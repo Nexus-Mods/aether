@@ -1,85 +1,106 @@
-# VFS (Rust workspace)
+# rust/: the injector and the shim
 
-Userspace virtual filesystem for Windows game modding: serve base game + mods **from Stored ZIP
-archives** (and disk folders, and remote sources) without extracting PE/BSA/ESP content, stage
-the launch PE closure, and inject a thin NT-API shim into the game. The game runs on Windows, or
-on Linux under GE-Proton.
+This Cargo workspace builds the two Windows programs Cairn's director needs to
+put a game in front of its virtual filesystem:
 
-The top-level [README](../README.md) is the main guide (build, Linux/Proton, tests, roots and
-launches, storage, embedding). This file is the short map of the workspace.
+- **`vfs-injector.exe`** (crate `vfs-inject`): starts the game's process and
+  loads the shim into it by remote-thread injection.
+- **`vfs_shim_dll.dll`** (crate `vfs-shim-dll`, hooks in `vfs-shim`): runs
+  inside the game and detours its NT file and registry calls, answering every
+  operation on a managed path from the director over a shared-memory ring.
 
-## Docs
+Both ship for **x64 and x86** (32-bit games and tools such as Oblivion), with the
+C runtime linked in (`+crt-static`): the shim loads inside the game, where Windows
+doesn't look beside it for `vcruntime140.dll`, and a PC may have no VC++ runtime.
+They are staged as `vfs-injector.exe`, `vfs_shim_dll.dll`, `vfs-injector32.exe`
+and `vfs_shim_dll32.dll`, the names the director looks for
+(`aether.director.natives`).
 
-| Document | Description |
-|----------|-------------|
-| **[docs/architecture.md](docs/architecture.md)** | How the system fits together; the crate map |
-| [aether-storage DURABILITY.md](../addons/crates/aether-storage/DURABILITY.md) | What is durable when (named layers, registry overlay) |
-| [../docs/shim-invariants.md](../docs/shim-invariants.md) | The rules the NT hooks keep, and the incidents behind them |
-| [../docs/superpowers/README.md](../docs/superpowers/README.md) | Index of design specs and plans (current and archived) |
-| [docs/benchmarks/](docs/benchmarks/) | Measurements |
-| [docs/overview.md](docs/overview.md), [docs/vfs-summary.md](docs/vfs-summary.md) | Earlier narratives (historical) |
+The director itself, the part that decides what the game sees, is Clojure
+(`../src/aether`); the wire contract it and the shim share is
+`vfs-ipc`/`vfs-protocol`. How it all fits: [`../docs/aether-vfs/`](../docs/aether-vfs)
+(start with [architecture.md](../docs/aether-vfs/architecture.md); the rules the
+hooks keep are in [shim-invariants.md](../docs/aether-vfs/shim-invariants.md)).
 
-## Embedding
+## Build
 
-A host names one crate, `vfs-embed`, and builds a `Session`:
+From the repository root:
 
-```rust
-use std::{path::Path, sync::Arc};
-use vfs_embed::{DiskProvider, LaunchOpts, Session, ZipProvider};
-
-fn run() -> Result<(), String> {
-    let st = |status: i32| format!("status {status}");   // mount calls return a status code
-    let mut session = Session::new();
-    session.set_root(r"C:\GameLayers\runtime");          // an empty directory
-    let base = ZipProvider::open(Path::new(r"C:\GameLayers\1. Skyrim Special Edition.zip"))
-        .map_err(|e| e.to_string())?;
-    session.mount("", Arc::new(base)).map_err(st)?;
-    session.mount("", Arc::new(DiskProvider::new(r"C:\GameLayers\mods"))).map_err(st)?; // later mounts win
-    // Writes to content the layers hold copy up into this directory.
-    session.set_write_layer(Arc::new(DiskProvider::new(r"C:\GameLayers\overwrite"))).map_err(st)?;
-    session.serve()?;
-    session.launch(&LaunchOpts {
-        image: "skse64_loader.exe".into(),
-        wait: true,
-        ..Default::default()
-    })?;
-    Ok(())
-}
+```powershell
+powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1             # the four natives, into rust\target\natives
+powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1 -Fixtures   # also the test fixtures and the host-target
+                                                                           # injector and shim, into rust\target\release
 ```
 
-See the top-level README's *Embedding* section and `vfs-embed`'s crate docs for the full API,
-including the Proton (Linux) options.
+Options: `-Out <dir>` stages the natives elsewhere; `-RequireDumpbin` fails
+(rather than warns) when Visual Studio's `dumpbin` isn't found for the check that
+none of the four imports the VC++ runtime (on by default when `$env:CI` is set).
+`bin\bootstrap.ps1` runs it with `-Fixtures` after checking the toolchain. The
+Rust toolchain and the `i686-pc-windows-msvc` target come from
+[`rust-toolchain.toml`](rust-toolchain.toml); the MSVC C++ build tools are needed.
 
-## Build and test
+On Linux and macOS, `bin/build-windows [--release]` cross-builds the same natives
+and the fixtures with `cargo-xwin`, clang and lld (LLVM 19 or later: the i686
+shim's `EXPORTAS` export needs it). `bin/bootstrap` runs it.
 
-```sh
-cargo build -p vfs-embed -p vfs-shim-dll -p vfs-fixture-read    # Windows
+## Test
+
+```powershell
+cd rust
+cargo test --no-fail-fast
 ```
 
-On Linux the Windows half is cross-built with `../bin/build-windows`; the shim's own tests run
-under Wine with `../bin/wine-shim-tests`; the Proton end-to-end tests are `#[ignore]`d and skip
-(or, with `VFS_TEST_REQUIRE_ALL=1`, fail) when a prerequisite is missing. The commands, the
-test policy and the clang-cl workaround
-(`CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration`) are in the
+Windows is where all of it builds and runs. CI also runs `cargo fmt --all --check`
+and `cargo clippy --all-targets -- -D warnings` (see `.github/workflows/test.yml`).
+
+**8.3 TMP alias.** When `TMP`/`TEMP` contain a short-name alias (a `~`, as in
+`C:\Users\LONGNA~1\AppData\Local\Temp`), eleven of these tests fail. Point them at
+a path without one first:
+
+```powershell
+$env:TMP = 'C:\vfstmp'; $env:TEMP = 'C:\vfstmp'
+```
+
+Tests whose prerequisite is missing (a Windows fixture not built, GE-Proton not
+installed) skip; with `VFS_TEST_REQUIRE_ALL=1` a skip is a failure. The
+Clojure director's own tests that launch these programs are covered in the
 [top-level README](../README.md#tests).
 
-## Workspace
+## Crates
 
-Rust 2021 Cargo workspace, `panic = "unwind"` throughout; `vfs-protocol/tests/unwind.rs` pins it.
-
-The workspace members are listed in [`Cargo.toml`](Cargo.toml) and described one by one in the
-crate map of [docs/architecture.md](docs/architecture.md#8-crate-map). The ones a reader meets
-first:
+The ones that ship:
 
 | Crate | Role |
 |-------|------|
-| `vfs-embed` | The embeddable API: `Session`, roots, composition, serve, launch |
-| `vfs-director` | Kernel: root to provider table, ring server, staging |
-| `vfs-compose`, `vfs-zip` | Providers and composition (overlay copy-up, layered, router, zip) |
-| `aether-storage`, `aether-block-store` (add-ons, `../addons/crates/`) | Pull-through cache and named write layers on a deduplicating block store |
-| `vfs-proton` | GE-Proton install, prefix and Wine launch (Linux host) |
-| `vfs-shim`, `vfs-inject` | The Windows half: NT detours, launch and injection |
+| `vfs-inject` | The injector: starts the target, injects the shim (the `vfs-injector` binary) |
+| `vfs-shim-dll` | The shim DLL: `DllMain` bootstrap |
+| `vfs-shim` | The NT detours and the director client |
+| `vfs-ipc` | The shared-memory control ring and bulk arena, OS-free |
+| `vfs-protocol` | Wire codecs, opcodes, the shim's bootstrap config |
+| `vfs-provider` | The provider contract (`Capabilities`, `VPath`, conformance suite) |
+| `vfs-redirect` | Pure path core: root map and canonicalisation |
+| `vfs-ntlayout` | Pure NT byte layouts and decisions for the hooks |
+| `vfs-registry` | Registry overlay tree and its merge with a real key |
+| `vfs-win` | Windows shared memory, events and volume lookups |
+| `vfs-pe` | Pure PE byte parsing |
+| `vfs-core` | Pure merged-tree resolver (layers, tombstones, case folding) |
+| `vfs-env` | Every `VFS_*` environment switch, defined once |
 
-## License
+The **test fixtures**, Windows programs the tests run under the shim:
+`vfs-fixture-read` (reads a virtual file), `-writepath` (the write path),
+`-escape` (paths that try to escape the managed root), `-prefs` (the INI profile
+API), `-vproxy` and `-staticimp` (a statically imported proxy DLL, pre-init
+injection), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and
+the registry overlay). `vfs-testkit` holds helpers shared by the tests.
 
-GPL-3.0-only. See [LICENSE](LICENSE).
+**The Rust director, kept for now.** `vfs-director`, `vfs-embed`, `vfs-compose`,
+`vfs-zip`, `vfs-unix` and `vfs-proton` are the original Rust director and its
+Linux and Proton launch path. Cairn runs on the Clojure director; these crates
+stay only because their tests still exercise the shim and injector end to end,
+until those tests are ported to the Clojure director (the second import plan).
+Don't build new features on them.
+
+`panic = "unwind"` throughout (`vfs-protocol/tests/unwind.rs` pins it). The
+vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim
+builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history of
+the Rust director crates. License: the repository's [LICENSE](../LICENSE).

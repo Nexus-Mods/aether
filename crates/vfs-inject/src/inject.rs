@@ -56,6 +56,20 @@ fn wide(s: &str) -> Vec<u16> {
         .collect()
 }
 
+/// The 32-bit stand-in for the x64 `expand_primary_stack` below: a 32-bit
+/// target keeps its stock stack, so this always fails (the caller logs it).
+///
+/// # Safety
+/// Touches nothing; `unsafe` only to match the x64 signature.
+#[cfg(target_arch = "x86")]
+pub unsafe fn expand_primary_stack(
+    _process: HANDLE,
+    _primary: HANDLE,
+    _stack_reserve: usize,
+) -> Result<(), InjectError> {
+    Err(InjectError::ThreadContext)
+}
+
 /// Grow the *primary* suspended thread's stack to `stack_reserve` bytes.
 ///
 /// # Safety
@@ -73,15 +87,6 @@ fn wide(s: &str) -> Vec<u16> {
 ///
 /// x86-64 only (the x64 TEB offsets and `Rsp`): a 32-bit target keeps its stock
 /// stack, as any target does when this fails, which the caller logs.
-#[cfg(target_arch = "x86")]
-pub unsafe fn expand_primary_stack(
-    _process: HANDLE,
-    _primary: HANDLE,
-    _stack_reserve: usize,
-) -> Result<(), InjectError> {
-    Err(InjectError::ThreadContext)
-}
-
 #[cfg(not(target_arch = "x86"))]
 pub unsafe fn expand_primary_stack(
     process: HANDLE,

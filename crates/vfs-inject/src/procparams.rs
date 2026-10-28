@@ -41,6 +41,14 @@ const PP_CURDIR_DOS_PATH: usize = 0x24;
 const PP_COMMAND_LINE: usize = 0x70;
 #[cfg(target_arch = "x86")]
 const PP_COMMAND_LINE: usize = 0x40;
+#[cfg(target_arch = "x86_64")]
+const PP_ENVIRONMENT: usize = 0x80;
+#[cfg(target_arch = "x86")]
+const PP_ENVIRONMENT: usize = 0x48;
+#[cfg(target_arch = "x86_64")]
+const PP_ENVIRONMENT_SIZE: usize = 0x3F0;
+#[cfg(target_arch = "x86")]
+const PP_ENVIRONMENT_SIZE: usize = 0x290;
 /// `RTL_USER_PROC_PARAMS_NORMALIZED`: the string buffers hold addresses, not
 /// offsets from the block.
 const PARAMS_NORMALIZED: u32 = 1;
@@ -170,6 +178,16 @@ unsafe fn process_parameters(process: HANDLE) -> Result<usize, String> {
 /// the string's own buffer when that is big enough, and otherwise after the
 /// block's last byte, in the slack of the block's own allocation, with the
 /// block's `Length` grown to cover it.
+///
+/// That slack is not necessarily free: the kernel lays a new process's
+/// **environment** out directly after its parameter block, in the same
+/// allocation. A string placed there overwrote the environment's first
+/// entries, and when its terminating NUL fell just before an entry's own the
+/// block ended there, hiding every later variable — `VFS_SHIM_CONFIG` among
+/// them, so the shim's `DllMain` failed and the target died with
+/// `STATUS_DLL_INIT_FAILED` before it ran, for some lengths of path and some
+/// environments only. So an environment in the way is moved first, to just
+/// after the grown block, keeping the kernel's own layout.
 #[allow(unsafe_code)]
 unsafe fn put_string(
     process: HANDLE,
@@ -204,10 +222,26 @@ unsafe fn put_string(
         size_of::<MEMORY_BASIC_INFORMATION>(),
     );
     let region_end = mbi.BaseAddress as usize + mbi.RegionSize;
+    let no_room =
+        || format!("no room in the target's parameter block for a {capacity}-byte string");
     if got == 0 || end > region_end {
-        return Err(format!(
-            "no room in the target's parameter block for a {capacity}-byte string"
-        ));
+        return Err(no_room());
+    }
+    // An environment that starts where the string goes moves past its end.
+    let env: usize = read(process, params + PP_ENVIRONMENT)?;
+    if env >= params && env < end {
+        let block = read_environment(process, params, env, region_end)?;
+        let moved = (end + 7) & !7;
+        if moved + block.len() > region_end {
+            return Err(no_room());
+        }
+        write_bytes(process, moved, block.as_ptr().cast(), block.len())?;
+        write_bytes(
+            process,
+            params + PP_ENVIRONMENT,
+            (&moved as *const usize).cast(),
+            size_of::<usize>(),
+        )?;
     }
     write_bytes(process, place, text.as_ptr().cast(), need)?;
     let s = RemoteUnicodeString {
@@ -226,6 +260,65 @@ unsafe fn put_string(
     write_bytes(process, params + 4, (&used as *const u32).cast(), 4)?;
     let max_len = max_len.max(used);
     write_bytes(process, params, (&max_len as *const u32).cast(), 4)
+}
+
+/// The bytes of the environment block at `env`, which ends before
+/// `region_end`: its entries through the empty one that ends them, or its
+/// `EnvironmentSize` when that says more and still fits.
+#[allow(unsafe_code)]
+unsafe fn read_environment(
+    process: HANDLE,
+    params: usize,
+    env: usize,
+    region_end: usize,
+) -> Result<Vec<u8>, String> {
+    // The block ends at its first empty entry: a NUL at its start, or two
+    // in a row. An empty block is two NULs all the same.
+    let mut bytes: Vec<u8> = Vec::new();
+    let len = loop {
+        let from = env + bytes.len();
+        let chunk = (region_end.saturating_sub(from) & !1).min(4096);
+        if chunk == 0 {
+            return Err("the target's environment has no end inside its allocation".into());
+        }
+        bytes.extend(read_bytes(process, from, chunk)?);
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .collect();
+        let end = units
+            .iter()
+            .enumerate()
+            .position(|(i, &u)| u == 0 && (i == 0 || units[i - 1] == 0));
+        if let Some(i) = end {
+            break (i.max(1) + 1) * 2;
+        }
+    };
+    let size: usize = read(process, params + PP_ENVIRONMENT_SIZE)?;
+    if size > len && env + size <= region_end {
+        return read_bytes(process, env, size);
+    }
+    bytes.truncate(len);
+    Ok(bytes)
+}
+
+#[allow(unsafe_code)]
+unsafe fn read_bytes(process: HANDLE, at: usize, len: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![0u8; len];
+    let mut got = 0usize;
+    let ok = ReadProcessMemory(
+        process,
+        at as *const c_void,
+        bytes.as_mut_ptr().cast(),
+        len,
+        &mut got,
+    );
+    if ok == 0 || got != len {
+        return Err(format!("ReadProcessMemory at {at:#x}"));
+    }
+    Ok(bytes)
 }
 
 #[allow(unsafe_code)]
@@ -262,4 +355,153 @@ unsafe fn write_bytes(
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod tests {
+    use super::*;
+    use std::mem::zeroed;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, TerminateProcess, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+        PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    /// A suspended `cmd.exe` started with `env` (entries, without the final
+    /// empty one), killed when dropped.
+    struct Suspended(PROCESS_INFORMATION);
+
+    impl Suspended {
+        fn start(env: &[String]) -> Self {
+            let mut block: Vec<u16> = Vec::new();
+            for e in env {
+                block.extend(e.encode_utf16());
+                block.push(0);
+            }
+            block.push(0);
+            let exe = format!(
+                r"{}\System32\cmd.exe",
+                std::env::var("SystemRoot").expect("SystemRoot")
+            );
+            let app = wide(&exe);
+            let mut cmd = wide(&format!("\"{exe}\""));
+            // SAFETY: NUL-terminated buffers that outlive the call.
+            unsafe {
+                let mut si: STARTUPINFOW = zeroed();
+                si.cb = size_of::<STARTUPINFOW>() as u32;
+                let mut pi: PROCESS_INFORMATION = zeroed();
+                let ok = CreateProcessW(
+                    app.as_ptr(),
+                    cmd.as_mut_ptr(),
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    0,
+                    CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                    block.as_ptr().cast(),
+                    core::ptr::null(),
+                    &si,
+                    &mut pi,
+                );
+                assert!(ok != 0, "CreateProcessW {exe}");
+                Suspended(pi)
+            }
+        }
+
+        /// The environment the target will start with: the entries of the
+        /// block its parameters name.
+        fn environment(&self) -> Vec<String> {
+            // SAFETY: a live suspended process this test created.
+            unsafe {
+                let params = process_parameters(self.0.hProcess).unwrap();
+                let mut at: usize = read(self.0.hProcess, params + PP_ENVIRONMENT).unwrap();
+                let mut entries = Vec::new();
+                let mut entry: Vec<u16> = Vec::new();
+                loop {
+                    let unit: u16 = read(self.0.hProcess, at).unwrap();
+                    at += 2;
+                    if unit != 0 {
+                        entry.push(unit);
+                        continue;
+                    }
+                    if entry.is_empty() {
+                        return entries;
+                    }
+                    entries.push(String::from_utf16_lossy(&entry));
+                    entry.clear();
+                }
+            }
+        }
+
+        /// The target's command line, and whether its text lies inside the
+        /// parameter block (`params .. params + Length`).
+        fn command_line(&self) -> (String, bool) {
+            // SAFETY: as `environment`.
+            unsafe {
+                let params = process_parameters(self.0.hProcess).unwrap();
+                let s: RemoteUnicodeString =
+                    read(self.0.hProcess, params + PP_COMMAND_LINE).unwrap();
+                let units: Vec<u16> = (0..s.length as usize / 2)
+                    .map(|i| read(self.0.hProcess, s.buffer + 2 * i).unwrap())
+                    .collect();
+                let used: u32 = read(self.0.hProcess, params + 4).unwrap();
+                let inside = s.buffer >= params
+                    && s.buffer + s.maximum_length as usize <= params + used as usize;
+                (String::from_utf16_lossy(&units), inside)
+            }
+        }
+    }
+
+    impl Drop for Suspended {
+        fn drop(&mut self) {
+            // SAFETY: the handles this test's `CreateProcessW` returned.
+            unsafe {
+                TerminateProcess(self.0.hProcess, 1);
+                CloseHandle(self.0.hThread);
+                CloseHandle(self.0.hProcess);
+            }
+        }
+    }
+
+    /// The kernel lays a new process's environment out directly after its
+    /// parameter block, in the same allocation. A command line too long for its
+    /// own buffer is placed after the block — which must not be on top of the
+    /// environment. It was: the first entries were overwritten, and when the
+    /// command line's terminating NUL landed just before an entry's own, the
+    /// block ended there, hiding every later variable (`VFS_SHIM_CONFIG` among
+    /// them), so the shim's `DllMain` failed and the target died with
+    /// `STATUS_DLL_INIT_FAILED` (0xC0000142) before it ran.
+    #[test]
+    fn a_relocated_command_line_leaves_the_environment_whole() {
+        let mut env: Vec<String> = vec![
+            format!("AAA={}", "a".repeat(37)),
+            "AAB=b".to_string(),
+            format!("AAC={}", "c".repeat(11)),
+        ];
+        env.extend((0..40).map(|i| format!("PAD{i:02}={}", "p".repeat(i))));
+        env.push(format!(
+            "SystemRoot={}",
+            std::env::var("SystemRoot").expect("SystemRoot")
+        ));
+        env.push("ZZZ_LAST=still here".to_string());
+        // Every length of command line from barely-too-long to a long one: each
+        // ends at a different place, so one of them lands its NUL against an
+        // entry's.
+        for extra in 0..48 {
+            let target = Suspended::start(&env);
+            let cmd = format!(r#""C:\virtual\{}\game.exe" -arg"#, "d".repeat(60 + extra));
+            // SAFETY: a suspended process this test created.
+            unsafe { rewrite(target.0.hProcess, Some(&cmd), Some(r"C:\virtual\dir")) }
+                .expect("rewrite");
+            assert_eq!(
+                target.environment(),
+                env,
+                "the environment after a {}-unit command line",
+                cmd.len()
+            );
+            let (got, inside) = target.command_line();
+            assert_eq!(got, cmd);
+            assert!(inside, "the command line lies inside the parameter block");
+        }
+    }
 }

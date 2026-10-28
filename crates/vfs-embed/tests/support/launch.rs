@@ -58,7 +58,9 @@ pub fn launch_timeout() -> Duration {
 /// behind (holding its clone of the session) when the test panics.
 ///
 /// A launch that returns an error panics with it: a launch that could not
-/// start is never an exit code.
+/// start is never an exit code. The panic carries what the shim left in the
+/// session's state directory ([`shim_traces`]), since the error alone is often
+/// only how the process ended.
 pub fn launch_bounded(session: &Arc<Session>, opts: LaunchOpts, label: &str) -> i32 {
     let (tx, rx) = std::sync::mpsc::channel();
     let s = Arc::clone(session);
@@ -68,7 +70,10 @@ pub fn launch_bounded(session: &Arc<Session>, opts: LaunchOpts, label: &str) -> 
     });
     match rx.recv_timeout(launch_timeout()) {
         Ok(Ok(code)) => code,
-        Ok(Err(e)) => panic!("launch of {image} ({label}) failed: {e}"),
+        Ok(Err(e)) => panic!(
+            "launch of {image} ({label}) failed: {e}\n{}",
+            shim_traces(session)
+        ),
         Err(_) => panic!(
             "launch of {image} stalled after {:?} ({label}): the child never exited, so it is \
              wedged, died without the launch noticing, or the launch itself never got going — \
@@ -77,4 +82,28 @@ pub fn launch_bounded(session: &Arc<Session>, opts: LaunchOpts, label: &str) -> 
             launch_timeout(),
         ),
     }
+}
+
+/// What the shim left in the session's state directory: the ready file (its
+/// verdict, which an import-activated launch does not read back), the boot log
+/// beside it and the load log. A launch that failed says only how the process
+/// ended (`TargetExited(0xC0000142)` is "a DLL's init failed"); these say why.
+fn shim_traces(session: &Session) -> String {
+    let state = session.state_dir();
+    let mut out = String::new();
+    for name in [
+        "ready.flag",
+        "ready.flag.boot.log",
+        "ready.flag.child-refused",
+        "shim-load.log",
+    ] {
+        let path = state.join(name);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+        out.push_str(&format!(
+            "--- {} ---\n{}\n",
+            path.display(),
+            text.trim_end()
+        ));
+    }
+    out
 }

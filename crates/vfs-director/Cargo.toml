@@ -1,0 +1,60 @@
+[package]
+name = "vfs-director"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Director kernel: one provider per root, ring server, staging. The embeddable API is vfs-embed."
+
+[lib]
+name = "vfs_director"
+path = "src/lib.rs"
+
+# No `zip` feature: it existed only for `Session::mount_zip`, and `Session`
+# now lives in `vfs-embed`, which carries the feature instead.
+
+[dependencies]
+vfs-env.workspace = true
+# `fold` only — the single source of truth for case-insensitive comparison,
+# shared with the shim above the ring so mount-prefix matching and directory
+# merging fold vpaths exactly the way the shim folded them.
+vfs-core.workspace = true
+vfs-protocol.workspace = true
+vfs-provider.workspace = true
+# `InlineProvider` in this crate's own tests; the composition that builds a
+# root's writable upper out of `OverlayProvider` moved to `vfs-embed` with
+# `Session`.
+vfs-compose.workspace = true
+vfs-ipc.workspace = true
+# Pure PE parsing for staging. Was reached through `vfs-inject`, which is
+# Windows-only for its injection half; the parsing half is a file format.
+vfs-pe.workspace = true
+# The registry overlay model and its persistence format, held by `RegistryHost`.
+vfs-registry.workspace = true
+# `RegistryHost` logs a corrupt overlay file it moves aside, and failed saves.
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `ipc.rs` — FileMapping, the file-backed ring a Wine-hosted shim shares by path.
+vfs-unix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.
+vfs-win.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# Integrity tests compare the composed VFS against a native extract.
+vfs-zip.workspace = true
+vfs-shim.workspace = true
+# `unicode_case_fold_across_the_ring` builds its vpaths with the *same*
+# `RootMap` the shim uses, rather than lowercasing a string in the test — the
+# whole point being that the two sides of the ring must fold identically.
+vfs-redirect.workspace = true
+
+[dev-dependencies]
+vfs-provider = { workspace = true, features = ["conformance"] }
+vfs-testkit.workspace = true
+
+[lints]
+workspace = true

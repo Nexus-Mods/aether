@@ -1,0 +1,339 @@
+//! Injection read target: opens a (virtual) file via the normal Win32 path
+//! (std::fs::read → CreateFileW → NtCreateFile, so the injected shim's hooks
+//! intercept it), and asserts its length/content. Exit 0 iff it matches.
+//! If `VFS_FIXTURE_WRITE_PATH` is set, after a successful read it also writes
+//! `VFS_FIXTURE_WRITE_DATA` (default `written`) there, exiting 1 on error.
+//!
+//! If `VFS_FIXTURE_SLOW_PATH` is set, it then reads that file — each read one
+//! `ReadFile` for the whole of it — on `VFS_FIXTURE_SLOW_THREADS` (default 1)
+//! threads, while `VFS_FIXTURE_THREADS` (default 4) others each read
+//! `VFS_FIXTURE_PATH` `VFS_FIXTURE_ROUNDS` (default 50) times, and exits 1
+//! unless every one of those reads was right **and finished while the slow
+//! reads were all still in flight**. The host makes the slow file slow; this
+//! asserts that one thread's file operation does not make the others wait.
+//!
+//! Two more paths take the timing out of that, when the host serves them:
+//! `VFS_FIXTURE_SLOW_STARTED` is waited for (until it exists) before the fast
+//! threads start, in place of a fixed head start, and
+//! `VFS_FIXTURE_SLOW_RELEASE` is looked up once they have all finished, which
+//! is the host's cue to let the slow reads go.
+//!
+//! `VFS_FIXTURE_SPAWN_CHILD=1` runs a second copy of the fixture after the first
+//! read (any other value names the program to run instead, as given), and exits
+//! 1 unless that copy, which the shim injects, also reads the
+//! file.
+//!
+//! `VFS_FIXTURE_ORPHAN_DIR` starts a copy of the fixture after the first read
+//! and exits without waiting for it, the copy outliving it: see `orphan.rs`.
+//!
+//! `VFS_FIXTURE_PROBE_OUT` writes what the process believes about itself (its
+//! environment, cwd, module path and argv[0]) before anything else: see `probe.rs`.
+//!
+//! `VFS_FIXTURE_OPS` runs a script of filesystem operations and writes what each
+//! did to `VFS_FIXTURE_OPS_OUT`: see `ops.rs`.
+//!
+//! `VFS_FIXTURE_NAMES` and its companions run the names phase first: see
+//! `names.rs`. Windows only — it calls Win32 directly.
+//!
+//! `VFS_FIXTURE_CACHE_PATH` and its companions run the read-cache phase after
+//! the first read: see `cache.rs`. `VFS_FIXTURE_LINGER_MS` keeps the process
+//! alive that long after it, so a shim stats report covers the run.
+#![allow(unsafe_code)]
+use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long the fast threads give the slow read to get in flight, when the
+/// host does not say when it is (`VFS_FIXTURE_SLOW_STARTED`).
+const SLOW_HEAD_START: Duration = Duration::from_millis(300);
+/// How long to wait for the host to say so before giving up.
+const SLOW_START_PATIENCE: Duration = Duration::from_secs(60);
+
+/// Read all of `path` with a single read call for its whole length, so the
+/// shim sees one large `NtReadFile` (and pipelines it) rather than whatever
+/// sizes `std::fs::read` chooses.
+fn read_in_one_call(path: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len() as usize;
+    let mut buf = vec![0u8; len];
+    let mut got = 0;
+    while got < len {
+        match f.read(&mut buf[got..])? {
+            0 => break,
+            n => got += n,
+        }
+    }
+    buf.truncate(got);
+    Ok(buf)
+}
+
+#[cfg(windows)]
+mod cache;
+#[cfg(windows)]
+mod names;
+mod ops;
+mod orphan;
+mod probe;
+
+fn env_num(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// See the module docs. Returns only if the phase passed.
+fn concurrent_phase(path: &str, slow_path: &str, expect_len: usize, fill: Option<u8>) {
+    let threads = env_num("VFS_FIXTURE_THREADS", 4);
+    let rounds = env_num("VFS_FIXTURE_ROUNDS", 50);
+    let slow_threads = env_num("VFS_FIXTURE_SLOW_THREADS", 1);
+    let slow_done = AtomicBool::new(false);
+    let started = Instant::now();
+    let (fast_ms, slow_was_done) = std::thread::scope(|s| {
+        let slow: Vec<_> = (0..slow_threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let r = read_in_one_call(slow_path);
+                    slow_done.store(true, Ordering::SeqCst);
+                    r
+                })
+            })
+            .collect();
+        match std::env::var("VFS_FIXTURE_SLOW_STARTED") {
+            Ok(marker) => {
+                while !std::path::Path::new(&marker).exists() {
+                    if started.elapsed() > SLOW_START_PATIENCE {
+                        eprintln!("FIXTURE FAIL: {marker} never appeared: the slow reads did not all start");
+                        exit(1);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            Err(_) => std::thread::sleep(SLOW_HEAD_START),
+        }
+        let fast: Vec<_> = (0..threads)
+            .map(|t| {
+                s.spawn(move || {
+                    for i in 0..rounds {
+                        let data = match std::fs::read(path) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!("FIXTURE FAIL: thread {t} read {i} of {path}: {e}");
+                                exit(1);
+                            }
+                        };
+                        if data.len() != expect_len
+                            || fill.is_some_and(|b| data.iter().any(|&x| x != b))
+                        {
+                            eprintln!(
+                                "FIXTURE FAIL: thread {t} read {i} of {path}: wrong bytes ({} of them)",
+                                data.len()
+                            );
+                            exit(1);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in fast {
+            h.join().unwrap();
+        }
+        let fast_ms = started.elapsed().as_millis();
+        // Sampled the moment the last fast read returned, before the slow
+        // thread is joined: this is the whole assertion.
+        let slow_was_done = slow_done.load(Ordering::SeqCst);
+        if let Ok(release) = std::env::var("VFS_FIXTURE_SLOW_RELEASE") {
+            // The lookup is the message; the path need not exist.
+            let _ = std::fs::metadata(release);
+        }
+        for h in slow {
+            match h.join().unwrap() {
+                Ok(d) if !d.is_empty() => {}
+                Ok(_) => {
+                    eprintln!("FIXTURE FAIL: slow read of {slow_path} came back empty");
+                    exit(1);
+                }
+                Err(e) => {
+                    eprintln!("FIXTURE FAIL: slow read of {slow_path}: {e}");
+                    exit(1);
+                }
+            }
+        }
+        (fast_ms, slow_was_done)
+    });
+    if slow_was_done {
+        eprintln!(
+            "FIXTURE FAIL: a slow read finished before the {} fast reads did ({fast_ms} ms): \
+             they waited for it",
+            threads * rounds
+        );
+        exit(1);
+    }
+    println!(
+        "FIXTURE CONCURRENT OK: {} reads on {threads} threads done at {fast_ms} ms, slow read at {} ms",
+        threads * rounds,
+        started.elapsed().as_millis()
+    );
+}
+
+/// Run a second copy of this fixture and exit 1 unless it exits 0. The copy
+/// repeats the read of `VFS_FIXTURE_PATH` (it inherits the environment, minus
+/// `VFS_FIXTURE_SPAWN_CHILD`, so it does not spawn again), which only succeeds
+/// if the process-creation hook injected it: the file exists only in the
+/// provider. A refused spawn (the hook failing closed) is a failure too.
+fn spawn_copy_of_self() {
+    // `1` is this fixture again; any other value is the program to start,
+    // spelled exactly as given (a launcher's doubled separator included).
+    let me = match std::env::var("VFS_FIXTURE_SPAWN_CHILD") {
+        Ok(p) if p != "1" => std::path::PathBuf::from(p),
+        _ => std::env::current_exe().unwrap_or_else(|e| {
+            eprintln!("FIXTURE FAIL: current_exe: {e}");
+            exit(1);
+        }),
+    };
+    // `VFS_FIXTURE_SPAWN_SUSPENDED` creates the child suspended and resumes it
+    // itself, the way SKSE starts SkyrimSE.exe — the shape that needs the
+    // in-memory import patch to work on a suspended child.
+    #[cfg(windows)]
+    if std::env::var_os("VFS_FIXTURE_SPAWN_SUSPENDED").is_some() {
+        spawn_suspended(&me);
+        return;
+    }
+    match std::process::Command::new(me)
+        .env_remove("VFS_FIXTURE_SPAWN_CHILD")
+        .status()
+    {
+        Ok(s) if s.success() => println!("FIXTURE CHILD OK"),
+        Ok(s) => {
+            eprintln!("FIXTURE FAIL: child exited with {s}");
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("FIXTURE FAIL: could not spawn the child: {e}");
+            exit(1);
+        }
+    }
+}
+
+/// Create the child suspended, then resume it — SKSE's shape. The shim's
+/// process hook injects it while it is suspended; the in-memory import patch
+/// leaves it suspended for this resume, and the shim bootstraps as the loader
+/// runs. Exits 0 iff the child exits 0.
+#[cfg(windows)]
+fn spawn_suspended(exe: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    const CREATE_SUSPENDED: u32 = 0x4;
+
+    // std builds the CreateProcessW call (correct structures) and it goes
+    // through the shim's process hook, which injects the child while it is
+    // suspended — exactly SKSE's shape. The child must not spawn again.
+    let child = std::process::Command::new(exe)
+        .env_remove("VFS_FIXTURE_SPAWN_CHILD")
+        .env_remove("VFS_FIXTURE_SPAWN_SUSPENDED")
+        .creation_flags(CREATE_SUSPENDED)
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("FIXTURE FAIL: suspended spawn: {e}");
+            exit(1);
+        }
+    };
+    // Resume every thread the child owns (just its primary, at this point),
+    // the way SKSE resumes the game after injecting.
+    // SAFETY: a ToolHelp thread walk; each opened handle is closed.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snap != INVALID_HANDLE_VALUE {
+            let mut te: THREADENTRY32 = core::mem::zeroed();
+            te.dwSize = core::mem::size_of::<THREADENTRY32>() as u32;
+            let mut ok = Thread32First(snap, &mut te);
+            while ok != 0 {
+                if te.th32OwnerProcessID == child.id() {
+                    let h = OpenThread(THREAD_SUSPEND_RESUME, 0, te.th32ThreadID);
+                    if !h.is_null() {
+                        ResumeThread(h);
+                        CloseHandle(h);
+                    }
+                }
+                ok = Thread32Next(snap, &mut te);
+            }
+            CloseHandle(snap);
+        }
+    }
+    match child.wait() {
+        Ok(s) if s.success() => println!("FIXTURE CHILD OK"),
+        Ok(s) => {
+            eprintln!("FIXTURE FAIL: suspended child exited with {s}");
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("FIXTURE FAIL: waiting on suspended child: {e}");
+            exit(1);
+        }
+    }
+}
+
+fn main() {
+    probe::run();
+    ops::run();
+    #[cfg(windows)]
+    names::run();
+    let path = std::env::var("VFS_FIXTURE_PATH").unwrap_or_else(|_| {
+        eprintln!("VFS_FIXTURE_PATH unset");
+        exit(2);
+    });
+    let expect_len: usize = std::env::var("VFS_FIXTURE_EXPECT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            eprintln!("VFS_FIXTURE_EXPECT unset/bad");
+            exit(2);
+        });
+    let fill: Option<u8> = std::env::var("VFS_FIXTURE_FILL")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("FIXTURE FAIL: read {path}: {e}");
+            exit(1);
+        }
+    };
+    if data.len() != expect_len {
+        eprintln!("FIXTURE FAIL: len {} != {expect_len}", data.len());
+        exit(1);
+    }
+    if let Some(b) = fill {
+        if data.iter().any(|&x| x != b) {
+            eprintln!("FIXTURE FAIL: content byte != {b}");
+            exit(1);
+        }
+    }
+    orphan::run();
+    if std::env::var_os("VFS_FIXTURE_SPAWN_CHILD").is_some() {
+        spawn_copy_of_self();
+    }
+    #[cfg(windows)]
+    cache::run();
+    if let Ok(wpath) = std::env::var("VFS_FIXTURE_WRITE_PATH") {
+        let data = std::env::var("VFS_FIXTURE_WRITE_DATA").unwrap_or_else(|_| "written".into());
+        if let Err(e) = std::fs::write(&wpath, data.as_bytes()) {
+            eprintln!("FIXTURE FAIL: write {wpath}: {e}");
+            exit(1);
+        }
+        println!("FIXTURE WROTE: {wpath}");
+    }
+    if let Ok(slow_path) = std::env::var("VFS_FIXTURE_SLOW_PATH") {
+        concurrent_phase(&path, &slow_path, expect_len, fill);
+    }
+    println!("FIXTURE OK: {} bytes", data.len());
+    exit(0);
+}

@@ -1,0 +1,2 @@
+# One style for the whole workspace, matching the crates' edition.
+style_edition = "2021"

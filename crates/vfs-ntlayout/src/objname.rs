@@ -1,0 +1,301 @@
+//! The name `NtQueryObject` reports for a redirected handle.
+
+use crate::info::Fit;
+
+/// The `ObjectNameInformation` name to emit for a redirected handle, given the
+/// host's own answer for the same handle (`real`) and the virtual NT path the
+/// caller opened (`vpath`).
+///
+/// The host's answer is consulted only for its **prefix convention** — never
+/// for its content, which is exactly the backing path being hidden. `device_of`
+/// is consulted only on the `\Device\` branch, so a host that uses `\??\` pays
+/// no `QueryDosDeviceW` call.
+///
+/// `None` means "emit nothing, pass the host's answer through": a convention
+/// this function does not recognise, or a virtual path that is not a
+/// drive-letter path, is a case where a made-up name would be worse than the
+/// real one.
+pub fn spoofed_object_name(
+    real: &str,
+    vpath: &str,
+    device_of: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    // DOS portion of the virtual path: `C:\dir\file`, no NT prefix.
+    let dos = vpath
+        .strip_prefix(r"\??\")
+        .or_else(|| vpath.strip_prefix(r"\\?\"))
+        .unwrap_or(vpath);
+    let b = dos.as_bytes();
+    // Must be `X:` optionally followed by a rooted remainder. Anything else
+    // (a UNC name, a volume GUID, a relative leftover) has no drive letter to
+    // resolve and no safe device form to build.
+    if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
+        return None;
+    }
+    if b.len() > 2 && b[2] != b'\\' {
+        return None;
+    }
+    if real.starts_with(r"\??\") {
+        Some(format!(r"\??\{dos}"))
+    } else if real.starts_with(r"\Device\") {
+        let dev = device_of(&dos[..2])?;
+        Some(format!("{dev}{}", &dos[2..]))
+    } else {
+        None
+    }
+}
+
+/// Bytes of the `UNICODE_STRING` header an `OBJECT_NAME_INFORMATION` opens with, for pointers of
+/// `ptr` bytes: two `u16` lengths, padding to the pointer's alignment, and the `Buffer` pointer
+/// (16 on a 64-bit target, 8 on a 32-bit one).
+pub const fn object_name_header(ptr: usize) -> usize {
+    2 * ptr
+}
+
+/// [`object_name_header`] for the target's pointers.
+pub const OBJECT_NAME_INFORMATION_HEADER: usize = object_name_header(crate::PTR);
+
+/// What [`put_object_name`] found: how much room the answer needs, and whether the buffer had it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectNameReply {
+    /// The size the whole answer needs, for `ReturnLength`. It is reported whether or not
+    /// anything was written.
+    pub required: usize,
+    /// Whether the caller's buffer held the header, and the whole answer.
+    pub fit: Fit,
+}
+
+/// Write `name` as an `OBJECT_NAME_INFORMATION` into `buf`, following the too-small-buffer
+/// contract measured on Windows 11 and Wine 11 alike: under the 16-byte header is
+/// `STATUS_INFO_LENGTH_MISMATCH`, the header or more but under `required` is
+/// `STATUS_BUFFER_OVERFLOW`, and in both nothing is written. A caller that size-probes loops or
+/// fails unless this is exact.
+///
+/// `buffer_addr` is the address `buf` starts at: both hosts point the `UNICODE_STRING::Buffer`
+/// at the caller's own buffer, 16 bytes in, so the answer has to carry it.
+///
+/// `None` if the name cannot be described at all (it does not fit a `UNICODE_STRING`, whose
+/// `MaximumLength` is a `u16` that must cover the NUL), in which case nothing was written.
+pub fn put_object_name(name: &str, buf: &mut [u8], buffer_addr: usize) -> Option<ObjectNameReply> {
+    put_object_name_for(name, buf, buffer_addr as u64, crate::PTR)
+}
+
+/// [`put_object_name`] for pointers of `ptr` bytes (8 or 4), `buffer_addr` widened to `u64`.
+pub fn put_object_name_for(
+    name: &str,
+    buf: &mut [u8],
+    buffer_addr: u64,
+    ptr: usize,
+) -> Option<ObjectNameReply> {
+    let header = object_name_header(ptr);
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let name_bytes = units.len() * 2;
+    if name_bytes + 2 > u16::MAX as usize {
+        return None;
+    }
+    let required = header + name_bytes + 2;
+    let fit = if buf.len() < header {
+        Fit::Mismatch
+    } else if buf.len() < required {
+        Fit::Overflow
+    } else {
+        Fit::Fits
+    };
+    if fit == Fit::Fits {
+        buf[0..2].copy_from_slice(&(name_bytes as u16).to_le_bytes());
+        buf[2..4].copy_from_slice(&((name_bytes + 2) as u16).to_le_bytes());
+        buf[4..ptr].fill(0);
+        let at = buffer_addr.wrapping_add(header as u64);
+        buf[ptr..header].copy_from_slice(&at.to_le_bytes()[..ptr]);
+        let dst = &mut buf[header..required];
+        for (i, u) in units.iter().enumerate() {
+            dst[i * 2..i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+        }
+        dst[name_bytes..].fill(0);
+    }
+    Some(ObjectNameReply { required, fit })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `spoofed_object_name` adopts the host's prefix rather than assuming one.
+    /// Both forms are measured facts (2026-09-01): Windows answers
+    /// `\Device\HarddiskVolumeN\...`, Wine answers `\??\C:\...`. A hook that
+    /// emitted one fixed form would be wrong on one of the two hosts.
+    #[test]
+    fn spoofed_object_name_adopts_the_hosts_prefix() {
+        // Wine's form: the DOS portion of the virtual path, re-prefixed. The
+        // device lookup must not even be consulted here -- it disagrees with
+        // Wine's own answer, so consulting it would be actively misleading.
+        assert_eq!(
+            spoofed_object_name(
+                r"\??\C:\backing\blob.dat",
+                r"\??\C:\root\mod.esp",
+                |_| panic!("QueryDosDeviceW must not be consulted on the \\??\\ branch"),
+            ),
+            Some(r"\??\C:\root\mod.esp".to_string())
+        );
+        // Windows' form: the VIRTUAL path's drive resolved to a device, with the
+        // virtual path's volume-relative remainder appended. Note the device
+        // comes from the virtual drive, not from the real answer's device --
+        // the backing file may live on another volume entirely.
+        assert_eq!(
+            spoofed_object_name(
+                r"\Device\HarddiskVolume7\backing\blob.dat",
+                r"\??\C:\root\mod.esp",
+                |d| {
+                    assert_eq!(d, "C:");
+                    Some(r"\Device\HarddiskVolume3".to_string())
+                },
+            ),
+            Some(r"\Device\HarddiskVolume3\root\mod.esp".to_string())
+        );
+    }
+
+    /// Everything this function cannot build honestly must come back `None`, so
+    /// the hook passes the host's own answer through. A wrong name is worse
+    /// than the backing one: it is undiagnosable.
+    #[test]
+    fn spoofed_object_name_declines_rather_than_guesses() {
+        let dev = |_: &str| Some(r"\Device\HarddiskVolume3".to_string());
+        // A convention we do not recognise. `\Device\Mup\...`-style names reach
+        // the `\Device\` branch legitimately, but a bare NT object path such as
+        // a named pipe or a mailslot root does not.
+        assert_eq!(
+            spoofed_object_name(r"\BaseNamedObjects\SomeMutex", r"\??\C:\root\mod.esp", dev),
+            None
+        );
+        assert_eq!(spoofed_object_name("", r"\??\C:\root\mod.esp", dev), None);
+        // A virtual path with no drive letter to resolve.
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\UNC\server\share\f", dev),
+            None
+        );
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\", dev),
+            None
+        );
+        // `C:relative` is not a rooted path; appending it to a device prefix
+        // would splice two names together (`\Device\HarddiskVolume3relative`).
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:relative", dev),
+            None
+        );
+        // The device lookup failing is a decline, not a fallback: with no
+        // device name there is nothing to build the Windows form out of.
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:\root\mod.esp", |_| {
+                None
+            }),
+            None
+        );
+    }
+
+    /// A drive root has an empty remainder, and both prefixes must survive it
+    /// rather than producing a trailing-separator variant of the volume name.
+    #[test]
+    fn spoofed_object_name_handles_a_drive_root() {
+        assert_eq!(
+            spoofed_object_name(r"\??\C:\x", r"\??\C:", |_| unreachable!()),
+            Some(r"\??\C:".to_string())
+        );
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:", |_| Some(
+                r"\Device\HarddiskVolume3".to_string()
+            )),
+            Some(r"\Device\HarddiskVolume3".to_string())
+        );
+    }
+
+    /// `PATH_TABLE` holds `\??\`-prefixed paths today, but `record_path` stores
+    /// whatever the open was decoded as. The `\\?\` long-path prefix and a bare
+    /// Win32 path must both be understood, or a handle opened by one of those
+    /// spellings silently declines the spoof and leaks.
+    #[test]
+    fn spoofed_object_name_accepts_every_prefix_path_table_can_hold() {
+        for vpath in [
+            r"\??\C:\root\mod.esp",
+            r"\\?\C:\root\mod.esp",
+            r"C:\root\mod.esp",
+        ] {
+            assert_eq!(
+                spoofed_object_name(r"\??\C:\backing", vpath, |_| unreachable!()),
+                Some(r"\??\C:\root\mod.esp".to_string()),
+                "vpath = {vpath}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_answer_carries_lengths_a_pointer_into_the_buffer_and_a_nul() {
+        let mut b = vec![0xEEu8; 64];
+        let r = put_object_name(r"\??\C:\x", &mut b, 0x1000).unwrap();
+        let name_bytes = r"\??\C:\x".len() * 2;
+        assert_eq!(
+            r,
+            ObjectNameReply {
+                required: 16 + name_bytes + 2,
+                fit: Fit::Fits
+            }
+        );
+        assert_eq!(u16::from_le_bytes([b[0], b[1]]) as usize, name_bytes);
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]) as usize, name_bytes + 2);
+        assert_eq!(usize::from_le_bytes(b[8..16].try_into().unwrap()), 0x1010);
+        assert_eq!(&b[16..18], &[b'\\', 0]);
+        assert_eq!(
+            &b[16 + name_bytes..16 + name_bytes + 2],
+            &[0, 0],
+            "NUL-terminated"
+        );
+    }
+
+    /// The measured contract: 0 and 8 bytes are a length mismatch, 16 (header only) and
+    /// `required - 1` are an overflow, `required` fits; `required` is reported in all of them.
+    #[test]
+    fn the_too_small_buffer_contract() {
+        let required = 16 + 4 + 2;
+        for (len, fit) in [
+            (0, Fit::Mismatch),
+            (8, Fit::Mismatch),
+            (15, Fit::Mismatch),
+            (16, Fit::Overflow),
+            (required - 1, Fit::Overflow),
+            (required, Fit::Fits),
+        ] {
+            let mut b = vec![0xEEu8; len];
+            let r = put_object_name("ab", &mut b, 0).unwrap();
+            assert_eq!((r.required, r.fit), (required, fit), "buffer of {len}");
+            if fit != Fit::Fits {
+                assert!(
+                    b.iter().all(|x| *x == 0xEE),
+                    "wrote into a short buffer of {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_too_long_for_a_unicode_string_is_refused() {
+        let mut b = vec![0u8; 0x10000];
+        assert_eq!(put_object_name(&"a".repeat(0x8000), &mut b, 0), None);
+        assert!(b.iter().all(|x| *x == 0));
+        assert!(put_object_name(&"a".repeat(0x7FFE), &mut b, 0).is_some());
+    }
+
+    /// A 32-bit (WOW64) caller's `UNICODE_STRING`: the lengths, then a 4-byte `Buffer` at 4
+    /// pointing just past the 8-byte header.
+    #[test]
+    fn a_32_bit_header_is_8_bytes_with_a_4_byte_pointer() {
+        assert_eq!(object_name_header(4), 8);
+        assert_eq!(object_name_header(8), 16);
+        let mut buf = [0xAAu8; 8 + 6 + 2];
+        let r = put_object_name_for("abc", &mut buf, 0x1000, 4).unwrap();
+        assert_eq!((r.required, r.fit), (16, Fit::Fits));
+        assert_eq!(&buf[0..4], &[6, 0, 8, 0], "Length 6, MaximumLength 8");
+        assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 0x1008);
+        assert_eq!(&buf[8..16], &[b'a', 0, b'b', 0, b'c', 0, 0, 0]);
+        assert_eq!(put_object_name_for("abc", &mut [0u8; 7], 0, 4).unwrap().fit, Fit::Mismatch);
+    }
+}

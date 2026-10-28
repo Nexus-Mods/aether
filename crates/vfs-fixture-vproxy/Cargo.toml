@@ -1,0 +1,17 @@
+[package]
+name = "vfs-fixture-vproxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib only. Adding rlib makes cargo build this package as two units that
+# both write `deps/vproxy.dll` (cargo#6313), which breaks `--all-targets`.
+# Dependents order their build through the Cargo edge, not a `use`.
+crate-type = ["cdylib"]
+name = "vproxy"
+
+[lints]
+workspace = true

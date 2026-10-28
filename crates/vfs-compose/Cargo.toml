@@ -1,0 +1,27 @@
+[package]
+name = "vfs-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Read-only composition: layered (top-wins) + router (glob routes)"
+
+[lib]
+name = "vfs_compose"
+path = "src/lib.rs"
+
+[dependencies]
+vfs-provider.workspace = true
+# `fold` only — the single source of truth for case-insensitive comparison.
+# The shim folds vpath components with it before they cross the ring, so every
+# combinator that keys or compares a name below the ring has to use the same
+# function or the two sides disagree on anything Unicode-cased.
+vfs-core.workspace = true
+
+[dev-dependencies]
+vfs-testkit.workspace = true
+vfs-provider = { workspace = true, features = ["conformance"] }
+
+[lints]
+workspace = true

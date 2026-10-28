@@ -227,10 +227,25 @@ unsafe fn put_string(
     if got == 0 || end > region_end {
         return Err(no_room());
     }
-    // An environment that starts where the string goes moves past its end.
+    // An environment the string would overwrite moves past the string's end.
+    //
+    // Only one that really overlaps `place..end`, because the two layouts
+    // differ. A native x64 process's environment starts at `params + Length`,
+    // exactly where the string goes, so it overlaps and is moved: it ends up
+    // after the grown block, where the kernel would have put it, with the
+    // allocation's slack (128 KiB) after it to grow into. A 32-bit (WOW64)
+    // process's environment lies *inside* the block's `Length` (measured: it
+    // ends at `params + Length`), in an allocation of a page or so; the
+    // string after `Length` does not touch it, and moving it there would ask
+    // for room for a second copy that the page does not have.
     let env: usize = read(process, params + PP_ENVIRONMENT)?;
-    if env >= params && env < end {
-        let block = read_environment(process, params, env, region_end)?;
+    let allocation = mbi.BaseAddress as usize;
+    let block = if env >= allocation && env < end {
+        Some(read_environment(process, params, env, region_end)?)
+    } else {
+        None
+    };
+    if let Some(block) = block.filter(|b| env + b.len() > place) {
         let moved = (end + 7) & !7;
         if moved + block.len() > region_end {
             return Err(no_room());
@@ -364,12 +379,16 @@ mod tests {
     use std::mem::zeroed;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, TerminateProcess, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-        PROCESS_INFORMATION, STARTUPINFOW,
+        CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
+        STARTUPINFOW,
     };
 
     /// A suspended `cmd.exe` started with `env` (entries, without the final
-    /// empty one), killed when dropped.
+    /// empty one), killed when dropped. Created without a window, so it starts
+    /// a console of its own: kernelbase's console set-up is the part of process
+    /// start that a mangled environment failed even when no variable it needed
+    /// was lost.
     struct Suspended(PROCESS_INFORMATION);
 
     impl Suspended {
@@ -397,7 +416,7 @@ mod tests {
                     core::ptr::null(),
                     core::ptr::null(),
                     0,
-                    CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                    CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
                     block.as_ptr().cast(),
                     core::ptr::null(),
                     &si,
@@ -452,6 +471,20 @@ mod tests {
         }
     }
 
+    impl Suspended {
+        /// Resume it and wait (10 s at most) for its exit code.
+        fn run(&self) -> u32 {
+            let mut code = 0u32;
+            // SAFETY: the handles this test's `CreateProcessW` returned.
+            unsafe {
+                ResumeThread(self.0.hThread);
+                assert_eq!(WaitForSingleObject(self.0.hProcess, 10_000), 0, "it exits");
+                GetExitCodeProcess(self.0.hProcess, &mut code);
+            }
+            code
+        }
+    }
+
     impl Drop for Suspended {
         fn drop(&mut self) {
             // SAFETY: the handles this test's `CreateProcessW` returned.
@@ -471,6 +504,9 @@ mod tests {
     /// block ended there, hiding every later variable (`VFS_SHIM_CONFIG` among
     /// them), so the shim's `DllMain` failed and the target died with
     /// `STATUS_DLL_INIT_FAILED` (0xC0000142) before it ran.
+    ///
+    /// Each target is then run: `cmd.exe` exits 7 only if it started and still
+    /// sees the environment's last variable.
     #[test]
     fn a_relocated_command_line_leaves_the_environment_whole() {
         let mut env: Vec<String> = vec![
@@ -489,7 +525,10 @@ mod tests {
         // entry's.
         for extra in 0..48 {
             let target = Suspended::start(&env);
-            let cmd = format!(r#""C:\virtual\{}\game.exe" -arg"#, "d".repeat(60 + extra));
+            let cmd = format!(
+                r#""C:\virtual\{}\game.exe" /d /c if defined ZZZ_LAST (exit 7) else (exit 3)"#,
+                "d".repeat(20 + extra)
+            );
             // SAFETY: a suspended process this test created.
             unsafe { rewrite(target.0.hProcess, Some(&cmd), Some(r"C:\virtual\dir")) }
                 .expect("rewrite");
@@ -502,6 +541,12 @@ mod tests {
             let (got, inside) = target.command_line();
             assert_eq!(got, cmd);
             assert!(inside, "the command line lies inside the parameter block");
+            assert_eq!(
+                target.run(),
+                7,
+                "the target starts and sees its whole environment ({}-unit command line)",
+                cmd.len()
+            );
         }
     }
 }

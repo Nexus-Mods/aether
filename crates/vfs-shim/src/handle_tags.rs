@@ -101,7 +101,11 @@ mod tests {
     #[test]
     fn every_tag_leaves_the_sign_bit_clear() {
         for t in [SYNTH_SECTION_TAG, SYNTH_FILE_TAG, REG_TAG] {
-            assert_eq!(t >> (usize::BITS - 1), 0, "tag {t:#x} would read as a pseudo-handle");
+            assert_eq!(
+                t >> (usize::BITS - 1),
+                0,
+                "tag {t:#x} would read as a pseudo-handle"
+            );
         }
     }
 }

@@ -469,6 +469,9 @@ mod tests {
         assert_eq!(&block[ptr..2 * ptr], &0x1234usize.to_ne_bytes());
         // Status's union padding, and every byte past the block, are untouched.
         assert!(block[4..ptr].iter().all(|&b| b == 0xAA));
-        assert!(block[2 * ptr..].iter().all(|&b| b == 0xAA), "nothing past the block");
+        assert!(
+            block[2 * ptr..].iter().all(|&b| b == 0xAA),
+            "nothing past the block"
+        );
     }
 }

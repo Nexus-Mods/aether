@@ -1045,9 +1045,7 @@ pub(crate) unsafe fn query_multiple_value_key(
     let refs: Vec<Option<&Value>> = values.iter().map(Option::as_ref).collect();
     // Seeded from the caller's array: the layout fills only the entries it copies.
     let mut seeds: Vec<ValueEntry> = (0..n)
-        .map(|i| {
-            ValueEntry::load(core::slice::from_raw_parts(slot(i), KEY_VALUE_ENTRY_SIZE))
-        })
+        .map(|i| ValueEntry::load(core::slice::from_raw_parts(slot(i), KEY_VALUE_ENTRY_SIZE)))
         .collect();
     let blen = core::ptr::read_unaligned(buffer_len);
     if buffer.is_null() && blen != 0 {

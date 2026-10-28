@@ -296,6 +296,9 @@ mod tests {
         assert_eq!(&buf[0..4], &[6, 0, 8, 0], "Length 6, MaximumLength 8");
         assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 0x1008);
         assert_eq!(&buf[8..16], &[b'a', 0, b'b', 0, b'c', 0, 0, 0]);
-        assert_eq!(put_object_name_for("abc", &mut [0u8; 7], 0, 4).unwrap().fit, Fit::Mismatch);
+        assert_eq!(
+            put_object_name_for("abc", &mut [0u8; 7], 0, 4).unwrap().fit,
+            Fit::Mismatch
+        );
     }
 }

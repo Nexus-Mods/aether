@@ -324,9 +324,8 @@ fn holds_loader_lock() -> bool {
         // SAFETY: an ntdll export cast to its documented signature.
         unsafe {
             let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
-            GetProcAddress(ntdll, c"RtlIsCriticalSectionLockedByThread".as_ptr().cast()).map(
-                |p| core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p),
-            )
+            GetProcAddress(ntdll, c"RtlIsCriticalSectionLockedByThread".as_ptr().cast())
+                .map(|p| core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p))
         }
     });
     let Some(f) = f else {

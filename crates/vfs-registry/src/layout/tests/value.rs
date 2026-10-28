@@ -285,9 +285,16 @@ fn maximum_length_names_report_their_full_size() {
 fn a_value_entry_round_trips_through_its_slot() {
     let ptr = core::mem::size_of::<usize>();
     let mut slot = [0x5Au8; KEY_VALUE_ENTRY_SIZE];
-    let e = ValueEntry { data_length: 7, data_offset: 32, ty: 4 };
+    let e = ValueEntry {
+        data_length: 7,
+        data_offset: 32,
+        ty: 4,
+    };
     e.store(&mut slot);
-    assert!(slot[..ptr].iter().all(|&b| b == 0x5A), "ValueName left as the caller wrote it");
+    assert!(
+        slot[..ptr].iter().all(|&b| b == 0x5A),
+        "ValueName left as the caller wrote it"
+    );
     assert_eq!(ValueEntry::load(&slot), e);
     assert_eq!(KEY_VALUE_ENTRY_SIZE, if ptr == 8 { 24 } else { 16 });
 }

@@ -42,7 +42,8 @@ Rust toolchain and the `i686-pc-windows-msvc` target come from
 CI builds them only when something here (or `bin/build-natives.ps1`) changed:
 `bin\natives-key.ps1` hashes every tracked file under `rust/` and the script,
 and the built natives are cached under that key (`docs/release.md`, "The
-natives key").
+natives key"). `powershell -ExecutionPolicy Bypass -File bin\natives-key.ps1`
+prints it, to match a CI run's `natives key:` line or cache entry.
 
 On Linux and macOS, `bin/build-windows [--release]` cross-builds the same natives
 and the fixtures with `cargo-xwin`, clang and lld (LLVM 19 or later: the i686

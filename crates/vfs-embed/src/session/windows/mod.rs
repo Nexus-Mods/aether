@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -98,13 +98,19 @@ impl Session {
             return Ok(());
         }
 
+        // Unique per serve: the pid and the time tell processes apart, the
+        // counter two sessions of one process that serve within the same
+        // millisecond (the same name would open the first session's section
+        // rather than create a new one, and both children would share it).
+        static SERVES: AtomicU64 = AtomicU64::new(0);
         let section = format!(
-            "Local\\vfs_ring_{}_{}",
+            "Local\\vfs_ring_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            SERVES.fetch_add(1, Ordering::Relaxed)
         );
         let ipc =
             IpcServe::start_with_workers(Arc::clone(&self.kernel), section, self.io_workers())?;

@@ -25,10 +25,21 @@ pub const FIXTURE_READ: &str = "vfs-fixture-read.exe";
 pub const FIXTURE_STEAM: &str = "vfs-fixture-steam.exe";
 pub const FIXTURE_NVAPI: &str = "vfs-fixture-nvapi.exe";
 pub const FIXTURE_REGISTRY: &str = "vfs-fixture-registry.exe";
+/// The rest of the fixtures, which the director's end-to-end tests (Cairn's
+/// `aether.director.e2e`) run as well: the same set as
+/// `bin/build-natives.ps1 -Fixtures` builds on Windows.
+pub const FIXTURE_WRITEPATH: &str = "vfs-fixture-writepath.exe";
+pub const FIXTURE_ESCAPE: &str = "vfs-fixture-escape.exe";
+pub const FIXTURE_PREFS: &str = "vfs-fixture-prefs.exe";
+/// vfs-fixture-vproxy's DLL, which `FIXTURE_STATICIMP` imports statically.
+pub const FIXTURE_VPROXY: &str = "vproxy.dll";
+pub const FIXTURE_STATICIMP: &str = "vfs-staticimp.exe";
+/// vfs-inject's probe program.
+pub const PROBE: &str = "vfs-probe.exe";
 
 /// Every artefact `bin/build-windows` produces, in the script's order: the
 /// launch's two, their 32-bit builds, then the fixtures.
-pub const WINDOWS_ARTIFACTS: [&str; 8] = [
+pub const WINDOWS_ARTIFACTS: [&str; 14] = [
     INJECTOR,
     SHIM_DLL,
     INJECTOR32,
@@ -37,6 +48,12 @@ pub const WINDOWS_ARTIFACTS: [&str; 8] = [
     FIXTURE_STEAM,
     FIXTURE_NVAPI,
     FIXTURE_REGISTRY,
+    FIXTURE_WRITEPATH,
+    FIXTURE_ESCAPE,
+    FIXTURE_PREFS,
+    FIXTURE_VPROXY,
+    FIXTURE_STATICIMP,
+    PROBE,
 ];
 
 #[cfg(test)]

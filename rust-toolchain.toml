@@ -1,4 +1,7 @@
+# An exact version, not "stable": the toolchain is part of what the natives
+# are built from, and this file is under rust/, so a toolchain bump changes
+# the natives key (bin/natives-key.ps1) and rebuilds them. Bump it on purpose.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
 components = ["clippy", "rustfmt"]

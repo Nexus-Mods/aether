@@ -39,6 +39,11 @@ none of the four imports the VC++ runtime (on by default when `$env:CI` is set).
 Rust toolchain and the `i686-pc-windows-msvc` target come from
 [`rust-toolchain.toml`](rust-toolchain.toml); the MSVC C++ build tools are needed.
 
+CI builds them only when something here (or `bin/build-natives.ps1`) changed:
+`bin\natives-key.ps1` hashes every tracked file under `rust/` and the script,
+and the built natives are cached under that key (`docs/release.md`, "The
+natives key").
+
 On Linux and macOS, `bin/build-windows [--release]` cross-builds the same natives
 and the fixtures with `cargo-xwin`, clang and lld (LLVM 19 or later: the i686
 shim's `EXPORTAS` export needs it). `bin/bootstrap` runs it.

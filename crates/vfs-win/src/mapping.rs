@@ -4,7 +4,9 @@ use std::io;
 use std::path::Path;
 
 use vfs_ipc::SharedSeg;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -35,8 +37,10 @@ unsafe impl Sync for SharedMapping {}
 
 impl SharedMapping {
     /// Create a new named page-file-backed section of at least `size` bytes and
-    /// map a read/write view. If a section of `name` already exists,
-    /// `CreateFileMappingW` opens it (callers coordinate names to avoid this).
+    /// map a read/write view. A section of `name` that already exists is an
+    /// error (`ErrorKind::AlreadyExists`), never opened: `CreateFileMappingW`
+    /// would hand back the existing one, and its creator's ring would then be
+    /// initialised again under it. A second handle comes from [`Self::open`].
     pub fn create(name: &str, size: usize) -> io::Result<Self> {
         let wide = to_wide(name);
         let (size_high, size_low) = split_size(size)?;
@@ -55,6 +59,19 @@ impl SharedMapping {
         };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
+        }
+        // SAFETY: FFI, read straight after the call whose status it reports.
+        #[allow(unsafe_code)]
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            // SAFETY: FFI. `handle` is valid and closed exactly once.
+            #[allow(unsafe_code)]
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("a section named {name} already exists"),
+            ));
         }
         Self::map_view(handle, size)
     }
@@ -316,6 +333,20 @@ mod tests {
         let opener = SharedMapping::open(&name, 64 * 1024).unwrap();
         let geom_opened = vfs_ipc::ring::open(opener.seg()).unwrap();
         assert_eq!(geom_created, geom_opened);
+    }
+
+    #[test]
+    fn creating_a_section_that_exists_fails_and_leaves_it_alone() {
+        let name = section_name("twice");
+        let first = SharedMapping::create(&name, 64 * 1024).unwrap();
+        let geom = vfs_ipc::ring::init(first.seg(), 4, 256).unwrap();
+        let err = SharedMapping::create(&name, 64 * 1024)
+            .err()
+            .expect("a second create of the same name must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        // the first creator's ring is still there, as written
+        let opener = SharedMapping::open(&name, 64 * 1024).unwrap();
+        assert_eq!(vfs_ipc::ring::open(opener.seg()).unwrap(), geom);
     }
 
     #[test]

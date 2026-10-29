@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use vfs_ipc::Notifier;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, OpenEventW, SetEvent, WaitForSingleObject,
 };
@@ -22,20 +22,20 @@ pub struct EventNotifier {
 }
 
 impl EventNotifier {
-    /// Create the named events (director side).
+    /// Create the named events (director side). An event of either name that
+    /// already exists is an error (`ErrorKind::AlreadyExists`), never opened:
+    /// `CreateEventW` would hand back the existing one, and two rings would
+    /// share their wakeups. A second handle comes from [`Self::open`].
     pub fn create(server_name: &str, client_name: &str) -> io::Result<Self> {
-        let s = wide(server_name);
-        let c = wide(client_name);
-        // SAFETY: CreateEventW with valid names; bManualReset=FALSE (auto-reset).
-        let server_ev = unsafe { CreateEventW(core::ptr::null(), 0, 0, s.as_ptr()) };
-        if server_ev.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let client_ev = unsafe { CreateEventW(core::ptr::null(), 0, 0, c.as_ptr()) };
-        if client_ev.is_null() {
-            unsafe { CloseHandle(server_ev) };
-            return Err(io::Error::last_os_error());
-        }
+        let server_ev = create_new_event(server_name)?;
+        let client_ev = match create_new_event(client_name) {
+            Ok(h) => h,
+            Err(e) => {
+                // SAFETY: `server_ev` is valid and closed exactly once.
+                unsafe { CloseHandle(server_ev) };
+                return Err(e);
+            }
+        };
         Ok(EventNotifier {
             server_ev,
             client_ev,
@@ -191,6 +191,28 @@ impl Drop for EventNotifier {
 unsafe impl Send for EventNotifier {}
 unsafe impl Sync for EventNotifier {}
 
+/// A new named auto-reset event; one of `name` that already exists is an
+/// error, its handle closed.
+fn create_new_event(name: &str) -> io::Result<HANDLE> {
+    let w = wide(name);
+    // SAFETY: CreateEventW with a valid NUL-terminated name; bManualReset=FALSE
+    // (auto-reset), initially unsignalled.
+    let h = unsafe { CreateEventW(core::ptr::null(), 0, 0, w.as_ptr()) };
+    if h.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: FFI, read straight after the call whose status it reports.
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // SAFETY: `h` is valid and closed exactly once.
+        unsafe { CloseHandle(h) };
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("an event named {name} already exists"),
+        ));
+    }
+    Ok(h)
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(core::iter::once(0)).collect()
 }
@@ -228,5 +250,43 @@ mod spin_tests {
             SPIN_UNTIL.with(|c| c.get()).is_none(),
             "budget must latch off"
         );
+    }
+}
+
+#[cfg(test)]
+mod create_tests {
+    use super::*;
+
+    fn names(tag: &str) -> (String, String) {
+        let pid = std::process::id();
+        (
+            format!("Local\\vfs-win-ev-test-{pid}-{tag}_srv"),
+            format!("Local\\vfs-win-ev-test-{pid}-{tag}_cli"),
+        )
+    }
+
+    #[test]
+    fn creating_events_that_exist_fails() {
+        let (s, c) = names("twice");
+        let _first = EventNotifier::create(&s, &c).unwrap();
+        let err = EventNotifier::create(&s, &c)
+            .err()
+            .expect("a second create of the same names must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        // a second handle is what `open` is for
+        assert!(EventNotifier::open(&s, &c).is_ok());
+    }
+
+    #[test]
+    fn a_client_event_that_exists_fails_the_create_and_frees_the_server_event() {
+        let (s, c) = names("half");
+        let (_, other_c) = names("half-other");
+        // only the client name is taken
+        let _holder = EventNotifier::create(&format!("{s}-holder"), &c).unwrap();
+        let err = EventNotifier::create(&s, &c).err().expect("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        // the server event the failed create made was closed again, so the
+        // name is free for a create of its own
+        assert!(EventNotifier::create(&s, &other_c).is_ok());
     }
 }

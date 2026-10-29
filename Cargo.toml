@@ -57,7 +57,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 # Floor the code needs: `File::try_lock` (1.89). CI runs `stable`.
 rust-version = "1.89"
 publish = false

@@ -36,6 +36,11 @@ const FH_HELD: u64 = 98;
 /// How long a test waits for something that must happen before it calls the
 /// run a failure. Never part of a passing run's logic.
 const GIVE_UP: Duration = Duration::from_secs(20);
+/// The deadline of [`Fixture::client`]: longer than any run of this binary,
+/// so a request ends when the test lets it (the latch, an answer), never
+/// because a clock ran out. Finite, so a request the test never lets go still
+/// fails the run instead of hanging it.
+const PATIENT: Duration = Duration::from_secs(30 * 60);
 
 const PAYLOAD_CAP: u32 = 4096;
 const BANK: usize = 64 * 1024;
@@ -129,8 +134,19 @@ impl Fixture {
         self.owned.seg()
     }
 
+    /// A client with no deadline a run reaches ([`PATIENT`]). A test that
+    /// wants one to expire says so with `with_deadline`, on a clock it drives
+    /// ([`Self::client_clocked`]).
+    ///
+    /// Not the shipped [`vfs_ipc::RESPONSE_DEADLINE`]: 60 s of wall clock is
+    /// not something these tests are about, and a run reaches it. Every
+    /// thread here spins (`SpinNotifier`, both ends), so on a runner with two
+    /// processors and two tests at once a round trip can wait for the
+    /// scheduler for a long time; 200 echoes once took longer than the 60 s
+    /// the held reads waiting on them had, and every read failed with
+    /// `ST_IO_ERROR` before the test opened the latch.
     fn client(&self) -> RingClient<'_, SpinNotifier> {
-        RingClient::with_geom(self.seg(), self.geom, SpinNotifier)
+        RingClient::with_geom(self.seg(), self.geom, SpinNotifier).with_deadline(PATIENT)
     }
 
     /// A client on a clock the test drives: see [`TestClock`].

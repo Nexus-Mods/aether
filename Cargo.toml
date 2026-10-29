@@ -58,7 +58,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-# Floor the code needs: `File::try_lock` (1.89). CI runs `stable`.
+# Floor the code needs: `File::try_lock` (1.89). CI builds with the toolchain pinned in rust-toolchain.toml.
 rust-version = "1.89"
 publish = false
 

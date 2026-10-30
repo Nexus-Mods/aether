@@ -543,7 +543,7 @@ fn start_target(
         // Created in the job, before anything of the target runs (the remote
         // thread below runs its process initialisation), so neither it nor
         // anything it starts is ever outside it: see `Job::create_process`.
-        let Some((pi, _)) = Job::create_process(
+        let (pi, _) = match Job::create_process(
             job,
             app_w.as_ptr(),
             cmd_w.as_mut_ptr(),
@@ -553,8 +553,9 @@ fn start_target(
                 .as_ref()
                 .map(|v| v.as_ptr())
                 .unwrap_or(core::ptr::null()),
-        ) else {
-            return Err(InjectError::CreateProcess);
+        ) {
+            Ok(created) => created,
+            Err(why) => return Err(InjectError::CreateProcessFailed(why)),
         };
 
         // Before process initialisation reads them: kernelbase keeps its own
@@ -735,7 +736,7 @@ fn start_import_activated(
     // SAFETY: CreateProcessW with valid, NUL-terminated buffers; the thread
     // handle is closed here and the process handle handed to the caller.
     unsafe {
-        let Some((pi, _)) = Job::create_process(
+        let (pi, _) = match Job::create_process(
             job,
             app_w.as_ptr(),
             cmd_w.as_mut_ptr(),
@@ -745,8 +746,9 @@ fn start_import_activated(
                 .as_ref()
                 .map(|v| v.as_ptr())
                 .unwrap_or(core::ptr::null()),
-        ) else {
-            return Err(InjectError::CreateProcess);
+        ) {
+            Ok(created) => created,
+            Err(why) => return Err(InjectError::CreateProcessFailed(why)),
         };
         if flags & CREATE_SUSPENDED != 0 {
             if let Err(e) = tell_where(pi.hProcess, cfg) {

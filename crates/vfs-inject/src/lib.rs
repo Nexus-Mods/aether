@@ -70,6 +70,9 @@ pub struct RunConfig {
 #[derive(Debug)]
 pub enum InjectError {
     CreateProcess,
+    /// Creating the launched target failed: each attempt's Windows error
+    /// (in its job, then without the job attribute).
+    CreateProcessFailed(String),
     Alloc,
     Write,
     RemoteThread,

@@ -171,8 +171,8 @@ impl Job {
     /// for the record; and one that succeeds but leaves the process outside
     /// the job (a layer that accepts the attribute and ignores it) is
     /// assigned then. Pass `CREATE_SUSPENDED` so that happens before it runs.
-    /// Returns `None` when `CreateProcessW` fails, else the process and how
-    /// it came to be in the job.
+    /// Returns the process and how it came to be in the job, or why
+    /// `CreateProcessW` failed (each attempt's error).
     ///
     /// # Safety
     /// The pointers are as `CreateProcessW` takes them: `app`, `cmd` (mutable)
@@ -185,7 +185,7 @@ impl Job {
         flags: u32,
         env: *const c_void,
         cwd: *const u16,
-    ) -> Option<(PROCESS_INFORMATION, Placement)> {
+    ) -> Result<(PROCESS_INFORMATION, Placement), String> {
         // SAFETY: per this function's contract; every buffer below is owned
         // here and outlives the calls that use it.
         unsafe {
@@ -196,7 +196,11 @@ impl Job {
                 CreateProcessW(app, cmd, null(), null(), 0, flags, env, cwd, &si, pi) != 0
             };
             let Some(job) = job else {
-                return plain(&mut pi).then_some((pi, Placement::NoJob));
+                return if plain(&mut pi) {
+                    Ok((pi, Placement::NoJob))
+                } else {
+                    Err(format!("CreateProcessW failed (error {})", GetLastError()))
+                };
             };
             let mut size = 0usize;
             InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size);
@@ -234,13 +238,13 @@ impl Job {
                 if created {
                     let mut in_job = 0;
                     if IsProcessInJob(pi.hProcess, job.job, &mut in_job) != 0 && in_job != 0 {
-                        return Some((pi, Placement::CreatedInJob));
+                        return Ok((pi, Placement::CreatedInJob));
                     }
                     // accepted and ignored: assign it now, still suspended
                     let why = "created with the job attribute but outside the job".to_string();
                     job.adopt(pi.hProcess);
                     job.note_fallback(&why);
-                    return Some((pi, Placement::Adopted(why)));
+                    return Ok((pi, Placement::Adopted(why)));
                 }
                 err
             } else {
@@ -248,11 +252,14 @@ impl Job {
             };
             let why = format!("creating it in the job failed (error {attr_error})");
             if !plain(&mut pi) {
-                return None;
+                return Err(format!(
+                    "CreateProcessW failed (error {}) after {why}",
+                    GetLastError()
+                ));
             }
             job.adopt(pi.hProcess);
             job.note_fallback(&why);
-            Some((pi, Placement::Adopted(why)))
+            Ok((pi, Placement::Adopted(why)))
         }
     }
 

@@ -24,11 +24,13 @@
 //! 15 exclusive-create of a fresh path, 16 exclusive-create against an
 //! existing path did not fail as expected, 17 in-place open refused, 18
 //! in-place content missing or short (a blank destination, not a seeded
-//! copy-up), 19 in-place write, 20 in-place readback mismatch.
+//! copy-up), 19 in-place write, 20 in-place readback mismatch, 21 no
+//! `VFS_SHIM_STATS_LOG` report covering the run appeared (see
+//! `outlive_a_covering_report`).
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Set `VFS_FIXTURE_COW_PATH` to a path the session serves from a **read-only**
 /// source and this fixture edits it in place first: `OPEN_EXISTING` +
@@ -266,23 +268,63 @@ fn main() {
     }
     println!("WRITEPATH FIXTURE OK: CREATE_NEW exclusivity held");
 
-    // The shim's hook-stats report is a periodic sample, not an exit dump —
-    // nothing flushes it when a process exits, so any open recorded after the
-    // reporter's last tick is invisible to a reader of the report file. A real
-    // game session runs for minutes and this never matters, but this fixture's
-    // last routed opens (the CREATE_NEW pair above) land microseconds before
-    // exit, well inside one tick's window. Outlive at least one full tick so
-    // the reporter has a chance to observe the fixture's final state before
-    // the process disappears. Derived from the same interval the harness
-    // configures (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed number, so
-    // this stays correct if that interval ever changes.
+    outlive_a_covering_report();
+    exit(0);
+}
+
+/// How long [`outlive_a_covering_report`] waits before it gives up.
+const REPORT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Stay alive until the shim's hook-stats report on disk was rendered from a
+/// snapshot taken after everything above. A no-op without `VFS_SHIM_STATS_LOG`.
+///
+/// The report is a periodic sample, not an exit dump: nothing flushes it when
+/// a process exits (`vfs_shim::hookstats::banner` says why), so an open made
+/// after the reporter's last tick is missing from the file a harness reads,
+/// and this fixture's last routed opens land microseconds before exit. A wait
+/// of a fixed number of ticks is not enough: it bounds how long this thread
+/// sleeps, not whether the reporter thread is scheduled, renders and renames
+/// in that time. On a loaded 2-vCPU runner it often isn't, and the harness
+/// read a report from the middle of the run, or none.
+///
+/// So this waits for evidence instead. The reporter is one thread that
+/// snapshots, writes a temp file and renames it over the report, tick after
+/// tick. Read the report now (or its absence): the first time it reads
+/// different, a rename landed after now; the second time, a later tick's
+/// rename landed, and that tick's snapshot was taken after the first rename,
+/// so after everything this fixture did. Two consecutive reports never read
+/// the same (the banner's elapsed time moves by a tick, and these reads are
+/// themselves in the report's path counts); were they ever to, this would
+/// only wait a tick longer. Exits 21 if no covering report appears within
+/// [`REPORT_DEADLINE`], so the harness sees why, not a stale count.
+fn outlive_a_covering_report() {
+    let Some(log) = std::env::var_os(vfs_env::SHIM_STATS_LOG) else {
+        return;
+    };
     let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(250);
-    std::thread::sleep(Duration::from_millis(interval_ms.saturating_mul(2)));
-
-    exit(0);
+    let poll = Duration::from_millis(interval_ms.clamp(1, 50));
+    let deadline = Instant::now() + REPORT_DEADLINE;
+    let mut seen = std::fs::read(&log).ok();
+    let mut replaced = 0;
+    while replaced < 2 {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "WRITEPATH FIXTURE FAIL [21]: the shim's stats report at {} was replaced {replaced} \
+                 of 2 times in {REPORT_DEADLINE:?}; no report covers this run",
+                std::path::Path::new(&log).display()
+            );
+            exit(21);
+        }
+        std::thread::sleep(poll);
+        let now = std::fs::read(&log).ok();
+        if now.is_some() && now != seen {
+            replaced += 1;
+            seen = now;
+        }
+    }
 }
 
 /// Copy-on-write over read-only content, driven the way an application drives

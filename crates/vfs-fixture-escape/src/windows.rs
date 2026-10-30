@@ -1601,7 +1601,7 @@ pub fn main() {
     }
     let _ = out.flush();
 
-    // Same reasoning as `vfs-fixture-writepath`'s own end-of-run sleep: the
+    // The reasoning `vfs-fixture-writepath`'s end-of-run wait started from: the
     // shim's hook-stats reporter is a periodic sample (`VFS_SHIM_STATS_LOG`),
     // not an exit dump, and nothing flushes it when this process exits. This
     // fixture's own last few vectors (13, 14) can otherwise land inside the

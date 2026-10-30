@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 vfs-env.workspace = true
+vfs-fixture-support.workspace = true
 
 [lints]
 workspace = true

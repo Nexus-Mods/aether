@@ -413,33 +413,13 @@ pub fn main() {
         }
         Err(_) => print!("{out}"),
     }
-    outlive_one_stats_tick();
-    exit(0);
-}
-
-/// Stay alive long enough for the shim's hook-stats reporter to tick at least
-/// once after the last call above.
-///
-/// The reporter is a periodic sample (`VFS_SHIM_STATS_LOG`), not an exit dump,
-/// and **nothing flushes it at process exit** — `vfs_shim::hookstats::banner`
-/// records why an exit flush was tried, measured, and removed. This whole run
-/// is a few milliseconds, so without this wait the report can simply never
-/// tick again after the calls a harness is reading it for, and their absence
-/// would look identical to their never having happened.
-///
-/// Copied in shape (and in its 20ms floor) from `vfs-fixture-escape`'s
-/// end-of-run wait: Windows' default timer granularity is ~15.6ms, so
-/// `interval * 2` alone — 10ms at the 5ms interval the e2e tests configure —
-/// does not reliably guarantee even one tick.
-fn outlive_one_stats_tick() {
-    if std::env::var_os(vfs_env::SHIM_STATS_LOG).is_none() {
-        return;
+    // Stay until the shim's stats report covers every call above: the
+    // harness reads it after exit for the hook rows and the synthetic-lock
+    // section, and this whole run is a few milliseconds (vfs_fixture_support
+    // says why a fixed wait isn't enough).
+    if let Err(e) = vfs_fixture_support::outlive_a_covering_report() {
+        eprintln!("FIXTURE FAIL: {e}");
+        exit(3);
     }
-    let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(250);
-    let wait = std::time::Duration::from_millis(interval_ms.saturating_mul(2))
-        .max(std::time::Duration::from_millis(20));
-    std::thread::sleep(wait);
+    exit(0);
 }

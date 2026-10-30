@@ -242,9 +242,10 @@ pub(super) static START: OnceLock<Instant> = OnceLock::new();
 /// not save it, because rendering has to allocate.
 ///
 /// So the banner is the answer instead: a short-lived process that needs its
-/// tail in the report must outlive one tick (see `report_interval` and
-/// `vfs-fixture-prefs`/`vfs-fixture-escape`'s end-of-run waits), and this line
-/// says how much of the run the numbers below actually cover.
+/// tail in the report must outlive a tick that renders it (see
+/// `report_interval`, and `vfs_fixture_support::outlive_a_covering_report`,
+/// which the fixtures wait in), and this line says how much of the run the
+/// numbers below actually cover.
 pub(super) fn banner() -> String {
     let elapsed = START
         .get()

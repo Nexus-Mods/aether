@@ -30,6 +30,8 @@ members = [
   # with the portable ring above both. Builds to an empty crate on Windows.
   "crates/vfs-unix",
   "crates/vfs-zip",
+  # What the fixtures share: waiting for a stats report that covers the run.
+  "crates/vfs-fixture-support",
   "crates/vfs-fixture-read",
   "crates/vfs-fixture-writepath",
   "crates/vfs-fixture-escape",
@@ -75,6 +77,7 @@ vfs-compose = { path = "crates/vfs-compose" }
 vfs-core = { path = "crates/vfs-core" }
 vfs-director = { path = "crates/vfs-director" }
 vfs-env = { path = "crates/vfs-env" }
+vfs-fixture-support = { path = "crates/vfs-fixture-support" }
 vfs-inject = { path = "crates/vfs-inject" }
 vfs-ipc = { path = "crates/vfs-ipc" }
 vfs-ntlayout = { path = "crates/vfs-ntlayout" }

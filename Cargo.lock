@@ -512,6 +512,7 @@ name = "vfs-fixture-escape"
 version = "0.1.0"
 dependencies = [
  "vfs-env",
+ "vfs-fixture-support",
 ]
 
 [[package]]
@@ -523,6 +524,7 @@ name = "vfs-fixture-prefs"
 version = "0.1.0"
 dependencies = [
  "vfs-env",
+ "vfs-fixture-support",
 ]
 
 [[package]]
@@ -551,6 +553,14 @@ name = "vfs-fixture-steam"
 version = "0.1.0"
 
 [[package]]
+name = "vfs-fixture-support"
+version = "0.1.0"
+dependencies = [
+ "vfs-env",
+ "vfs-testkit",
+]
+
+[[package]]
 name = "vfs-fixture-vproxy"
 version = "0.1.0"
 
@@ -559,6 +569,7 @@ name = "vfs-fixture-writepath"
 version = "0.1.0"
 dependencies = [
  "vfs-env",
+ "vfs-fixture-support",
 ]
 
 [[package]]

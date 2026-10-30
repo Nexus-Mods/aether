@@ -1601,36 +1601,14 @@ pub fn main() {
     }
     let _ = out.flush();
 
-    // The reasoning `vfs-fixture-writepath`'s end-of-run wait started from: the
-    // shim's hook-stats reporter is a periodic sample (`VFS_SHIM_STATS_LOG`),
-    // not an exit dump, and nothing flushes it when this process exits. This
-    // fixture's own last few vectors (13, 14) can otherwise land inside the
-    // same handful of milliseconds this whole run takes, well within one
-    // tick's window — a caller reading the report for evidence that every
-    // vector's open was classified must not see a report that simply never
-    // ticked again after them. Derived from the same interval the caller may
-    // have configured (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed
-    // number, so this stays correct if that interval ever changes; a no-op
-    // when stats logging is off (nothing to outlive).
-    let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(250);
-    // Floored at 20ms regardless of how small `interval_ms` is: Windows'
-    // default system timer resolution is coarser than either fast-tick
-    // interval this project configures (5ms, or 1ms) — a thread that calls
-    // `Sleep(N)` for `N` under roughly 15.6ms is not guaranteed to actually
-    // wake up anywhere near `N`, only "no earlier than `N`, next tick or
-    // later", so `interval_ms * 2` alone (10ms for a 5ms interval) is not
-    // reliably enough margin to guarantee even one reporter tick landed —
-    // found by reproduction during the vectors-7/9 closeout: an isolated
-    // single-vector run occasionally exited before any tick fired, an
-    // intermittent classification miss unrelated to that closeout's own
-    // canonicalisation logic. 20ms comfortably clears the default ~15.6ms
-    // granularity with margin, for either configured interval.
-    let wait = std::time::Duration::from_millis(interval_ms.saturating_mul(2))
-        .max(std::time::Duration::from_millis(20));
-    std::thread::sleep(wait);
+    // Stay until the shim's stats report covers every vector above: a
+    // caller reads it after exit for evidence that each vector's open was
+    // classified, and the last vectors land within milliseconds of exit
+    // (vfs_fixture_support says why a fixed wait isn't enough).
+    if let Err(e) = vfs_fixture_support::outlive_a_covering_report() {
+        eprintln!("vfs-fixture-escape: {e}");
+        std::process::exit(2);
+    }
 
     std::process::exit(0);
 }

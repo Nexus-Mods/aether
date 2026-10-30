@@ -24,7 +24,8 @@
 //! 15 exclusive-create of a fresh path, 16 exclusive-create against an
 //! existing path did not fail as expected, 17 in-place open refused, 18
 //! in-place content missing or short (a blank destination, not a seeded
-//! copy-up), 19 in-place write, 20 in-place readback mismatch, 21 no
+//! copy-up), 19 in-place write, 20 in-place readback mismatch, 21
+//! (`vfs_fixture_support::NO_COVERING_REPORT_EXIT`) no
 //! `VFS_SHIM_STATS_LOG` report covering the run appeared (see
 //! `vfs_fixture_support::outlive_a_covering_report`).
 use std::fs::OpenOptions;
@@ -272,7 +273,7 @@ fn main() {
     // before it (vfs_fixture_support says why a fixed wait isn't enough).
     if let Err(e) = vfs_fixture_support::outlive_a_covering_report() {
         eprintln!("WRITEPATH FIXTURE FAIL [21]: {e}");
-        exit(21);
+        exit(vfs_fixture_support::NO_COVERING_REPORT_EXIT);
     }
     exit(0);
 }

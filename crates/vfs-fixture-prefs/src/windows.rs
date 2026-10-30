@@ -418,8 +418,8 @@ pub fn main() {
     // section, and this whole run is a few milliseconds (vfs_fixture_support
     // says why a fixed wait isn't enough).
     if let Err(e) = vfs_fixture_support::outlive_a_covering_report() {
-        eprintln!("FIXTURE FAIL: {e}");
-        exit(3);
+        eprintln!("FIXTURE FAIL [21]: {e}");
+        exit(vfs_fixture_support::NO_COVERING_REPORT_EXIT);
     }
     exit(0);
 }

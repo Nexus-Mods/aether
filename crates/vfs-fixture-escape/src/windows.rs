@@ -1606,8 +1606,8 @@ pub fn main() {
     // classified, and the last vectors land within milliseconds of exit
     // (vfs_fixture_support says why a fixed wait isn't enough).
     if let Err(e) = vfs_fixture_support::outlive_a_covering_report() {
-        eprintln!("vfs-fixture-escape: {e}");
-        std::process::exit(2);
+        eprintln!("vfs-fixture-escape: no covering stats report [21]: {e}");
+        std::process::exit(vfs_fixture_support::NO_COVERING_REPORT_EXIT);
     }
 
     std::process::exit(0);

@@ -102,8 +102,10 @@ the registry overlay). `vfs-testkit` holds helpers shared by the tests.
 **The Rust director is gone.** Cairn runs on the Clojure director
 (`src/aether/director/`), and its end-to-end tests, which launch these
 fixtures under the shim, are `test/aether/director/e2e/` (the old Rust ones,
-`vfs-embed`'s and `vfs-proton`'s, and where each went:
-[docs/aether-vfs/e2e-port.md](../docs/aether-vfs/e2e-port.md)). What stays here
+`vfs-embed`'s, and where each went:
+[docs/aether-vfs/e2e-port.md](../docs/aether-vfs/e2e-port.md); `vfs-proton`'s
+own tests were not ported: the spec dropped that crate, whose job
+`aether.director.proton.*` and its own tests do). What stays here
 is the kernel the shim's tests need: `vfs-director` (a dev-dependency of the
 shim), `vfs-compose`, `vfs-zip`, `vfs-unix` and `vfs-testkit`. Don't build new
 features on them.

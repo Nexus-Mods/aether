@@ -22,11 +22,12 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
-    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-    JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    JobObjectAssociateCompletionPortInformation, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
@@ -54,6 +55,18 @@ pub(crate) struct Job {
     port: HANDLE,
     /// Set by [`Job::adopt`] when the process could not be assigned: why.
     unassigned: Option<String>,
+}
+
+/// How [`Job::create_process`] put a process in its job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// No job was given.
+    NoJob,
+    /// Created in it: never outside it.
+    CreatedInJob,
+    /// Assigned after its creation ([`Job::adopt`]), for the reason given;
+    /// [`Job::unassigned`] says whether that failed too.
+    Adopted(String),
 }
 
 impl Job {
@@ -150,10 +163,16 @@ impl Job {
     /// (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so there is no moment when it
     /// exists outside it. Assigning it after `CreateProcessW` left a window:
     /// a host that killed this process then (a launch stopped as it starts)
-    /// left the target suspended, in no job, for good. If the creation is
-    /// refused with the attribute (a host job that forbids nesting), it is
-    /// created without it and [`Job::adopt`]ed, which records why it isn't
-    /// tracked. Returns `None` when `CreateProcessW` fails.
+    /// left the target suspended, in no job, for good.
+    ///
+    /// Two fallbacks, each assigning it with [`Job::adopt`] (which records why,
+    /// if that fails too): a creation refused with the attribute (a host job
+    /// that forbids nesting) is retried without it, keeping the first error
+    /// for the record; and one that succeeds but leaves the process outside
+    /// the job (a layer that accepts the attribute and ignores it) is
+    /// assigned then. Pass `CREATE_SUSPENDED` so that happens before it runs.
+    /// Returns `None` when `CreateProcessW` fails, else the process and how
+    /// it came to be in the job.
     ///
     /// # Safety
     /// The pointers are as `CreateProcessW` takes them: `app`, `cmd` (mutable)
@@ -166,27 +185,18 @@ impl Job {
         flags: u32,
         env: *const c_void,
         cwd: *const u16,
-    ) -> Option<PROCESS_INFORMATION> {
+    ) -> Option<(PROCESS_INFORMATION, Placement)> {
         // SAFETY: per this function's contract; every buffer below is owned
         // here and outlives the calls that use it.
         unsafe {
             let mut pi: PROCESS_INFORMATION = zeroed();
             let mut si: STARTUPINFOW = zeroed();
             si.cb = size_of::<STARTUPINFOW>() as u32;
+            let plain = |pi: &mut PROCESS_INFORMATION| {
+                CreateProcessW(app, cmd, null(), null(), 0, flags, env, cwd, &si, pi) != 0
+            };
             let Some(job) = job else {
-                return (CreateProcessW(
-                    app,
-                    cmd,
-                    null(),
-                    null(),
-                    0,
-                    flags,
-                    env,
-                    cwd,
-                    &si,
-                    &mut pi,
-                ) != 0)
-                    .then_some(pi);
+                return plain(&mut pi).then_some((pi, Placement::NoJob));
             };
             let mut size = 0usize;
             InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size);
@@ -194,7 +204,7 @@ impl Job {
             let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
             let list = buf.as_mut_ptr().cast::<c_void>();
             let jobs = [job.job];
-            if InitializeProcThreadAttributeList(list, 1, 0, &mut size) != 0 {
+            let attr_error = if InitializeProcThreadAttributeList(list, 1, 0, &mut size) != 0 {
                 let mut six: STARTUPINFOEXW = zeroed();
                 six.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
                 six.lpAttributeList = list;
@@ -219,16 +229,41 @@ impl Job {
                         &six.StartupInfo,
                         &mut pi,
                     ) != 0;
+                let err = GetLastError();
                 DeleteProcThreadAttributeList(list);
                 if created {
-                    return Some(pi);
+                    let mut in_job = 0;
+                    if IsProcessInJob(pi.hProcess, job.job, &mut in_job) != 0 && in_job != 0 {
+                        return Some((pi, Placement::CreatedInJob));
+                    }
+                    // accepted and ignored: assign it now, still suspended
+                    let why = "created with the job attribute but outside the job".to_string();
+                    job.adopt(pi.hProcess);
+                    job.note_fallback(&why);
+                    return Some((pi, Placement::Adopted(why)));
                 }
-            }
-            if CreateProcessW(app, cmd, null(), null(), 0, flags, env, cwd, &si, &mut pi) == 0 {
+                err
+            } else {
+                GetLastError()
+            };
+            let why = format!("creating it in the job failed (error {attr_error})");
+            if !plain(&mut pi) {
                 return None;
             }
             job.adopt(pi.hProcess);
-            Some(pi)
+            job.note_fallback(&why);
+            Some((pi, Placement::Adopted(why)))
+        }
+    }
+
+    /// Adds why the process was assigned after its creation to the reason an
+    /// [`Job::adopt`] failure records, and says so on stderr.
+    fn note_fallback(&mut self, why: &str) {
+        eprintln!(
+            "vfs-inject: the launched process was assigned to its job after its creation: {why}"
+        );
+        if let Some(u) = &mut self.unassigned {
+            u.push_str(&format!(" ({why} first)"));
         }
     }
 
@@ -546,11 +581,26 @@ mod tests {
         assert_eq!(limits & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, 0);
     }
 
+    /// Ends and closes a test's process on drop, so a failed assertion
+    /// leaves no suspended process behind.
+    struct Reaped(PROCESS_INFORMATION);
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            // SAFETY: the handles `create_process` returned, owned here.
+            unsafe {
+                TerminateProcess(self.0.hProcess, 1);
+                CloseHandle(self.0.hThread);
+                CloseHandle(self.0.hProcess);
+            }
+        }
+    }
+
     /// A process is created in the job, not put in it afterwards: a host
     /// killed just after `CreateProcessW` (a launch stopped as it starts)
     /// left the suspended target in no job, alive for good (CI run
-    /// 41051064387, `slow.exe`). Here nothing assigns it, and closing the
-    /// job, as the host's death does, still ends it.
+    /// 41051064387, `slow.exe`). The attribute path must be the one taken,
+    /// and closing the job, as the host's death does, ends the process.
     #[test]
     fn a_target_is_created_in_its_job_and_dies_with_it() {
         use windows_sys::Win32::System::JobObjects::IsProcessInJob;
@@ -562,7 +612,7 @@ mod tests {
         let mut cmd = wide("cmd.exe /c exit 0");
         // SAFETY: NUL-terminated buffers that outlive the call; no env block
         // (the parent's) and no cwd.
-        let pi = unsafe {
+        let (pi, placement) = unsafe {
             Job::create_process(
                 Some(&mut job),
                 app.as_ptr(),
@@ -573,20 +623,24 @@ mod tests {
             )
         }
         .expect("cmd.exe created");
+        let p = Reaped(pi);
+        assert_eq!(
+            placement,
+            Placement::CreatedInJob,
+            "the attribute path, not a fallback"
+        );
         assert!(job.unassigned().is_none(), "{:?}", job.unassigned());
-        // SAFETY: the live handles create_process returned, closed below.
+        // SAFETY: the live handles `p` holds.
         unsafe {
             let mut in_job = 0;
-            assert_ne!(IsProcessInJob(pi.hProcess, job.job, &mut in_job), 0);
+            assert_ne!(IsProcessInJob(p.0.hProcess, job.job, &mut in_job), 0);
             assert_ne!(in_job, 0, "the suspended process is in the job already");
             drop(job);
             assert_eq!(
-                WaitForSingleObject(pi.hProcess, 10_000),
+                WaitForSingleObject(p.0.hProcess, 10_000),
                 WAIT_OBJECT_0,
                 "the job's close ended it, never having run"
             );
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
         }
     }
 

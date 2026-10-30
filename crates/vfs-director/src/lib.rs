@@ -1,12 +1,12 @@
 //! The director **kernel**: one provider per root, a ring server the injected
 //! shim talks to, and the leaf/staging pieces a host composes around them.
 //!
-//! **This is not the API a host embeds.** Session lifecycle — roots,
-//! composition, serve, launch — lives in `vfs-embed` (design spec §4), which
-//! is the one public seam every host is written against. `Session` used to live here; it moved so that "the kernel" and
-//! "the embeddable API" stopped being the same crate.
+//! **This is not a host API.** Session lifecycle — roots, composition, serve,
+//! launch — was `vfs-embed`'s (now deleted); Cairn's host is the Clojure
+//! director (`src/aether/director/`). This crate is the kernel the shim's
+//! tests run against.
 //!
-//! What remains here, and what a host reaches for *through* `vfs-embed`:
+//! What is here:
 //! * [`Director`] — the root → provider table and the handle namespace
 //! * [`ipc::IpcServe`] — the shared-memory ring + workers
 //! * `DiskProvider` / `MountGraph` live in `vfs-compose`

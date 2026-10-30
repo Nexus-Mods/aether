@@ -3,8 +3,8 @@
 //! and let the game run fully un-virtualized, which is what the shim's `director` module
 //! returning `None` used to mean and nothing reported.
 //!
-//! `run_target_with_shim` is the exact function `vfs_embed::Session::launch`
-//! calls (it only wraps the error into a `String`), so exercising it here
+//! `run_target_with_shim` is the exact function the deleted
+//! `vfs_embed::Session::launch` called (it only wraps the error into a `String`), so exercising it here
 //! proves the production launch path aborts, not just some lower-level detail.
 #![allow(unsafe_code)]
 mod common;

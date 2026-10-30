@@ -1,7 +1,7 @@
 //! Shim config wire codec: the root and the static-import table, packed into the
 //! byte buffer the injected DLL reads on bootstrap.
 //!
-//! The host (vfs-embed, or the director) writes it and the shim (and vfs-inject,
+//! The host (the director) writes it and the shim (and vfs-inject,
 //! for the static-import rows) reads it. Both halves live here, in `vfs-protocol`
 //! (portable, no OS dependency), because a native Linux host must build a shim
 //! config for a Wine-hosted shim and the readers must agree with it byte for byte.

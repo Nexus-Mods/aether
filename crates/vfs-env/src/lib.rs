@@ -140,7 +140,7 @@ pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
 /// The ready wait when [`READY_TIMEOUT_SECS`] is unset: what a Windows
 /// `Session::launch` has always defaulted to. A cold first launch in a fresh
 /// Wine prefix can take well over the 20 s this used to be. The one place the
-/// number is written; the injector, `vfs-embed` and the shim all use it.
+/// number is written; the injector and the shim both use it.
 pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 180;
 
 /// The ready wait in seconds, as the environment says it: [`READY_TIMEOUT_SECS`]
@@ -1106,7 +1106,7 @@ pub fn describe() -> String {
 
 /// The handshake: every name the host writes and the child reads, in one place.
 ///
-/// Three crates had to agree on this set by hand: `vfs-proton`'s stale list,
+/// Three crates had to agree on this set by hand: the Proton launcher's stale list,
 /// the Windows `IpcServe::env_roots`, and the reserved-name check for
 /// `LaunchOpts::env`. They disagreed (`VFS_REGISTRY` and `VFS_FUSE_CFG` were in
 /// some and not others). They now all read these tables, and a test ties the

@@ -99,14 +99,17 @@ API), `-vproxy` and `-staticimp` (a statically imported proxy DLL, pre-init
 injection), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and
 the registry overlay). `vfs-testkit` holds helpers shared by the tests.
 
-**The Rust director, kept for now.** `vfs-director`, `vfs-embed`, `vfs-compose`,
-`vfs-zip`, `vfs-unix` and `vfs-proton` are the original Rust director and its
-Linux and Proton launch path. Cairn runs on the Clojure director; these crates
-stay only because their tests still exercise the shim and injector end to end,
-until those tests are ported to the Clojure director (the second import plan).
-Don't build new features on them.
+**The Rust director is gone.** Cairn runs on the Clojure director
+(`src/aether/director/`), and its end-to-end tests, which launch these
+fixtures under the shim, are `test/aether/director/e2e/` (the old Rust ones,
+`vfs-embed`'s and `vfs-proton`'s, and where each went:
+[docs/aether-vfs/e2e-port.md](../docs/aether-vfs/e2e-port.md)). What stays here
+is the kernel the shim's tests need: `vfs-director` (a dev-dependency of the
+shim), `vfs-compose`, `vfs-zip`, `vfs-unix` and `vfs-testkit`. Don't build new
+features on them.
 
 `panic = "unwind"` throughout (`vfs-protocol/tests/unwind.rs` pins it). The
 vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim
 builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history of
-the Rust director crates. License: the repository's [LICENSE](../LICENSE).
+the Rust director crates (the last entries are those of the deleted
+`vfs-embed` and `vfs-proton`). License: the repository's [LICENSE](../LICENSE).

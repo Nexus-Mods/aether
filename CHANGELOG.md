@@ -1,8 +1,18 @@
 # Changelog
 
-Changes to the host-facing API of `vfs-embed`, `vfs-proton`, `vfs-provider`
+Changes to the host-facing API of `vfs-embed` and `vfs-proton` (both deleted
+since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
+
+## Unreleased (the Rust director is removed)
+
+`vfs-embed` and `vfs-proton` are deleted, and with them `Session`, `vfs_proton`
+and the `vfs-proton` binary. Nothing in this repository hosts the director from
+Rust any more: Cairn runs the Clojure director (`aether.director.*`), and the
+end-to-end tests of the deleted crates now run against it
+(`docs/aether-vfs/e2e-port.md` says where each went). The entries below describe
+those crates as they were.
 
 ## Unreleased (Windows process-tree wait)
 

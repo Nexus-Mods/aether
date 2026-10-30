@@ -5,14 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Director kernel: one provider per root, ring server, staging. The embeddable API is vfs-embed."
+description = "Director kernel: one provider per root, ring server, staging."
 
 [lib]
 name = "vfs_director"
 path = "src/lib.rs"
-
-# No `zip` feature: it existed only for `Session::mount_zip`, and `Session`
-# now lives in `vfs-embed`, which carries the feature instead.
 
 [dependencies]
 vfs-env.workspace = true
@@ -22,9 +19,7 @@ vfs-env.workspace = true
 vfs-core.workspace = true
 vfs-protocol.workspace = true
 vfs-provider.workspace = true
-# `InlineProvider` in this crate's own tests; the composition that builds a
-# root's writable upper out of `OverlayProvider` moved to `vfs-embed` with
-# `Session`.
+# `InlineProvider` in this crate's own tests.
 vfs-compose.workspace = true
 vfs-ipc.workspace = true
 # Pure PE parsing for staging. Was reached through `vfs-inject`, which is

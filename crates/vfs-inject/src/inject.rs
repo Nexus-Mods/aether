@@ -18,9 +18,9 @@ const CONTEXT_FULL: u32 = 0x0010_000B;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, GetExitCodeProcess, ResumeThread, TerminateProcess,
-    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE,
-    LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateRemoteThread, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, LPTHREAD_START_ROUTINE,
+    PROCESS_INFORMATION,
 };
 
 use crate::tree::{finish_code, Job, ProcessTree};
@@ -535,38 +535,27 @@ fn start_target(
     let timeout_ms = u32::try_from(cfg.ready_timeout.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: CreateProcessW + inject + resume.
     unsafe {
-        let mut pi: PROCESS_INFORMATION = zeroed();
         // Staging puts the EXE and its import closure on disk, so the loader
         // resolves everything itself — see `vfs-director::stage`.
         let mut cmd_w = wide(&command_line(cfg));
         let app_w = wide(&cfg.target_exe);
         let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
-        let mut si: STARTUPINFOW = zeroed();
-        si.cb = size_of::<STARTUPINFOW>() as u32;
-        let ok = CreateProcessW(
+        // Created in the job, before anything of the target runs (the remote
+        // thread below runs its process initialisation), so neither it nor
+        // anything it starts is ever outside it: see `Job::create_process`.
+        let Some(pi) = Job::create_process(
+            job,
             app_w.as_ptr(),
             cmd_w.as_mut_ptr(),
-            core::ptr::null(),
-            core::ptr::null(),
-            0,
             CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
             env.as_ptr().cast(),
             cwd_w
                 .as_ref()
                 .map(|v| v.as_ptr())
                 .unwrap_or(core::ptr::null()),
-            &si,
-            &mut pi,
-        );
-        if ok == 0 {
+        ) else {
             return Err(InjectError::CreateProcess);
-        }
-
-        // Before anything of the target runs — the remote thread below runs
-        // its process initialisation — so nothing it starts escapes the job.
-        if let Some(job) = job {
-            job.adopt(pi.hProcess);
-        }
+        };
 
         // Before process initialisation reads them: kernelbase keeps its own
         // copy of the command line from then on.
@@ -746,30 +735,19 @@ fn start_import_activated(
     // SAFETY: CreateProcessW with valid, NUL-terminated buffers; the thread
     // handle is closed here and the process handle handed to the caller.
     unsafe {
-        let mut pi: PROCESS_INFORMATION = zeroed();
-        let mut si: STARTUPINFOW = zeroed();
-        si.cb = size_of::<STARTUPINFOW>() as u32;
-        let ok = CreateProcessW(
+        let Some(pi) = Job::create_process(
+            job,
             app_w.as_ptr(),
             cmd_w.as_mut_ptr(),
-            core::ptr::null(),
-            core::ptr::null(),
-            0,
             flags | CREATE_UNICODE_ENVIRONMENT,
             env.as_ptr().cast(),
             cwd_w
                 .as_ref()
                 .map(|v| v.as_ptr())
                 .unwrap_or(core::ptr::null()),
-            &si,
-            &mut pi,
-        );
-        if ok == 0 {
+        ) else {
             return Err(InjectError::CreateProcess);
-        }
-        if let Some(job) = job {
-            job.adopt(pi.hProcess);
-        }
+        };
         if flags & CREATE_SUSPENDED != 0 {
             if let Err(e) = tell_where(pi.hProcess, cfg) {
                 return Err(fail_closed(&pi, e));

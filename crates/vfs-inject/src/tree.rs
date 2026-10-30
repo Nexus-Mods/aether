@@ -13,6 +13,7 @@
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
+use core::ptr::{null, null_mut};
 use std::mem::{size_of, zeroed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,7 +29,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
+    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
@@ -139,6 +143,92 @@ impl Job {
                  error {err}; is this host in a job that forbids nesting?), so the launch \
                  ends when that process exits, not when everything it started has"
             ));
+        }
+    }
+
+    /// `CreateProcessW` with the new process created in this job
+    /// (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so there is no moment when it
+    /// exists outside it. Assigning it after `CreateProcessW` left a window:
+    /// a host that killed this process then (a launch stopped as it starts)
+    /// left the target suspended, in no job, for good. If the creation is
+    /// refused with the attribute (a host job that forbids nesting), it is
+    /// created without it and [`Job::adopt`]ed, which records why it isn't
+    /// tracked. Returns `None` when `CreateProcessW` fails.
+    ///
+    /// # Safety
+    /// The pointers are as `CreateProcessW` takes them: `app`, `cmd` (mutable)
+    /// and `cwd` (or null) NUL-terminated UTF-16, `env` a Unicode environment
+    /// block, all live for the call.
+    pub(crate) unsafe fn create_process(
+        job: Option<&mut Job>,
+        app: *const u16,
+        cmd: *mut u16,
+        flags: u32,
+        env: *const c_void,
+        cwd: *const u16,
+    ) -> Option<PROCESS_INFORMATION> {
+        // SAFETY: per this function's contract; every buffer below is owned
+        // here and outlives the calls that use it.
+        unsafe {
+            let mut pi: PROCESS_INFORMATION = zeroed();
+            let mut si: STARTUPINFOW = zeroed();
+            si.cb = size_of::<STARTUPINFOW>() as u32;
+            let Some(job) = job else {
+                return (CreateProcessW(
+                    app,
+                    cmd,
+                    null(),
+                    null(),
+                    0,
+                    flags,
+                    env,
+                    cwd,
+                    &si,
+                    &mut pi,
+                ) != 0)
+                    .then_some(pi);
+            };
+            let mut size = 0usize;
+            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size);
+            // usize-aligned, as the list holds pointers
+            let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
+            let list = buf.as_mut_ptr().cast::<c_void>();
+            let jobs = [job.job];
+            if InitializeProcThreadAttributeList(list, 1, 0, &mut size) != 0 {
+                let mut six: STARTUPINFOEXW = zeroed();
+                six.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+                six.lpAttributeList = list;
+                let created = UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    jobs.as_ptr().cast(),
+                    size_of::<HANDLE>(),
+                    null_mut(),
+                    null(),
+                ) != 0
+                    && CreateProcessW(
+                        app,
+                        cmd,
+                        null(),
+                        null(),
+                        0,
+                        flags | EXTENDED_STARTUPINFO_PRESENT,
+                        env,
+                        cwd,
+                        &six.StartupInfo,
+                        &mut pi,
+                    ) != 0;
+                DeleteProcThreadAttributeList(list);
+                if created {
+                    return Some(pi);
+                }
+            }
+            if CreateProcessW(app, cmd, null(), null(), 0, flags, env, cwd, &si, &mut pi) == 0 {
+                return None;
+            }
+            job.adopt(pi.hProcess);
+            Some(pi)
         }
     }
 
@@ -454,6 +544,50 @@ mod tests {
         assert_ne!(limits & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
         assert_eq!(limits & JOB_OBJECT_LIMIT_BREAKAWAY_OK, 0);
         assert_eq!(limits & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, 0);
+    }
+
+    /// A process is created in the job, not put in it afterwards: a host
+    /// killed just after `CreateProcessW` (a launch stopped as it starts)
+    /// left the suspended target in no job, alive for good (CI run
+    /// 41051064387, `slow.exe`). Here nothing assigns it, and closing the
+    /// job, as the host's death does, still ends it.
+    #[test]
+    fn a_target_is_created_in_its_job_and_dies_with_it() {
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        let mut job = Job::new().expect("a job");
+        let sys = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let app = wide(&format!(r"{sys}\System32\cmd.exe"));
+        let mut cmd = wide("cmd.exe /c exit 0");
+        // SAFETY: NUL-terminated buffers that outlive the call; no env block
+        // (the parent's) and no cwd.
+        let pi = unsafe {
+            Job::create_process(
+                Some(&mut job),
+                app.as_ptr(),
+                cmd.as_mut_ptr(),
+                CREATE_SUSPENDED,
+                null(),
+                null(),
+            )
+        }
+        .expect("cmd.exe created");
+        assert!(job.unassigned().is_none(), "{:?}", job.unassigned());
+        // SAFETY: the live handles create_process returned, closed below.
+        unsafe {
+            let mut in_job = 0;
+            assert_ne!(IsProcessInJob(pi.hProcess, job.job, &mut in_job), 0);
+            assert_ne!(in_job, 0, "the suspended process is in the job already");
+            drop(job);
+            assert_eq!(
+                WaitForSingleObject(pi.hProcess, 10_000),
+                WAIT_OBJECT_0,
+                "the job's close ended it, never having run"
+            );
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
     }
 
     #[test]

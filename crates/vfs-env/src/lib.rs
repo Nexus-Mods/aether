@@ -374,6 +374,9 @@ pub const FIXTURE_WRITE_DATA: &str = "VFS_FIXTURE_WRITE_DATA";
 /// small pieces by every route and compared with one big read (the shim's
 /// read cache).
 pub const FIXTURE_CACHE_PATH: &str = "VFS_FIXTURE_CACHE_PATH";
+/// `vfs-fixture-read`: a file read with `ReadFileEx`, whose completion is a
+/// callback run during an alertable wait (the shim's APC delivery).
+pub const FIXTURE_APC_PATH: &str = "VFS_FIXTURE_APC_PATH";
 /// `vfs-fixture-read`: a file read in small pieces, rewritten with
 /// `FIXTURE_CACHE_RW_DATA` through another handle, and read again.
 pub const FIXTURE_CACHE_RW_PATH: &str = "VFS_FIXTURE_CACHE_RW_PATH";
@@ -831,6 +834,11 @@ pub const ALL: &[Var] = &[
         name: FIXTURE_CACHE_PATH,
         kind: Kind::Fixture,
         default: "unset: no cache phase",
+    },
+    Var {
+        name: FIXTURE_APC_PATH,
+        kind: Kind::Fixture,
+        default: "unset: no ReadFileEx phase",
     },
     Var {
         name: FIXTURE_CACHE_RW_PATH,

@@ -11,6 +11,26 @@ use crate::synth_file::FileView;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
+/// What a successful call on a synthetic handle owes its caller, which has been
+/// answered synchronously: its event set, and its APC queued to this thread. The
+/// kernel does both even for an I/O that finished at once, and `ReadFileEx` needs
+/// the second: its caller sleeps alertably until the APC runs, however done the
+/// read is. Starfield reads its BA2s that way, and hung on the first one.
+///
+/// # Safety
+/// `event`, `apc`, `apc_ctx` and `iosb` are the caller's NT arguments, and `iosb`
+/// has been filled in.
+unsafe fn complete(event: HANDLE, apc: *const c_void, apc_ctx: *const c_void, iosb: *mut c_void) {
+    if !event.is_null() {
+        // SAFETY: FFI call with valid arguments.
+        unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
+    }
+    if !apc.is_null() {
+        // SAFETY: the caller's APC routine and its arguments.
+        unsafe { crate::regnotify::queue_apc_to_self(apc, apc_ctx, iosb) };
+    }
+}
+
 /// `NtLockFile` hook: grants byte-range locks on synthetic handles locally.
 ///
 /// A synthetic handle is a tagged value in `synth_file`'s table, not a kernel file
@@ -27,8 +47,7 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 ///
 /// Only handles [`open_synth`] resolves are answered (the tag test alone would also
 /// catch `INVALID_HANDLE_VALUE` and closed handles). Answered synchronously, like
-/// `read_hook`: `STATUS_SUCCESS`, a completed `IO_STATUS_BLOCK`, and `SetEvent` if
-/// given. The caller's APC is not run; `note_read_completion` counts that case.
+/// `read_hook`: `STATUS_SUCCESS`, a completed `IO_STATUS_BLOCK`, and [`complete`].
 /// See docs/shim-invariants.md, "Lock semantics".
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn lock_hook_body(
@@ -52,11 +71,9 @@ pub(super) unsafe fn lock_hook_body(
         if !open_synth(handle) {
             return STATUS_INVALID_HANDLE;
         }
-        // Classified the same way `read_hook`/`write_hook` classify theirs: an
-        // APC-supplied lock is a completion we accept and never deliver, and
-        // that is the one caller shape here that can actually hang. Counting
-        // it is what makes it visible in the async section instead of looking
-        // like an ordinary synchronous grant.
+        // Classified the same way `read_hook`/`write_hook` classify theirs, so
+        // that a lock asking for a completion shows in the async section
+        // instead of looking like an ordinary synchronous grant.
         crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
         crate::hookstats::note_synthetic_lock(
             if exclusive != 0 {
@@ -68,10 +85,8 @@ pub(super) unsafe fn lock_hook_body(
         );
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
-        if !event.is_null() {
-            // SAFETY: FFI call with valid arguments.
-            unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
-        }
+        // SAFETY: as above; the caller's `event`, `apc` and `iosb`.
+        unsafe { complete(event, apc, apc_ctx, iosb) };
         return STATUS_SUCCESS;
     }
     // SAFETY: the original NT function, called with valid NT arguments.
@@ -229,10 +244,8 @@ pub(super) unsafe fn write_hook_body(
             }
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n) };
-            if !event.is_null() {
-                // SAFETY: FFI call with valid arguments.
-                unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
-            }
+            // SAFETY: as above; the caller's `event`, `apc` and `iosb`.
+            unsafe { complete(event, apc, apc_ctx, iosb) };
             return STATUS_SUCCESS;
         }
         // Tagged synth handle with no table entry — never hand it to the real
@@ -276,6 +289,7 @@ pub(super) unsafe fn read_hook_body(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::synth_file::is_fuse_synth(handle as isize) {
+        crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let explicit = unsafe { crate::ntbuf::explicit_offset(byte_offset) };
         if let Some(view) = crate::synth_file::lookup_read(handle as isize) {
@@ -331,7 +345,10 @@ pub(super) unsafe fn read_hook_body(
                 };
                 // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                 unsafe { crate::ntbuf::iosb_set(iosb, status, n) };
-                if !event.is_null() {
+                if status == STATUS_SUCCESS {
+                    // SAFETY: as above; the caller's `event`, `apc` and `iosb`.
+                    unsafe { complete(event, apc, apc_ctx, iosb) };
+                } else if !event.is_null() {
                     // SAFETY: FFI call with valid arguments.
                     unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
                 }

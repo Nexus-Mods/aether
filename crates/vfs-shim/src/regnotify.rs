@@ -285,6 +285,25 @@ pub(crate) unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
 const CURRENT_THREAD: isize = -2;
 /// `NtCurrentProcess()`.
 const CURRENT_PROCESS: isize = -1;
+/// Queues `apc` to the calling thread as `ApcRoutine(ApcContext, IoStatusBlock, 0)`,
+/// the completion of an I/O call its hook answered synchronously. Without ntdll's
+/// export the APC is lost, and the caller's alertable wait goes on.
+///
+/// # Safety
+/// `apc` is the caller's `PIO_APC_ROUTINE`, and `apc_ctx` and `iosb` its arguments.
+pub(crate) unsafe fn queue_apc_to_self(
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+) {
+    /// `NtCurrentThread()`.
+    const CURRENT_THREAD: HANDLE = -2isize as HANDLE;
+    if let Some(api) = nt() {
+        // SAFETY: the contract above; the pseudo-handle needs no right.
+        unsafe { (api.queue_apc)(CURRENT_THREAD, apc, apc_ctx as usize, iosb as usize, 0) };
+    }
+}
+
 /// `THREAD_SET_CONTEXT`: the right `NtQueueApcThread` needs.
 const THREAD_SET_CONTEXT: u32 = 0x0010;
 const DUPLICATE_SAME_ACCESS: u32 = 0x2;

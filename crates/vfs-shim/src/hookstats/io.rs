@@ -370,7 +370,7 @@ pub(super) fn render_async(snap: &Snapshot) -> String {
          opens: {a} async / {s} synchronous\n  \
          reads: {apc} with APC / {ev} with event / {bare} bare\n  \
          IOCP binds (FileCompletionInformation): {iocp}\n  \
-         NOTE: APC reads and IOCP binds are completions we never deliver.\n"
+         NOTE: IOCP binds are completions we never deliver.\n"
     )
 }
 

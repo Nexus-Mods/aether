@@ -35,6 +35,9 @@
 //! `VFS_FIXTURE_NAMES` and its companions run the names phase first: see
 //! `names.rs`. Windows only — it calls Win32 directly.
 //!
+//! `VFS_FIXTURE_APC_PATH` runs the `ReadFileEx` phase after the first read: see
+//! `apc.rs`.
+//!
 //! `VFS_FIXTURE_CACHE_PATH` and its companions run the read-cache phase after
 //! the first read: see `cache.rs`. `VFS_FIXTURE_LINGER_MS` keeps the process
 //! alive that long after it, so a shim stats report covers the run.
@@ -68,6 +71,8 @@ fn read_in_one_call(path: &str) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+#[cfg(windows)]
+mod apc;
 #[cfg(windows)]
 mod cache;
 #[cfg(windows)]
@@ -323,6 +328,8 @@ fn main() {
     }
     #[cfg(windows)]
     cache::run();
+    #[cfg(windows)]
+    apc::run();
     if let Ok(wpath) = std::env::var("VFS_FIXTURE_WRITE_PATH") {
         let data = std::env::var("VFS_FIXTURE_WRITE_DATA").unwrap_or_else(|_| "written".into());
         if let Err(e) = std::fs::write(&wpath, data.as_bytes()) {

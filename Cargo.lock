@@ -3,6 +3,237 @@
 version = 4
 
 [[package]]
+name = "aether-compose"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+ "aether-provider",
+ "aether-testkit",
+]
+
+[[package]]
+name = "aether-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+]
+
+[[package]]
+name = "aether-director"
+version = "0.1.0"
+dependencies = [
+ "aether-compose",
+ "aether-core",
+ "aether-env",
+ "aether-ipc",
+ "aether-pe",
+ "aether-protocol",
+ "aether-provider",
+ "aether-redirect",
+ "aether-registry",
+ "aether-shim",
+ "aether-testkit",
+ "aether-unix",
+ "aether-win",
+ "aether-zip",
+ "tracing",
+]
+
+[[package]]
+name = "aether-env"
+version = "0.1.0"
+
+[[package]]
+name = "aether-fixture-escape"
+version = "0.1.0"
+dependencies = [
+ "aether-env",
+ "aether-fixture-support",
+]
+
+[[package]]
+name = "aether-fixture-nvapi"
+version = "0.1.0"
+
+[[package]]
+name = "aether-fixture-prefs"
+version = "0.1.0"
+dependencies = [
+ "aether-env",
+ "aether-fixture-support",
+]
+
+[[package]]
+name = "aether-fixture-read"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-fixture-registry"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-fixture-staticimp"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-fixture-steam"
+version = "0.1.0"
+
+[[package]]
+name = "aether-fixture-support"
+version = "0.1.0"
+dependencies = [
+ "aether-env",
+ "aether-testkit",
+]
+
+[[package]]
+name = "aether-fixture-vproxy"
+version = "0.1.0"
+
+[[package]]
+name = "aether-fixture-writepath"
+version = "0.1.0"
+dependencies = [
+ "aether-env",
+ "aether-fixture-support",
+]
+
+[[package]]
+name = "aether-inject"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+ "aether-env",
+ "aether-pe",
+ "aether-protocol",
+ "aether-shim",
+ "aether-zip",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-ipc"
+version = "0.1.0"
+dependencies = [
+ "aether-protocol",
+]
+
+[[package]]
+name = "aether-ntlayout"
+version = "0.1.0"
+dependencies = [
+ "aether-protocol",
+]
+
+[[package]]
+name = "aether-pe"
+version = "0.1.0"
+
+[[package]]
+name = "aether-protocol"
+version = "0.1.0"
+dependencies = [
+ "aether-ipc",
+ "aether-provider",
+ "aether-registry",
+]
+
+[[package]]
+name = "aether-provider"
+version = "0.1.0"
+
+[[package]]
+name = "aether-redirect"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+ "aether-provider",
+ "aether-win",
+]
+
+[[package]]
+name = "aether-registry"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+]
+
+[[package]]
+name = "aether-shim"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+ "aether-director",
+ "aether-env",
+ "aether-inject",
+ "aether-ipc",
+ "aether-ntlayout",
+ "aether-pe",
+ "aether-protocol",
+ "aether-provider",
+ "aether-redirect",
+ "aether-registry",
+ "aether-win",
+ "retour",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-shim-dll"
+version = "0.1.0"
+dependencies = [
+ "aether-env",
+ "aether-shim",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
+name = "aether-unix"
+version = "0.1.0"
+dependencies = [
+ "aether-ipc",
+ "aether-testkit",
+ "libc",
+]
+
+[[package]]
+name = "aether-win"
+version = "0.1.0"
+dependencies = [
+ "aether-env",
+ "aether-ipc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aether-zip"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+ "aether-provider",
+ "aether-testkit",
+ "tempfile",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -464,237 +695,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vfs-compose"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-provider",
- "vfs-testkit",
-]
-
-[[package]]
-name = "vfs-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "proptest",
-]
-
-[[package]]
-name = "vfs-director"
-version = "0.1.0"
-dependencies = [
- "tracing",
- "vfs-compose",
- "vfs-core",
- "vfs-env",
- "vfs-ipc",
- "vfs-pe",
- "vfs-protocol",
- "vfs-provider",
- "vfs-redirect",
- "vfs-registry",
- "vfs-shim",
- "vfs-testkit",
- "vfs-unix",
- "vfs-win",
- "vfs-zip",
-]
-
-[[package]]
-name = "vfs-env"
-version = "0.1.0"
-
-[[package]]
-name = "vfs-fixture-escape"
-version = "0.1.0"
-dependencies = [
- "vfs-env",
- "vfs-fixture-support",
-]
-
-[[package]]
-name = "vfs-fixture-nvapi"
-version = "0.1.0"
-
-[[package]]
-name = "vfs-fixture-prefs"
-version = "0.1.0"
-dependencies = [
- "vfs-env",
- "vfs-fixture-support",
-]
-
-[[package]]
-name = "vfs-fixture-read"
-version = "0.1.0"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-fixture-registry"
-version = "0.1.0"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-fixture-staticimp"
-version = "0.1.0"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-fixture-steam"
-version = "0.1.0"
-
-[[package]]
-name = "vfs-fixture-support"
-version = "0.1.0"
-dependencies = [
- "vfs-env",
- "vfs-testkit",
-]
-
-[[package]]
-name = "vfs-fixture-vproxy"
-version = "0.1.0"
-
-[[package]]
-name = "vfs-fixture-writepath"
-version = "0.1.0"
-dependencies = [
- "vfs-env",
- "vfs-fixture-support",
-]
-
-[[package]]
-name = "vfs-inject"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-env",
- "vfs-pe",
- "vfs-protocol",
- "vfs-shim",
- "vfs-zip",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-ipc"
-version = "0.1.0"
-dependencies = [
- "vfs-protocol",
-]
-
-[[package]]
-name = "vfs-ntlayout"
-version = "0.1.0"
-dependencies = [
- "vfs-protocol",
-]
-
-[[package]]
-name = "vfs-pe"
-version = "0.1.0"
-
-[[package]]
-name = "vfs-protocol"
-version = "0.1.0"
-dependencies = [
- "vfs-ipc",
- "vfs-provider",
- "vfs-registry",
-]
-
-[[package]]
-name = "vfs-provider"
-version = "0.1.0"
-
-[[package]]
-name = "vfs-redirect"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-provider",
- "vfs-win",
-]
-
-[[package]]
-name = "vfs-registry"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
-]
-
-[[package]]
-name = "vfs-shim"
-version = "0.1.0"
-dependencies = [
- "retour",
- "vfs-core",
- "vfs-director",
- "vfs-env",
- "vfs-inject",
- "vfs-ipc",
- "vfs-ntlayout",
- "vfs-pe",
- "vfs-protocol",
- "vfs-provider",
- "vfs-redirect",
- "vfs-registry",
- "vfs-win",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-shim-dll"
-version = "0.1.0"
-dependencies = [
- "vfs-env",
- "vfs-shim",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-testkit"
-version = "0.1.0"
-dependencies = [
- "tempfile",
-]
-
-[[package]]
-name = "vfs-unix"
-version = "0.1.0"
-dependencies = [
- "libc",
- "vfs-ipc",
- "vfs-testkit",
-]
-
-[[package]]
-name = "vfs-win"
-version = "0.1.0"
-dependencies = [
- "vfs-env",
- "vfs-ipc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vfs-zip"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "vfs-core",
- "vfs-provider",
- "vfs-testkit",
-]
 
 [[package]]
 name = "wait-timeout"

@@ -1,0 +1,18 @@
+[package]
+name = "aether-shim-dll"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-env.workspace = true
+aether-shim.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation"] }
+
+[lints]
+workspace = true

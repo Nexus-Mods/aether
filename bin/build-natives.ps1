@@ -5,8 +5,8 @@
 #   bin/build-natives.ps1 [-Fixtures] [-Out <dir>] [-RequireDumpbin]
 #
 #   -Out             where the four are staged (default target/natives)
-#   -Fixtures        also build the test fixtures (every vfs-fixture-* crate and
-#                    vfs-inject's vfs-probe) and the host-target injector and
+#   -Fixtures        also build the test fixtures (every aether-fixture-* crate and
+#                    aether-inject's aether-probe) and the host-target injector and
 #                    shim into target/release, where the tests (and a
 #                    director's) look
 #   -RequireDumpbin  fail, rather than warn, when dumpbin (Visual Studio's MSVC
@@ -45,13 +45,13 @@ try {
   $env:RUSTFLAGS = '-C target-feature=+crt-static'
   try {
     Invoke-Step 'build x64 injector and shim' {
-      cargo build --release --target x86_64-pc-windows-msvc -p vfs-inject -p vfs-shim-dll
+      cargo build --release --target x86_64-pc-windows-msvc -p aether-inject -p aether-shim-dll
     }
     Invoke-Step 'build i686 injector' {
-      cargo build --release --target i686-pc-windows-msvc -p vfs-inject --bin vfs-injector
+      cargo build --release --target i686-pc-windows-msvc -p aether-inject --bin aether-injector
     }
     Invoke-Step 'build i686 shim' {
-      cargo build --release --target i686-pc-windows-msvc -p vfs-shim-dll
+      cargo build --release --target i686-pc-windows-msvc -p aether-shim-dll
     }
   } finally {
     $env:RUSTFLAGS = $old
@@ -60,10 +60,10 @@ try {
   # staged name -> what the build produced
   $t = Join-Path $root 'target'
   $natives = [ordered]@{
-    'vfs-injector.exe'   = "$t\x86_64-pc-windows-msvc\release\vfs-injector.exe"
-    'vfs_shim_dll.dll'   = "$t\x86_64-pc-windows-msvc\release\vfs_shim_dll.dll"
-    'vfs-injector32.exe' = "$t\i686-pc-windows-msvc\release\vfs-injector.exe"
-    'vfs_shim_dll32.dll' = "$t\i686-pc-windows-msvc\release\vfs_shim_dll.dll"
+    'aether-injector.exe'   = "$t\x86_64-pc-windows-msvc\release\aether-injector.exe"
+    'aether_shim_dll.dll'   = "$t\x86_64-pc-windows-msvc\release\aether_shim_dll.dll"
+    'aether-injector32.exe' = "$t\i686-pc-windows-msvc\release\aether-injector.exe"
+    'aether_shim_dll32.dll' = "$t\i686-pc-windows-msvc\release\aether_shim_dll.dll"
   }
 
   # Checked where they were built, before anything is staged: a failed check
@@ -117,21 +117,21 @@ try {
 
   if ($Fixtures) {
     # host target, no crt-static: the tests look in target/release.
-    # vfs-inject's bins include vfs-probe.exe, a fixture of its own.
-    Invoke-Step 'build host injector and shim' { cargo build --release -p vfs-inject -p vfs-shim-dll }
+    # aether-inject's bins include aether-probe.exe, a fixture of its own.
+    Invoke-Step 'build host injector and shim' { cargo build --release -p aether-inject -p aether-shim-dll }
     # vproxy's import library must exist before staticimp links against it
     Invoke-Step 'build fixtures' {
-      cargo build --release -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy -p vfs-fixture-registry -p vfs-fixture-steam -p vfs-fixture-nvapi
+      cargo build --release -p aether-fixture-read -p aether-fixture-writepath -p aether-fixture-escape -p aether-fixture-prefs -p aether-fixture-vproxy -p aether-fixture-registry -p aether-fixture-steam -p aether-fixture-nvapi
     }
-    Invoke-Step 'build fixture staticimp' { cargo build --release -p vfs-fixture-staticimp }
+    Invoke-Step 'build fixture staticimp' { cargo build --release -p aether-fixture-staticimp }
     # Every file the tests read from target/release, so a build that left one
     # out fails here rather than as a test's skip.
     $release = Join-Path $root 'target\release'
     $fixtureFiles = @(
-      'vfs-injector.exe', 'vfs_shim_dll.dll', 'vfs-probe.exe',
-      'vfs-fixture-read.exe', 'vfs-fixture-writepath.exe', 'vfs-fixture-escape.exe', 'vfs-fixture-prefs.exe',
-      'vproxy.dll', 'vfs-staticimp.exe',
-      'vfs-fixture-registry.exe', 'vfs-fixture-steam.exe', 'vfs-fixture-nvapi.exe'
+      'aether-injector.exe', 'aether_shim_dll.dll', 'aether-probe.exe',
+      'aether-fixture-read.exe', 'aether-fixture-writepath.exe', 'aether-fixture-escape.exe', 'aether-fixture-prefs.exe',
+      'vproxy.dll', 'aether-staticimp.exe',
+      'aether-fixture-registry.exe', 'aether-fixture-steam.exe', 'aether-fixture-nvapi.exe'
     )
     foreach ($f in $fixtureFiles) {
       if (-not (Test-Path -LiteralPath (Join-Path $release $f) -PathType Leaf)) {

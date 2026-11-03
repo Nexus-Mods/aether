@@ -1,0 +1,82 @@
+//! When the shim never writes a ready file, the injector must kill the
+//! suspended process, not resume it. Releasing would let the game run with nothing
+//! virtualising it, its writes reaching the real disk.
+//!
+//! The "shim" here is `vproxy.dll`, a fixture DLL with no `DllMain`: the
+//! remote `LoadLibrary` succeeds and nothing ever touches the ready file,
+//! which is what a shim that dies or hangs before bootstrap looks like.
+//!
+//! Single-test binary: `run_target_with_shim` mutates process-global env vars.
+#![allow(unsafe_code)]
+mod common;
+
+use aether_inject::{run_target_with_shim, InjectError, RunConfig};
+use std::time::Duration;
+
+#[test]
+fn a_shim_that_never_reports_ready_gets_the_process_killed() {
+    let pid = std::process::id();
+    let base = std::env::temp_dir().join(format!("vfs-ready-timeout-{pid}"));
+    let root = base.join("gameroot");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let config_path = base.join("shim.cfg");
+    std::fs::write(
+        &config_path,
+        aether_shim::encode_config(root.to_str().unwrap()),
+    )
+    .unwrap();
+    let ready_path = base.join("ready.flag");
+    let output_path = base.join("probe-out.bin");
+    let probe = env!("CARGO_BIN_EXE_aether-probe").to_string();
+    let silent_shim = common::locate_artifact("vproxy.dll");
+
+    let result = run_target_with_shim(RunConfig {
+        target_exe: probe,
+        current_dir: None,
+        args: vec![
+            root.join("does-not-matter.bin")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            output_path.to_str().unwrap().to_string(),
+        ],
+        dll_path: silent_shim,
+        config_path: config_path.to_str().unwrap().to_string(),
+        ready_path: ready_path.to_str().unwrap().to_string(),
+        ready_timeout: Duration::from_secs(3),
+        detach: false,
+        env_set: Vec::new(),
+        env_remove: Vec::new(),
+        virtual_image: None,
+        virtual_cwd: None,
+        // This test injects a full-path fake shim; the in-memory patch (which
+        // imports the real shim by name) does not apply, so force injection.
+        force_injection: true,
+    });
+
+    assert!(
+        matches!(result, Err(InjectError::Bootstrap(_))),
+        "expected Err(InjectError::Bootstrap) from a shim that never wrote the ready file; got {result:?}"
+    );
+    assert!(
+        !ready_path.exists(),
+        "the silent shim must not have written a ready file"
+    );
+    // A resumed probe would run to completion and write this file — but after
+    // `run_target_with_shim` had already returned, so give it time to get there.
+    for _ in 0..40 {
+        if output_path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !output_path.exists(),
+        "probe output exists at {output_path:?}: the process was released after the ready timeout"
+    );
+    // Not merely unrun: gone. A parked process satisfies the check above.
+    common::assert_no_child_processes();
+    let _ = std::fs::remove_dir_all(&base);
+}

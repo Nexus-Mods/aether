@@ -1,0 +1,864 @@
+//! Minimal `#[repr(C)]` NT type definitions used by the NtCreateFile hook.
+//! No `unsafe` here — just layout-compatible structs and the fn signature.
+
+use core::ffi::c_void;
+use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
+
+// The five statuses the registry layout also names are defined once, in `aether_registry::layout`:
+// `STATUS_SUCCESS`, `STATUS_BUFFER_OVERFLOW` (the caller buffer cannot hold even one entry),
+// `STATUS_INVALID_PARAMETER`, `STATUS_BUFFER_TOO_SMALL`, and `STATUS_OBJECT_NAME_NOT_FOUND`
+// (returned for a tombstoned, mod-deleted path so the real on-disk file appears absent).
+pub(crate) use aether_registry::layout::{
+    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+};
+
+/// `STATUS_UNSUCCESSFUL` — returned only if the trampoline is somehow unset
+/// (an invariant violation the hook must not panic on).
+pub(crate) const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
+/// A move between volumes; also a move of a directory between two roots.
+pub(crate) const STATUS_NOT_SAME_DEVICE: NTSTATUS = 0xC000_00D4_u32 as i32;
+
+/// `STATUS_OBJECT_PATH_NOT_FOUND` — maps to Win32 `ERROR_PATH_NOT_FOUND` (3),
+/// as distinct from `STATUS_OBJECT_NAME_NOT_FOUND`'s `ERROR_FILE_NOT_FOUND`
+/// (2). NT returns it when the *container* of the named file cannot be
+/// resolved, which is exactly what a refused create under a managed root
+/// means: the leaf was supposed to be created, so what is missing is a
+/// location willing to hold it, not the name. See `try_fuse_create`.
+pub(crate) const STATUS_OBJECT_PATH_NOT_FOUND: NTSTATUS = 0xC000_003Au32 as i32;
+
+/// `STATUS_ACCESS_DENIED` — maps to `ERROR_ACCESS_DENIED`. The honest NT
+/// answer when the provider graph serves a path but no layer of it accepts
+/// writes (`ST_READ_ONLY`), which is what a real read-only filesystem
+/// returns for the same open.
+pub(crate) const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as i32;
+
+/// Layout-compatible with the NT `UNICODE_STRING`. `length`/`maximum_length`
+/// are in BYTES; the u16 count is `length / 2`.
+#[repr(C)]
+pub(crate) struct UnicodeString {
+    pub length: u16,
+    pub maximum_length: u16,
+    pub buffer: *mut u16,
+}
+
+/// Layout-compatible with the NT `OBJECT_ATTRIBUTES`.
+#[repr(C)]
+pub(crate) struct ObjectAttributes {
+    pub length: u32,
+    pub root_directory: HANDLE,
+    pub object_name: *const UnicodeString,
+    pub attributes: u32,
+    pub security_descriptor: *const c_void,
+    pub security_qos: *const c_void,
+}
+
+/// The `ntdll!NtCreateFile` signature. `IO_STATUS_BLOCK` is left opaque
+/// (`*mut c_void`) — the hook never inspects it.
+pub(crate) type NtCreateFileFn = unsafe extern "system" fn(
+    *mut HANDLE, // FileHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    *mut c_void,   // IoStatusBlock
+    *const i64,    // AllocationSize
+    u32,           // FileAttributes
+    u32,           // ShareAccess
+    u32,           // CreateDisposition
+    u32,           // CreateOptions
+    *const c_void, // EaBuffer
+    u32,           // EaLength
+) -> NTSTATUS;
+
+/// Layout-compatible with `FILE_BASIC_INFORMATION` (40 bytes).
+#[repr(C)]
+pub(crate) struct FileBasicInformation {
+    pub creation_time: i64,
+    pub last_access_time: i64,
+    pub last_write_time: i64,
+    pub change_time: i64,
+    pub file_attributes: u32,
+    pub _reserved: u32,
+}
+
+/// Layout-compatible with `FILE_NETWORK_OPEN_INFORMATION` (56 bytes).
+#[repr(C)]
+pub(crate) struct FileNetworkOpenInformation {
+    pub creation_time: i64,
+    pub last_access_time: i64,
+    pub last_write_time: i64,
+    pub change_time: i64,
+    pub allocation_size: i64,
+    pub end_of_file: i64,
+    pub file_attributes: u32,
+    pub _reserved: u32,
+}
+
+pub(crate) type NtQueryAttributesFileFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *mut FileBasicInformation) -> NTSTATUS;
+pub(crate) type NtQueryFullAttributesFileFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *mut FileNetworkOpenInformation) -> NTSTATUS;
+
+/// `ntdll!NtQueryDirectoryFileEx`. `FileName` is a `PUNICODE_STRING` (nullable);
+/// `IoStatusBlock` and `FileInformation` are left opaque and touched by the hook
+/// via raw offsets. `ApcRoutine`/`ApcContext`/`Event` are unused by our callers.
+pub(crate) type NtQueryDirectoryFileExFn = unsafe extern "system" fn(
+    HANDLE,               // FileHandle
+    HANDLE,               // Event
+    *const c_void,        // ApcRoutine
+    *const c_void,        // ApcContext
+    *mut c_void,          // IoStatusBlock
+    *mut c_void,          // FileInformation
+    u32,                  // Length
+    u32,                  // FileInformationClass
+    u32,                  // QueryFlags
+    *const UnicodeString, // FileName
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryDirectoryFile` — the classic enumeration entry point, still a
+/// distinct export from the `Ex` form above and still what plenty of callers
+/// reach. It carries `ReturnSingleEntry` and `RestartScan` as separate
+/// `BOOLEAN`s where `Ex` folds both into `QueryFlags`.
+///
+/// Hooking only `Ex` leaves this one running against the real directory, which
+/// is invisible in every counter: the composed view is simply never consulted.
+pub(crate) type NtQueryDirectoryFileFn = unsafe extern "system" fn(
+    HANDLE,               // FileHandle
+    HANDLE,               // Event
+    *const c_void,        // ApcRoutine
+    *const c_void,        // ApcContext
+    *mut c_void,          // IoStatusBlock
+    *mut c_void,          // FileInformation
+    u32,                  // Length
+    u32,                  // FileInformationClass
+    u8,                   // ReturnSingleEntry (BOOLEAN)
+    *const UnicodeString, // FileName
+    u8,                   // RestartScan (BOOLEAN)
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryInformationByName` (Win10 1709+). Stats a path *without*
+/// opening it, so a caller using it never appears in any open-side counter and
+/// never consults a handle we could have virtualised.
+pub(crate) type NtQueryInformationByNameFn = unsafe extern "system" fn(
+    *const ObjectAttributes,
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FileInformation
+    u32,         // Length
+    u32,         // FileInformationClass
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenFile` — the open path many callers (incl. Rust `std`'s
+/// directory open) use instead of `NtCreateFile`.
+pub(crate) type NtOpenFileFn = unsafe extern "system" fn(
+    *mut HANDLE, // FileHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    *mut c_void, // IoStatusBlock
+    u32,         // ShareAccess
+    u32,         // OpenOptions
+) -> NTSTATUS;
+
+/// `ntdll!NtDeleteFile` — the **path-based** delete.
+///
+/// The signature is the whole point: an `OBJECT_ATTRIBUTES` and nothing else.
+/// No handle, no access mask, no disposition. Every other delete route the
+/// shim sees (`NtSetInformationFile` with either disposition class) arrives on
+/// a handle the shim watched being opened, so leaving one of *those* unhooked
+/// fails safely — a synthetic handle is not a kernel object and the call comes
+/// back `STATUS_INVALID_HANDLE`. This one resolves the path itself, against
+/// the real filesystem, so leaving it unhooked does not fail at all.
+pub(crate) type NtDeleteFileFn = unsafe extern "system" fn(*const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtClose`.
+pub(crate) type NtCloseFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtQueryInformationFile`.
+pub(crate) type NtQueryInformationFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FileInformation
+    u32,         // Length
+    u32,         // FileInformationClass
+) -> NTSTATUS;
+
+/// `FileNormalizedNameInformation` — the class `GetFinalPathNameByHandleW`
+/// appends to the drive letter to build its answer.
+pub(crate) const FILE_NORMALIZED_NAME_INFORMATION: u32 = 48;
+
+/// `FileNameInformation` — the volume-relative name, same record layout as
+/// class 48. `GetFinalPathNameByHandleW` uses its **length**, not its content:
+/// it takes the device prefix to be `ObjectName[.. ObjectName.len - this.len]`.
+/// So this and `NtQueryObject`'s `ObjectNameInformation` must describe the same
+/// path or that subtraction slices the device name in half — see
+/// `qif_hook_body`, which spoofs both together for exactly that reason.
+pub(crate) const FILE_NAME_INFORMATION: u32 = 9;
+
+/// `ntdll!NtQueryObject`. **Not file-specific**: the same entry point answers
+/// about events, mutexes, sections, registry keys and threads, so a hook on it
+/// must pass through every class and every handle it does not recognise.
+/// `ReturnLength` is a nullable `PULONG`.
+pub(crate) type NtQueryObjectFn = unsafe extern "system" fn(
+    HANDLE,      // Handle
+    u32,         // ObjectInformationClass
+    *mut c_void, // ObjectInformation
+    u32,         // ObjectInformationLength
+    *mut u32,    // ReturnLength
+) -> NTSTATUS;
+
+/// `ObjectNameInformation` (class 1): an `OBJECT_NAME_INFORMATION`, which is a
+/// `UNICODE_STRING` followed by the NUL-terminated name it points at.
+pub(crate) const OBJECT_NAME_INFORMATION: u32 = 1;
+
+/// Bytes of the `UNICODE_STRING` header an `OBJECT_NAME_INFORMATION` opens with
+/// (x64: `u16` Length, `u16` MaximumLength, 4 bytes padding, `*mut u16` Buffer).
+/// Measured on both hosts: `Buffer` points exactly this far into the caller's
+/// own buffer.
+pub(crate) use aether_ntlayout::OBJECT_NAME_INFORMATION_HEADER;
+
+/// `ntdll!NtSetInformationFile` (same ABI as NtQueryInformationFile).
+pub(crate) type NtSetInformationFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FileInformation
+    u32,         // Length
+    u32,         // FileInformationClass
+) -> NTSTATUS;
+
+/// `FileDispositionInformation` (class 13): 1-byte BOOLEAN `DeleteFile`.
+pub(crate) const FILE_DISPOSITION_INFORMATION: u32 = 13;
+/// `FileDispositionInformationEx` (class 64): ULONG `Flags`; bit 0 = DELETE.
+pub(crate) const FILE_DISPOSITION_INFORMATION_EX: u32 = 64;
+/// `FILE_DISPOSITION_DELETE` flag for the Ex form.
+pub(crate) const FILE_DISPOSITION_DELETE: u32 = 0x1;
+
+/// `FileRenameInformation` (class 10) / `FileRenameInformationEx` (class 65).
+/// Layout (x64): `[0] ReplaceIfExists/Flags`, `[8] RootDirectory (HANDLE)`,
+/// `[16] FileNameLength (ULONG)`, `[20] FileName (WCHAR[])`.
+pub(crate) const FILE_RENAME_INFORMATION: u32 = 10;
+pub(crate) const FILE_RENAME_INFORMATION_EX: u32 = 65;
+/// `FILE_LINK_INFORMATION` and its `_EX` form: laid out exactly as the rename classes.
+pub(crate) const FILE_LINK_INFORMATION: u32 = 11;
+pub(crate) const FILE_LINK_INFORMATION_EX: u32 = 72;
+
+/// `FileEndOfFileInformation` (class 20): a single `LARGE_INTEGER EndOfFile`.
+/// Set via `NtSetInformationFile` — this is how `File::set_len` truncates.
+pub(crate) const FILE_END_OF_FILE_INFORMATION: u32 = 20;
+
+/// `FILE_DIRECTORY_FILE` `CreateOptions` flag — the open targets a directory.
+pub(crate) const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+/// `CreateOptions`: delete the file when the last handle to it is closed.
+pub(crate) const FILE_DELETE_ON_CLOSE: u32 = 0x0000_1000;
+
+/// `NtQueryDirectoryFileEx` QueryFlags.
+pub(crate) const SL_RESTART_SCAN: u32 = 0x01;
+pub(crate) const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
+
+/// `STATUS_NO_MORE_FILES` — enumeration cursor exhausted.
+pub(crate) const STATUS_NO_MORE_FILES: NTSTATUS = 0x8000_0006u32 as i32;
+/// `STATUS_INFO_LENGTH_MISMATCH` — the caller buffer cannot hold even the fixed
+/// header of the requested structure. Distinct from `STATUS_BUFFER_OVERFLOW`,
+/// and `NtQueryObject` returns each in its own range — see `qobj_hook_body`.
+pub(crate) const STATUS_INFO_LENGTH_MISMATCH: NTSTATUS = 0xC000_0004u32 as i32;
+
+/// `ntdll!NtReadFile`. `Event`/`ApcRoutine`/`ApcContext`/`Key` are unused by
+/// synchronous callers; `ByteOffset` is a `PLARGE_INTEGER` (nullable).
+pub(crate) type NtReadFileFn = unsafe extern "system" fn(
+    HANDLE,        // FileHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    *mut c_void,   // Buffer
+    u32,           // Length
+    *const i64,    // ByteOffset (LARGE_INTEGER)
+    *const u32,    // Key
+) -> NTSTATUS;
+
+/// `NtWriteFile` — identical signature to `NtReadFile` (Buffer is the source).
+pub(crate) type NtWriteFileFn = unsafe extern "system" fn(
+    HANDLE,        // FileHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    *mut c_void,   // Buffer (source bytes to write)
+    u32,           // Length
+    *const i64,    // ByteOffset
+    *const u32,    // Key
+) -> NTSTATUS;
+
+/// `STATUS_END_OF_FILE`.
+pub(crate) const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
+/// `STATUS_INVALID_FILE_FOR_SECTION` — e.g. a section over a synthetic handle
+/// whose content cannot be mapped (a directory, an empty file, or a PE the
+/// director's bytes do not parse as an image).
+pub(crate) const STATUS_INVALID_FILE_FOR_SECTION: NTSTATUS = 0xC000_0124u32 as i32;
+/// `STATUS_INVALID_HANDLE`.
+pub(crate) const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
+/// `STATUS_OBJECT_TYPE_MISMATCH` — the handle is not an object of the type the call takes
+/// (e.g. `NtQueryKey` on a file handle).
+pub(crate) const STATUS_OBJECT_TYPE_MISMATCH: NTSTATUS = 0xC000_0024u32 as i32;
+/// `STATUS_OBJECT_NAME_COLLISION` — maps to `ERROR_ALREADY_EXISTS`; what a
+/// `FILE_CREATE` of an existing name must report so the standard
+/// create-and-ignore-ALREADY_EXISTS idiom works.
+pub(crate) const STATUS_OBJECT_NAME_COLLISION: NTSTATUS = 0xC000_0035u32 as i32;
+/// `STATUS_SECTION_TOO_BIG`.
+pub(crate) const STATUS_SECTION_TOO_BIG: NTSTATUS = 0xC000_0040u32 as i32;
+/// `STATUS_FILE_IS_A_DIRECTORY` — maps to `ERROR_ACCESS_DENIED` at the Win32
+/// layer, but NT callers that look at the status get the real reason. What a
+/// create or overwrite aimed at an existing *directory* must report, rather
+/// than the generic `STATUS_UNSUCCESSFUL` every other provider error gets.
+pub(crate) const STATUS_FILE_IS_A_DIRECTORY: NTSTATUS = 0xC000_00BAu32 as i32;
+pub(crate) use aether_ntlayout::{FILE_CREATED, FILE_OPENED};
+
+/// `SEC_IMAGE` — PE image mapping.
+pub(crate) const SEC_IMAGE: u32 = 0x0100_0000;
+
+/// `ntdll!NtCreateSection`.
+pub(crate) type NtCreateSectionFn = unsafe extern "system" fn(
+    *mut HANDLE, // SectionHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    *mut i64, // MaximumSize (PLARGE_INTEGER)
+    u32,      // SectionPageProtection
+    u32,      // AllocationAttributes
+    HANDLE,   // FileHandle
+) -> NTSTATUS;
+
+/// `ntdll!NtMapViewOfSection`.
+pub(crate) type NtMapViewOfSectionFn = unsafe extern "system" fn(
+    HANDLE,           // SectionHandle
+    HANDLE,           // ProcessHandle
+    *mut *mut c_void, // BaseAddress
+    usize,            // ZeroBits
+    usize,            // CommitSize
+    *mut i64,         // SectionOffset
+    *mut usize,       // ViewSize
+    u32,              // InheritDisposition
+    u32,              // AllocationType
+    u32,              // Win32Protect
+) -> NTSTATUS;
+
+/// `ntdll!NtUnmapViewOfSection`.
+pub(crate) type NtUnmapViewOfSectionFn = unsafe extern "system" fn(
+    HANDLE,      // ProcessHandle
+    *mut c_void, // BaseAddress
+) -> NTSTATUS;
+
+/// `FileBasicInformation` (class 4).
+pub(crate) const FILE_BASIC_INFORMATION: u32 = 4;
+/// `FileStandardInformation` (class 5).
+pub(crate) const FILE_STANDARD_INFORMATION: u32 = 5;
+/// `FileInternalInformation` (class 6).
+pub(crate) const FILE_INTERNAL_INFORMATION: u32 = 6;
+/// `FilePositionInformation` (class 14).
+pub(crate) const FILE_POSITION_INFORMATION: u32 = 14;
+/// `FileAllInformation` (class 18).
+pub(crate) const FILE_ALL_INFORMATION: u32 = 18;
+/// `FileNetworkOpenInformation` (class 34).
+pub(crate) const FILE_NETWORK_OPEN_INFORMATION: u32 = 34;
+/// `FileAttributeTagInformation` (class 35): attributes and reparse tag.
+pub(crate) const FILE_ATTRIBUTE_TAG_INFORMATION: u32 = 35;
+/// `FileIdInformation` (class 59): volume serial number and 128-bit file id.
+pub(crate) const FILE_ID_INFORMATION: u32 = 59;
+/// `FileStatInformation` (class 68): id, times, sizes, attributes, links.
+pub(crate) const FILE_STAT_INFORMATION: u32 = 68;
+
+/// Layout-compatible with `FILE_INTERNAL_INFORMATION` (8 bytes).
+#[repr(C)]
+pub(crate) struct FileInternalInformation {
+    pub index_number: i64,
+}
+
+/// `ntdll!NtLockFile` — byte-range lock acquisition, and the call that made
+/// the Windows profile APIs unusable under a managed root until it was
+/// hooked (see `hook::lock_hook`).
+///
+/// `ByteOffset` and `Length` are `PLARGE_INTEGER`s; `FailImmediately` and
+/// `ExclusiveLock` are `BOOLEAN`s (one byte each, not `BOOL`) — passing them
+/// as `u32` would misalign `ExclusiveLock` and, worse, silently: the register
+/// the callee reads would hold whatever the caller left there.
+pub(crate) type NtLockFileFn = unsafe extern "system" fn(
+    HANDLE,        // FileHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    *const i64,    // ByteOffset (LARGE_INTEGER)
+    *const i64,    // Length (LARGE_INTEGER)
+    u32,           // Key
+    u8,            // FailImmediately (BOOLEAN)
+    u8,            // ExclusiveLock (BOOLEAN)
+) -> NTSTATUS;
+
+/// `ntdll!NtUnlockFile` — the release half of [`NtLockFileFn`]. Always
+/// synchronous: no `Event`, no APC.
+pub(crate) type NtUnlockFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *const i64,  // ByteOffset (LARGE_INTEGER)
+    *const i64,  // Length (LARGE_INTEGER)
+    u32,         // Key
+) -> NTSTATUS;
+
+/// `ntdll!NtFlushBuffersFile` — what `FlushFileBuffers` becomes.
+pub(crate) type NtFlushBuffersFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryVolumeInformationFile`.
+pub(crate) type NtQueryVolumeInformationFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FsInformation
+    u32,         // Length
+    u32,         // FsInformationClass
+) -> NTSTATUS;
+
+/// `FileFsDeviceInformation` (class 4).
+pub(crate) const FILE_FS_DEVICE_INFORMATION: u32 = 4;
+/// `FILE_DEVICE_DISK`.
+pub(crate) const FILE_DEVICE_DISK: u32 = 0x0000_0007;
+
+/// Layout-compatible with `FILE_FS_DEVICE_INFORMATION` (8 bytes).
+#[repr(C)]
+pub(crate) struct FileFsDeviceInformation {
+    pub device_type: u32,
+    pub characteristics: u32,
+}
+
+/// Layout-compatible with `FILE_STANDARD_INFORMATION` (24 bytes).
+#[repr(C)]
+pub(crate) struct FileStandardInformation {
+    pub allocation_size: i64,
+    pub end_of_file: i64,
+    pub number_of_links: u32,
+    pub delete_pending: u8,
+    pub directory: u8,
+    pub _pad: u16,
+}
+
+/// Layout-compatible with `FILE_POSITION_INFORMATION` (8 bytes).
+#[repr(C)]
+pub(crate) struct FilePositionInformation {
+    pub current_byte_offset: i64,
+}
+
+/// Layout-compatible with `FILE_END_OF_FILE_INFORMATION` (8 bytes).
+#[repr(C)]
+pub(crate) struct FileEndOfFileInformation {
+    pub end_of_file: i64,
+}
+
+// ---- Registry (spec 2026-10-05 registry overlay, section 3.1) ----
+
+/// `ntdll!NtOpenKey`.
+pub(crate) type NtOpenKeyFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenKeyEx`: `NtOpenKey` plus `OpenOptions` (`REG_OPTION_OPEN_LINK`,
+/// `REG_OPTION_BACKUP_RESTORE`).
+pub(crate) type NtOpenKeyExFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32, // OpenOptions
+) -> NTSTATUS;
+
+/// `ntdll!NtCreateKey`. `Class` is a nullable `PUNICODE_STRING`, `Disposition` a nullable
+/// `PULONG`.
+pub(crate) type NtCreateKeyFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32,                  // TitleIndex
+    *const UnicodeString, // Class
+    u32,                  // CreateOptions
+    *mut u32,             // Disposition
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryKey`.
+pub(crate) type NtQueryKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    u32,         // KeyInformationClass
+    *mut c_void, // KeyInformation
+    u32,         // Length
+    *mut u32,    // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtDuplicateObject`. `TargetHandle` is nullable (a close-only call with
+/// `DUPLICATE_CLOSE_SOURCE`).
+pub(crate) type NtDuplicateObjectFn = unsafe extern "system" fn(
+    HANDLE,      // SourceProcessHandle
+    HANDLE,      // SourceHandle
+    HANDLE,      // TargetProcessHandle
+    *mut HANDLE, // TargetHandle
+    u32,         // DesiredAccess
+    u32,         // HandleAttributes
+    u32,         // Options
+) -> NTSTATUS;
+
+/// `KeyNameInformation`: a `KEY_NAME_INFORMATION` (`u32` NameLength in bytes, then the name).
+pub(crate) const KEY_NAME_INFORMATION: u32 = 3;
+
+/// `NtCreateKey` dispositions.
+pub(crate) const REG_CREATED_NEW_KEY: u32 = 1;
+pub(crate) const REG_OPENED_EXISTING_KEY: u32 = 2;
+
+/// `NtCreateKey` `CreateOptions` / `NtOpenKeyEx` `OpenOptions` bits.
+pub(crate) const REG_OPTION_VOLATILE: u32 = 0x1;
+pub(crate) const REG_OPTION_CREATE_LINK: u32 = 0x2;
+pub(crate) const REG_OPTION_BACKUP_RESTORE: u32 = 0x4;
+pub(crate) const REG_OPTION_OPEN_LINK: u32 = 0x8;
+
+/// `DUPLICATE_CLOSE_SOURCE` / `DUPLICATE_SAME_ACCESS`.
+pub(crate) const DUPLICATE_CLOSE_SOURCE: u32 = 0x1;
+pub(crate) const DUPLICATE_SAME_ACCESS: u32 = 0x2;
+/// `DUPLICATE_SAME_ATTRIBUTES`.
+pub(crate) const DUPLICATE_SAME_ATTRIBUTES: u32 = 0x4;
+
+/// `NtQueryObject` classes answered for synthetic key handles besides the name.
+pub(crate) const OBJECT_BASIC_INFORMATION: u32 = 0;
+pub(crate) const OBJECT_TYPE_INFORMATION: u32 = 2;
+pub(crate) const OBJECT_HANDLE_FLAG_INFORMATION: u32 = 4;
+
+/// `OBJ_CASE_INSENSITIVE`, for the shim's own absolute key opens.
+pub(crate) const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+
+/// `STATUS_NOT_SUPPORTED`.
+pub(crate) const STATUS_NOT_SUPPORTED: NTSTATUS = 0xC000_00BBu32 as i32;
+/// `STATUS_OBJECT_NAME_INVALID`.
+pub(crate) const STATUS_OBJECT_NAME_INVALID: NTSTATUS = 0xC000_0033u32 as i32;
+
+/// `ntdll!NtEnumerateKey`.
+pub(crate) type NtEnumerateKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    u32,         // Index
+    u32,         // KeyInformationClass
+    *mut c_void, // KeyInformation
+    u32,         // Length
+    *mut u32,    // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryValueKey`.
+pub(crate) type NtQueryValueKeyFn = unsafe extern "system" fn(
+    HANDLE,               // KeyHandle
+    *const UnicodeString, // ValueName
+    u32,                  // KeyValueInformationClass
+    *mut c_void,          // KeyValueInformation
+    u32,                  // Length
+    *mut u32,             // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtEnumerateValueKey`.
+pub(crate) type NtEnumerateValueKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    u32,         // Index
+    u32,         // KeyValueInformationClass
+    *mut c_void, // KeyValueInformation
+    u32,         // Length
+    *mut u32,    // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryMultipleValueKey`. `ValueEntries` is an array of x64 `KEY_VALUE_ENTRY`
+/// (24 bytes each); `BufferLength` is in/out, `RequiredBufferLength` nullable.
+pub(crate) type NtQueryMultipleValueKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    *mut c_void, // ValueEntries
+    u32,         // EntryCount
+    *mut c_void, // ValueBuffer
+    *mut u32,    // BufferLength
+    *mut u32,    // RequiredBufferLength
+) -> NTSTATUS;
+
+/// `KEY_INFORMATION_CLASS` values the query hooks read from real keys.
+pub(crate) const KEY_BASIC_INFORMATION: u32 = 0;
+pub(crate) const KEY_NODE_INFORMATION: u32 = 1;
+pub(crate) const KEY_FULL_INFORMATION: u32 = 2;
+/// `KEY_VALUE_INFORMATION_CLASS` values the query hooks read from real keys.
+pub(crate) const KEY_VALUE_BASIC_INFORMATION: u32 = 0;
+pub(crate) const KEY_VALUE_PARTIAL_INFORMATION: u32 = 2;
+
+/// `STATUS_NO_MORE_ENTRIES`: an enumeration index past the end.
+pub(crate) const STATUS_NO_MORE_ENTRIES: NTSTATUS = 0x8000_001Au32 as i32;
+/// `STATUS_KEY_DELETED`: a query through a handle whose key was deleted.
+pub(crate) const STATUS_KEY_DELETED: NTSTATUS = 0xC000_017Cu32 as i32;
+/// `STATUS_ACCESS_VIOLATION`, for a NULL buffer the caller said was non-empty.
+pub(crate) const STATUS_ACCESS_VIOLATION: NTSTATUS = 0xC000_0005u32 as i32;
+
+/// `ntdll!NtSetValueKey`.
+pub(crate) type NtSetValueKeyFn = unsafe extern "system" fn(
+    HANDLE,               // KeyHandle
+    *const UnicodeString, // ValueName
+    u32,                  // TitleIndex
+    u32,                  // Type
+    *const c_void,        // Data
+    u32,                  // DataSize
+) -> NTSTATUS;
+
+/// `ntdll!NtDeleteValueKey`.
+pub(crate) type NtDeleteValueKeyFn =
+    unsafe extern "system" fn(HANDLE, *const UnicodeString) -> NTSTATUS;
+
+/// `ntdll!NtDeleteKey`.
+pub(crate) type NtDeleteKeyFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtRenameKey`.
+pub(crate) type NtRenameKeyFn = unsafe extern "system" fn(HANDLE, *const UnicodeString) -> NTSTATUS;
+
+/// `ntdll!NtSetInformationKey`.
+pub(crate) type NtSetInformationKeyFn = unsafe extern "system" fn(
+    HANDLE,        // KeyHandle
+    u32,           // KeySetInformationClass
+    *const c_void, // KeySetInformation
+    u32,           // KeySetInformationLength
+) -> NTSTATUS;
+
+/// `ntdll!NtFlushKey`.
+pub(crate) type NtFlushKeyFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `STATUS_CANNOT_DELETE`: `NtDeleteKey` of a key with subkeys; `NtRenameKey` to a name that
+/// exists.
+pub(crate) const STATUS_CANNOT_DELETE: NTSTATUS = 0xC000_0121u32 as i32;
+/// `STATUS_INSUFFICIENT_RESOURCES`: a rename whose copy is over the shim's bound.
+pub(crate) const STATUS_INSUFFICIENT_RESOURCES: NTSTATUS = 0xC000_009Au32 as i32;
+/// `STATUS_INVALID_INFO_CLASS`.
+pub(crate) const STATUS_INVALID_INFO_CLASS: NTSTATUS = 0xC000_0003u32 as i32;
+
+// ---- Registry: notifications, security, handle flags, out-of-scope calls (Task 12) ----
+
+/// `ntdll!NtNotifyChangeKey`. `WatchTree` and `Asynchronous` are `BOOLEAN`s.
+pub(crate) type NtNotifyChangeKeyFn = unsafe extern "system" fn(
+    HANDLE,        // KeyHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    u32,           // CompletionFilter
+    u8,            // WatchTree
+    *mut c_void,   // Buffer
+    u32,           // BufferSize
+    u8,            // Asynchronous
+) -> NTSTATUS;
+
+/// `ntdll!NtNotifyChangeMultipleKeys`: `NtNotifyChangeKey` plus subordinate keys.
+pub(crate) type NtNotifyChangeMultipleKeysFn = unsafe extern "system" fn(
+    HANDLE,                  // MasterKeyHandle
+    u32,                     // Count
+    *const ObjectAttributes, // SubordinateObjects
+    HANDLE,                  // Event
+    *const c_void,           // ApcRoutine
+    *const c_void,           // ApcContext
+    *mut c_void,             // IoStatusBlock
+    u32,                     // CompletionFilter
+    u8,                      // WatchTree
+    *mut c_void,             // Buffer
+    u32,                     // BufferSize
+    u8,                      // Asynchronous
+) -> NTSTATUS;
+
+/// `ntdll!NtQuerySecurityObject`.
+pub(crate) type NtQuerySecurityObjectFn = unsafe extern "system" fn(
+    HANDLE,      // Handle
+    u32,         // SecurityInformation
+    *mut c_void, // SecurityDescriptor
+    u32,         // Length
+    *mut u32,    // LengthNeeded
+) -> NTSTATUS;
+
+/// `ntdll!NtSetSecurityObject`.
+pub(crate) type NtSetSecurityObjectFn = unsafe extern "system" fn(
+    HANDLE,        // Handle
+    u32,           // SecurityInformation
+    *const c_void, // SecurityDescriptor
+) -> NTSTATUS;
+
+/// `ntdll!NtSetInformationObject`.
+pub(crate) type NtSetInformationObjectFn = unsafe extern "system" fn(
+    HANDLE,        // Handle
+    u32,           // ObjectInformationClass
+    *const c_void, // ObjectInformation
+    u32,           // Length
+) -> NTSTATUS;
+
+/// `ntdll!NtCreateKeyTransacted`: `NtCreateKey` with a transaction before `Disposition`.
+pub(crate) type NtCreateKeyTransactedFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32,                  // TitleIndex
+    *const UnicodeString, // Class
+    u32,                  // CreateOptions
+    HANDLE,               // TransactionHandle
+    *mut u32,             // Disposition
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenKeyTransacted`.
+pub(crate) type NtOpenKeyTransactedFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    HANDLE, // TransactionHandle
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenKeyTransactedEx`.
+pub(crate) type NtOpenKeyTransactedExFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32,    // OpenOptions
+    HANDLE, // TransactionHandle
+) -> NTSTATUS;
+
+/// `ntdll!NtLoadKey(TargetKey, SourceFile)`.
+pub(crate) type NtLoadKeyFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtLoadKey2(TargetKey, SourceFile, Flags)`.
+pub(crate) type NtLoadKey2Fn =
+    unsafe extern "system" fn(*const ObjectAttributes, *const ObjectAttributes, u32) -> NTSTATUS;
+
+/// `ntdll!NtLoadKeyEx` and `ntdll!NtLoadKey3`: eight arguments, the target key first. Only the
+/// target is read; the other six are passed on untouched, so one pointer-sized shape serves both.
+pub(crate) type NtLoadKey8Fn = unsafe extern "system" fn(
+    *const ObjectAttributes, // TargetKey
+    *const ObjectAttributes, // SourceFile
+    u32,                     // Flags
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+) -> NTSTATUS;
+
+/// `ntdll!NtUnloadKey(TargetKey)`.
+pub(crate) type NtUnloadKeyFn = unsafe extern "system" fn(*const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtUnloadKey2(TargetKey, Flags)` and `ntdll!NtUnloadKeyEx(TargetKey, Event)`: the
+/// target, then one pointer-sized argument passed on untouched.
+pub(crate) type NtUnloadKey2Fn =
+    unsafe extern "system" fn(*const ObjectAttributes, usize) -> NTSTATUS;
+
+/// `ntdll!NtSaveKey(KeyHandle, FileHandle)`.
+pub(crate) type NtSaveKeyFn = unsafe extern "system" fn(HANDLE, HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtSaveKeyEx(KeyHandle, FileHandle, Format)`.
+pub(crate) type NtSaveKeyExFn = unsafe extern "system" fn(HANDLE, HANDLE, u32) -> NTSTATUS;
+
+/// `ntdll!NtSaveMergedKeys(HighPrecedenceKey, LowPrecedenceKey, FileHandle)`.
+pub(crate) type NtSaveMergedKeysFn = unsafe extern "system" fn(HANDLE, HANDLE, HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtReplaceKey(NewFile, TargetHandle, OldFile)`.
+pub(crate) type NtReplaceKeyFn =
+    unsafe extern "system" fn(*const ObjectAttributes, HANDLE, *const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtRestoreKey(KeyHandle, FileHandle, Flags)`.
+pub(crate) type NtRestoreKeyFn = unsafe extern "system" fn(HANDLE, HANDLE, u32) -> NTSTATUS;
+
+/// `ntdll!NtCompressKey(Key)` and `ntdll!NtLockRegistryKey(KeyHandle)`.
+pub(crate) type NtKeyOnlyFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `STATUS_PENDING`: an asynchronous registry notification was registered.
+pub(crate) const STATUS_PENDING: NTSTATUS = 0x0000_0103;
+/// `STATUS_NOTIFY_CLEANUP`: a pending notification ended by closing its key handle.
+pub(crate) const STATUS_NOTIFY_CLEANUP: NTSTATUS = 0x0000_010B;
+/// `STATUS_NOTIFY_ENUM_DIR`: what a registry notification completes with when the key changed.
+pub(crate) const STATUS_NOTIFY_ENUM_DIR: NTSTATUS = 0x0000_010C;
+/// `STATUS_INVALID_BUFFER_SIZE`: `NtSetInformationObject` with a short buffer (Wine's answer).
+pub(crate) const STATUS_INVALID_BUFFER_SIZE: NTSTATUS = 0xC000_0206u32 as i32;
+/// `STATUS_HANDLE_NOT_CLOSABLE`: `NtClose` of a handle protected from close.
+pub(crate) const STATUS_HANDLE_NOT_CLOSABLE: NTSTATUS = 0xC000_0235u32 as i32;
+/// `STATUS_INVALID_SECURITY_DESCR`.
+pub(crate) const STATUS_INVALID_SECURITY_DESCR: NTSTATUS = 0xC000_0079u32 as i32;
+
+/// `ntdll!NtRaiseHardError`. The loader calls it when a module cannot be loaded
+/// (a missing static import or delay-load): `ErrorStatus` is the failure (e.g.
+/// `STATUS_DLL_NOT_FOUND` 0xC0000135) and `Parameters[0]` is a `UNICODE_STRING*`
+/// naming the DLL when bit 0 of `UnicodeStringParameterMask` is set. The shim
+/// hooks it to *log* the error in whichever process raises it; it changes
+/// nothing (the trampoline is called unchanged). Diagnostics only.
+pub(crate) type NtRaiseHardErrorFn = unsafe extern "system" fn(
+    NTSTATUS,     // ErrorStatus
+    u32,          // NumberOfParameters
+    u32,          // UnicodeStringParameterMask
+    *const usize, // Parameters (PULONG_PTR)
+    u32,          // ValidResponseOptions
+    *mut u32,     // Response
+) -> NTSTATUS;
+
+/// `ntdll!LdrLoadDll`, the loader's dynamic-load entry (under `LoadLibrary*`).
+/// The shim hooks it to log a *failed* load — the DLL name, the search path and
+/// the status — so a dynamic load that resolves against the virtual game dir and
+/// misses (a DLL only in the backing folder) is visible. Diagnostics only; the
+/// trampoline's result is returned unchanged.
+pub(crate) type LdrLoadDllFn = unsafe extern "system" fn(
+    *const u16,           // SearchPath (optional)
+    *const u32,           // DllCharacteristics (optional)
+    *const UnicodeString, // DllName
+    *mut *mut c_void,     // BaseAddress (out)
+) -> NTSTATUS;
+
+/// `ntdll!NtCreateUserProcess`, the native process-creation syscall that
+/// `CreateProcessInternalW` funnels into — but which can also be called directly,
+/// bypassing that hook. The shim hooks it to log the image path of every process
+/// created from a shimmed process, so a create that never reached
+/// `cpiw_hook_body` is caught. Diagnostics only (log + call through); it does not
+/// yet virtualise or refuse here — see `cpiw_hook_body` for the fail-closed path.
+pub(crate) type NtCreateUserProcessFn = unsafe extern "system" fn(
+    *mut HANDLE,             // ProcessHandle (out)
+    *mut HANDLE,             // ThreadHandle (out)
+    u32,                     // ProcessDesiredAccess
+    u32,                     // ThreadDesiredAccess
+    *const ObjectAttributes, // ProcessObjectAttributes (optional)
+    *const ObjectAttributes, // ThreadObjectAttributes (optional)
+    u32,                     // ProcessFlags
+    u32,                     // ThreadFlags
+    *const c_void,           // ProcessParameters (PRTL_USER_PROCESS_PARAMETERS)
+    *mut c_void,             // CreateInfo (PPS_CREATE_INFO)
+    *const c_void,           // AttributeList (PPS_ATTRIBUTE_LIST)
+) -> NTSTATUS;
+
+/// The typed structures above are the layouts `aether_ntlayout`'s byte writers fill: this pins the two
+/// together, so a field moved on either side fails on a Windows host.
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod layout_pins {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn the_writers_offsets_are_the_structures_fields() {
+        assert_eq!(
+            size_of::<FileBasicInformation>(),
+            aether_ntlayout::BASIC_LEN
+        );
+        assert_eq!(offset_of!(FileBasicInformation, creation_time), 0);
+        assert_eq!(offset_of!(FileBasicInformation, last_access_time), 8);
+        assert_eq!(offset_of!(FileBasicInformation, last_write_time), 16);
+        assert_eq!(offset_of!(FileBasicInformation, change_time), 24);
+        assert_eq!(offset_of!(FileBasicInformation, file_attributes), 32);
+
+        assert_eq!(
+            size_of::<FileNetworkOpenInformation>(),
+            aether_ntlayout::NETWORK_OPEN_LEN
+        );
+        assert_eq!(offset_of!(FileNetworkOpenInformation, change_time), 24);
+        assert_eq!(offset_of!(FileNetworkOpenInformation, allocation_size), 32);
+        assert_eq!(offset_of!(FileNetworkOpenInformation, end_of_file), 40);
+        assert_eq!(offset_of!(FileNetworkOpenInformation, file_attributes), 48);
+    }
+
+    #[test]
+    fn a_writer_fills_the_typed_structure() {
+        let mut b = [0u8; aether_ntlayout::BASIC_LEN];
+        aether_ntlayout::put_basic(&mut b, 7, aether_ntlayout::attributes(true));
+        // SAFETY: `b` is 40 bytes and `FileBasicInformation` is plain data of that size.
+        let b: FileBasicInformation = unsafe { core::ptr::read_unaligned(b.as_ptr().cast()) };
+        assert_eq!(b.creation_time, 7);
+        assert_eq!(b.change_time, 7);
+        assert_eq!(b.file_attributes, 0x10);
+    }
+}

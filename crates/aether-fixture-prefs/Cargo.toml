@@ -1,0 +1,18 @@
+[package]
+name = "aether-fixture-prefs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aether-fixture-prefs"
+path = "src/main.rs"
+
+[dependencies]
+aether-env.workspace = true
+aether-fixture-support.workspace = true
+
+[lints]
+workspace = true

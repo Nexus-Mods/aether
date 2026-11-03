@@ -1,0 +1,19 @@
+[package]
+name = "aether-zip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-core.workspace = true
+aether-provider.workspace = true
+
+[dev-dependencies]
+aether-testkit.workspace = true
+aether-provider = { workspace = true, features = ["conformance"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

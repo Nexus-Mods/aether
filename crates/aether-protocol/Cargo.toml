@@ -1,0 +1,19 @@
+[package]
+name = "aether-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-provider.workspace = true
+aether-registry.workspace = true
+
+[dev-dependencies]
+# Golden vectors for the ring header live beside the codec vectors.
+# Dev-only: aether-ipc itself depends on this crate.
+aether-ipc.workspace = true
+
+[lints]
+workspace = true

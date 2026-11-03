@@ -5,6 +5,21 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (Aether: crates and binaries renamed `vfs-*` to `aether-*`)
+
+The code now lives in its own repository, Nexus-Mods/aether, split from
+Cairn's `rust/`. Every crate is renamed `vfs-*` to `aether-*` (Rust paths
+`vfs_*` to `aether_*`), and so are the binaries a director starts:
+`aether-injector.exe`, `aether_shim_dll.dll` and their 32-bit
+`aether-injector32.exe`, `aether_shim_dll32.dll`; the fixtures are
+`aether-fixture-*.exe`, `aether-probe.exe`, `aether-staticimp.exe`
+(`vproxy.dll` keeps its name). Nothing on the wire changes: the `VFS_*`
+environment variables, the ring and config magics (`VFIP`, `VFSC`), the
+wire version, the `Local\vfs_shim_ready_<pid>`/`vfs_shim_failed_<pid>`
+events, the `vfs_shim_activated` export, and the text the shim and the
+injector print (`vfs-shim hook stats`, `[vfs-injector] ...`) are as they
+were. The entries below use the names of their time.
+
 ## Unreleased (the Rust director is removed)
 
 `vfs-embed` and `vfs-proton` are deleted, and with them `Session`, `vfs_proton`

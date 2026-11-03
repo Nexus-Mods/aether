@@ -1,0 +1,18 @@
+[package]
+name = "aether-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Dev-only test helpers shared by the workspace's integration tests: stored-zip writer, build-artefact locator"
+
+[lib]
+name = "aether_testkit"
+path = "src/lib.rs"
+
+[dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Cross-build Aether's Windows natives from Linux or macOS: the x64 injector and
 # shim DLL, the i686 pair for 32-bit programs, and every test fixture: the
-# vfs-fixture-* programs (read, Steam, NVAPI, registry, writepath, escape,
-# prefs, staticimp and its vproxy.dll) and vfs-inject's vfs-probe, the set
+# aether-fixture-* programs (read, Steam, NVAPI, registry, writepath, escape,
+# prefs, staticimp and its vproxy.dll) and aether-inject's aether-probe, the set
 # bin/build-natives.ps1 -Fixtures builds on Windows. They run inside Wine; the
 # director that serves them is native.
 #
@@ -92,20 +92,20 @@ target=x86_64-pc-windows-msvc
 # and staged under these names
 target32=i686-pc-windows-msvc
 ARTIFACTS=(
-  vfs-injector.exe
-  vfs_shim_dll.dll
-  vfs-injector32.exe
-  vfs_shim_dll32.dll
-  vfs-fixture-read.exe
-  vfs-fixture-steam.exe
-  vfs-fixture-nvapi.exe
-  vfs-fixture-registry.exe
-  vfs-fixture-writepath.exe
-  vfs-fixture-escape.exe
-  vfs-fixture-prefs.exe
+  aether-injector.exe
+  aether_shim_dll.dll
+  aether-injector32.exe
+  aether_shim_dll32.dll
+  aether-fixture-read.exe
+  aether-fixture-steam.exe
+  aether-fixture-nvapi.exe
+  aether-fixture-registry.exe
+  aether-fixture-writepath.exe
+  aether-fixture-escape.exe
+  aether-fixture-prefs.exe
   vproxy.dll
-  vfs-staticimp.exe
-  vfs-probe.exe
+  aether-staticimp.exe
+  aether-probe.exe
 )
 
 export XWIN_ACCEPT_LICENSE=1
@@ -129,17 +129,17 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
   "CFLAGS_i686-pc-windows-msvc=-Wno-error=implicit-function-declaration")
 # `${flags[@]+…}`: macOS's bash 3.2 calls an empty array unbound under `set -u`.
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
-  -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-steam \
-  -p vfs-fixture-nvapi -p vfs-fixture-registry -p vfs-fixture-writepath \
-  -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy
+  -p aether-inject -p aether-shim-dll -p aether-fixture-read -p aether-fixture-steam \
+  -p aether-fixture-nvapi -p aether-fixture-registry -p aether-fixture-writepath \
+  -p aether-fixture-escape -p aether-fixture-prefs -p aether-fixture-vproxy
 # staticimp links vproxy.dll.lib through its build.rs, with no Cargo edge to
 # the cdylib (cargo#6313): vproxy is built first, in the invocation above
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
-  -p vfs-fixture-staticimp
+  -p aether-fixture-staticimp
 
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" \
-  -p vfs-inject --bin vfs-injector
-"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" -p vfs-shim-dll
+  -p aether-inject --bin aether-injector
+"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" -p aether-shim-dll
 
 src="target/$target/$profile"
 src32="target/$target32/$profile"
@@ -151,15 +151,15 @@ dst="target/$profile"
 mkdir -p "$natives_dst" "$dst"
 for f in "${ARTIFACTS[@]}"; do
   case "$f" in
-    vfs-injector32.exe) from="$src32/vfs-injector.exe" ;;
-    vfs_shim_dll32.dll) from="$src32/vfs_shim_dll.dll" ;;
+    aether-injector32.exe) from="$src32/aether-injector.exe" ;;
+    aether_shim_dll32.dll) from="$src32/aether_shim_dll.dll" ;;
     *) from="$src/$f" ;;
   esac
   [[ -f "$from" ]] || die "the build succeeded but did not produce $from"
   cp -f "$from" "$dst/$f"
   echo "  $dst/$f"
   case "$f" in
-    vfs-injector*.exe | vfs_shim_dll*.dll)
+    aether-injector*.exe | aether_shim_dll*.dll)
       cp -f "$from" "$natives_dst/$f"
       echo "  $natives_dst/$f"
       ;;

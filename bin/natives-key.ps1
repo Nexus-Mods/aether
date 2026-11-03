@@ -7,7 +7,7 @@
 # The inputs are the files git tracks among Cargo.toml, Cargo.lock,
 # rust-toolchain.toml, vendor/, crates/ and bin/build-natives.ps1, read from
 # the working tree, except the fixtures' crates (crates/*fixture*) and the
-# test kit (crates/vfs-testkit): a change there changes no native. They are
+# test kit (crates/aether-testkit): a change there changes no native. They are
 # sorted by path (ordinal), and each is hashed as its UTF-8 path, a NUL, its
 # length in decimal, a NUL, then its bytes. So any change to an input's
 # content, a new or removed input or a rename gives another key. Whatever
@@ -27,7 +27,7 @@ $oldEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 try {
   $global:LASTEXITCODE = 0
-  $listed = & git -C $root ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml vendor crates bin/build-natives.ps1 ':(exclude,glob)crates/*fixture*/**' ':(exclude)crates/vfs-testkit'
+  $listed = & git -C $root ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml vendor crates bin/build-natives.ps1 ':(exclude,glob)crates/*fixture*/**' ':(exclude)crates/aether-testkit'
   if ($LASTEXITCODE) { throw "natives-key: git ls-files failed (exit $LASTEXITCODE)" }
 } finally {
   [Console]::OutputEncoding = $oldEncoding

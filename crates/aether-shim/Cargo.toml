@@ -1,0 +1,58 @@
+[package]
+name = "aether-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-redirect.workspace = true
+# Pure NT layouts and decisions the hooks apply.
+aether-ntlayout.workspace = true
+aether-core.workspace = true
+aether-protocol.workspace = true
+aether-ipc.workspace = true
+aether-win.workspace = true
+# Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
+aether-env.workspace = true
+aether-inject.workspace = true
+# Names of the on-disk copies backing image sections.
+aether-pe.workspace = true
+# `Lookup`, `Node` and `fold` for the registry client (`regclient.rs`).
+aether-registry.workspace = true
+retour = { version = "0.3", default-features = false }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+# `tests/fakedirector` mounts `RwMemFixture`; the seal tests name the write layer's directory
+# (`overlay_layer_dir`).
+aether-provider = { workspace = true, features = ["conformance"] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  # `tests/registry/regkeys*.rs`: scratch real keys, a restrictive DACL, the user SID.
+  "Win32_System_Registry",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Threading",
+  # `tests/registry/regnotify.rs`: ntdll calls looked up at run time.
+  "Win32_System_LibraryLoader",
+  # `tests/diagnostics/child_inject_fails_closed.rs`: the process list.
+  "Win32_System_Diagnostics_ToolHelp",
+] }
+# `tests/registry/regclient.rs`: the fake director answers the registry opcodes with the real
+# `dispatch_director` over a real `RegistryHost`.
+aether-director.workspace = true
+
+[lints]
+workspace = true

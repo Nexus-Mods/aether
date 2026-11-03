@@ -1,0 +1,30 @@
+#![deny(unsafe_code)]
+//! `aether-ipc`: a recursion-free shared-memory control ring + bulk data arena.
+//! Operates on a caller-owned segment; imports no OS file/section/process API.
+//! All `unsafe` is confined to the `seg` module (`SharedSeg`).
+
+pub mod arena;
+pub mod backing;
+pub mod concurrent;
+pub mod endpoint;
+pub mod layout;
+pub mod notifier;
+pub mod readcache;
+pub mod ring;
+pub mod seg;
+
+pub use arena::{DataArena, DEFAULT_ARENA_BYTES, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
+pub use backing::RingBacking;
+pub use concurrent::{data_limit, read_fragmented, submit_data, DataGate, Permits, ReadPlan};
+pub use endpoint::{Request, Response, RingClient, RingServer, Unanswered, CLIENT_SPIN_BUDGET};
+pub use notifier::{AdaptiveNotifier, Notifier, SpinNotifier};
+pub use readcache::{CacheConfig, CacheStats, FileDiag, FileRef, FileReport, ReadCache};
+pub use ring::{Geom, IpcError};
+pub use seg::{OwnedSeg, SharedSeg};
+
+/// How long an endpoint waits for a published request to be answered.
+///
+/// Generous on purpose: a director that has not answered in a minute is broken,
+/// not busy, and the point is only to convert a permanent hang into a reportable
+/// error. Measured round trips are 20-209 microseconds.
+pub const RESPONSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);

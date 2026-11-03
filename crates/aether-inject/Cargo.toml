@@ -1,0 +1,75 @@
+[package]
+name = "aether-inject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-env.workspace = true
+# The shim config codec (`shimcfg`), for the static-import rows.
+aether-protocol.workspace = true
+aether-core.workspace = true
+aether-pe.workspace = true
+aether-zip.workspace = true
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+  "Win32_System_SystemServices",
+  "Win32_System_Kernel",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
+  "Win32_System_Diagnostics_ToolHelp",
+  # `spawn_target_with_shim`: the launch's Job Object and its completion port.
+  "Win32_System_JobObjects",
+  "Win32_System_IO",
+  # The target's environment block, built from this process's (`env_block`).
+  "Win32_System_Environment",
+] }
+
+[dev-dependencies]
+aether-shim.workspace = true
+# NOT a dev-dependency: a cdylib cannot be `use`d, so the edge only ordered the
+# build — and `tests/common` already builds this package (plus the other PE
+# fixtures) with a nested cargo at test runtime. As a dependency it was built a
+# second time as its own artifact target, and both units wrote
+# `deps/aether_shim_dll.dll`, which is the cargo#6313 collision that made
+# `--all-targets` unusable.
+aether-zip.workspace = true
+# PE fixtures (the shim, vproxy) are built by the tests via a nested
+# `cargo build -p …` (see tests/common).
+
+[[bin]]
+name = "aether-probe"
+path = "src/bin/aether-probe.rs"
+
+[[bin]]
+name = "aether-acceptance"
+path = "src/bin/aether-acceptance.rs"
+
+[[bin]]
+name = "aether-spawn-child"
+path = "src/bin/aether-spawn-child.rs"
+
+[[bin]]
+name = "aether-fake-steam-helper"
+path = "src/bin/aether-fake-steam-helper.rs"
+
+[[bin]]
+name = "compare_map"
+path = "src/bin/compare_map.rs"
+
+
+[[bin]]
+name = "list_mods"
+path = "src/bin/list_mods.rs"
+
+[lints]
+workspace = true

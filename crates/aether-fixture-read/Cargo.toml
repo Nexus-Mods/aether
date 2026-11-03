@@ -1,0 +1,24 @@
+[package]
+name = "aether-fixture-read"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aether-fixture-read"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_LibraryLoader",
+] }
+
+[lints]
+workspace = true

@@ -1,0 +1,1405 @@
+//! Thin director FUSE client: ring + bulk arena + optional event wake.
+//!
+//! The ring comes from one of two places — see [`RingSource`]. A named section
+//! plus an event wake is the Windows deployment; a mapped *file* with no event
+//! at all is how a shim inside Wine reaches a native Linux director.
+
+// Waking the director is a Win32 SetEvent on a handle we opened; the rest of
+// the crate stays unsafe-free.
+#![allow(unsafe_code)]
+
+use std::path::Path;
+use std::sync::OnceLock;
+
+use aether_ipc::{DataGate, Geom, ReadPlan, RingClient};
+use aether_protocol::{
+    decode_getattr_resp, decode_names_resp, decode_open_resp, decode_readdir_resp,
+    decode_write_resp, encode_close_req, encode_mkdir_req, encode_names_req, encode_open_req,
+    encode_path_req, encode_rename_req, encode_setattr_req, encode_write_req, AttrResp,
+    DirEntryWire, OpenResp, SetattrReq, WriteReq, OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE,
+    OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READDIR, OP_RENAME, OP_SETATTR,
+    OP_STORED_NAMES, OP_WRITE, ST_OK,
+};
+use aether_redirect::{RootId, RootMap};
+use aether_win::SharedMapping;
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, Sleep, SwitchToThread};
+
+/// `EVENT_MODIFY_STATE` — all we need is `SetEvent`.
+const EVENT_MODIFY_STATE: u32 = 0x0002;
+
+static FUSE: OnceLock<FuseClient> = OnceLock::new();
+
+pub fn global() -> Option<&'static FuseClient> {
+    FUSE.get()
+}
+
+// `pub enum LargeStackError` and `pub fn on_large_stack` used to sit here: a
+// helper that ran ring I/O on an 8 MiB worker thread, because SkyrimSE's
+// primary thread ships with a 1 MiB PE stack and pipelined submit + bulk arena
+// copies overflowed it (`0xC0000409`). Its doc said “callers on game threads
+// must use this for open/read/getattr paths” — and it had **zero callers**,
+// workspace-wide, which made that sentence a standing instruction to use
+// machinery nobody uses.
+//
+// The stack problem is real and is solved elsewhere: `aether-inject` expands the
+// primary stack to 16 MiB before the game runs (see the note in `hook/file_open.rs` on
+// try_fuse_create), so ring ops run on the calling thread by design. The
+// helper is also not free to reintroduce casually: it would serialise every
+// op behind a thread spawn+join, and the worker would not inherit the
+// caller's `ShimIoGuard`, so its own I/O would be re-decided by our hooks.
+// Deleted rather than left standing as an instruction nothing follows.
+
+/// Why [`try_init_from_env`] did not leave a live [`FuseClient`] installed.
+///
+/// Both variants are fatal to the caller (`bootstrap.rs` aborts the launch on
+/// either). Standalone shim launches — no ring named at all, the shim
+/// composing the tree itself — used to be treated as a legitimate deployment, and plenty of this crate's own tests used to run
+/// exactly that way. That mode is retired: it is precisely the one in which a
+/// game runs completely un-virtualised while looking like a normal launch —
+/// the bypass this type exists to make impossible to ignore. The two cases
+/// are still kept distinct because their messages differ (a name for one, a
+/// connection failure reason for the other), not because either is safe to
+/// swallow.
+#[derive(Debug)]
+pub enum FuseInitError {
+    /// No ring was named — neither [`aether_env::RING_PATH`] nor
+    /// [`aether_env::RING_SECTION`] is set. The process was not launched to talk
+    /// to a director — no longer a supported deployment.
+    NotConfigured,
+    /// A ring was named but the client could not attach, or the post-connect
+    /// heartbeat failed. The caller intended virtualisation and it silently
+    /// did not happen — this must reach whoever launched the process.
+    ConnectFailed(String),
+}
+
+/// Where the ring's shared memory comes from.
+///
+/// Two spellings of one thing: a mapped `SharedSeg` the director also has. The
+/// distinction survives only as far as [`FuseClient::connect_source`], which
+/// obtains the mapping and then stops caring.
+#[derive(Debug, PartialEq, Eq)]
+enum RingSource {
+    /// A named page-file-backed section ([`aether_env::RING_SECTION`]) — the
+    /// Windows deployment, and what the shipped shim uses.
+    Section(String),
+    /// A real file ([`aether_env::RING_PATH`]), mapped by path — the only kind of
+    /// shared memory a shim inside Wine and a native Linux director can both
+    /// name. A page-file-backed section has no identity outside its own
+    /// Windows/Wine session.
+    File(String),
+}
+
+/// Pick the ring source. **The path wins when both are set**, and that
+/// ordering is a correctness requirement rather than a preference.
+///
+/// A session configured for the Wine boundary must never fall back to a named
+/// section: `VFS_RING_SECTION` may well still be set (the launcher writes ten
+/// `VFS_*` vars together), and a section of that name may even exist — from an
+/// unrelated director on the same box. Falling back would attach the shim to
+/// the *wrong* director, or to nothing, and report success either way.
+///
+/// An empty `VFS_RING_PATH` is treated as absent. Believing it would map `""`
+/// and fail with a confusing io error while a perfectly good section was
+/// named — the same trap as an empty `VFS_RING_SECTION` (see the Task 2 ruling
+/// in this increment's ledger). Neither set stays `None`, which the caller
+/// turns into [`FuseInitError::NotConfigured`] exactly as before.
+///
+/// Split from [`ring_source_from_env`] so the precedence is testable without
+/// writing to the process environment — global mutable state every other test
+/// in this binary shares.
+fn ring_source(ring_path: Option<String>, section: Option<String>) -> Option<RingSource> {
+    match ring_path.filter(|p| !p.is_empty()) {
+        Some(path) => Some(RingSource::File(path)),
+        None => section.map(RingSource::Section),
+    }
+}
+
+fn ring_source_from_env() -> Option<RingSource> {
+    ring_source(
+        aether_env::text(aether_env::RING_PATH),
+        aether_env::text(aether_env::RING_SECTION),
+    )
+}
+
+pub fn try_init_from_env() -> Result<(), FuseInitError> {
+    if FUSE.get().is_some() {
+        return Ok(());
+    }
+    // Test-only escape hatch (see the constant's doc comment in `aether-env`): lets
+    // the launch-abort path be exercised without standing up a director that is
+    // actually broken.
+    if aether_env::opt_in(aether_env::TEST_FUSE_INIT_FAIL) {
+        return Err(FuseInitError::ConnectFailed(format!(
+            "forced failure via {}",
+            aether_env::TEST_FUSE_INIT_FAIL
+        )));
+    }
+    let source = ring_source_from_env().ok_or(FuseInitError::NotConfigured)?;
+    let ring_bytes: usize = aether_env::text(aether_env::RING_BYTES)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2 * 1024 * 1024);
+    let payload_cap: u32 = aether_env::text(aether_env::RING_PAYLOAD_CAP)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_048_576);
+    let arena_len: usize = aether_env::text(aether_env::ARENA_LEN)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    // Required, not defaulted: this names *which tree is being virtualised*, and
+    // there is no sensible guess. The default it used to carry pointed at a
+    // layout that no longer exists, so an unset root connected the client to a
+    // path nothing matched — surfacing much later as content simply missing.
+    //
+    // Reachable only once `source` above is `Some` — i.e. a director launch
+    // was intended — so this is a `ConnectFailed`, not `NotConfigured`.
+    let root = aether_env::text(aether_env::VIRTUAL_DIR).ok_or_else(|| {
+        FuseInitError::ConnectFailed(
+            "VFS_VIRTUAL_DIR unset: the managed root has no default".to_string(),
+        )
+    })?;
+    let roots = roots_from_env(&root);
+    let client = FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
+        .map_err(FuseInitError::ConnectFailed)?;
+    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
+    let _ = FUSE.set(client);
+    Ok(())
+}
+
+/// Concurrent bulk READs in flight (each uses its own arena bank via slot id).
+/// Keep modest: deep pipelines + large banks correlated with early 0xC0000409
+/// under the sealed director path (working director-only used depth 4 / 1 MiB).
+///
+/// That is per call. Calls on other threads have pipelines of their own, and
+/// what bounds them all together is [`FuseClient::gate`].
+const PIPELINE_DEPTH: usize = 4;
+/// Prefer shared-section bulk over inline ring payload above this size.
+const BULK_THRESHOLD: u32 = 64 * 1024;
+/// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
+const PIPELINE_DEPTH_STREAM: usize = 8;
+/// How long a remembered spelling is used without asking again.
+const NAME_TTL_MS: u64 = 2_000;
+/// How many spellings are remembered.
+const NAME_CACHE_ENTRIES: usize = 8_192;
+/// A read at least this long gets [`PIPELINE_DEPTH_STREAM`].
+const STREAM_BYTES: usize = 4 * 1024 * 1024;
+/// How long a wait for a response may yield the processor before it sleeps.
+///
+/// A read served from the local store is back within this (its 1 MiB chunks
+/// take 1-15 ms), so it never pays a sleep's overshoot. What is still
+/// unanswered after it is waiting on the network, where a millisecond more is
+/// nothing and a core spun for 300 ms is not.
+const IDLE_YIELD: core::time::Duration = core::time::Duration::from_millis(20);
+
+/// Wakes the director on submit, then spins for the response.
+///
+/// The client used to be a plain `SpinNotifier`, whose `notify_server` is a
+/// no-op — so `server_ev` was never signalled and a director that had gone to
+/// sleep only noticed the request when its timed wait expired at the 15.6 ms
+/// timer tick. Measured 2026-08-12: 16 of 231 `NtQueryFullAttributesFile` calls
+/// stalled that way and owned ~93% of that hook's total time, with a 15.2 ms
+/// worst case.
+///
+/// Spinning for the *response* stays right: it arrives in microseconds, far
+/// below the cost of sleeping for it. Only a response that has **not** come
+/// within `aether_ipc::CLIENT_SPIN_BUDGET` stops spinning (`idle_client` below):
+/// by then the request is waiting on its provider, and since `ring_lock` went
+/// there can be one such waiter per game thread rather than one per process.
+///
+/// **A null `server_ev` makes both notifications no-ops**, and that is the
+/// whole of [`RingSource::File`] mode. Under Wine a `SetEvent` targets a *Wine*
+/// event object, which cannot wake a native Linux process — so there is nothing
+/// to signal and the syscall would only cost. The Linux director compensates by
+/// **spinning** rather than sleeping (`IpcServe::start_file_backed` gives every
+/// worker a `SpinNotifier`). Do not "fix" the CPU burn by putting that director
+/// back to sleep: nothing could wake it, which reintroduces exactly the
+/// 15.6 ms timer-tick stall measured above.
+struct WakeServerSpinClient {
+    server_ev: HANDLE,
+}
+
+impl aether_ipc::Notifier for WakeServerSpinClient {
+    fn notify_server(&self) {
+        // Null in file-backed mode, by construction in `connect_source` — see
+        // this type's doc for why signalling there would be a lie.
+        if !self.server_ev.is_null() {
+            // SAFETY: handle owned by FuseClient for its lifetime; SetEvent is
+            // safe on an auto-reset event from any thread.
+            unsafe {
+                let _ = SetEvent(self.server_ev);
+            }
+        }
+    }
+    fn wait_client(&self, _slot: u32) {
+        core::hint::spin_loop();
+    }
+    /// Off the hot path: give the processor to whatever else the game wants
+    /// to run, first by yielding and, for a wait long enough to be a network
+    /// fetch, by sleeping a millisecond at a time.
+    ///
+    /// Both are in-process under Wine — `NtYieldExecution` is `sched_yield`
+    /// and a non-alertable `NtDelayExecution` is a host sleep; neither asks
+    /// wineserver — and neither is a call this shim hooks. `Sleep` directly,
+    /// not `std::thread::sleep`: std builds a high-resolution waitable timer
+    /// for it, which is four handle operations (one of them the hooked
+    /// `NtClose`) to wait a millisecond.
+    fn idle_client(&self, _slot: u32, waited: core::time::Duration) {
+        // SAFETY: both take no pointers and may be called from any thread.
+        unsafe {
+            if waited < IDLE_YIELD {
+                SwitchToThread();
+            } else {
+                Sleep(1);
+            }
+        }
+    }
+    fn notify_slot_free(&self) {
+        // A full ring can leave the director blocked; wake it on release too.
+        // Null (file-backed) means there is nothing wakeable on the other side.
+        if !self.server_ev.is_null() {
+            unsafe {
+                let _ = SetEvent(self.server_ev);
+            }
+        }
+    }
+}
+
+pub struct FuseClient {
+    mapping: SharedMapping,
+    geom: Geom,
+    payload_cap: u32,
+    /// Every managed root this session virtualizes, plus the staged-launch
+    /// directory as an alias for root 0 — and the *only* under-root predicate
+    /// the shim has.
+    ///
+    /// **This used to be a pair of lowercased strings** (`root_lower` plus an
+    /// optional `stage_root_lower`) tested with `strip_prefix`. That was the
+    /// second of two under-root predicates in this tree, and it disagreed with
+    /// the first: `RootMap` canonicalises (device paths, volume GUIDs,
+    /// `GLOBALROOT`, UNC admin shares, junction aliases, 8.3 short names) and
+    /// the string test did none of it, so five alternate spellings of an
+    /// in-root path were classified by `RootMap::decide` but never *routed* by
+    /// this client — and a name-based attribute query on one of them reached
+    /// real disk. Stage 2b task 5 replaced the strings with the real thing, so
+    /// there is now one predicate rather than two that can drift.
+    roots: RootMap,
+    /// Every root's path as it was declared, aliases included, root first:
+    /// the spelling a handle under that root is finally named with
+    /// ([`FuseClient::final_path`]). `roots` keeps the same paths folded,
+    /// for matching; this keeps them as written, for answering.
+    declared: Vec<(RootId, String)>,
+    /// How directories and files this process asked about are spelled, so a
+    /// name query for something under a directory already asked about costs
+    /// one round trip for the last component, and a repeated one none.
+    ///
+    /// Entries are dropped when this process creates, renames or deletes at
+    /// or above them ([`FuseClient::names_changed`]), and are not used past
+    /// [`NAME_TTL_MS`], which bounds what a change made by anyone else — the
+    /// host, another process on the same session — can cost: a stale
+    /// spelling for that long.
+    names: std::sync::Mutex<aether_core::finalname::NameCache>,
+    /// What the cache's clock counts from.
+    started: std::time::Instant,
+    arena_len: usize,
+    /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
+    /// the ring still works, just with the old timer-tick latency — and null
+    /// *by design* for a [`RingSource::File`] ring, where the director is a
+    /// native Linux process no Wine event can reach.
+    server_ev: HANDLE,
+    /// Bounds the reads and writes this process has in flight below the
+    /// director's worker count, so that a worker is always left for an open,
+    /// a stat or a listing — see `aether_ipc::concurrent`.
+    ///
+    /// **There is no lock around a round trip.** There used to be
+    /// (`ring_lock`, held from claim to release by every method here), on the
+    /// belief that the ring was not safe for concurrent clients. It is: a slot
+    /// is claimed by compare-and-swap, its response is awaited on that slot
+    /// alone, and each slot has its own arena bank. What the lock actually did
+    /// was make every file operation of every game thread wait behind
+    /// whichever one was in flight — so one read stalled on the network froze
+    /// all the game's file I/O, and the director's workers sat idle. Each
+    /// thread now has its own requests in flight; only data requests (reads,
+    /// writes, truncates and write-opens) are counted, and only against this
+    /// gate.
+    gate: DataGate,
+    /// How long a request waits for its answer before giving up:
+    /// [`aether_ipc::RESPONSE_DEADLINE`] unless [`FuseClient::with_deadline`] said otherwise.
+    deadline: core::time::Duration,
+}
+
+// SAFETY: `server_ev` is only ever passed to SetEvent, which is thread-safe.
+unsafe impl Send for FuseClient {}
+unsafe impl Sync for FuseClient {}
+
+impl FuseClient {
+    /// `roots` is `(id, path)` for every managed root, root 0 first. The
+    /// staged-launch directory (if any) is appended here as a second spelling
+    /// of root 0 — see [`FuseClient::vpath_under_root`].
+    pub fn connect(
+        section: &str,
+        roots: &[(RootId, String)],
+        payload_cap: u32,
+        ring_bytes: usize,
+        arena_len: usize,
+    ) -> Result<Self, String> {
+        Self::connect_source(
+            &RingSource::Section(section.to_string()),
+            roots,
+            payload_cap,
+            ring_bytes,
+            arena_len,
+        )
+    }
+
+    /// [`Self::connect`] over either ring source. One code path: the two
+    /// sources differ in how the shared memory is obtained and in whether
+    /// there is a director event worth opening, and in nothing else.
+    fn connect_source(
+        source: &RingSource,
+        roots: &[(RootId, String)],
+        payload_cap: u32,
+        ring_bytes: usize,
+        arena_len: usize,
+    ) -> Result<Self, String> {
+        let (mapping, server_ev) = match source {
+            RingSource::Section(section) => {
+                let mapping = SharedMapping::open(section, ring_bytes)
+                    .map_err(|e| format!("open section {section}: {e}"))?;
+                // Opening the director's wake event is best-effort: without it
+                // the ring still works, it just falls back to the director's
+                // timed wait.
+                let ev = aether_env::text(aether_env::SERVER_EV)
+                    .map(|n| {
+                        let w: Vec<u16> = n.encode_utf16().chain(core::iter::once(0)).collect();
+                        // SAFETY: name is NUL-terminated; a failed open returns null.
+                        unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, w.as_ptr()) }
+                    })
+                    .unwrap_or(core::ptr::null_mut());
+                (mapping, ev)
+            }
+            RingSource::File(path) => {
+                let mapping = SharedMapping::open_file_backed(Path::new(path), ring_bytes)
+                    .map_err(|e| format!("open ring file {path}: {e}"))?;
+                // **No event, deliberately** — not a fallback and not a
+                // best-effort miss. This mode exists because the director is a
+                // native Linux process, and a Wine event object cannot wake
+                // one; `VFS_SERVER_EV` is therefore not even consulted, so a
+                // stale value from an earlier Windows launch cannot resurrect
+                // a handle that signals into the void. Null here is what makes
+                // `WakeServerSpinClient`'s two notifications no-ops — see its
+                // doc for the 15.6 ms stall this trades against, and why the
+                // answer is a spinning director rather than a sleeping one.
+                (mapping, core::ptr::null_mut())
+            }
+        };
+        let geom =
+            aether_ipc::ring::open(mapping.seg()).map_err(|e| format!("ring open: {e:?}"))?;
+        // Sized from the worker count the director published in the ring
+        // header (a ring that names none is taken to have the default four).
+        let gate = DataGate::for_ring(mapping.seg(), &geom);
+
+        // The staged launch directory is a second spelling of root 0, not a
+        // root of its own: a staged game resolves `Data\` relative to its own
+        // executable, so those opens must reach the same provider as the
+        // managed-root spelling. Expressed as an alias entry rather than as a
+        // separate prefix test, which is what it used to be.
+        let mut decls: Vec<(RootId, String)> = roots.to_vec();
+        if let Some(stage) = stage_root_from_env() {
+            decls.push((RootId::DEFAULT, stage));
+        }
+        if decls.is_empty() {
+            return Err("no managed root declared for the FUSE client".to_string());
+        }
+        // Resolved once, from the live OS, before any hook is installed
+        // (`bootstrap` calls `try_init_from_env` ahead of `install`), so the
+        // junction scan's own `CreateFileW` calls cannot re-enter this path.
+        // Scoped to *every* declared root, not just root 0 — see
+        // `resolve_volume_map_for`.
+        // Each root's backing directory, where the program was really started
+        // (`aether_env::ROOT_BACKINGS`), routes like the root but is never the
+        // name a handle is given: a final path names the root's location,
+        // which is all the program is meant to know. So these join the
+        // matching table only, not `declared`.
+        let mut routing = decls.clone();
+        routing.extend(backings_from_env());
+        let scan: Vec<&str> = routing.iter().map(|(_, p)| p.as_str()).collect();
+        let volumes = aether_redirect::resolve_volume_map_for(&scan);
+        let refs: Vec<(RootId, &str)> = routing.iter().map(|(id, p)| (*id, p.as_str())).collect();
+        let roots = RootMap::with_roots(&refs, volumes)
+            .map_err(|e| format!("managed root is not a usable path: {e:?}"))?;
+
+        Ok(FuseClient {
+            mapping,
+            geom,
+            payload_cap,
+            roots,
+            declared: decls,
+            names: std::sync::Mutex::new(aether_core::finalname::NameCache::new(
+                NAME_TTL_MS,
+                NAME_CACHE_ENTRIES,
+            )),
+            started: std::time::Instant::now(),
+            arena_len,
+            server_ev,
+            gate,
+            deadline: aether_ipc::RESPONSE_DEADLINE,
+        })
+    }
+
+    /// This client, giving up on an unanswered request after `deadline` instead of
+    /// [`aether_ipc::RESPONSE_DEADLINE`]. For a test that needs a director that never answers to
+    /// fail in less than a minute.
+    pub fn with_deadline(mut self, deadline: core::time::Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    /// Test-only constructor for the predicate alone: no ring, no OS volume
+    /// scan. `connect` needs a live shared section, which a unit test has no
+    /// business standing up just to ask whether a path is under a root.
+    #[cfg(test)]
+    fn roots_only(decls: &[(RootId, &str)]) -> RootMap {
+        RootMap::with_roots(decls, aether_redirect::VolumeMap::empty()).unwrap()
+    }
+
+    fn client(&self) -> RingClient<'_, WakeServerSpinClient> {
+        RingClient::with_geom(
+            self.mapping.seg(),
+            self.geom,
+            WakeServerSpinClient {
+                server_ev: self.server_ev,
+            },
+        )
+        .with_deadline(self.deadline)
+    }
+
+    /// The largest request (and reply) payload the ring carries, from its header.
+    pub fn payload_cap(&self) -> u32 {
+        self.geom.payload_cap
+    }
+
+    /// The registry generation the director last published in the ring header (0 if none):
+    /// what [`crate::regclient`] checks a cached answer against.
+    pub fn reg_generation(&self) -> u64 {
+        aether_ipc::ring::reg_generation(self.mapping.seg())
+    }
+
+    /// One registry request (opcodes 15-22): the reply payload, or the director's status. A
+    /// request that could not be sent or was never answered is `ST_IO_ERROR`.
+    pub fn reg_request(&self, opcode: u32, payload: &[u8]) -> Result<Vec<u8>, i32> {
+        let r = self
+            .client()
+            .submit(opcode, 0, payload)
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(r.payload)
+    }
+
+    pub fn heartbeat(&self) -> Result<(), String> {
+        let c = self.client();
+        let r = c
+            .submit(OP_HEARTBEAT, 0, &[])
+            .map_err(|e| format!("HEARTBEAT: {e:?}"))?;
+        if r.status != ST_OK {
+            return Err(format!("HEARTBEAT status {}", r.status));
+        }
+        Ok(())
+    }
+
+    pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_GETATTR, 0, &encode_path_req(root.0, vpath))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        decode_getattr_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    }
+
+    pub fn readdir(&self, root: RootId, vpath: &str) -> Result<Vec<DirEntryWire>, i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_READDIR, 0, &encode_path_req(root.0, vpath))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        decode_readdir_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    }
+
+    pub fn open(&self, root: RootId, vpath: &str) -> Result<OpenResp, i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_OPEN, 0, &encode_open_req(root.0, OPEN_READ, vpath))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        decode_open_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    }
+
+    /// Open a virtual path for WRITE. `create_flags` carries the
+    /// `OPEN_CREATE`/`OPEN_EXCL`/`OPEN_TRUNC` bits derived from the caller's NT
+    /// create-disposition (see `hook::open_create_flags`) — folded in here
+    /// rather than hardcoding `OPEN_WRITE` alone, which is what used to make
+    /// every brand-new file report `ST_NOT_FOUND` regardless of disposition.
+    pub fn open_write(
+        &self,
+        root: RootId,
+        vpath: &str,
+        create_flags: u32,
+    ) -> Result<OpenResp, i32> {
+        // Counted against the gate, unlike a read-open: opening a base file
+        // for writing copies the whole of it up inside this one request, and
+        // on content that is not cached yet that is a download holding a
+        // worker.
+        let c = self.client();
+        let r = aether_ipc::submit_data(
+            &c,
+            &self.gate,
+            OP_OPEN,
+            0,
+            &encode_open_req(root.0, OPEN_WRITE | create_flags, vpath),
+        )
+        .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        decode_open_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    }
+
+    /// Write `data` at `offset` to a virtual write handle. Chunks to fit the ring
+    /// payload (inline; bulk-arena writes are a later step).
+    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let chunk = (self.payload_cap as usize).saturating_sub(24).max(1);
+        let c = self.client();
+        let mut written = 0usize;
+        while written < data.len() {
+            let end = (written + chunk).min(data.len());
+            let piece = &data[written..end];
+            // A data request like a read: counted against the gate, one chunk
+            // at a time, so a long write does not sit on a permit between
+            // chunks.
+            let r = aether_ipc::submit_data(
+                &c,
+                &self.gate,
+                OP_WRITE,
+                0,
+                &encode_write_req(
+                    &WriteReq {
+                        fh,
+                        offset: offset + written as u64,
+                        len: piece.len() as u32,
+                    },
+                    piece,
+                ),
+            )
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+            if r.status != ST_OK {
+                return Err(r.status);
+            }
+            let n = decode_write_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)? as usize;
+            written += n;
+            if n < piece.len() {
+                break;
+            }
+        }
+        Ok(written)
+    }
+
+    /// Bytes per bulk READ = one arena bank (shared section, not ring payload).
+    fn bulk_bank_bytes(&self) -> usize {
+        if self.arena_len == 0 {
+            return self.payload_cap.saturating_sub(8) as usize;
+        }
+        let slots = self.geom.slot_count.max(1) as usize;
+        // Cap at 1 MiB per RTT — full bank (4–16 MiB) was used during the
+        // 0xC0000409 regression window; large copies + deep pipelines on the
+        // game thread (or long join windows) are not worth the risk yet.
+        (self.arena_len / slots).clamp(256 * 1024, 1024 * 1024)
+    }
+
+    /// Read into `buf` (game NtReadFile buffer or CreateSection destination).
+    ///
+    /// Large fragments use the **shared bulk arena** (control ring only carries
+    /// length+offset); small use inline ring payload. Data never rides as a
+    /// multi-MiB ring blob.
+    ///
+    /// The chunking, the pipeline and the arena copy are
+    /// `aether_ipc::read_fragmented` — there rather than here so the code a game
+    /// thread runs is the code the native tests and `ring-bench` run. This
+    /// only says how this ring is to be cut up.
+    pub fn read_fragmented(&self, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        let plan = ReadPlan {
+            // Prefer the arena from `BULK_THRESHOLD` up; a ring with no arena
+            // has nothing to prefer.
+            bulk_threshold: if self.arena_len > 0 {
+                BULK_THRESHOLD as usize
+            } else {
+                usize::MAX
+            },
+            bulk_chunk: self.bulk_bank_bytes(),
+            inline_chunk: self.payload_cap.saturating_sub(8) as usize,
+            depth: PIPELINE_DEPTH,
+            depth_stream: PIPELINE_DEPTH_STREAM,
+            stream_bytes: STREAM_BYTES,
+        };
+        aether_ipc::read_fragmented(&self.client(), &self.gate, &plan, fh, offset, buf)
+    }
+
+    /// Serve a small read of `fh` from the read cache (`crate::read_cache`),
+    /// fetching a block it lacks with [`Self::read_fragmented`] — so a block
+    /// fetch is an ordinary bulk read: the same gate, deadline and slot
+    /// rules. `None` when the cache does not serve it (off, too large, not
+    /// cacheable, changed, no room, a failed fetch); the caller then reads
+    /// uncached.
+    pub fn read_cached(
+        &self,
+        cache: &aether_ipc::FileRef,
+        fh: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        crate::read_cache::get()?.read(cache, offset, buf, |at, block| {
+            self.read_fragmented(fh, at, block)
+        })
+    }
+
+    /// Delete (whiteout) a virtual path via the director overlay (`OP_DELETE`).
+    pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_DELETE, 0, &encode_path_req(root.0, vpath))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Rename a virtual path to another virtual path (`OP_RENAME`).
+    ///
+    /// One root for both sides: the director resolves `from` and `to` against
+    /// the same root, and a caller whose two paths land under *different*
+    /// roots must not route the rename here at all — see `hook/file_mutate.rs`'s
+    /// rename/delete arm, which declines rather than guessing.
+    pub fn rename(&self, root: RootId, from: &str, to: &str) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_RENAME, 0, &encode_rename_req(root.0, from, to))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Rename `from` under `from_root` to `to` under `to_root`, two different
+    /// roots (`OP_RENAME_X`): the director copies a file across and removes
+    /// it at the source. `Err(ST_CROSS_ROOT)` for a directory.
+    pub fn rename_across(
+        &self,
+        from_root: RootId,
+        from: &str,
+        to_root: RootId,
+        to: &str,
+    ) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(
+                aether_protocol::OP_RENAME_X,
+                0,
+                &aether_protocol::encode_rename_x_req(from_root.0, from, to_root.0, to),
+            )
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Stage the program at `vpath` under `root` onto real disk so a child
+    /// can be started from it (`OP_STAGE_EXEC`): the real path to start it by.
+    pub fn stage_exec(&self, root: RootId, vpath: &str) -> Result<String, i32> {
+        let c = self.client();
+        let r = c
+            .submit(
+                aether_protocol::OP_STAGE_EXEC,
+                0,
+                &aether_protocol::encode_path_req(root.0, vpath),
+            )
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        String::from_utf8(r.payload).map_err(|_| aether_protocol::ST_IO_ERROR)
+    }
+
+    /// Create a virtual directory via the director overlay (`OP_MKDIR`).
+    pub fn mkdir(&self, root: RootId, vpath: &str, mode: u32) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_MKDIR, 0, &encode_mkdir_req(root.0, mode, vpath))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Truncate/extend a virtual write handle to `size` bytes (`OP_SETATTR`).
+    pub fn truncate(&self, fh: u64, size: u64) -> Result<(), i32> {
+        // A data request: it rewrites the file's blocks.
+        let c = self.client();
+        let r = aether_ipc::submit_data(
+            &c,
+            &self.gate,
+            OP_SETATTR,
+            0,
+            &encode_setattr_req(&SetattrReq { fh, size }),
+        )
+        .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    pub fn close(&self, fh: u64) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_CLOSE, 0, &encode_close_req(fh))
+            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// The final DOS path of something under a managed root that was opened
+    /// as `nt_path`: the root as it was declared, then each component as it
+    /// is stored — see `aether_core::finalname`. `None` for a path under no
+    /// root.
+    ///
+    /// This is what `GetFinalPathNameByHandleW` must answer for a virtual
+    /// handle, file or directory alike, so that `canonical(dir)` is a prefix
+    /// of `canonical(dir/file)` whatever case either was opened in.
+    ///
+    /// The spellings come from the director's one-name lookup
+    /// (`OP_STORED_NAMES`): at most one round trip per query, asking only
+    /// about the components this client does not already know, and none at
+    /// all when it knows them all ([`Self::names`]). No directory is listed
+    /// on this side of the ring. If the director cannot be asked, the
+    /// caller's own spelling stands.
+    pub fn final_path(&self, nt_path: &str) -> Option<String> {
+        let (path, stream) = aether_redirect::split_stream_suffix(nt_path);
+        let (root, under) = self.roots.resolve(path)?;
+        let spellings: Vec<&str> = self
+            .declared
+            .iter()
+            .filter(|(id, _)| *id == root)
+            .map(|(_, p)| p.as_str())
+            .collect();
+        let stored = self.stored_names(root, &under);
+        let mut name = aether_core::finalname::final_dos_path(path, &under, &spellings, |i| {
+            stored.get(i).cloned()
+        });
+        // A named stream is part of what was opened, not of where the file
+        // lives; it is carried through as the caller spelled it.
+        if let Some(stream) = stream {
+            name.push_str(stream);
+        }
+        Some(name)
+    }
+
+    /// How each component of `under` is spelled where it is stored: from
+    /// what this client remembers, and for the rest from the director. Fewer
+    /// names than components (none, even) if the director could not say.
+    fn stored_names(&self, root: RootId, under: &[String]) -> Vec<String> {
+        crate::hookstats::note_name_query();
+        let now = self.started.elapsed().as_millis() as u64;
+        let mut known = match self.names.lock() {
+            Ok(names) => names.leading(root.0, under, now),
+            Err(_) => Vec::new(),
+        };
+        if known.len() == under.len() {
+            crate::hookstats::note_name_query_cached();
+            return known;
+        }
+        crate::hookstats::note_name_lookup();
+        let asked = self
+            .client()
+            .submit(
+                OP_STORED_NAMES,
+                0,
+                &encode_names_req(root.0, known.len() as u32, &under.join("/")),
+            )
+            .ok()
+            .filter(|r| r.status == ST_OK)
+            .and_then(|r| decode_names_resp(&r.payload));
+        let Some(rest) = asked else {
+            return known;
+        };
+        // One name per component asked about, or the reply is not an answer
+        // to this question (an older director, say) and nothing is learned.
+        if rest.len() != under.len() - known.len() {
+            return known;
+        }
+        if let Ok(mut names) = self.names.lock() {
+            names.remember(root.0, under, known.len(), &rest, now);
+        }
+        known.extend(rest);
+        known
+    }
+
+    /// Something this process did may have changed how `vpath` (folded,
+    /// under `root`) or anything beneath it is spelled — a create, a rename,
+    /// a delete. What was remembered about it is dropped.
+    pub fn names_changed(&self, root: RootId, vpath: &str) {
+        if let Ok(mut names) = self.names.lock() {
+            names.forget(root.0, vpath);
+        }
+    }
+
+    /// [`Self::vpath_under_root`] with the part under the root **as the
+    /// caller spelled it**, not folded: what a request that *creates* a name
+    /// sends, so that the name is stored as it was created — a save file, a
+    /// log, a directory — and a listing gives it back that way, as NTFS
+    /// does. Every other request sends the folded path.
+    ///
+    /// The providers resolve either spelling to the same entry (the provider
+    /// contract's case rule), so this changes what a new name is called and
+    /// nothing about what an existing one resolves to. A path whose spelling
+    /// cannot be read off it (a short name under the root) is sent folded,
+    /// as before.
+    pub fn vpath_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
+        let (root, folded) = self.vpath_under_root(path)?;
+        let (plain, stream) = aether_redirect::split_stream_suffix(path);
+        if stream.is_some() {
+            return Some((root, folded));
+        }
+        let (_, under) = self.roots.resolve(plain)?;
+        match aether_core::finalname::opened_tail(plain, &under) {
+            Some(tail) => Some((root, tail.join("/"))),
+            None => Some((root, folded)),
+        }
+    }
+
+    /// [`vpath_under_root`](Self::vpath_under_root) as the wire spells it: the root itself is
+    /// `"."`, not the empty string.
+    pub fn route(&self, path: &str) -> Option<(RootId, String)> {
+        self.vpath_under_root(path)
+            .map(|(root, vpath)| (root, wire_vpath(vpath)))
+    }
+
+    /// [`vpath_as_spelled`](Self::vpath_as_spelled) with the root as `"."`, like [`route`](Self::route).
+    pub fn route_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
+        self.vpath_as_spelled(path)
+            .map(|(root, vpath)| (root, wire_vpath(vpath)))
+    }
+
+    /// Map an absolute path into the virtual namespace: **which root** it
+    /// belongs to, and its path relative to that root.
+    ///
+    /// Several roots resolve, not one, and the staged launch directory is one
+    /// more spelling of root 0. The game is launched from a staged directory
+    /// holding only its PE closure, and it resolves `Data\` relative to **its
+    /// own executable**, not the working directory — measured 2026-08-12, a
+    /// new game asked for `…\vfs-stage-21728\data\ccasvsse001-almsivi.esm` and
+    /// friends. With only the virtual root mapped those fell through to a
+    /// directory containing six files, so the plugin set came back empty and
+    /// world load never completed while the main menu, which resolves through
+    /// the root, worked fine. It also fixes tools that resolve beside the
+    /// executable — SKSE looks for `Data\SKSE\Plugins\` there.
+    ///
+    /// This is now `RootMap`'s canonicalising answer rather than a lowercased
+    /// `strip_prefix`, so a device-path, volume-GUID, `GLOBALROOT`, UNC
+    /// admin-share, junction-alias or 8.3 short-name spelling of an in-root
+    /// path routes here exactly as `RootMap::decide` already classified it.
+    /// See the `roots` field for what that asymmetry cost.
+    /// An alternate-data-stream suffix (`f.esp:s`) is carried through into the
+    /// vpath, because `canonicalise` — correctly, for its own purpose —
+    /// discards it: `f.esp:s` and `f.esp` are spellings of the same *file*,
+    /// which is what a canonicaliser unifying spellings should say. But a
+    /// request for a named stream is not a request for the file's default
+    /// stream, and resolving one to the other would answer `f.esp:s` with
+    /// `f.esp`'s bytes. The string predicate this replaced kept the suffix by
+    /// accident (it never parsed the path at all); keeping it deliberately
+    /// preserves that behaviour, so a stream nothing serves still comes back
+    /// not-found. Verified by `aether-fixture-escape`'s vector 11, which flipped
+    /// to `opened` the moment the suffix was dropped.
+    pub fn vpath_under_root(&self, path: &str) -> Option<(RootId, String)> {
+        let (_, stream) = aether_redirect::split_stream_suffix(path);
+        let (root, comps) = self.roots.resolve(path)?;
+        let mut vpath = comps.join("/");
+        if let Some(stream) = stream {
+            // `aether_core::fold`, matching the components `RootMap` already
+            // folded: one string on the wire, one fold. Behaviourally
+            // identical for the ASCII stream names anything real uses, but a
+            // second fold spelled differently inside the very function that
+            // builds the wire vpath is how the ring's two sides drifted apart
+            // in the first place.
+            vpath.push_str(&aether_core::fold(stream));
+        }
+        Some((root, vpath))
+    }
+}
+
+/// A directory open of the root itself has an empty remainder; on the wire that is `"."`.
+fn wire_vpath(vpath: String) -> String {
+    if vpath.is_empty() {
+        ".".to_string()
+    } else {
+        vpath
+    }
+}
+
+/// Parse [`aether_env::VIRTUAL_ROOTS`] (`id=path;id=path…`) on top of
+/// [`aether_env::VIRTUAL_DIR`] (root 0).
+///
+/// Root 0 is seeded from `VIRTUAL_DIR` first so a session that declares no
+/// extra roots — every session before stage 2b — is byte-for-byte the old
+/// single-root case. An entry whose id will not parse is skipped rather than
+/// failing the launch; an entry naming id 0 replaces `VIRTUAL_DIR`'s path,
+/// because a caller that spelled root 0 explicitly meant it.
+pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
+    merge_extra_roots(
+        virtual_dir,
+        aether_env::text(aether_env::VIRTUAL_ROOTS).as_deref(),
+    )
+}
+
+/// The parsing half of [`roots_from_env`], split out so it can be tested
+/// without writing to the process environment — which is global mutable state
+/// every other test in this binary shares.
+fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
+    let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];
+    let Some(extra) = spec else {
+        return out;
+    };
+    for entry in extra.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((id, path)) = entry.split_once('=') else {
+            continue;
+        };
+        let (Ok(id), path) = (id.trim().parse::<u32>(), path.trim()) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        match out.iter_mut().find(|(r, _)| r.0 == id) {
+            Some(slot) => slot.1 = path.to_string(),
+            None => out.push((RootId(id), path.to_string())),
+        }
+    }
+    out
+}
+
+/// Each root's backing directory where it differs from the root's location
+/// ([`aether_env::ROOT_BACKINGS`]): `id=path;id=path`, malformed entries skipped.
+pub(crate) fn backings_from_env() -> Vec<(RootId, String)> {
+    parse_backings(aether_env::text(aether_env::ROOT_BACKINGS).as_deref())
+}
+
+/// The parsing half of [`backings_from_env`].
+fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
+    spec.unwrap_or_default()
+        .split(';')
+        .filter_map(|entry| {
+            let (id, path) = entry.trim().split_once('=')?;
+            let id = id.trim().parse::<u32>().ok()?;
+            let path = path.trim();
+            (!path.is_empty()).then(|| (RootId(id), normalize_path_for_root(path)))
+        })
+        .collect()
+}
+
+/// Directory holding the staged launch image, derived from [`aether_env::LAUNCH_IMAGE`].
+///
+/// The staged EXE and its imports live there physically; everything else the
+/// game asks for beside it must come from the VFS.
+///
+/// This read used the pre-rename name until 2026-08-13, so the alias silently
+/// resolved to nothing after the hollow removal renamed the writer. It did not
+/// bite because the same change moved the child's cwd to the managed root — but
+/// nothing reported it, which is why the name now comes from `aether-env`.
+fn stage_root_from_env() -> Option<String> {
+    let host = aether_env::text(aether_env::LAUNCH_IMAGE)?;
+    let dir = std::path::Path::new(&host).parent()?;
+    let s = dir.to_string_lossy();
+    if s.is_empty() {
+        return None;
+    }
+    Some(normalize_path_for_root(&s))
+}
+
+pub fn strip_nt_device(p: &str) -> &str {
+    p.strip_prefix(r"\??\")
+        .or_else(|| p.strip_prefix(r"\\?\"))
+        .unwrap_or(p)
+}
+
+pub fn normalize_path_for_root(p: &str) -> String {
+    strip_nt_device(p).replace('/', "\\").to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// The unified predicate, exercised the way `FuseClient::vpath_under_root`
+    /// exercises it (`RootMap::resolve` then join), without needing a live
+    /// ring. `vpath_under_root_norm` — the lowercased `strip_prefix` this
+    /// replaced — is gone; these are its cases, re-asserted against the
+    /// canonicalising predicate so nothing it used to answer regressed.
+    fn resolve(map: &RootMap, path: &str) -> Option<(RootId, String)> {
+        let (_, stream) = aether_redirect::split_stream_suffix(path);
+        map.resolve(path).map(|(r, c)| {
+            let mut v = c.join("/");
+            if let Some(s) = stream {
+                v.push_str(&aether_core::fold(s));
+            }
+            (r, v)
+        })
+    }
+
+    /// A named alternate data stream must not resolve to the file's default
+    /// stream. `canonicalise` discards the suffix — right for unifying
+    /// spellings of a file, wrong for building the vpath the director is
+    /// asked about — so the client re-attaches it. Without this,
+    /// `aether-fixture-escape`'s vector 11 (read-only `OPEN_EXISTING` on a
+    /// stream nothing pre-creates) opens and gets the base file's bytes
+    /// instead of not-found.
+    #[test]
+    fn an_alternate_data_stream_keeps_its_suffix_in_the_vpath() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\Games\Skyrim")]);
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim\Data\a.esp:probe"),
+            Some((RootId::DEFAULT, "data/a.esp:probe".to_string()))
+        );
+        // The drive's own colon is not a stream separator.
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim\Data\a.esp"),
+            Some((RootId::DEFAULT, "data/a.esp".to_string()))
+        );
+    }
+
+    #[test]
+    fn vpath_under_root_nt_device() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\GameLayers\runtime")]);
+        assert_eq!(
+            resolve(&m, r"\??\C:\GameLayers\runtime\Data\x.esp"),
+            Some((RootId::DEFAULT, "data/x.esp".to_string()))
+        );
+    }
+
+    #[test]
+    fn vpath_under_root_win32() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\GameLayers\runtime")]);
+        assert_eq!(
+            resolve(&m, r"C:\GameLayers\runtime\Data\a.esm"),
+            Some((RootId::DEFAULT, "data/a.esm".to_string()))
+        );
+    }
+
+    /// The staged launch directory must map into the same namespace as the root.
+    ///
+    /// Measured 2026-08-12: a new game asked for
+    /// `<stage>\data\ccasvsse001-almsivi.esm` because Skyrim resolves `Data`
+    /// relative to its executable, not the working directory. With only the
+    /// root mapped, those fell through to bare disk, the plugin set came back
+    /// empty, and world load hung while the main menu worked.
+    ///
+    /// It is now an alias *entry* sharing root 0's id rather than a second
+    /// prefix test, so it must still resolve — and still answer with root 0,
+    /// which is what routes the request to the same provider.
+    #[test]
+    fn stage_dir_aliases_the_virtual_root() {
+        let stage = r"C:\tmp\skyrim-data\stage\vfs-stage-21728";
+        let m = FuseClient::roots_only(&[
+            (RootId::DEFAULT, r"C:\GameLayers\runtime"),
+            (RootId::DEFAULT, stage),
+        ]);
+        assert_eq!(
+            resolve(
+                &m,
+                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\data\ccasvsse001-almsivi.esm"
+            ),
+            Some((RootId::DEFAULT, "data/ccasvsse001-almsivi.esm".to_string()))
+        );
+        // The game probes the bare-root spelling as well as Data\.
+        assert_eq!(
+            resolve(
+                &m,
+                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\ccasvsse001-almsivi.esm"
+            ),
+            Some((RootId::DEFAULT, "ccasvsse001-almsivi.esm".to_string()))
+        );
+        // A sibling staging directory must not match.
+        assert_eq!(
+            resolve(&m, r"\??\c:\tmp\skyrim-data\stage\other\data\x.esl"),
+            None
+        );
+    }
+
+    #[test]
+    fn vpath_under_root_rejects_outside() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\GameLayers\runtime")]);
+        assert_eq!(resolve(&m, r"\??\C:\Windows\x.dll"), None);
+    }
+
+    /// Stage 2b task 5: the client predicate answers with a root id, and a
+    /// second root routes to itself rather than to root 0. Before this the
+    /// client held one root path and one alias, so a path under a second root
+    /// was simply "not ours" and fell through to real disk.
+    #[test]
+    fn a_second_root_routes_to_its_own_id() {
+        let m = FuseClient::roots_only(&[
+            (RootId(0), r"C:\Games\Skyrim"),
+            (RootId(1), r"C:\Users\me\Documents\My Games\Skyrim"),
+        ]);
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim\Data\a.esm"),
+            Some((RootId(0), "data/a.esm".to_string()))
+        );
+        assert_eq!(
+            resolve(&m, r"\??\C:\Users\me\Documents\My Games\Skyrim\Saves\a.ess"),
+            Some((RootId(1), "saves/a.ess".to_string()))
+        );
+        assert_eq!(resolve(&m, r"\??\C:\Windows\x.dll"), None);
+    }
+
+    /// The predicate's own root spelling resolves to the empty remainder,
+    /// which every caller turns into `"."`. Both roots, not just the first.
+    #[test]
+    fn the_root_itself_resolves_to_an_empty_remainder() {
+        let m = FuseClient::roots_only(&[
+            (RootId(0), r"C:\Games\Skyrim"),
+            (RootId(1), r"C:\Docs\Skyrim"),
+        ]);
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim"),
+            Some((RootId(0), String::new()))
+        );
+        assert_eq!(
+            resolve(&m, r"\??\C:\Docs\Skyrim"),
+            Some((RootId(1), String::new()))
+        );
+    }
+
+    /// The wire spells the root itself `"."`, and `route` is the one place that happens: it is
+    /// `vpath_under_root` through `wire_vpath`. (A `FuseClient` needs a live ring, so the
+    /// resolve-then-spell pair is checked on the `RootMap` the client wraps.)
+    #[test]
+    fn the_root_itself_is_spelled_as_a_dot_on_the_wire() {
+        let m = FuseClient::roots_only(&[(RootId(0), r"C:\Games\Skyrim")]);
+        let routed = |p: &str| resolve(&m, p).map(|(r, v)| (r, wire_vpath(v)));
+        assert_eq!(
+            routed(r"\??\C:\Games\Skyrim"),
+            Some((RootId(0), ".".to_string()))
+        );
+        assert_eq!(
+            routed(r"\??\C:\Games\Skyrim\Data\a.esm"),
+            Some((RootId(0), "data/a.esm".to_string()))
+        );
+        assert_eq!(routed(r"\??\C:\Windows\x.dll"), None);
+        assert_eq!(wire_vpath(String::new()), ".");
+        assert_eq!(wire_vpath("data".to_string()), "data");
+    }
+
+    /// **This is the unification, stated as a test.** The five alternate
+    /// spellings `RootMap` recognises and the old string predicate did not
+    /// must now route, not merely classify. A device-path spelling is the
+    /// cheapest of the five to build without touching the filesystem (the 8.3
+    /// and junction cases need real on-disk state and are covered in
+    /// `aether-redirect`'s own tests), so it stands in for the family here.
+    ///
+    /// If the unification were reverted — the client going back to a
+    /// lowercased `strip_prefix` — this assertion fails: `strip_prefix` has no
+    /// device table and would answer `None`.
+    #[test]
+    fn the_client_predicate_recognises_the_spellings_only_rootmap_used_to() {
+        let mut volumes = aether_redirect::VolumeMap::empty();
+        volumes.insert(r"\Device\HarddiskVolume3", 'C');
+        let m = RootMap::with_roots(
+            &[
+                (RootId(0), r"C:\Games\Skyrim"),
+                (RootId(1), r"C:\Docs\Skyrim"),
+            ],
+            volumes,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(&m, r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp"),
+            Some((RootId(0), "data/a.esp".to_string())),
+            "a device-path spelling of an in-root path must now route, not just classify"
+        );
+        assert_eq!(
+            resolve(&m, r"\Device\HarddiskVolume3\Docs\Skyrim\Saves\a.ess"),
+            Some((RootId(1), "saves/a.ess".to_string())),
+            "and for every root, not only the first"
+        );
+        // The over-eager direction stays closed: registering a device prefix
+        // must not swallow the rest of the volume.
+        assert_eq!(
+            resolve(&m, r"\Device\HarddiskVolume3\Windows\System32\x.dll"),
+            None
+        );
+    }
+
+    /// `VFS_VIRTUAL_ROOTS` is additive on top of `VFS_VIRTUAL_DIR`. Exercised
+    /// through the pure half, not the process environment — that is global
+    /// mutable state every other test in this binary shares.
+    #[test]
+    fn extra_roots_parse_additively_over_root_zero() {
+        let game = r"C:\Games\Skyrim";
+        // Unset: exactly the single-root case every pre-stage-2b session had.
+        assert_eq!(
+            merge_extra_roots(game, None),
+            vec![(RootId::DEFAULT, game.to_string())]
+        );
+        // One extra root, plus tolerance for whitespace and a trailing `;`.
+        assert_eq!(
+            merge_extra_roots(game, Some(r" 1 = C:\Docs\Skyrim ; ")),
+            vec![
+                (RootId(0), game.to_string()),
+                (RootId(1), r"C:\Docs\Skyrim".to_string()),
+            ]
+        );
+        // An explicit root 0 replaces VFS_VIRTUAL_DIR rather than duplicating
+        // it — two entries for one id would be read as an alias, which is not
+        // what a caller respelling root 0 means.
+        assert_eq!(
+            merge_extra_roots(game, Some(r"0=C:\Other")),
+            vec![(RootId(0), r"C:\Other".to_string())]
+        );
+        // Malformed entries are skipped, not fatal, and never shift the roots
+        // that did parse.
+        assert_eq!(
+            merge_extra_roots(game, Some(r"nope;2=;=C:\x;3=C:\Three")),
+            vec![
+                (RootId(0), game.to_string()),
+                (RootId(3), r"C:\Three".to_string()),
+            ]
+        );
+    }
+
+    /// Serializes the one test below that writes `VFS_RING_PATH` /
+    /// `VFS_RING_SECTION`. Process environment is global mutable state every
+    /// other test in this binary shares — the same hazard, and the same
+    /// remedy, as `vfs-embed`'s `LAUNCH_ENV_LOCK` (a `static` cannot be shared
+    /// across test binaries, so this is that established pattern applied here
+    /// rather than a second convention).
+    static RING_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// **The precedence, as a test.** With both variables set the client must
+    /// map the *file*, and must not consult `VFS_RING_SECTION` at all.
+    ///
+    /// The section name here names nothing, so a reversed precedence does not
+    /// merely pick the other source — it fails at `OpenFileMappingW`, which is
+    /// exactly the silent-misconnection this ordering exists to prevent (a
+    /// session configured for the Wine boundary attaching to whatever named
+    /// section happens to exist, or to nothing, with no error).
+    #[test]
+    fn ring_path_wins_over_ring_section_and_is_the_file_that_gets_mapped() {
+        let _g = RING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Non-default geometry on purpose: reading it back proves the client
+        // mapped *this file's* header rather than defaulting to something.
+        const SLOTS: u32 = 8;
+        const CAP: u32 = 4096;
+        const MAP: usize = 256 * 1024;
+
+        let p = std::env::temp_dir().join(format!("aether-shim-ring-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        // Stands in for `IpcServe::start_file_backed`: create the backing file
+        // and lay a ring out in it. No director, no threads — this test is
+        // about which ring the client attaches to, not about serving.
+        let creator = SharedMapping::create_file_backed(&p, MAP).unwrap();
+        let created = aether_ipc::ring::init(creator.seg(), SLOTS, CAP).unwrap();
+        drop(creator);
+
+        let prev_path = std::env::var(aether_env::RING_PATH).ok();
+        let prev_section = std::env::var(aether_env::RING_SECTION).ok();
+        std::env::set_var(aether_env::RING_PATH, &p);
+        std::env::set_var(
+            aether_env::RING_SECTION,
+            format!("aether-shim-absent-section-{}", std::process::id()),
+        );
+
+        let source = ring_source_from_env();
+        assert_eq!(
+            source,
+            Some(RingSource::File(p.to_string_lossy().into_owned())),
+            "VFS_RING_PATH must win over VFS_RING_SECTION"
+        );
+        let client = FuseClient::connect_source(
+            source.as_ref().unwrap(),
+            &[(RootId::DEFAULT, r"C:\Games\Skyrim".to_string())],
+            CAP,
+            MAP,
+            0,
+        );
+
+        // Restore before asserting, so a failure cannot leak env into the rest
+        // of the binary.
+        match prev_path {
+            Some(v) => std::env::set_var(aether_env::RING_PATH, v),
+            None => std::env::remove_var(aether_env::RING_PATH),
+        }
+        match prev_section {
+            Some(v) => std::env::set_var(aether_env::RING_SECTION, v),
+            None => std::env::remove_var(aether_env::RING_SECTION),
+        }
+
+        let client = client.expect("must open the ring file named by VFS_RING_PATH");
+        assert_eq!(
+            client.geom, created,
+            "geometry must be read from that file's ring header"
+        );
+        assert!(
+            client.server_ev.is_null(),
+            "file-backed mode must hold no wake event: a Wine event object cannot \
+             wake a native Linux director, so signalling it is a syscall that lies"
+        );
+        drop(client);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The selection itself, without touching process env.
+    #[test]
+    fn ring_source_prefers_the_path_and_reports_neither_as_none() {
+        let file = || Some(RingSource::File(r"R:\ring.bin".to_string()));
+        assert_eq!(
+            ring_source(Some(r"R:\ring.bin".into()), Some("sect".into())),
+            file(),
+            "path wins when both are set"
+        );
+        assert_eq!(ring_source(Some(r"R:\ring.bin".into()), None), file());
+        assert_eq!(
+            ring_source(None, Some("sect".into())),
+            Some(RingSource::Section("sect".to_string())),
+            "the named-section path is unchanged when no path is given"
+        );
+        // Neither set stays `None`, which `try_init_from_env` turns into
+        // `NotConfigured` exactly as before.
+        assert_eq!(ring_source(None, None), None);
+        // An empty `VFS_RING_PATH` is absent, not a path. Believing it would
+        // map `""` and fail with a confusing io error while a perfectly good
+        // section was named — the same trap as an empty `VFS_RING_SECTION`.
+        assert_eq!(
+            ring_source(Some(String::new()), Some("sect".into())),
+            Some(RingSource::Section("sect".to_string()))
+        );
+    }
+}

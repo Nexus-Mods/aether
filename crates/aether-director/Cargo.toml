@@ -1,0 +1,55 @@
+[package]
+name = "aether-director"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Director kernel: one provider per root, ring server, staging."
+
+[lib]
+name = "aether_director"
+path = "src/lib.rs"
+
+[dependencies]
+aether-env.workspace = true
+# `fold` only — the single source of truth for case-insensitive comparison,
+# shared with the shim above the ring so mount-prefix matching and directory
+# merging fold vpaths exactly the way the shim folded them.
+aether-core.workspace = true
+aether-protocol.workspace = true
+aether-provider.workspace = true
+# `InlineProvider` in this crate's own tests.
+aether-compose.workspace = true
+aether-ipc.workspace = true
+# Pure PE parsing for staging. Was reached through `aether-inject`, which is
+# Windows-only for its injection half; the parsing half is a file format.
+aether-pe.workspace = true
+# The registry overlay model and its persistence format, held by `RegistryHost`.
+aether-registry.workspace = true
+# `RegistryHost` logs a corrupt overlay file it moves aside, and failed saves.
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `ipc.rs` — FileMapping, the file-backed ring a Wine-hosted shim shares by path.
+aether-unix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.
+aether-win.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# Integrity tests compare the composed VFS against a native extract.
+aether-zip.workspace = true
+aether-shim.workspace = true
+# `unicode_case_fold_across_the_ring` builds its vpaths with the *same*
+# `RootMap` the shim uses, rather than lowercasing a string in the test — the
+# whole point being that the two sides of the ring must fold identically.
+aether-redirect.workspace = true
+
+[dev-dependencies]
+aether-provider = { workspace = true, features = ["conformance"] }
+aether-testkit.workspace = true
+
+[lints]
+workspace = true

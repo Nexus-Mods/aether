@@ -706,18 +706,23 @@ mod tests {
         d.mount(
             RootId::DEFAULT,
             Arc::new(vfs_compose::InlineProvider::from_files([(
-                "f",
+                "rejected-write-discovery.txt",
                 b"x".as_slice(),
             )])),
         )
         .unwrap();
-        vfs_compose::reset_rejected_writes();
-        let _ = d.open(RootId::DEFAULT, "f", OPEN_WRITE);
+        // The table is process-wide, and io_stats' tests reset it (under
+        // STATS_LOCK) concurrently in this binary; the path is unique to
+        // this test, so the check needs no reset of its own.
+        let _stats = crate::io_stats::STATS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _ = d.open(RootId::DEFAULT, "rejected-write-discovery.txt", OPEN_WRITE);
         let rejected = vfs_compose::rejected_writes();
         assert!(
             rejected
                 .iter()
-                .any(|(path, count)| path == "f" && *count >= 1),
+                .any(|(path, count)| path == "rejected-write-discovery.txt" && *count >= 1),
             "a rejected write must be discoverable, got {rejected:?}"
         );
     }

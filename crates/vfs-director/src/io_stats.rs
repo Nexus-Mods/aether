@@ -332,22 +332,25 @@ pub fn reset() {
     LAUNCH_MARK_MS.store(0, Ordering::Relaxed);
 }
 
+/// The counters behind `state()` are process-global with no test
+/// dimension, and `reset()` zeroes all of them. Any test that resets is
+/// therefore mutually exclusive with any test that reads a *delta*
+/// across two snapshots: a reset landing between the two reads makes the
+/// delta negative or zero. Tests here take this lock rather than assuming
+/// test order — the convention stated at `VA_LOCK` in
+/// `vfs-shim::lazy_section`.
+///
+/// Concurrent *increments* from other modules' tests (`ring_dispatch`
+/// drives real opens through these same counters) are harmless to a
+/// delta and deliberately not serialized; only `reset()` is destructive.
+/// `reset()` also clears vfs-compose's rejected-write table, so a test
+/// elsewhere in this crate that asserts on that table takes it too.
+#[cfg(test)]
+pub(crate) static STATS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The counters behind `state()` are process-global with no test
-    /// dimension, and `reset()` zeroes all of them. Any test that resets is
-    /// therefore mutually exclusive with any test that reads a *delta*
-    /// across two snapshots: a reset landing between the two reads makes the
-    /// delta negative or zero. Tests here take this lock rather than assuming
-    /// test order — the convention stated at `VA_LOCK` in
-    /// `vfs-shim::lazy_section`.
-    ///
-    /// Concurrent *increments* from other modules' tests (`ring_dispatch`
-    /// drives real opens through these same counters) are harmless to a
-    /// delta and deliberately not serialized; only `reset()` is destructive.
-    static STATS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn records_open_read_and_surfaces_failures() {

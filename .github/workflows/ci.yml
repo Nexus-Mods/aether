@@ -1,0 +1,145 @@
+# Builds and tests Aether on every push and pull request: the whole workspace
+# on Windows, where all of it builds and runs, and the portable crates plus the
+# cross-build of the Windows natives on Linux.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  # The large caches (rust-cache's target dirs, cargo-xwin's MSVC CRT) are
+  # saved from master only, so branches restore them and never crowd them out.
+  SAVE_LARGE_CACHES: ${{ github.ref == 'refs/heads/master' }}
+
+jobs:
+  # Format, lint, the artifacts the tests inject, every test, the 32-bit
+  # injector's unit tests, and the release build of the natives with the
+  # VC++ runtime import check.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    # The runner's default TMP is under C:\Users\RUNNER~1\... (`runneradmin`
+    # exceeds eight characters, so its profile has an 8.3 alias), and every
+    # path from `std::env::temp_dir()` carries that alias. A root declared in
+    # short form matches only short paths, so tests rooted there fail, while
+    # passing on any machine whose user name fits 8.3. Production paths are
+    # long-form, and fixing it in `RootMap` was tried and reverted (the
+    # `#[ignore]`d `a_root_declared_in_8dot3_form_recognises_its_long_form_paths`
+    # in vfs-redirect records why). So the runner's TMP is corrected instead:
+    # `vfstmp` fits 8.3 and has no alias.
+    env:
+      TMP: C:\vfstmp
+      TEMP: C:\vfstmp
+      # a test whose prerequisite (a fixture, the shim) is missing fails here
+      # rather than skipping
+      VFS_TEST_REQUIRE_ALL: '1'
+    steps:
+      - uses: actions/checkout@v4
+      # TMP/TEMP above only name it; nothing creates it
+      - name: Create an 8.3-free TMP
+        run: New-Item -ItemType Directory -Force -Path C:\vfstmp | Out-Null
+        shell: pwsh
+      # rust-toolchain.toml's pinned toolchain, with its targets (i686 for the
+      # 32-bit injector) and components
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          save-if: ${{ env.SAVE_LARGE_CACHES == 'true' }}
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --all --check
+      # `--all-targets` is what covers tests, benches and the cdylibs
+      - name: Clippy (workspace, all targets, warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+      # The shim and fixtures beside the test profile, so the tests that
+      # inject them need no nested cargo build. staticimp links
+      # `vproxy.dll.lib` through its build.rs with no Cargo edge to the cdylib
+      # (cargo#6313), so on a clean target dir vproxy must be built first or
+      # the link fails with LNK1181. Hence two builds, in this order.
+      - name: Build inject artifacts
+        run: cargo build -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy && cargo build -p vfs-fixture-staticimp
+      # `--no-fail-fast`: without it cargo stops at the first failing test
+      # binary and hides how much of the suite broke. No `-p`: every member.
+      - name: Rust tests (every crate)
+        timeout-minutes: 25
+        run: cargo test --no-fail-fast
+      # A 32-bit (WOW64) process lays its parameter block and environment out
+      # differently from an x64 one, and the injector rewrites both; its unit
+      # tests run 32-bit targets only when built for i686.
+      - name: vfs-inject unit tests, 32-bit (i686)
+        run: cargo test -p vfs-inject --lib --target i686-pc-windows-msvc
+      # The release natives (+crt-static, x64 and i686) and the fixtures, as a
+      # release builds them, with the VC++ runtime import check required
+      - name: Release natives and fixtures (bin/build-natives.ps1)
+        shell: powershell
+        run: .\bin\build-natives.ps1 -Fixtures -RequireDumpbin
+      - name: Natives key
+        shell: powershell
+        run: Write-Host "natives key: $(.\bin\natives-key.ps1)"
+
+  # The crates that build on Linux (format, lint of the `#[cfg(unix)]` half
+  # that nothing else compiles, their tests), then the cross-build of the
+  # Windows natives and fixtures with cargo-xwin.
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # Every crate that builds on Linux. The rest (vfs-shim, vfs-shim-dll,
+      # vfs-inject, vfs-win, vfs-fixture-*) pull Windows-only code (`retour`,
+      # Win32) and are linted and tested by the windows job.
+      LINUX_CRATES: >-
+        -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe
+        -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix
+        -p vfs-director -p vfs-registry -p vfs-testkit
+        -p vfs-ntlayout -p vfs-redirect
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          save-if: ${{ env.SAVE_LARGE_CACHES == 'true' }}
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --all --check
+      - name: Clippy (Linux crates, all targets, warnings are errors)
+        run: cargo clippy $LINUX_CRATES --all-targets -- -D warnings
+      - name: Portable crates (compile and test on Linux)
+        run: cargo test --no-fail-fast $LINUX_CRATES
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+      # LLVM 19 (the runner's default 18 can't link the i686 shim), its
+      # unversioned names first on PATH
+      - name: LLVM 19
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
+      # The MSVC CRT + Windows SDK cargo-xwin downloads on first use (about
+      # 15 minutes when Microsoft's servers are slow).
+      - name: cargo-xwin's MSVC CRT from the cache
+        id: xwin
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-v1
+      - name: Cross-build the natives and fixtures (bin/build-windows --release)
+        run: bin/build-windows --release
+      - name: cargo-xwin's MSVC CRT into the cache (master)
+        if: env.SAVE_LARGE_CACHES == 'true' && steps.xwin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-v1
+      - name: The four natives are staged
+        run: |
+          for f in vfs-injector.exe vfs_shim_dll.dll vfs-injector32.exe vfs_shim_dll32.dll; do
+            test -f "target/natives/$f" || { echo "target/natives/$f missing"; exit 1; }
+          done
+          ls -l target/natives

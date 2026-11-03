@@ -1,63 +1,65 @@
-# rust/: the injector and the shim
+# Aether
 
-This Cargo workspace builds the two Windows programs Cairn's director needs to
-put a game in front of its virtual filesystem:
+Aether puts a Windows game in front of files that are not on disk. Two small
+Windows programs do it:
 
 - **`vfs-injector.exe`** (crate `vfs-inject`): starts the game's process and
   loads the shim into it by remote-thread injection.
 - **`vfs_shim_dll.dll`** (crate `vfs-shim-dll`, hooks in `vfs-shim`): runs
   inside the game and detours its NT file and registry calls, answering every
-  operation on a managed path from the director over a shared-memory ring.
+  operation on a managed path from a **director** over a shared-memory ring.
 
-Both ship for **x64 and x86** (32-bit games and tools such as Oblivion), with the
-C runtime linked in (`+crt-static`): the shim loads inside the game, where Windows
-doesn't look beside it for `vcruntime140.dll`, and a PC may have no VC++ runtime.
-They are staged as `vfs-injector.exe`, `vfs_shim_dll.dll`, `vfs-injector32.exe`
-and `vfs_shim_dll32.dll`, the names the director looks for
-(`aether.director.natives`).
+The director, the program that decides what the game sees, is not here: it is
+whatever speaks the wire contract (`vfs-ipc`, `vfs-protocol`). Cairn's
+director (Clojure, [Nexus-Mods/cairn](https://github.com/Nexus-Mods/cairn)) is
+one. Running a Windows game on Linux or macOS (Proton, Wine prefixes,
+CrossOver) is the director's job too; the injector and the shim are the same
+Windows binaries everywhere, running inside Wine there.
 
-The director itself, the part that decides what the game sees, is Clojure
-(`../src/aether`); the wire contract it and the shim share is
-`vfs-ipc`/`vfs-protocol`. How it all fits: [`../docs/aether-vfs/`](../docs/aether-vfs)
-(start with [architecture.md](../docs/aether-vfs/architecture.md); the rules the
-hooks keep are in [shim-invariants.md](../docs/aether-vfs/shim-invariants.md)).
+Both ship for **x64 and x86** (32-bit games and tools), with the C runtime
+linked in (`+crt-static`): the shim loads inside the game, where Windows
+doesn't look beside it for `vcruntime140.dll`, and a PC may have no VC++
+runtime. They are staged as `vfs-injector.exe`, `vfs_shim_dll.dll`,
+`vfs-injector32.exe` and `vfs_shim_dll32.dll`.
+
+How it fits together: Cairn's
+[docs/aether-vfs/](https://github.com/Nexus-Mods/cairn/tree/master/docs/aether-vfs)
+(start with `architecture.md`) until they move here. The code
+here was split from Cairn's `rust/` on 2026-11-03, with its history; before
+that it lived in [halgari/aether-vfs](https://github.com/halgari/aether-vfs).
 
 ## Build
 
-From the repository root:
+On Windows, with the MSVC C++ build tools (the Rust toolchain and the
+`i686-pc-windows-msvc` target come from [`rust-toolchain.toml`](rust-toolchain.toml)):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1             # the four natives, into rust\target\natives
+rustup toolchain install
+powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1             # the four natives, into target\natives
 powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1 -Fixtures   # also the test fixtures and the host-target
-                                                                           # injector and shim, into rust\target\release
+                                                                           # injector and shim, into target\release
 ```
 
 Options: `-Out <dir>` stages the natives elsewhere; `-RequireDumpbin` fails
-(rather than warns) when Visual Studio's `dumpbin` isn't found for the check that
-none of the four imports the VC++ runtime (on by default when `$env:CI` is set).
-`bin\bootstrap.ps1` runs it with `-Fixtures` after checking the toolchain. The
-Rust toolchain and the `i686-pc-windows-msvc` target come from
-[`rust-toolchain.toml`](rust-toolchain.toml); the MSVC C++ build tools are needed.
+(rather than warns) when Visual Studio's `dumpbin` isn't found for the check
+that none of the four imports the VC++ runtime (on by default when `$env:CI`
+is set). `bin\natives-key.ps1` prints the natives key, the hash of what the
+four are built from.
 
-CI builds them only when something here (or `bin/build-natives.ps1`) changed:
-`bin\natives-key.ps1` hashes every tracked file under `rust/` and the script,
-and the built natives are cached under that key (`docs/release.md`, "The
-natives key"). `powershell -ExecutionPolicy Bypass -File bin\natives-key.ps1`
-prints it, to match a CI run's `natives key:` line or cache entry.
-
-On Linux and macOS, `bin/build-windows [--release]` cross-builds the same natives
-and the fixtures with `cargo-xwin`, clang and lld (LLVM 19 or later: the i686
-shim's `EXPORTAS` export needs it). `bin/bootstrap` runs it.
+On Linux and macOS, `bin/build-windows [--release]` cross-builds the same
+natives and the fixtures with `cargo-xwin`, clang and lld (LLVM 19 or later:
+the i686 shim's `EXPORTAS` export needs it).
 
 ## Test
 
 ```powershell
-cd rust
 cargo test --no-fail-fast
 ```
 
-Windows is where all of it builds and runs. CI also runs `cargo fmt --all --check`
-and `cargo clippy --all-targets -- -D warnings` (see `.github/workflows/test.yml`).
+Windows is where all of it builds and runs; the portable crates also build and
+test on Linux (CI's `linux` job lists them). CI also runs `cargo fmt --all
+--check` and `cargo clippy --all-targets -- -D warnings`
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 **8.3 TMP alias.** When `TMP`/`TEMP` contain a short-name alias (a `~`, as in
 `C:\Users\LONGNA~1\AppData\Local\Temp`), eleven of these tests fail. Point them at
@@ -67,10 +69,9 @@ a path without one first:
 $env:TMP = 'C:\vfstmp'; $env:TEMP = 'C:\vfstmp'
 ```
 
-Tests whose prerequisite is missing (a Windows fixture not built, GE-Proton not
-installed) skip; with `VFS_TEST_REQUIRE_ALL=1` a skip is a failure. The
-Clojure director's own tests that launch these programs are covered in the
-[top-level README](../README.md#tests).
+Tests whose prerequisite is missing (a fixture not built) skip; with
+`VFS_TEST_REQUIRE_ALL=1` a skip is a failure. The fixtures must be built
+first (`cargo build` of the inject artifacts, as ci.yml does).
 
 ## Crates
 
@@ -91,6 +92,7 @@ The ones that ship:
 | `vfs-pe` | Pure PE byte parsing |
 | `vfs-core` | Pure merged-tree resolver (layers, tombstones, case folding) |
 | `vfs-env` | Every `VFS_*` environment switch, defined once |
+| `vfs-zip` | Stored-zip reading, used by the injector |
 
 The **test fixtures**, Windows programs the tests run under the shim:
 `vfs-fixture-read` (reads a virtual file), `-writepath` (the write path),
@@ -99,19 +101,15 @@ API), `-vproxy` and `-staticimp` (a statically imported proxy DLL, pre-init
 injection), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and
 the registry overlay). `vfs-testkit` holds helpers shared by the tests.
 
-**The Rust director is gone.** Cairn runs on the Clojure director
-(`src/aether/director/`), and its end-to-end tests, which launch these
-fixtures under the shim, are `test/aether/director/e2e/` (the old Rust ones,
-`vfs-embed`'s, and where each went:
-[docs/aether-vfs/e2e-port.md](../docs/aether-vfs/e2e-port.md); `vfs-proton`'s
-own tests were not ported: the spec dropped that crate, whose job
-`aether.director.proton.*` and its own tests do). What stays here
-is the kernel the shim's tests need: `vfs-director` (a dev-dependency of the
-shim), `vfs-compose`, `vfs-zip`, `vfs-unix` and `vfs-testkit`. Don't build new
-features on them.
+**Test-only:** `vfs-director`, `vfs-compose` and `vfs-unix` are an old Rust
+director kept as the shim's tests' counterpart (a dev-dependency of the
+shim). Don't build new features on them: a director harness will replace
+them.
 
 `panic = "unwind"` throughout (`vfs-protocol/tests/unwind.rs` pins it). The
 vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim
-builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history of
-the Rust director crates (the last entries are those of the deleted
-`vfs-embed` and `vfs-proton`). License: the repository's [LICENSE](../LICENSE).
+builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history.
+
+## License
+
+GPL-3.0-or-later ([LICENSE](LICENSE)).

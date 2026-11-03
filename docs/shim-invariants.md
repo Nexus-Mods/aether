@@ -39,13 +39,13 @@ blocking acquisition here hangs the process permanently.
 Traced 2026-09-02 with `VFS_SHIM_BREADCRUMB`, three reproductions:
 `threads=1`, `current=NtClose`, `mark=TABLE_HANDLE_PATHS`,
 `holder=CLOSE_HOOK`, `entries - exits = 2`, zero CPU, and immune to
-`TerminateProcess`. The holder is `close_hook_body` — but the only
+`TerminateProcess`. The holder is `close_hook_body`, but the only
 statement it holds the guard across is a `BTreeMap<isize, String>`
 remove, which cannot close a handle and so cannot be a live outer frame
-re-entering. The holder is a **dead** frame.
+re-entering. The holder is a dead frame.
 
 A thread terminated while holding a `std::sync::Mutex` leaves it locked
-**forever, and not poisoned** — so every `if let Ok(..)` in this crate is
+forever, and not poisoned, so every `if let Ok(..)` in this crate is
 no defence against it. At process exit Windows terminates every thread
 but one before `DLL_PROCESS_DETACH`, and the surviving thread then closes
 handles on its way out. `aether_shim_dll`'s own `DllMain` records this exact
@@ -69,7 +69,7 @@ From `hook/dirquery.rs`.
 
 Phase 2 (unlocked): build the listing. The handle only reached
 `DIR_TABLE` because `tag_under_root` found `path_is_ours` true for it,
-so *every* listing built here is a listing under a managed root — and
+so *every* listing built here is a listing under a managed root, and
 the governing invariant says the real filesystem beneath a managed root
 is unreachable by any spelling. A directory listing is a spelling. So
 exactly one thing may appear in one: what the director serves. When the
@@ -88,7 +88,7 @@ real directory into a served listing. Until task C8 a second branch
 listed the shim-local write overlay's own entries; that overlay is
 gone, and with it every source but the director.
 
-A tracked directory the client does not route gets an **empty** listing,
+A tracked directory the client does not route gets an empty listing,
 counted `contained` in the report. It is not reached: `path_is_ours`
 (which decides tracking) and `FuseClient::route` (which decides the
 listing) are the same question, `vpath_under_root`. It is kept because a
@@ -100,7 +100,7 @@ five spellings at once, when they were two different `RootMap`s.
 
 From `hook/dirquery.rs`.
 
-**Gate 5, Task 7 — the phantom whiteout marker,
+**Gate 5, Task 7: the phantom whiteout marker,
 closed.** This branch used to hand the director's
 answer to the game verbatim, and the director's
 answer carries the shim's own markers: it mounts the
@@ -111,7 +111,7 @@ the shim's came back as ordinary files. That showed
 the game a phantom `<file>.__vfs_wh__` entry *and*
 left the file it names listed.
 
-**Before the wildcard filter, not after** — see
+Before the wildcard filter, not after: see
 `hook/whiteout.rs::strip_whiteout_markers`, which
 also records why the fix is here rather than in a
 shared spelling.
@@ -156,7 +156,7 @@ does file I/O, whose `NtClose` re-enters the shim and takes
 `DIR_TABLE.lock()` again. `std::sync::Mutex` is not reentrant, so that
 second acquisition blocked forever on a lock the same thread already
 held: zero CPU, one thread, and immune to `TerminateProcess`. Measured
-three times with `VFS_SHIM_BREADCRUMB` — `threads=1`, `entries - exits =
+three times with `VFS_SHIM_BREADCRUMB`: `threads=1`, `entries - exits =
 2`, `mark=TABLES`.
 
 A scratch buffer rather than cloning the entries: the copy is bounded by
@@ -171,10 +171,10 @@ file name, and nothing falls through to the real file system.
 
 From `hook/file_open.rs`.
 
-**Gate 5, Task 4 — the DRM/identity exceptions, closed.** Four basenames
+**Gate 5, Task 4: the DRM/identity exceptions, closed.** Four basenames
 (`steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
 `SkyrimSE.exe`) used to be matched here, case-insensitively at any depth,
-and returned `None` *before the ring was consulted* — sending the open on
+and returned `None` *before the ring was consulted*, sending the open on
 to the shim-local engine (removed by task C8), which either redirected it
 at a real disk path or passed it straight through to the real filesystem
 under the managed root.
@@ -187,13 +187,13 @@ FUSE produced a Steam Error, caused by an open that fails to resolve
 self-cancelling: the unresolvable OA only ever arose on the *excepted*
 arm, which is the one that has to hand the kernel an OA whose root is a
 synthetic handle (see `tramp_create_abs`). With the exception gone the
-kernel is never called for these names at all — the open either gets a
+kernel is never called for these names at all: the open either gets a
 synthetic handle from the director or is sealed.
 
-Two things the deleted comment got right and are worth keeping: Steam
-does **not** compare the in-memory image against the on-disk PE (measured
-— the whole loaded image was once overwritten with zip PE bytes at a
-relocated base and DRM still verified), and what actually needs the
+Two things the deleted comment got right: Steam
+does not compare the in-memory image against the on-disk PE (measured:
+the whole loaded image was once overwritten with zip PE bytes at a
+relocated base and DRM still verified), and what needs the
 on-disk exe is outside this hook: `CreateProcess` of the host image, and
 Steam's own path association from a separate, un-injected process.
 
@@ -203,7 +203,7 @@ only ever read zero since the exceptions went, so it proved nothing a test canno
 names are served by the director is asserted by `director_overlay/drm_names_route_to_director.rs`
 (each name is `Routed`, and the bytes come from the director).
 
-The tracer stays wired for the live acceptance run — it is off unless
+The tracer stays wired for the live acceptance run. It is off unless
 `VFS_DRM_EXE_LOG` names a file, and it now sees the opens it never could
 before, since these names finally arrive here.
 
@@ -211,7 +211,7 @@ before, since these names finally arrive here.
 
 From `hook/file_open.rs`.
 
-Every under-root open — read *and* write — goes through the
+Every under-root open, read *and* write, goes through the
 director (zip / composed / writable layer), and every answer it gives,
 including the failures, is this function's answer too: since gate 4's
 Task 5 no *decision* below returns `None`, except behind the explicit
@@ -224,20 +224,20 @@ opened the file, and leaked that `fh`. Since task C8's fix round it fails
 closed instead: `STATUS_UNSUCCESSFUL`, and the director's `fh` is closed.
 `try_fuse_mkdir`'s two `open_fuse` calls do the same.
 
-It is still not a live route — but not for the reason this comment used
+It is still not a live route, but not for the reason this comment used
 to give. It claimed the crate builds with `panic = "abort"`; it does
 not. `rust/Cargo.toml` sets `panic = "unwind"` for both profiles,
-deliberately, so "a panic cannot unwind here" is simply false and
+deliberately, so "a panic cannot unwind here" is false and
 nothing about poisoning is ruled out by the profile. What rules it out
 instead is that nothing inside those critical sections can unwind.
 `synth_file` holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
-insert/get/get_mut/remove keyed by `usize`, and `String` clone/drop --
+insert/get/get_mut/remove keyed by `usize`, and `String` clone/drop:
 no `unwrap`, no slice indexing, no caller-supplied closure, no `Ord` or
 `Drop` impl that can panic. Allocation failure aborts rather than
 unwinding. Poisoning requires a panic to unwind *out of a held guard*,
 and there is no panic here to unwind.
 
-Note that `contain_panic` does NOT make this safe by itself: it catches
+`contain_panic` does not make this safe by itself: it catches
 a panic at the hook boundary, but the guard's drop has already set the
 poison flag by then, so later calls would see it. Re-check the argument
 above if `synth_file` ever grows a fallible or reentrant operation
@@ -261,7 +261,7 @@ passes through to the real file, for reads and writes; before task C8
 it went to the shim-local engine instead, which denied a read and sent
 a write to its own overlay.
 
-**Gate 4, Task 5 — this is the write fall-through, closed.** A write
+**Gate 4, Task 5: this is the write fall-through, closed.** A write
 used to return `None` here unconditionally, which sent
 `create_hook`/`open_hook` on to the shim-local engine (removed by task
 C8): an overlay redirect where one was configured, and a plain
@@ -279,21 +279,21 @@ From `hook/file_open.rs`.
 Two different failures wear `ST_NOT_FOUND` on a write open,
 and NT distinguishes them, so this must too:
 
-- The open asked to **create** (any of SUPERSEDE / CREATE /
+- The open asked to create (any of SUPERSEDE / CREATE /
   OPEN_IF / OVERWRITE_IF set `OPEN_CREATE`) and the director
   still said not-found: no writable provider is mounted
-  anywhere over this path. The name is not what is missing —
-  the caller was going to supply it — so this is
+  anywhere over this path. The name is not what is missing
+  (the caller was going to supply it), so this is
   `STATUS_OBJECT_PATH_NOT_FOUND` (`ERROR_PATH_NOT_FOUND`),
   the same answer NTFS gives for a create whose containing
   directory does not exist.
-- The open did **not** ask to create (FILE_OPEN /
-  FILE_OVERWRITE with write access — "open the existing
-  file for writing"). Then the file itself is simply absent
-  and the honest answer is the ordinary
-  `STATUS_OBJECT_NAME_NOT_FOUND` (`ERROR_FILE_NOT_FOUND`) —
+- The open did not ask to create (FILE_OPEN /
+  FILE_OVERWRITE with write access: "open the existing
+  file for writing"). Then the file itself is absent
+  and the answer is the ordinary
+  `STATUS_OBJECT_NAME_NOT_FOUND` (`ERROR_FILE_NOT_FOUND`),
   the same one the read seal below returns. Answering
-  PATH_NOT_FOUND here would mislead the very common
+  PATH_NOT_FOUND here would mislead the common
   "open-for-write, and on ERROR_FILE_NOT_FOUND create it"
   idiom into thinking the directory was gone.
 
@@ -302,8 +302,8 @@ and NT distinguishes them, so this must too:
 From `hook/file_open.rs`.
 
 Any other director error on a write. **Gate 4, Task 5:** this used to
-return `None` — "the director rejects OPEN_WRITE, so let the write
-land in the shim-local overlay instead" — which is the second half of
+return `None` ("the director rejects OPEN_WRITE, so let the write
+land in the shim-local overlay instead"), which is the second half of
 the fall-through this task closes.
 
 Deliberately *not* merged with the `ST_NOT_FOUND` arm above. That one
@@ -315,21 +315,21 @@ answers at the NT boundary:
   `ReadWrite` provider serves this path" (`Director::open`, which
   also records it for `vfs stats` discovery). That is a permission
   fact, not a fault, and `STATUS_ACCESS_DENIED` is what a real
-  read-only filesystem answers — a status callers already have code
+  read-only filesystem answers, a status callers already have code
   for, unlike `STATUS_UNSUCCESSFUL`'s `ERROR_GEN_FAILURE`.
 - `ST_IS_DIR` means the path is a directory and the caller asked to
   create or replace a file over it (`OverlayProvider::open_for_write`
   refuses rather than letting a `DiskProvider` upper create a file
   named after the directory). The two non-creating dispositions
-  never get here — `dir_open_downgrades` already turned them into
-  the directory open the caller meant — so what is left genuinely
+  never get here (`dir_open_downgrades` already turned them into
+  the directory open the caller meant), so what is left
   is a file create aimed at a directory, and NT has a status that
   says exactly that.
 - Anything else (I/O error, bad request, a provider that broke) is a
-  genuine failure: `STATUS_UNSUCCESSFUL`, matching the read-side
+  failure: `STATUS_UNSUCCESSFUL`, matching the read-side
   `Err(_)` arm below, which likewise refuses to fall through.
 
-Note there is no `allow_disk_fallthrough` escape here, again matching
+There is no `allow_disk_fallthrough` escape here, again matching
 the read side: that switch relaxes "the director does not have this",
 never "the director failed".
 
@@ -342,7 +342,7 @@ trampolined. Anything in between is refused.
 
 From `hook/file_mutate.rs`.
 
-`NtDeleteFile` hook — the **path-based** delete (gate 5, Task 5).
+`NtDeleteFile` hook: the path-based delete (gate 5, Task 5).
 
 **This was the one unhooked NT API that reached real disk.** The others on
 this project's list all take a handle, so leaving one unhooked fails safely:
@@ -350,7 +350,7 @@ under a managed root the caller is holding a synthetic handle, the kernel
 does not own it, and the call comes back `STATUS_INVALID_HANDLE`. This one
 takes only an `OBJECT_ATTRIBUTES`. There is no handle to be wrong about, so
 an unhooked call resolves the path itself and unlinks the real file sitting
-under the root — which is the exact thing the root's contract says is
+under the root, the exact thing the root's contract says is
 unreachable.
 
 **The decision is made on the path, like `create_hook`/`open_hook`, and by
@@ -358,7 +358,7 @@ the same machinery.** `path_of_tracked` decodes the `OBJECT_ATTRIBUTES`
 (including a handle-relative name, and including the FUSE-synthetic
 `RootDirectory` a virtual directory handle produces), and the question asked
 of that path is the one the open hooks ask:
-`FuseClient::route` — the director's notion of the root. If it claims the
+`FuseClient::route`, the director's notion of the root. If it claims the
 path, the director's answer is the caller's answer, both ways: `OP_DELETE`
 accepted is `STATUS_SUCCESS`, `OP_DELETE` refused is a failure the caller
 sees. It never continues to the kernel from here, for the same reason
@@ -370,8 +370,8 @@ the shim-local engine's whiteout and a `path_is_ours` backstop
 `path_is_ours` is the client's own question, so a path the first step does
 not claim is one the backstop would not claim either.
 
-Outside every root the call is trampolined unchanged, which is most of them
-— a hook with an opinion about every delete in the process would break the
+Outside every root the call is trampolined unchanged, which is most of them:
+a hook with an opinion about every delete in the process would break the
 rest of it.
 
 ### `close_hook_body`: `FILE_DELETE_ON_CLOSE` on a synthetic handle
@@ -382,8 +382,8 @@ From `hook/close.rs` and `hook/file_open.rs`.
 disposition set-info: it is `NtCreateFile` with `FILE_DELETE_ON_CLOSE` followed by `NtClose`.
 The director has no delete-on-close of its own, so the shim keeps it: `route_open` records the
 flag on the synthetic handle it returns (`synth_file::set_delete_on_close`), and
-`close_hook_body` sends `OP_DELETE` for the handle's path — the path it is named by when it
-closes, so after a rename through it, the new one — after releasing the `fh`, as NT deletes at
+`close_hook_body` sends `OP_DELETE` for the handle's path (the path it is named by when it
+closes, so after a rename through it, the new one) after releasing the `fh`, as NT deletes at
 the last close. Until then every Win32 delete of a director-served file under Proton reported
 success and deleted nothing.
 
@@ -395,7 +395,7 @@ success and deleted nothing.
   access, which is not a write open, and nothing in a read open's answer says whether the path
   is deletable, so knowing would cost a round trip on every such open.
 - **No second delete.** A set-info delete that succeeds through a handle that also has the flag
-  clears it, so the close does not send `OP_DELETE` again — which could delete a file recreated
+  clears it, so the close does not send `OP_DELETE` again, which could delete a file recreated
   under the same name in between.
 - **Not honoured on a directory `try_fuse_mkdir` created.** That handle is synthesised without a
   path recorded on it (`open_fuse(0, 0, true)`) and the flag is never set, so a directory created
@@ -408,10 +408,10 @@ From `hook/file_mutate.rs`.
 The NT status for a director `OP_DELETE` refusal.
 
 **Flattening every refusal to `STATUS_UNSUCCESSFUL` is not neutral.** That
-maps to `ERROR_GEN_FAILURE`, and the delete-then-create idiom — the single
-most common thing callers do with a delete — treats only
+maps to `ERROR_GEN_FAILURE`, and the delete-then-create idiom (the single
+most common thing callers do with a delete) treats only
 `ERROR_FILE_NOT_FOUND` as benign and gives up on anything else. So a delete
-of a path the director simply does not have would stop callers that a real
+of a path the director does not have would stop callers that a real
 filesystem lets straight through. The open path already distinguishes these
 (`try_fuse_create`'s `Err` arms); this is the same mapping for the same
 reason, kept as one function so the two cannot drift:
@@ -422,9 +422,9 @@ reason, kept as one function so the two cannot drift:
   for "no `ReadWrite` provider serves this path", and `ERROR_ACCESS_DENIED`
   is what a real read-only filesystem answers a `DeleteFileW`.
 - `ST_IS_DIR` -> `STATUS_FILE_IS_A_DIRECTORY`, which `RtlNtStatusToDosError`
-  folds to `ERROR_ACCESS_DENIED` — exactly what `DeleteFileW` returns when
+  folds to `ERROR_ACCESS_DENIED`, which is what `DeleteFileW` returns when
   the name is a directory.
-- Anything else (I/O error, a provider that broke) is a genuine failure and
+- Anything else (I/O error, a provider that broke) is a failure and
   keeps `STATUS_UNSUCCESSFUL`.
 
 ### `setinfo_source_path`: finding the path of a handle
@@ -439,16 +439,16 @@ provenance bit [`DecodedPath`] carries, for the same reason: a
 **The third source is what closes an escape.** `PATH_TABLE` is populated by
 `record_path`, which runs only on an open *this shim intercepted*. A handle
 inherited across `CreateProcess`, duplicated in from another process, or
-opened before injection is in no table of ours — and `setinfo_hook`'s
+opened before injection is in no table of ours, and `setinfo_hook`'s
 non-synthetic branch used to read that miss as "nothing to do" and hand the
-call to the real `NtSetInformationFile`. For a **delete** that unlinked the
+call to the real `NtSetInformationFile`. For a delete that unlinked the
 real file under a managed root, which is the same breach `delete_hook`
 exists to prevent, arriving by a different door. There is no cheap
 backstop for it either: a `PATH_TABLE` miss leaves no path at all, so there
 is nothing to apply `path_is_ours` to until one is recovered.
 
-So ask the OS, exactly as `parent_dir_of_handle`'s case 4 already does for
-`OBJECT_ATTRIBUTES.RootDirectory` — `GetFinalPathNameByHandleW` needs no
+So ask the OS, as `parent_dir_of_handle`'s case 4 already does for
+`OBJECT_ATTRIBUTES.RootDirectory`: `GetFinalPathNameByHandleW` needs no
 reopen, since the caller is handing us a handle it currently holds.
 
 **The order is correctness, not only cost.** `PATH_TABLE` holds the path the
@@ -459,13 +459,13 @@ location under no managed root, so the operation went to the kernel. No
 handle is redirected any more, but the recorded name is still the one the
 caller used, so it wins wherever there is one:
 
-1. `PATH_TABLE` — an intercepted open whose path was under a managed root.
-2. `HANDLE_PATHS` — every other intercepted open. A handle here but not in
+1. `PATH_TABLE`: an intercepted open whose path was under a managed root.
+2. `HANDLE_PATHS`: every other intercepted open. A handle here but not in
    (1) is one `record_path` declined, i.e. outside every root, so this
    answers the common "delete a file that is none of our business" case
    without touching the OS.
 3. `GetFinalPathNameByHandleW`. Only reached for a handle the shim never saw
-   opened, and only on a delete/rename set-info, which is rare — this is not
+   opened, and only on a delete/rename set-info, which is rare; this is not
    a per-call cost on any hot path.
 
 
@@ -528,12 +528,12 @@ root is refused rather than guessed at: the
 wire carries one root for both sides, and the
 provider contract has no cross-root move.
 
-It does **not** fall through — an earlier
+It does not fall through. An earlier
 version of this comment claimed it did, and the
 shim-local engine's `rename` was written to
 match that description, which is how its branch
 ended up handing cross-root moves to the real
-filesystem. What actually happens is
+filesystem. What happens is
 `STATUS_UNSUCCESSFUL`, the same as any other
 refused delete/rename, for both kinds of
 handle.
@@ -547,13 +547,13 @@ From `hook/file_mutate.rs`.
 file, and three kinds of operation used to end that way through the
 shim-local engine's branch:
 
- - A **delete** the engine declined (no overlay configured, or a
+ - A delete the engine declined (no overlay configured, or a
    path resolving with an empty remainder, the root itself).
- - A **rename out** of a managed root to a target outside every
+ - A rename out of a managed root to a target outside every
    one of them, which *unlinks a real file under a managed root*.
    That the destination is legitimately outside does not make the
    source side any less of a breach.
- - A **rename whose target cannot be parsed at all**
+ - A rename whose target cannot be parsed at all
    (`parse_rename_target` -> `None`, e.g. a target named against
    a directory handle we cannot resolve).
 
@@ -574,7 +574,7 @@ Task 5). Everything above is keyed on the *source*, and for a source
 outside every root none of it runs: `record_path` inserts into
 `PATH_TABLE` only when `path_is_ours(path)`, so an outside handle is
 never recorded, the source-keyed arm above is skipped, and `tramp` below
-performed the move — physically creating a file under the
+performed the move, physically creating a file under the
 destination root, where it then read back as missing because that
 root seals every path the provider graph does not serve.
 
@@ -584,7 +584,7 @@ content crossing out of it, and the source being legitimately
 outside does not make the target's root any less managed.
 
 Refused rather than routed, and there is no third option available:
-`OP_RENAME` carries **one** root and two vpaths under it (see
+`OP_RENAME` carries one root and two vpaths under it (see
 `FuseClient::rename`), so the provider contract has no operation for
 an import from outside. `STATUS_ACCESS_DENIED` rather than the
 `STATUS_UNSUCCESSFUL` the cross-root arm above returns, because it is
@@ -596,7 +596,7 @@ NOTE: `parse_rename_target` discards `parent_dir_of_handle`'s
 OS-consulted provenance bit, so a target named against a directory
 handle the shim never saw opened reaches `path_is_ours` here without
 an `UncachedScope`. That is the known gap `parse_rename_target`
-already records, not a new one — it is listed there rather than fixed
+already records, not a new one; it is listed there rather than fixed
 here so both callers are fixed at once.
 
 ## Panic containment
@@ -610,11 +610,11 @@ only ever raised by a guard whose `Drop` lowers it.
 From `hook/entry.rs`.
 
 RAII form of [`HOOK_REENTER`] for shim-initiated file I/O. `enter()` returns
-`None` when the guard is already held on this thread — the caller's signal
+`None` when the guard is already held on this thread, the caller's signal
 that it is already running *inside* the shim's own I/O and must not start
 more. While it is held, every NT file call this thread makes takes
 `create_hook`/`open_hook`'s `in_hook_reenter` fast path straight to the real
-ntdll — which is the point: the shim's own file I/O (the stats report, the
+ntdll, which is the point: the shim's own file I/O (the stats report, the
 panic log, the diagnostic traces) must reach the real filesystem rather than
 be re-decided by the hooks it runs inside. (The shim-local copy-up, which
 wrote its destination file from inside the hook that asked for it, was the
@@ -625,12 +625,12 @@ than tidy.** There used to be a `hook_reenter_begin`/`hook_reenter_end`
 pair as well, and three in-module callers used it raw: `install_panic_hook`,
 `drm_exe_trace` and `director_open_trace`. Each of those does file I/O
 between the two calls, and a panic anywhere in that span skipped the `end`.
-That failure is permanent and completely silent: the counter stays at 1 for
+That failure is permanent and silent: the counter stays at 1 for
 the life of the thread, so every later hook call from it takes the
 `in_hook_reenter` fast path to real ntdll, and the process quietly stops
 being virtualized on that thread while every counter keeps reporting
 ordinary activity. Now that `hook::contain_panic` catches panics instead of
-letting them abort the process, that "later" actually exists — so the pair
+letting them abort the process, that "later" exists, so the pair
 is gone and the counter can only be raised by a value whose `Drop` lowers
 it, unwinding included.
 
@@ -640,19 +640,19 @@ From `hook/entry.rs`.
 
 What every hook returns when [`contain_panic`] catches a panic in its body.
 
-**The choice that matters is that it is a failure**, with the NTSTATUS
+The choice that matters is that it is a failure, with the NTSTATUS
 severity bits set, so no caller can mistake it for a completed operation. A
 hook that panicked half way through has written nothing to the caller's
 output buffer and stored nothing in its `*mut HANDLE`; answering
 `STATUS_SUCCESS` would hand the game an uninitialised handle value and a
-buffer of stack garbage to parse, which is materially worse than the abort
-this replaces — a crash at least stops at the fault.
+buffer of stack garbage to parse, which is worse than the abort
+this replaces: a crash at least stops at the fault.
 
 It is `STATUS_UNSUCCESSFUL` and not something more specific for the opposite
 reason. A panic means the shim does not know what happened, and every
 *specific* status is a claim it is not entitled to make: returning
 `STATUS_OBJECT_NAME_NOT_FOUND` tells the game the file does not exist, and
-Skyrim will happily bake that into a load order and carry on without the
+Skyrim will bake that into a load order and carry on without the
 plugin; `STATUS_ACCESS_DENIED` invites a retry loop; `STATUS_NO_MORE_FILES`
 from an enumeration hook silently truncates a directory listing. Generic
 failure is the only answer that says "this operation did not happen" without
@@ -664,9 +664,9 @@ would be one more chance per hook to pick one that a caller treats as benign.
 `cpiw_hook` is the one exception and is not an exception to the principle:
 `CreateProcessInternalW` returns a Win32 `BOOL`, where this constant's bit
 pattern is *non-zero* and therefore reads as success. It returns `FALSE`
-instead — see the `on_panic` column of the `CreateProcessInternalW` row in `detour_table!`.
+instead; see the `on_panic` column of the `CreateProcessInternalW` row in `detour_table!`.
 
-Note that several hooks already return this same status when their
+Several hooks already return this same status when their
 trampoline is missing, so the value alone does not distinguish a panic from
 that. The distinguishing record is `hookstats::note_hook_panic` plus the
 shim panic log, both of which a panic writes and a missing trampoline does
@@ -684,8 +684,8 @@ boundary, and report `on_panic`'s value to the caller if it faults.
 `extern "system"` fn runs the `Drop` impls of every Rust frame below the
 boundary, in order, and *then* hits rustc's forced
 `core::panicking::panic_cannot_unwind` and takes the process down with
-`0xC0000409`. Adding this wrapper does not change which destructors run —
-the same unwind runs the same ones — it changes only where the unwind stops
+`0xC0000409`. Adding this wrapper does not change which destructors run
+(the same unwind runs the same ones); it changes only where the unwind stops
 and what happens there. The unwind never reached the game's frames before
 (the forced abort is at *our* boundary, not theirs) and still does not; what
 the game gets now is a returned status instead of a dead process.
@@ -693,7 +693,7 @@ the game gets now is a returned status instead of a dead process.
 That the inner destructors run is a requirement here, not a tolerated cost:
 [`ShimIoGuard`]'s `Drop` is what releases this thread's reentrancy counter,
 and a panic that skipped it would leave every later hook call on that thread
-falling through to real ntdll — a silent un-virtualization far harder to
+falling through to real ntdll, a silent un-virtualization far harder to
 diagnose than a crash.
 
 # `AssertUnwindSafe`
@@ -711,10 +711,10 @@ a panic taken while held, and every lock site in this crate already treats
 `Err` as "no entry". So a later call cannot read a torn value out of one; it
 reads nothing, which is the same thing it does on any other lock failure.
 
-The honest consequence of that, which the abort did not have because there
+The consequence of that, which the abort did not have because there
 was no "later": a panic taken while one of those tables is locked poisons it
 for the rest of the process, and the handle tracking it backs degrades to
-permanently empty. That is a real loss of fidelity and it is why the caught
+permanently empty. That is a loss of fidelity and it is why the caught
 panic is counted loudly rather than swallowed.
 
 # Visibility
@@ -731,47 +731,47 @@ against a single marker.
 
 From `hook/entry.rs`.
 
-Record shim panics — which no longer take the game down, and that is the
+Record shim panics, which no longer take the game down; that is the
 change that matters most about this comment.
 
 **A panic in a hook used to end the process, and does not any more.** The
-history is worth keeping because two successive versions of this comment
+history is kept because two successive versions of this comment
 were wrong about why. The first claimed the workspace builds with
-`panic = "abort"`; it does not — `rust/Cargo.toml` sets `panic = "unwind"`
+`panic = "abort"`; it does not: `rust/Cargo.toml` sets `panic = "unwind"`
 for both profiles, deliberately, so a future binding can turn a panic into
 a host-language exception. The second, correct as far as it went, was that
 the process died anyway because every hook is `extern "system"` and rustc
 plants a forced abort wherever an unwind would cross that boundary:
 measured, a panic inside such a function printed `thread caused
-non-unwinding panic. aborting.` and exited **0xC0000409**
+non-unwinding panic. aborting.` and exited 0xC0000409
 (`FAST_FAIL_FATAL_APP_EXIT`). That is no longer what happens, because
 [`contain_panic`] now catches at each boundary and returns
 [`STATUS_HOOK_PANICKED`] instead. The old behaviour is still one edit away
-and reproducible on demand — deleting the `catch_unwind` makes
+and reproducible on demand: deleting the `catch_unwind` makes
 `a_panicking_hook_returns_a_failure_status_instead_of_aborting` kill the
 *test process* with exactly that code.
 
 So this hook's job changed from "attribute the crash" to "be the only
 record there was a fault at all". It matters more now, not less: a
-contained panic is invisible from outside the process — the game gets a
-failed file operation and carries on — and this log is the only place the
+contained panic is invisible from outside the process (the game gets a
+failed file operation and carries on), and this log is the only place the
 message, location and thread survive. (`hookstats`' caught-panic counters
 are the aggregate, but they only reach a reader if `VFS_SHIM_STATS_LOG` is
 set.) The 0xC0000409 attribution still matters for the panics that *do*
-abort — a panic inside this hook, or in code the containment does not
-cover — where the exit is otherwise an unattributable
-`STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine
+abort (a panic inside this hook, or in code the containment does not
+cover), where the exit is otherwise an unattributable
+`STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a
 stack-cookie or CFG failure in the game, and localisable only by bisecting
 (see the 0xC0000409 hunt behind commit 5f8f2eb).
 
 `set_hook`'s hook runs at panic time, before any unwinding begins, so the
 message is written whether the unwind is later caught or aborts. A logged
-message therefore does **not** imply the process died, and now for two
+message therefore does not imply the process died, and now for two
 reasons rather than one: a panic on the stats reporter thread kills only
 that thread and never reaches an `extern` boundary at all, and a panic in a
 hook is caught at that boundary and answered with a status.
 Writes to `VFS_SHIM_PANIC_LOG`, else `<state dir>/shim-panic.log`, else a
-fixed fallback — a panic here must never be silent for want of a path.
+fixed fallback: a panic here must never be silent for want of a path.
 
 ## Name-query consistency
 
@@ -782,8 +782,8 @@ fixed fallback — a panic here must never be silent for want of a path.
 
 From `hook/file_info.rs`.
 
-`NtQueryInformationFile` hook. Spoofs the two name classes —
-`FileNameInformation` (9) and `FileNormalizedNameInformation` (48) — on a
+`NtQueryInformationFile` hook. Spoofs the two name classes,
+`FileNameInformation` (9) and `FileNormalizedNameInformation` (48), on a
 redirected handle -> the virtual path, so `GetFinalPathNameByHandleW`
 reports where the mod file appears to live. Everything else passes through.
 
@@ -791,15 +791,15 @@ reports where the mod file appears to live. Everything else passes through.
 
 This comment used to read "spoofing class 9 breaks
 `GetFinalPathNameByHandleW`", and that was a true measurement of the shim as
-it then stood — but the cause was consistency, not class 9 itself.
+it then stood, but the cause was consistency, not class 9 itself.
 `GetFinalPathNameByHandleW` builds its answer from three sources and treats
 them as describing one file:
 
-1. `NtQueryObject(ObjectNameInformation)` — the full NT name;
-2. `NtQueryInformationFile(FileNameInformation)` (class 9) — used for its
-   **length only**: the device prefix is taken to be
+1. `NtQueryObject(ObjectNameInformation)`: the full NT name;
+2. `NtQueryInformationFile(FileNameInformation)` (class 9), used for its
+   length only: the device prefix is taken to be
    `ObjectName[.. ObjectName.len - class9.len]`;
-3. `NtQueryInformationFile(FileNormalizedNameInformation)` (class 48) —
+3. `NtQueryInformationFile(FileNormalizedNameInformation)` (class 48),
    appended to the drive letter that prefix maps to.
 
 Spoof any one of those and the subtraction in (2) slices at the wrong
@@ -809,7 +809,7 @@ minus the backing file's class 9 `\vfstmp\vfs-diag-backing\backing_blob.dat`
 (47 chars) gave a 6-character "device" of `\Devic`, which maps to no drive,
 so the call failed with `ERROR_FILE_NOT_FOUND`.
 
-The rule is therefore **all three or none**: classes 1, 9 and 48 must
+The rule is therefore all three or none: classes 1, 9 and 48 must
 describe the same path. They now do, and the subtraction lands on the real
 device prefix again because both operands moved by the same amount.
 
@@ -819,22 +819,22 @@ From `hook/file_info.rs`.
 
 `NtQueryObject` hook. Answers `ObjectNameInformation` (class 1) for a handle
 the shim redirected -> the VIRTUAL path, in the prefix convention this host
-actually uses. Every other class, and every handle we do not track, passes
+uses. Every other class, and every handle we do not track, passes
 through untouched: this API answers about events, mutexes, sections and
 registry keys too, and inventing a name for one of those would break
 unrelated Windows APIs.
 
 Why the convention is discovered rather than assumed: measured 2026-09-01,
 Windows returns `\Device\HarddiskVolume3\...` while Wine returns `\??\C:\...`,
-and `QueryDosDeviceW("C:")` reports `\Device\HarddiskVolume1` on Wine — it
+and `QueryDosDeviceW("C:")` reports `\Device\HarddiskVolume1` on Wine; it
 disagrees with Wine's own `NtQueryObject`. So building a device path from it
 would emit a form Wine never produces. Instead the trampoline runs first and
 its answer's prefix is reused.
 
 **This closes a pre-existing leak on Windows, not only on Wine.**
 `GetFinalPathNameByHandleW` happens to route through
-`NtQueryInformationFile(FileNormalizedNameInformation)` on Windows — hooked
-by [`qif_hook_body`] — so the leak hid there; any caller reaching
+`NtQueryInformationFile(FileNormalizedNameInformation)` on Windows (hooked
+by [`qif_hook_body`]), so the leak hid there; any caller reaching
 `NtQueryObject` directly got the backing path, silently. Wine routes
 `GetFinalPathNameByHandleW` through this entry point instead, which is how
 the leak became visible at all.
@@ -910,7 +910,7 @@ launch waits for it and stops it like any other. A child that escaped would
 keep doing file I/O through the VFS after the host saw the launch end. The job
 allows no breakaway, so the flag would otherwise make the `CreateProcess` fail
 with `ERROR_ACCESS_DENIED`; stripped, it cannot. Under Wine, or for a launch
-with no job, the child simply stays in its parent's job, if any.
+with no job, the child stays in its parent's job, if any.
 
 **What the child inherits.** After a shim has written its own ready state it
 drops `VFS_SHIM_READY` from its environment (`finish_ready_handshake`), so
@@ -922,7 +922,7 @@ not need it: it answers its spawner by event.
 it sets `Local\vfs_shim_failed_<pid>` instead (`signal_bootstrap_failed`), and
 the parent waits on both events and on the child's process handle, so a failed
 or crashed child is refused at once rather than after the timeout. A child that
-simply never answers is refused at the timeout.
+never answers is refused at the timeout.
 
 **The timeout.** The parent waits as long as the top-level launch did, for each
 of its two waits (sentinel, ready). `run_target_with_shim` writes
@@ -948,16 +948,16 @@ because the alternative was unreadable INI files.
 
 From `hook/file_io.rs`.
 
-`NtLockFile` hook — grants byte-range locks on synthetic handles locally.
+`NtLockFile` hook: grants byte-range locks on synthetic handles locally.
 
 **Why this exists.** A synthetic handle is a tagged value in `synth_file`'s
 table, not a kernel file object, so any NT call without a detour hands that
 value to the real kernel and gets `STATUS_INVALID_HANDLE` back. Measured
-2026-08-14: `GetPrivateProfileStringW` — how Skyrim loads `SkyrimPrefs.ini`
-— issues `NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile →
+2026-08-14: `GetPrivateProfileStringW` (how Skyrim loads `SkyrimPrefs.ini`)
+issues `NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile →
 NtUnlockFile → NtClose`, and with `NtLockFile` unhooked the sequence
 stopped dead at step 2. The API then returned the *caller's default* for
-every key, so the game received no INI data at all — not stale data, not
+every key, so the game received no INI data at all: not stale data, not
 real-disk data. `WritePrivateProfileStringW` failed the same way one
 operation earlier. Neither showed up as a read or write at the director;
 both showed up as an open and nothing else.
@@ -969,14 +969,14 @@ overlooked:
 
 - Inside a sealed managed root the director is the only route to the bytes,
   and there is no cross-process byte-range locking anywhere in the design
-  today — so there is no lock table for a real answer to consult.
+  today, so there is no lock table for a real answer to consult.
 - Refusing instead (`STATUS_LOCK_NOT_GRANTED`) would leave the profile APIs
   exactly as broken as an unhooked call did; it swaps a wrong status for a
   different wrong status.
 
 **Do not read that as "there is only one writer".** There is not, by
 design: `cpiw_hook` propagates injection into child processes, so a
-launcher and a game — or a game and a mod manager's helper — are routinely
+launcher and a game (or a game and a mod manager's helper) are routinely
 in one session. And the API that exposed this bug is the worst case for a
 fake lock: `WritePrivateProfileString` is a read-modify-write, and the lock
 it takes here is exactly what stops two of those from losing each other's
@@ -985,7 +985,7 @@ exclusive range and one update will disappear.
 
 That is a real hole, not a theoretical one; it is accepted because the
 alternative on offer was every INI staying unreadable, not because it is
-harmless. Closing it needs a byte-range table in the director — the only
+harmless. Closing it needs a byte-range table in the director, the only
 component both processes share. Until then
 `hookstats::note_synthetic_lock` counts every grant by path, so the
 contention shows up in a report instead of only in corrupted settings.
@@ -997,7 +997,7 @@ those would report a lock held on a file the caller never opened.
 
 **Completion.** Answered synchronously: `STATUS_SUCCESS`, a completed
 `IO_STATUS_BLOCK`, `SetEvent` if the caller supplied one and its APC queued
-to the calling thread if it supplied that — the same shape `read_hook` and
+to the calling thread if it supplied that, the same shape `read_hook` and
 `write_hook` use, because a `ReadFileEx` caller sleeps alertably until the
 APC runs however done the read is. `note_read_completion` classifies every
 synthetic lock by the completion its caller expected, in the report's async

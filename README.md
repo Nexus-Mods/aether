@@ -7,7 +7,7 @@ Windows programs do it:
   loads the shim into it by remote-thread injection.
 - **`aether_shim_dll.dll`** (crate `aether-shim-dll`, hooks in `aether-shim`): runs
   inside the game and detours its NT file and registry calls, answering every
-  operation on a managed path from a **director** over a shared-memory ring.
+  operation on a managed path from a director over a shared-memory ring.
 
 The director, the program that decides what the game sees, is not here: it is
 whatever speaks the wire contract (`aether-ipc`, `aether-protocol`). Cairn's
@@ -16,7 +16,7 @@ one. Running a Windows game on Linux or macOS (Proton, Wine prefixes,
 CrossOver) is the director's job too; the injector and the shim are the same
 Windows binaries everywhere, running inside Wine there.
 
-Both ship for **x64 and x86** (32-bit games and tools), with the C runtime
+Both ship for x64 and x86 (32-bit games and tools), with the C runtime
 linked in (`+crt-static`): the shim loads inside the game, where Windows
 doesn't look beside it for `vcruntime140.dll`, and a PC may have no VC++
 runtime. They are staged as `aether-injector.exe`, `aether_shim_dll.dll`,
@@ -61,7 +61,7 @@ test on Linux (CI's `linux` job lists them). CI also runs `cargo fmt --all
 --check` and `cargo clippy --all-targets -- -D warnings`
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-**8.3 TMP alias.** When `TMP`/`TEMP` contain a short-name alias (a `~`, as in
+When `TMP`/`TEMP` contain an 8.3 short-name alias (a `~`, as in
 `C:\Users\LONGNA~1\AppData\Local\Temp`), eleven of these tests fail. Point them at
 a path without one first:
 
@@ -94,14 +94,14 @@ The ones that ship:
 | `aether-env` | Every `VFS_*` environment switch, defined once |
 | `aether-zip` | Stored-zip reading, used by the injector |
 
-The **test fixtures**, Windows programs the tests run under the shim:
+The test fixtures, Windows programs the tests run under the shim:
 `aether-fixture-read` (reads a virtual file), `-writepath` (the write path),
 `-escape` (paths that try to escape the managed root), `-prefs` (the INI profile
 API), `-vproxy` and `-staticimp` (a statically imported proxy DLL, pre-init
 injection), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and
 the registry overlay). `aether-testkit` holds helpers shared by the tests.
 
-**Test-only:** `aether-director`, `aether-compose` and `aether-unix` are an old Rust
+`aether-director`, `aether-compose` and `aether-unix` are test-only: an old Rust
 director kept as the shim's tests' counterpart (a dev-dependency of the
 shim). Don't build new features on them: a director harness will replace
 them.

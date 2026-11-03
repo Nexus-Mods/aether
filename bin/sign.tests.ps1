@@ -117,3 +117,4 @@ if ($failed.Count) {
   exit 1
 }
 Write-Host 'all passed'
+exit 0

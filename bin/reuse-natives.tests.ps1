@@ -108,3 +108,4 @@ try {
 
 if ($failed.Count) { Write-Host "$($failed.Count) failed: $($failed -join '; ')"; exit 1 }
 Write-Host 'all passed'
+exit 0

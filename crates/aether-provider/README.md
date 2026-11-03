@@ -12,16 +12,15 @@ Design background: [`docs/superpowers/specs/2026-08-13-pluggable-providers-desig
 §5 (the contract) and §6 (primitives and composition). That spec describes the
 full end state across five stages; this crate is the contract, addressing,
 capabilities, and conformance suite. The registry and the combinators-as-designed
-are later stages (see [below](#what-this-crate-and-aether-compose-do-not-include)).
+are later stages (see [below](#what-this-crate-does-not-include)).
 
 ## What a provider is
 
 A `Provider` is anything that can answer filesystem questions for a virtual
 tree: does this path exist, what is in this directory, give me a handle to
-this file, read some bytes from it. Concrete examples elsewhere in the
-workspace: a zip archive (`aether-zip`'s `ZipProvider`), a directory on disk
-(`aether-compose`'s `DiskProvider`), and several combinators in
-`aether-compose` that build a provider out of other providers.
+this file, read some bytes from it. Concrete providers (a zip archive, a
+directory on disk, combinators that build a provider out of other providers)
+live in a director, outside this repository.
 
 A provider does not decide how it is combined with others, does not know
 about mount tables, and does not know about the ring protocol that eventually
@@ -239,29 +238,20 @@ by the suite itself — `aether_provider::conformance::MemFixture` (positional) 
 worked examples of a provider that does pass conformance, one for each access
 tier.
 
-Every provider ported to this contract elsewhere in the workspace is held to
-this same suite: `ZipProvider`, `DiskProvider`, `RemoteProvider`, and the
-combinators in `aether-compose` (`InlineProvider`, `LayeredProvider`, `OverlayProvider`)
-all call `assert_conformance` in their own test suites.
+A provider written to this contract is held to this same suite by calling
+`assert_conformance` in its own tests.
 
-## What this crate and `aether-compose` do not include
+## What this crate does not include
 
 The design spec describes a larger end state than what exists in this crate
-and in `aether-compose` today. To avoid documenting aspiration as fact:
+today. To avoid documenting aspiration as fact:
 
 - **The write path is on the trait and implemented elsewhere.** `write_at`,
   `set_len`, `mkdir`, `remove`, `rename` and `set_attr` are optional methods;
-  `MemoryProvider`, `OverlayProvider`, `DiskProvider` and the
-  `aether-storage` add-on's layer provider implement them, and the conformance suite has `ReadWrite`
-  cases (see `RwMemFixture`).
-- **`aether-compose`'s combinators are narrower than the spec's catalog.**
-  `layered`, `router`, `subdir`, `inline`, `memory`, `seekable`, `readonly`
-  and `overlay` exist. `overlay` is writable: it declares `Access::ReadWrite`
-  (its upper must too), copies a base-only file up whole on the first write,
-  and hides a removed base path with a `.wh.<name>` marker in the upper.
-  `router`'s `readdir` is single-dispatch (it returns one route's listing, not
-  the union across routes the design calls for). `cached` is not a
-  `aether-compose` primitive: the `aether-storage` add-on has `Storage::cached`.
+  a director's providers implement them, and the conformance suite has
+  `ReadWrite` cases (see `RwMemFixture`).
+- **No combinators.** Layering, overlays (copy-up, `.wh.<name>` whiteouts) and
+  routing belong to a director, outside this repository.
 - **No registry.** There is no `register_provider` and no `type` string →
   factory mapping; providers are constructed directly in Rust.
 - **No Python binding.** That is later work in the design spec (the Rust

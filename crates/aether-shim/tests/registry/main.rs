@@ -1,4 +1,4 @@
-//! The registry overlay's hooks and client, against the director's own registry code.
+//! The registry overlay's hooks and client, against the fake director's registry.
 //!
 //! Each `#[test]` runs in a fresh process (see `common`), so the scenarios here may install
 //! different process-wide state. Add a scenario as a module below.

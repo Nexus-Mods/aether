@@ -518,7 +518,7 @@ fn start_target(
     // SAFETY: CreateProcessW + inject + resume.
     unsafe {
         // Staging puts the EXE and its import closure on disk, so the loader
-        // resolves everything itself — see `aether-director::stage`.
+        // resolves everything itself (a director's staging).
         let mut cmd_w = wide(&command_line(cfg));
         let app_w = wide(&cfg.target_exe);
         let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));

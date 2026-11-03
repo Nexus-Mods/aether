@@ -7,7 +7,7 @@
 //! The shim and the director shared one physical directory and spell whiteouts
 //! differently: the shim-local overlay (removed by task C8) appended
 //! `aether_redirect::WHITEOUT_SUFFIX` (`<name>.__vfs_wh__`);
-//! `aether_compose::OverlayProvider` prefixes `.wh.<name>`. Live,
+//! a director's overlay prefixes `.wh.<name>`. Live,
 //! `skyrim-live` and the daemon hand the director a write layer rooted at
 //! `overlay_layer_dir(overlay, RootId::DEFAULT)` — the *same* directory the
 //! shim-local overlay wrote into. So a marker an older shim wrote is, to the

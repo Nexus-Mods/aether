@@ -10,7 +10,6 @@ members = [
   "crates/aether-pe",
   "crates/aether-env",
   "crates/aether-protocol",
-  "crates/aether-compose",
   # Dev-only helpers shared by integration tests (stored-zip writer, artefact locator).
   "crates/aether-testkit",
   # Registry overlay model (paths, copy-on-write tree). Portable: depends only on
@@ -22,14 +21,9 @@ members = [
   # for the shim, split out so they build and test on any host.
   "crates/aether-ntlayout",
   "crates/aether-redirect",
-  "crates/aether-director",
   "crates/aether-shim",
   "crates/aether-shim-dll",
   "crates/aether-win",
-  # The Unix mirror of aether-win: one crate per OS, each owning that OS's handles,
-  # with the portable ring above both. Builds to an empty crate on Windows.
-  "crates/aether-unix",
-  "crates/aether-zip",
   # What the fixtures share: waiting for a stats report that covers the run.
   "crates/aether-fixture-support",
   "crates/aether-fixture-read",
@@ -73,9 +67,7 @@ unimplemented = "warn"
 
 [workspace.dependencies]
 # Internal crates.
-aether-compose = { path = "crates/aether-compose" }
 aether-core = { path = "crates/aether-core" }
-aether-director = { path = "crates/aether-director" }
 aether-env = { path = "crates/aether-env" }
 aether-fixture-support = { path = "crates/aether-fixture-support" }
 aether-inject = { path = "crates/aether-inject" }
@@ -88,9 +80,7 @@ aether-redirect = { path = "crates/aether-redirect" }
 aether-registry = { path = "crates/aether-registry" }
 aether-shim = { path = "crates/aether-shim" }
 aether-testkit = { path = "crates/aether-testkit" }
-aether-unix = { path = "crates/aether-unix" }
 aether-win = { path = "crates/aether-win" }
-aether-zip = { path = "crates/aether-zip" }
 
 # Shared external crates: one version spec each. Members add their own
 # `features` / `optional` on top.
@@ -101,7 +91,6 @@ tempfile = "3.27"
 serde_json = "1"
 thiserror = "2"
 toml = "0.8"
-tracing = "0.1"
 redb = "4.3"
 windows-sys = "0.61"
 

@@ -1,6 +1,6 @@
 //! Registry change notifications, the out-of-scope calls, key security, handle flags and the
 //! registry stats (registry overlay spec sections 3.4, 3.6 and 6), through the real ntdll entry
-//! points with the shim's detours installed and a real director registry behind the ring
+//! points with the shim's detours installed and the fake director's registry behind the ring
 //! (`fakedirector` with [`Fake::with_registry`]).
 //!
 //! Real scratch keys live under `HKCU\Software\AetherVfsRegNotifyTest`, made before the hooks go
@@ -644,8 +644,7 @@ fn notify_change_multiple_keys_refuses_subordinate_keys_on_a_served_key() {
 fn a_waiter_rides_out_a_director_failure_without_firing() {
     isolate!();
     let (_g, f) = fixture();
-    let host = f.fake.director().registry().unwrap();
-    f.fake.director().set_registry(None);
+    f.fake.detach_registry();
     // With the director gone the key opens as the real handle; the notification still becomes
     // an overlay waiter, with no version to watch from yet.
     let h = f.open("Dead", NT_KEY_READ | NT_KEY_SET_VALUE);
@@ -663,7 +662,7 @@ fn a_waiter_rides_out_a_director_failure_without_firing() {
     assert_eq!(set_dword(h, "lost", 1), STATUS_UNSUCCESSFUL);
     assert_eq!(reg_write_refused_count(), refused + 1);
     assert_eq!(reg_read_fallback_count(), fallbacks);
-    f.fake.director().set_registry(Some(host));
+    f.fake.attach_registry();
     // The first answered poll sets the version; it does not complete the waiter.
     assert_eq!(wait(ev, QUIET), WAIT_TIMEOUT);
     assert_eq!(set_dword(h, "back", 1), STATUS_SUCCESS);

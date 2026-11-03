@@ -142,7 +142,7 @@ impl SharedMapping {
     /// A shorter file is **refused**. `CreateFileMappingW` with a nonzero size
     /// would otherwise extend the file to `size` and return success, which
     /// contradicts the "must already be" above and diverges from
-    /// `aether_unix::FileMapping::open`, the deliberate mirror of this function.
+    /// a Unix director's file mapping, the deliberate mirror of this function.
     /// The divergence matters across the boundary: silently growing a short
     /// file hands the ring code a zero-filled segment, which surfaces as an
     /// `IpcError::Layout` about a missing magic rather than as the length

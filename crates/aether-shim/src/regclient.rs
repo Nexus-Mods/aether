@@ -4,7 +4,7 @@
 //! **Caching (spec section 3.5).** `REG_LOOKUP` and `REG_KEY` answers are cached per path. The
 //! director publishes a registry *generation* in the ring header that every injected process of
 //! the session maps, and moves it on every registry write (before the writer gets its reply)
-//! and whenever a layer is attached or detached (`aether_director::Director::registry_changed`).
+//! and whenever a layer is attached or detached.
 //! An answer is cached under the generation read **before** it was asked for, and used only
 //! while the published generation still equals it. So a write by any process makes every
 //! process's cached answers unusable before that write returns, and a cache hit costs one

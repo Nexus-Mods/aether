@@ -407,7 +407,7 @@ fn reg_checker() {
     }
 }
 
-/// Start the fake director with its real registry behind the ring and switch the registry
+/// Start the fake director with its registry behind the ring and switch the registry
 /// overlay on (`VFS_REGISTRY`, which `regclient::enabled` reads once). Returns the virtual
 /// root's directory too.
 pub(crate) fn start_director(tag: &str) -> (&'static Fake, std::path::PathBuf) {

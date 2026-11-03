@@ -37,16 +37,15 @@
 //! ([`key`]), so a fixture serving the same relative path under two roots holds two entries and
 //! a request that lost its root shows up as the wrong file.
 //!
-//! **The registry half** (opcodes 15-22) is not faked at all: [`Fake::with_registry`] puts a
-//! real `aether_director::Director` with a real `RegistryHost` behind the ring and answers those
-//! opcodes with the director's own `dispatch_director`, and [`install`] registers the ring
-//! header for the director's registry generation exactly as `IpcServe` does. What the shim's
-//! registry client is tested against is therefore the director's code, not this file's idea
-//! of it.
+//! **The registry half** (opcodes 15-22, [`Fake::with_registry`]) keeps one session's overlay in
+//! memory as `aether_registry`'s own `Overlay`, so what is stored, merged and versioned is that
+//! crate's code; this file adds only a director's rules around it (docs/wire.md, the registry
+//! opcodes): the path check, the status for each overlay error, the inline-reply limit, and the
+//! registry generation in the ring header, bumped and published before a write's reply leaves.
 //!
 //! **Both transports.** A READ is answered inline (data in the ring payload)
 //! or in **bulk** (data written into the shared arena, ring carries only
-//! length + offset), chosen exactly the way `dispatch_director` chooses: the
+//! length + offset), chosen exactly the way a director chooses: the
 //! client's `FLAG_READ_BULK`, or a request at or above `BULK_THRESHOLD`. This
 //! is not decoration. Live, `arena_len > 0` and copy-up's `SEED_CHUNK` is
 //! 256 KiB — four times the threshold — so **every real copy-up of a large
@@ -59,10 +58,12 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_ipc::{DataArena, RingServer, SpinNotifier};
 use aether_protocol as P;
+use aether_registry::{path as regpath, Lookup, Overlay, RegError};
 use aether_win::SharedMapping;
 
 /// Deliberately small — 4 KiB caps an inline READ response at 4088 bytes, so
@@ -72,7 +73,7 @@ use aether_win::SharedMapping;
 pub(crate) const PAYLOAD_CAP: u32 = 4096;
 pub(crate) const SLOTS: u32 = 8;
 
-/// Requests at or above this go bulk, matching `dispatch_director`'s and
+/// Requests at or above this go bulk, matching a director's and
 /// `FuseClient::read_fragmented`'s own constant. A fixture below it stays
 /// inline whatever the arena is, which is how one ring covers both transports.
 pub(crate) const BULK_THRESHOLD: u32 = 64 * 1024;
@@ -85,7 +86,7 @@ pub(crate) const BULK_THRESHOLD: u32 = 64 * 1024;
 pub(crate) const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
 
 /// Control ring length, and therefore the arena's offset within the section —
-/// same layout `IpcServe::start` uses (`arena_offset = ring_bytes`).
+/// same layout a director uses (`arena_offset = ring_bytes`).
 fn ring_bytes() -> usize {
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
     aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride
@@ -226,7 +227,7 @@ pub(crate) struct Fake {
     /// one that refused.
     failing: Vec<String>,
     /// Answers the registry opcodes when set ([`Fake::with_registry`]).
-    director: Option<Arc<aether_director::Director>>,
+    registry: Option<Registry>,
     pub(crate) tally: Tally,
 }
 
@@ -239,28 +240,33 @@ impl Fake {
             next_fh: AtomicU64::new(1),
             writable: Vec::new(),
             failing: Vec::new(),
-            director: None,
+            registry: None,
             tally: Tally::default(),
         }
     }
 
-    /// Serve the registry opcodes from a real director with an empty registry layer attached
-    /// (an in-memory provider). Without this they answer `ST_NOT_SUPPORTED`, as a director
-    /// with no registry layer does.
+    /// Serve the registry opcodes from an empty overlay. Without this they answer
+    /// `ST_NOT_SUPPORTED`, as a director with no registry layer does.
     pub(crate) fn with_registry(mut self) -> Fake {
-        let d = aether_director::Director::new();
-        let layer = Arc::new(aether_provider::RwMemFixture::new());
-        d.set_registry(Some(
-            aether_director::registry::RegistryHost::open(layer).expect("registry host"),
-        ));
-        self.director = Some(Arc::new(d));
+        self.registry = Some(Registry::default());
         self
     }
 
-    /// The director behind the registry opcodes, for a test that attaches or detaches layers.
-    pub(crate) fn director(&self) -> &aether_director::Director {
-        self.director.as_ref().expect("Fake::with_registry")
+    /// Detach the registry layer, as a director whose layer went away: every registry opcode
+    /// answers `ST_NOT_SUPPORTED` until [`Fake::attach_registry`], and the generation moves.
+    pub(crate) fn detach_registry(&self) {
+        self.registry().set_attached(false);
     }
+
+    /// Attach the registry layer again, with the overlay it had; the generation moves.
+    pub(crate) fn attach_registry(&self) {
+        self.registry().set_attached(true);
+    }
+
+    fn registry(&self) -> &Registry {
+        self.registry.as_ref().expect("Fake::with_registry")
+    }
+
     /// Add a directory to the provider graph.
     ///
     /// It answers a write open the way a real provider graph does, and that
@@ -333,7 +339,7 @@ impl Fake {
     }
 
     /// `arena` is `(arena, slot)` for this request, mirroring
-    /// `dispatch_director`'s own parameter — `None` only when the fixture was
+    /// a director's own dispatch — `None` only when the fixture was
     /// installed with no arena at all.
     fn handle(
         &self,
@@ -578,7 +584,7 @@ impl Fake {
                     want = want.min(n);
                 }
                 let src = &e.bytes[start..start + want];
-                // Bulk chosen exactly as `dispatch_director` chooses it, so a
+                // Bulk chosen exactly as a director chooses it, so a
                 // fixture inherits production's transport rather than the
                 // fake's opinion of it.
                 let want_bulk = (flags & P::FLAG_READ_BULK) != 0 || req.len >= BULK_THRESHOLD;
@@ -662,19 +668,12 @@ impl Fake {
                 }
                 (P::ST_OK, Vec::new())
             }
-            P::OP_REG_LOOKUP..=P::OP_REG_CHANGED => match &self.director {
-                Some(d) => {
+            P::OP_REG_LOOKUP..=P::OP_REG_CHANGED => match &self.registry {
+                Some(r) => {
                     if let Some(path) = reg_request_path(payload) {
                         Tally::bump(&self.tally.reg, &format!("{opcode} {path}"));
                     }
-                    aether_director::ring_dispatch::dispatch_director(
-                        d,
-                        opcode,
-                        payload,
-                        flags,
-                        PAYLOAD_CAP,
-                        None,
-                    )
+                    r.handle(opcode, payload)
                 }
                 None => (P::ST_NOT_SUPPORTED, Vec::new()),
             },
@@ -697,7 +696,7 @@ impl Fake {
 /// test that declares more roots sets `VFS_VIRTUAL_ROOTS` before this.
 ///
 /// `arena_len` of 0 forces every READ inline; [`ARENA_LEN`] gives the section
-/// a real bulk arena laid out the way `IpcServe::start` lays one out, so a
+/// a real bulk arena laid out the way a director lays one out, so a
 /// request at or above [`BULK_THRESHOLD`] takes the same transport it takes
 /// live. Below the threshold reads stay inline either way, so one ring can
 /// cover both.
@@ -719,11 +718,9 @@ pub(crate) fn install(
             SharedMapping::create(&name, map_bytes).expect("section"),
         ));
         aether_ipc::ring::init(mapping.seg(), SLOTS, PAYLOAD_CAP).expect("ring init");
-        if let Some(d) = &fake.director {
-            // What `IpcServe` does with its ring header, before any client attaches.
-            let sink: Arc<dyn aether_director::RegistryGenSink> = Arc::new(HeaderSink(mapping));
-            d.add_registry_sink(Arc::downgrade(&sink));
-            std::mem::forget(sink);
+        if let Some(r) = &fake.registry {
+            // The generation is in the ring header before any client attaches.
+            r.publish_to(mapping);
         }
 
         std::thread::Builder::new()
@@ -731,7 +728,7 @@ pub(crate) fn install(
             .spawn(move || {
                 let server = RingServer::new(mapping.seg(), SpinNotifier).expect("ring open");
                 // One arena for the life of the thread, banked per slot —
-                // `worker_loop`'s shape. `banks == slot_count` is what makes
+                // a director worker's shape. `banks == slot_count` is what makes
                 // the client's `arena_len / slot_count` bank size agree with
                 // the server's.
                 let arena = (arena_len > 0).then(|| {
@@ -766,13 +763,150 @@ pub(crate) fn install(
     })
 }
 
-/// The ring header as the director's registry-generation sink.
-struct HeaderSink(&'static SharedMapping);
+/// The registry layer behind opcodes 15-22. One lock over all of it: each answer is computed
+/// together with the version it reports, and a write's generation is published before the lock
+/// (and so the reply) is let go.
+#[derive(Default)]
+struct Registry {
+    state: Mutex<RegState>,
+    /// The ring header the generation is published in, once [`install`] has made it.
+    header: OnceLock<&'static SharedMapping>,
+}
 
-impl aether_director::RegistryGenSink for HeaderSink {
-    fn publish_reg_generation(&self, generation: u64) {
-        aether_ipc::ring::publish_reg_generation(self.0.seg(), generation);
+struct RegState {
+    overlay: Overlay,
+    attached: bool,
+    /// Starts at 1, moved by every successful write and every attach or detach. Not the
+    /// overlay's version: the shim trusts a cached answer only while this has not moved.
+    generation: u64,
+}
+
+impl Default for RegState {
+    fn default() -> RegState {
+        RegState {
+            overlay: Overlay::new(),
+            attached: true,
+            generation: 1,
+        }
     }
+}
+
+impl Registry {
+    fn publish_to(&self, mapping: &'static SharedMapping) {
+        let s = self.state.lock().unwrap();
+        let _ = self.header.set(mapping);
+        aether_ipc::ring::publish_reg_generation(mapping.seg(), s.generation);
+    }
+
+    fn changed(&self, s: &mut RegState) {
+        s.generation += 1;
+        if let Some(m) = self.header.get() {
+            aether_ipc::ring::publish_reg_generation(m.seg(), s.generation);
+        }
+    }
+
+    fn set_attached(&self, attached: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.attached = attached;
+        self.changed(&mut s);
+    }
+
+    fn handle(&self, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
+        let mut s = self.state.lock().unwrap();
+        if !s.attached {
+            return (P::ST_NOT_SUPPORTED, Vec::new());
+        }
+        let ok = |p: &&str| valid_reg_path(p);
+        let (o, v) = (&s.overlay, s.overlay.version());
+        let read = match opcode {
+            P::OP_REG_LOOKUP => P::decode_reg_path(payload).filter(ok).map(|p| {
+                let (l, below) = o.lookup(p);
+                P::encode_reg_lookup_reply(lookup_state(l), below, v)
+            }),
+            P::OP_REG_KEY => P::decode_reg_path(payload)
+                .filter(ok)
+                .map(|p| P::encode_reg_key_reply(o.node(p), v)),
+            P::OP_REG_CHANGED => {
+                P::decode_reg_changed(payload)
+                    .filter(|(p, ..)| ok(p))
+                    .map(|(p, sub, since)| {
+                        P::encode_reg_changed_reply(o.changed_since(p, sub, since), v)
+                    })
+            }
+            _ => None,
+        };
+        if let Some(b) = read {
+            // Larger than an inline reply can carry (`payload_cap - 8`).
+            if b.len() > PAYLOAD_CAP as usize - 8 {
+                return (P::ST_REPLY_TOO_LARGE, Vec::new());
+            }
+            return (P::ST_OK, b);
+        }
+        let now = filetime_now();
+        let o = &mut s.overlay;
+        let write = match opcode {
+            P::OP_REG_SET_VALUE => P::decode_reg_set_value(payload)
+                .filter(|(p, ..)| ok(p))
+                .map(|(p, name, ty, data)| o.set_value(p, name, ty, data, now)),
+            P::OP_REG_DELETE_VALUE => P::decode_reg_delete_value(payload)
+                .filter(|(p, _)| ok(p))
+                .map(|(p, name)| o.delete_value(p, name, now)),
+            // Always *created here*: the shim asks only for a key with no real counterpart.
+            P::OP_REG_CREATE_KEY => P::decode_reg_create_key(payload)
+                .filter(|(p, _)| ok(p))
+                .map(|(p, volatile)| o.create_key(p, volatile, false, now)),
+            P::OP_REG_DELETE_KEY => P::decode_reg_path(payload)
+                .filter(ok)
+                .map(|p| o.delete_key(p, now)),
+            P::OP_REG_RENAME_KEY => P::decode_reg_rename_key(payload)
+                .filter(|(p, leaf)| ok(p) && *leaf != "." && *leaf != "..")
+                .map(|(p, leaf)| o.rename_key(p, leaf, now)),
+            _ => None,
+        };
+        match write {
+            None => (P::ST_BAD_REQUEST, Vec::new()),
+            Some(Err(e)) => (reg_status(e), Vec::new()),
+            Some(Ok(v)) => {
+                self.changed(&mut s);
+                (P::ST_OK, P::encode_reg_version_reply(v))
+            }
+        }
+    }
+}
+
+/// A canonical key path, which a director demands of every registry request: `\Registry` then
+/// non-empty components, none `.` or `..`, no doubled or trailing separator.
+fn valid_reg_path(p: &str) -> bool {
+    regpath::canonical(p, None).is_ok_and(|c| regpath::fold(&c) == regpath::fold(p))
+        && !p.split('\\').any(|c| c == "." || c == "..")
+}
+
+/// The ring status for an overlay error; the shim maps these to NT statuses.
+fn reg_status(e: RegError) -> i32 {
+    match e {
+        RegError::NameTooLong
+        | RegError::DataTooLarge
+        | RegError::InvalidPath
+        | RegError::TooDeep => P::ST_BAD_REQUEST,
+        RegError::NotFound => P::ST_NOT_FOUND,
+        RegError::AlreadyExists => P::ST_EXISTS,
+    }
+}
+
+/// `REG_LOOKUP`'s wire state.
+fn lookup_state(l: Lookup) -> u8 {
+    match l {
+        Lookup::Absent => 0,
+        Lookup::Present { created: false } => 1,
+        Lookup::Present { created: true } => 2,
+        Lookup::Tombstoned => 3,
+    }
+}
+
+/// Now as a FILETIME (100 ns ticks since 1601): a written key's last-write time.
+fn filetime_now() -> u64 {
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    (d.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(d.subsec_nanos()) / 100
 }
 
 /// The section [`install`] serves.

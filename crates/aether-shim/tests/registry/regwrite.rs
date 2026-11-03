@@ -1,6 +1,6 @@
 //! The registry write hooks (registry overlay spec sections 3.1, 3.2 and 6): `NtSetValueKey`,
 //! `NtDeleteValueKey`, `NtDeleteKey`, `NtRenameKey`, `NtSetInformationKey` and `NtFlushKey`,
-//! through the real ntdll entry points with the shim's detours installed and a real director
+//! through the real ntdll entry points with the shim's detours installed and the fake director's
 //! registry behind the ring (`fakedirector` with [`Fake::with_registry`]).
 //!
 //! Real scratch keys live under `HKCU\Software\AetherVfsRegWriteTest`, made before the hooks go
@@ -747,8 +747,7 @@ fn a_dead_director_fails_writes_and_leaves_the_real_key() {
     assert_eq!(st, STATUS_SUCCESS);
     let (st, del) = f.open(r"Del\Dead", NT_KEY_ALL_ACCESS);
     assert_eq!(st, STATUS_SUCCESS);
-    let host = f.fake.director().registry().unwrap();
-    f.fake.director().set_registry(None);
+    f.fake.detach_registry();
     let results = [
         set_dword(h, "v", 9),
         set_dword(h, "brandnew", 9),
@@ -756,7 +755,7 @@ fn a_dead_director_fails_writes_and_leaves_the_real_key() {
         rename(h, "DeadNew"),
         unsafe { NtDeleteKey(del) },
     ];
-    f.fake.director().set_registry(Some(host));
+    f.fake.attach_registry();
     assert_eq!(results, [STATUS_UNSUCCESSFUL; 5]);
     close(h);
     close(del);

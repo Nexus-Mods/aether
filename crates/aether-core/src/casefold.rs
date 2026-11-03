@@ -6,10 +6,9 @@
 /// It is load-bearing across the ring, not merely a convention. The shim folds
 /// every vpath component with this function before the vpath is sent
 /// (`aether-redirect`'s `RootMap::match_canonical`), so everything that keys,
-/// compares, or orders a name on the other side — `aether-zip`'s `by_fold` index,
-/// `aether-director`'s mount-prefix matching and directory merges, `aether-compose`'s
-/// layered/overlay merges and glob routes — has to fold with this same
-/// function. `to_ascii_lowercase` was used below the ring until the final
+/// compares, or orders a name on the other side — a director's archive indexes,
+/// mount-prefix matching, directory merges, layered/overlay merges and glob
+/// routes — has to fold with this same function. `to_ascii_lowercase` was used below the ring until the final
 /// review of `feat/real-roots` found the split: `Data/ÜBER/a.esp` crossed as
 /// `data/über/a.esp` and every index below was keyed `data/ÜBER/a.esp`, so the
 /// file resolved to not-found. `DiskProvider` hid it, because Windows folds

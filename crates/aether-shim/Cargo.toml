@@ -34,9 +34,8 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# `tests/fakedirector` mounts `RwMemFixture`; the seal tests name the write layer's directory
-# (`overlay_layer_dir`).
-aether-provider = { workspace = true, features = ["conformance"] }
+# The seal tests name the write layer's directory (`overlay_layer_dir`).
+aether-provider.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
@@ -50,9 +49,6 @@ windows-sys = { workspace = true, features = [
   # `tests/diagnostics/child_inject_fails_closed.rs`: the process list.
   "Win32_System_Diagnostics_ToolHelp",
 ] }
-# `tests/registry/regclient.rs`: the fake director answers the registry opcodes with the real
-# `dispatch_director` over a real `RegistryHost`.
-aether-director.workspace = true
 
 [lints]
 workspace = true

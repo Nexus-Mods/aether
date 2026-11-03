@@ -10,7 +10,7 @@ use aether_redirect::is_whiteout;
 /// the name it hides.
 ///
 /// The shim spelled a whiteout `<name>.__vfs_wh__` ([`aether_redirect::WHITEOUT_SUFFIX`]);
-/// `aether_compose::OverlayProvider` spells it `.wh.<name>`. Since gate 4 Task 6
+/// a director's overlay spells it `.wh.<name>`. Since gate 4 Task 6
 /// those two conventions shared one physical directory — a host mounts
 /// `overlay_layer_dir` as the director's write layer, which is the directory the
 /// shim-local overlay wrote into — and the director has no reason to hide a
@@ -25,7 +25,7 @@ use aether_redirect::is_whiteout;
 ///
 /// ## Why the shim never spelled whiteouts `.wh.<name>`
 ///
-/// `aether_compose::OverlayProvider` answers `is_whiteout` from a **cached
+/// The old Rust director's overlay answered `is_whiteout` from a **cached
 /// per-directory index**, licensed by its own doc comment: *"this provider is the
 /// only writer of `.wh.` markers in its own upper … A process outside this
 /// provider mutating the upper's markers underneath us is already outside the

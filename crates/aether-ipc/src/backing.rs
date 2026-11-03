@@ -4,9 +4,9 @@ use crate::seg::SharedSeg;
 
 /// What a ring host needs from the memory the ring lives in.
 ///
-/// `aether-win`'s `SharedMapping` (a named page-file section) and `aether-unix`'s
-/// `FileMapping` (an `mmap` over a real file, so a shim inside Wine and a native
-/// Linux director can share one ring) both implement it. The host picks one by
+/// `aether-win`'s `SharedMapping` (a named page-file section) implements it, and so
+/// does a Unix director's file mapping (an `mmap` over a real file, so a shim inside
+/// Wine and a native Linux director can share one ring). The host picks one by
 /// target and writes everything above that choice once; this trait is the
 /// meaning of "identical" that the two types used to share only by convention.
 pub trait RingBacking: Send + Sync {

@@ -1,9 +1,9 @@
-//! The shim's registry client (`aether_shim::regclient`) against the director's own registry code.
+//! The shim's registry client (`aether_shim::regclient`) against a director's registry opcodes.
 //!
 //! The far side of the ring is `fakedirector` with [`Fake::with_registry`]: the registry
-//! opcodes are answered by `aether_director`'s `dispatch_director` over a real `RegistryHost`, and
-//! the ring header carries the director's registry generation as `IpcServe` publishes it. A
-//! second `FuseClient` on the same section plays a second injected process.
+//! opcodes are answered over an in-memory `aether_registry::Overlay`, and the ring header
+//! carries the registry generation as a director publishes it. A second `FuseClient` on the
+//! same section plays a second injected process.
 //!
 //! Every test takes [`LOCK`]: they share one director, and a write in one test moves the
 //! generation every other test's cache is checked against, which would make "this read cost
@@ -176,8 +176,7 @@ fn no_registry_layer_fails_reads_and_writes() {
     assert!(regclient::key(&k).unwrap().is_some());
     regclient::lookup(&k).unwrap();
 
-    let host = f.fake.director().registry().unwrap();
-    f.fake.director().set_registry(None);
+    f.fake.detach_registry();
     let fallbacks = aether_shim::reg_read_fallback_count();
     let result = (
         regclient::lookup(&k),
@@ -190,7 +189,7 @@ fn no_registry_layer_fails_reads_and_writes() {
         regclient::changed(&k, false, 0),
     );
     let fallbacks = aether_shim::reg_read_fallback_count() - fallbacks;
-    f.fake.director().set_registry(Some(host));
+    f.fake.attach_registry();
 
     assert_eq!(result.0, Err(ST_NOT_SUPPORTED), "lookup");
     assert_eq!(result.1, Err(ST_NOT_SUPPORTED), "key");

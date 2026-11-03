@@ -103,9 +103,8 @@ jobs:
       # aether-inject, aether-win, aether-fixture-*) pull Windows-only code (`retour`,
       # Win32) and are linted and tested by the windows job.
       LINUX_CRATES: >-
-        -p aether-ipc -p aether-protocol -p aether-provider -p aether-compose -p aether-pe
-        -p aether-zip -p aether-core -p aether-env -p aether-unix
-        -p aether-director -p aether-registry -p aether-testkit
+        -p aether-ipc -p aether-protocol -p aether-provider -p aether-pe
+        -p aether-core -p aether-env -p aether-registry -p aether-testkit
         -p aether-ntlayout -p aether-redirect
     steps:
       - uses: actions/checkout@v4

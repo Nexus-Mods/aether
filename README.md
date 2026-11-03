@@ -92,7 +92,6 @@ The ones that ship:
 | `aether-pe` | Pure PE byte parsing |
 | `aether-core` | Pure merged-tree resolver (layers, tombstones, case folding) |
 | `aether-env` | Every `VFS_*` environment switch, defined once |
-| `aether-zip` | Stored-zip reading, used by the injector |
 
 The test fixtures, Windows programs the tests run under the shim:
 `aether-fixture-read` (reads a virtual file), `-writepath` (the write path),
@@ -101,10 +100,9 @@ API), `-vproxy` and `-staticimp` (a statically imported proxy DLL, pre-init
 injection), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and
 the registry overlay). `aether-testkit` holds helpers shared by the tests.
 
-`aether-director`, `aether-compose` and `aether-unix` are test-only: an old Rust
-director kept as the shim's tests' counterpart (a dev-dependency of the
-shim). Don't build new features on them: a director harness will replace
-them.
+Directors live outside this repository. The shim's tests run against their own
+fake director (`crates/aether-shim/tests/fakedirector`), which answers the file
+and registry opcodes from memory.
 
 `panic = "unwind"` throughout (`aether-protocol/tests/unwind.rs` pins it). The
 vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim

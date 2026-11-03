@@ -10,9 +10,7 @@ publish.workspace = true
 aether-env.workspace = true
 # The shim config codec (`shimcfg`), for the static-import rows.
 aether-protocol.workspace = true
-aether-core.workspace = true
 aether-pe.workspace = true
-aether-zip.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -36,13 +34,12 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 aether-shim.workspace = true
-# NOT a dev-dependency: a cdylib cannot be `use`d, so the edge only ordered the
+# `aether-shim-dll` is NOT a dev-dependency: a cdylib cannot be `use`d, so the edge only ordered the
 # build — and `tests/common` already builds this package (plus the other PE
 # fixtures) with a nested cargo at test runtime. As a dependency it was built a
 # second time as its own artifact target, and both units wrote
 # `deps/aether_shim_dll.dll`, which is the cargo#6313 collision that made
 # `--all-targets` unusable.
-aether-zip.workspace = true
 # PE fixtures (the shim, vproxy) are built by the tests via a nested
 # `cargo build -p …` (see tests/common).
 

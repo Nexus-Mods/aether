@@ -1,7 +1,7 @@
 //! The registry query hooks: `NtQueryKey`, `NtEnumerateKey`, `NtQueryValueKey`,
 //! `NtEnumerateValueKey` and `NtQueryMultipleValueKey` on keys the overlay touches (registry
 //! overlay spec sections 3.2, 3.3, 3.5 and 6), through the real ntdll entry points with the
-//! shim's detours installed and a real director registry behind the ring.
+//! shim's detours installed and the fake director's registry behind the ring.
 //!
 //! Two oracles:
 //! - **The host itself.** `M\Merge` is a real key with overlay changes; `X\Merge` is a real
@@ -1014,13 +1014,12 @@ fn a_failing_director_answers_from_the_real_key() {
     let e = f.open("Down", KEY_ENUMERATE_SUB_KEYS);
     assert!(is_synthetic_key_handle(d));
     assert_eq!(value_names(d), ["o", "r"]);
-    let host = f.fake.director().registry().unwrap();
-    f.fake.director().set_registry(None);
+    f.fake.detach_registry();
     let names = value_names(d);
     let overlay_value = qval(d, "o", 2, 64).st;
     // The real key's answer is the private handle's, but the access is still the caller's.
     let denied = qval(e, "r", 2, 64).st;
-    f.fake.director().set_registry(Some(host));
+    f.fake.attach_registry();
     assert_eq!(names, ["r"], "the real key alone");
     assert_eq!(overlay_value, STATUS_OBJECT_NAME_NOT_FOUND);
     assert_eq!(denied, STATUS_ACCESS_DENIED);

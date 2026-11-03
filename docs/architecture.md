@@ -22,9 +22,10 @@ points at, are history.
 were deleted; their jobs (staging a launch, the Proton and CrossOver paths,
 storage) are a director's, and Cairn's Clojure director does them
 ([Nexus-Mods/cairn](https://github.com/Nexus-Mods/cairn), `src/aether/director/`,
-and its `docs/aether-vfs/director.md`). `aether-director` here is the old Rust
-director, kept only as the shim tests' counterpart. Those sections stay as the
-design they recorded, in the past tense.
+and its `docs/aether-vfs/director.md`). The old Rust director and its provider
+crates are gone too; the shim's tests run against their own fake director.
+Those sections, and the ones on providers, the director and staging, stay as
+the design they recorded.
 
 ---
 
@@ -104,7 +105,7 @@ answers `resolve(vpath)`. It knows about:
 Keeping this layer pure makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Providers and composition: `aether-provider`, `aether-zip`, `aether-compose` (and the `aether-storage` add-on)
+### 3.2 Providers and composition: `aether-provider`, a director's providers (and the `aether-storage` add-on)
 
 Everything that can supply bytes implements the `Provider` trait
 (`aether-provider`), addressed by `(RootId, relative path)` via `VPath` rather
@@ -138,13 +139,13 @@ correctness bug (stale bytes served from a disk cache for content that turns
 out to be mutable) or a silent performance bug (content that never changes,
 never cached).
 
-- **`aether-zip`**'s `ZipProvider` parses the ZIP64 central directory and serves
+- **A zip provider** (a director's) parses the ZIP64 central directory and serves
   **Stored** (uncompressed) entries as byte windows into the container.
   Stored-only is a deliberate constraint: a Stored entry is a contiguous
   range, so a read at an arbitrary offset is a seek, not a
   decompress-from-the-start. That is what makes random access into a 15 GB
   archive viable.
-- **`aether-compose`** provides combinators over other providers: `layered`
+- **Combinators** (a director's) build providers out of other providers: `layered`
   (top-wins; `readdir` unions), `router` (glob-pattern dispatch:
   `getattr`/`open` take the first matching route; `readdir` is currently
   single-dispatch rather than the cross-route union the design calls for),
@@ -168,7 +169,7 @@ never cached).
   durable when is in `director.md`'s Storage section; the original design was the
   vfs-storage design spec (not imported).
 
-### 3.3 The director: `aether-director`
+### 3.3 The director (not in this repository)
 
 The userspace FUSE kernel. Holds the mount table, resolves a virtual path
 through it, owns the global file-handle table, and serves ring requests. It is
@@ -179,7 +180,7 @@ mounts, `serve()` to stand up the ring, `launch()` to start the target) lives in
 `vfs-embed` (§3.11, deleted), which sat above the director; the Clojure
 director's `aether.director.launch` is its successor.
 
-### 3.4 IPC: `aether-ipc`, `aether-win`, `aether-unix`
+### 3.4 IPC: `aether-ipc`, `aether-win`
 
 A shared memory segment holding a **control ring** of fixed slots plus a **bulk
 arena** of per-slot banks. Small requests and replies travel inline in the slot;
@@ -188,8 +189,8 @@ large reads land in the arena so the ring never has to carry megabytes.
 Slot ownership moves by `compare_exchange`, which makes it multi-producer safe
 without a lock, which is necessary because a game issues file I/O from many threads at
 once. `aether-ipc` imports no OS API at all; the mapping and the event objects live
-in `aether-win` (a named section on Windows) and `aether-unix` (an `mmap` of a real
-file, which a Windows shim inside Wine maps too). All `unsafe` is confined to
+in `aether-win` (a named section on Windows) and, on Unix, in the director (an `mmap`
+of a real file, which a Windows shim inside Wine maps too). All `unsafe` is confined to
 the segment accessor.
 
 **Concurrency.** Each game thread claims its own slot and waits on that slot
@@ -340,7 +341,7 @@ why. The open reply's `immutable` flag and generation sit in what
 was padding, so the wire version did not change: an older director's reply
 reads as mutable and is never cached.
 
-### 3.6 Process creation: `aether-pe`, `aether-inject`, `aether-director::stage`
+### 3.6 Process creation: `aether-pe`, `aether-inject`, a director's staging
 
 Getting the shim into the process before the process needs the VFS. This is the
 subtlest part of the system and gets its own section below.
@@ -386,7 +387,7 @@ keeps the root's write layer composed. The daemon (`vfs-directord`,
 end-to-end tests (the escape matrix, enumeration, the launch scenarios) moved
 to `vfs-embed/tests/`, and from there to `test/aether/director/e2e/`.
 
-### 3.9 Registry overlay: `aether-registry`, `aether-director`'s `registry` module, the shim's `reg*` modules
+### 3.9 Registry overlay: `aether-registry`, a director's registry host, the shim's `reg*` modules
 
 Injected processes see the real registry, but none of their registry writes
 reach it: they go to a per-profile **registry layer** that persists between
@@ -428,12 +429,11 @@ runs (spec: `docs/superpowers/specs/2026-10-05-registry-overlay-design.md`).
   made while the hook is bypassed returns `STATUS_UNSUCCESSFUL`. Reads fall
   back to the real registry, counted in the shim stats.
 
-### 3.10 The Proton host path: `aether-unix`, and `aether.director.proton`
+### 3.10 The Proton host path: `aether.director.proton`
 
 This section was written for the Rust `vfs-proton` and `vfs-embed` crates, now
-deleted; the Clojure director's `aether.director.proton.*` ports them, and
-`aether-unix` is the native half that stays. Where the text names a Rust item, read
-it as the design the Clojure code follows.
+deleted; the Clojure director's `aether.director.proton.*` ports them. Where the
+text names a Rust item, read it as the design the Clojure code follows.
 
 Linux is a supported host. The game is still a Windows program and so is the
 shim: both run inside GE-Proton's Wine, while the director, the providers and
@@ -441,7 +441,7 @@ the host are native Linux. Only the transport and the launch differ from the
 Windows path.
 
 - **Ring.** `Session::serve` creates a file-backed ring (`state_dir/ring.bin`,
-  mapped by `aether-unix` natively and by the shim through Wine), tmpfs-backed when
+  mapped by the director natively and by the shim through Wine), tmpfs-backed when
   `$XDG_RUNTIME_DIR` is private (§3.4). The wire protocol and the version are
   the same as on Windows.
 - **Runtime.** `aether.director.proton.{release,fetch,install,runtime}` find,
@@ -812,7 +812,7 @@ than work that errors. Tests are shaped around that.
   Linux.
 - **Hook behaviour is tested in-process.** Integration binaries install the real
   detours into the test process and then use ordinary `std::fs` and raw NT calls
-  against a live director (a real one, or the fake in `tests/fakedirector`).
+  against the fake director in `tests/fakedirector`.
   One install per process, so every `#[test]` in `aether-shim/tests/`
   re-executes itself in a fresh process (`tests/common`), and the scenarios are
   grouped into a few binaries by concern. These are Windows executables: on
@@ -892,10 +892,6 @@ observer before concluding the process is idle.
 | `aether-protocol` | ring wire codecs and opcodes, the shim bootstrap config (`VFSC` v2); re-exports the provider contract |
 | `aether-ipc` | control ring + bulk arena + read cache, OS-free |
 | `aether-win` | Windows shared memory, events and volume lookups |
-| `aether-unix` | Unix shared memory: the file-backed ring (the mirror of `aether-win`) |
-| `aether-zip` | ZIP64 central directory, Stored windows, `ZipProvider` |
-| `aether-compose` | provider combinators: layered, overlay (copy-up), router, subdir, seekable, readonly, disk, memory, inline, `MountGraph` |
-| `aether-director` | the kernel: root to provider table, handle namespace, ring server, staging, registry host |
 | `aether-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
 | `aether-env` | every `VFS_*` switch, defined once, with a drift test |
 | `aether-redirect` | pure path core: root map and canonicalisation |

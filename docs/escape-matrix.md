@@ -5,7 +5,7 @@
 > `hook.rs:NNNN` line references are gone), the `fuse_client` module became
 > `aether-shim/src/director.rs` (the client type is still `FuseClient`), and the shim-local `Engine` (with its snapshot,
 > `decide`, `cow_seed` and `whiteout`) was deleted: the shim always has a director and the
-> overlay's copy-up lives in `aether-compose`. `vfs-directord::registry` is gone with the daemon's
+> overlay's copy-up lives there (the old Rust director was later removed from this repository). `vfs-directord::registry` is gone with the daemon's
 > old registry, and `vfs-launch` with the CLI. A child process is now injected **fail closed**:
 > see vector 14 below. The daemon was removed on 2026-10-08, and its e2e tests named here
 > (`crates/vfs-directord/tests/*.rs`) moved to `crates/vfs-embed/tests/`, built on a

@@ -3,41 +3,11 @@
 version = 4
 
 [[package]]
-name = "aether-compose"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "aether-provider",
- "aether-testkit",
-]
-
-[[package]]
 name = "aether-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "proptest",
-]
-
-[[package]]
-name = "aether-director"
-version = "0.1.0"
-dependencies = [
- "aether-compose",
- "aether-core",
- "aether-env",
- "aether-ipc",
- "aether-pe",
- "aether-protocol",
- "aether-provider",
- "aether-redirect",
- "aether-registry",
- "aether-shim",
- "aether-testkit",
- "aether-unix",
- "aether-win",
- "aether-zip",
- "tracing",
 ]
 
 [[package]]
@@ -117,12 +87,10 @@ dependencies = [
 name = "aether-inject"
 version = "0.1.0"
 dependencies = [
- "aether-core",
  "aether-env",
  "aether-pe",
  "aether-protocol",
  "aether-shim",
- "aether-zip",
  "windows-sys 0.61.2",
 ]
 
@@ -178,7 +146,6 @@ name = "aether-shim"
 version = "0.1.0"
 dependencies = [
  "aether-core",
- "aether-director",
  "aether-env",
  "aether-inject",
  "aether-ipc",
@@ -210,31 +177,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-unix"
-version = "0.1.0"
-dependencies = [
- "aether-ipc",
- "aether-testkit",
- "libc",
-]
-
-[[package]]
 name = "aether-win"
 version = "0.1.0"
 dependencies = [
  "aether-env",
  "aether-ipc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "aether-zip"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "aether-provider",
- "aether-testkit",
- "tempfile",
 ]
 
 [[package]]
@@ -455,12 +403,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "pin-project-lite"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "ppv-lite86"
@@ -708,37 +650,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tracing"
-version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
-dependencies = [
- "pin-project-lite",
- "tracing-attributes",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-attributes"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "tracing-core"
-version = "0.1.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
-dependencies = [
- "once_cell",
 ]
 
 [[package]]

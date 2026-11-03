@@ -52,7 +52,7 @@ fn session(
     arena_len: usize,
 ) -> (std::path::PathBuf, &'static Fake, HookGuard) {
     let base = std::env::temp_dir().join(format!(
-        "aether-director-reads-{name}-{}",
+        "aether-shim-director-reads-{name}-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&base);

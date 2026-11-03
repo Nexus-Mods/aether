@@ -39,7 +39,7 @@ pub fn overlay_layer_dir(overlay_root: &Path, root: RootId) -> PathBuf {
 /// writing `.wh.<name>` next to where it would be, in the overlay's upper.
 ///
 /// The marker convention lives here, with the rest of the on-disk layout, so
-/// the overlay that writes the markers (`aether-compose`) and whatever reads an
+/// the overlay that writes the markers (a director's) and whatever reads an
 /// upper without it (`aether-storage`'s layer export) cannot drift apart.
 pub const WHITEOUT_PREFIX: &str = ".wh.";
 

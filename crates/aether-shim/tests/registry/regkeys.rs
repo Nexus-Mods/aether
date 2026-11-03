@@ -1,6 +1,6 @@
 //! The registry hooks' key handles: open, create, duplicate, close and the object name
 //! (registry overlay spec sections 3.1, 3.2 and 6), through the real ntdll entry points with
-//! the shim's detours installed and a real director registry behind the ring
+//! the shim's detours installed and the fake director's registry behind the ring
 //! (`fakedirector` with [`Fake::with_registry`]).
 //!
 //! Real scratch keys live under `HKCU\Software\AetherVfsRegKeysTest`, made before the hooks go
@@ -553,8 +553,7 @@ fn a_failing_director_reads_the_real_registry_and_refuses_creates() {
     isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Overlaid"), "Fov", 4, &90u32.to_le_bytes()).unwrap();
-    let host = f.fake.director().registry().unwrap();
-    f.fake.director().set_registry(None);
+    f.fake.detach_registry();
     let fallbacks = aether_shim::reg_read_fallback_count();
 
     let (st, h) = f.open("Overlaid", NT_KEY_READ);
@@ -565,7 +564,7 @@ fn a_failing_director_reads_the_real_registry_and_refuses_creates() {
     let create_existing = (st, disp, real(h));
     close(h);
     let fell_back = aether_shim::reg_read_fallback_count() - fallbacks;
-    f.fake.director().set_registry(Some(host));
+    f.fake.attach_registry();
 
     assert_eq!(open_overlaid, (STATUS_SUCCESS, true), "the real key alone");
     assert_eq!(create_new.0, STATUS_UNSUCCESSFUL);

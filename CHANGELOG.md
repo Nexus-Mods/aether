@@ -5,6 +5,14 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (the old Rust director is removed)
+
+Aether ships only the shim and the injector; directors live outside this
+repository. The old Rust director and the crates only it used are deleted:
+`aether-director`, `aether-compose`, `aether-zip` and `aether-unix`.
+`aether-inject` no longer depends on `aether-core` or `aether-zip`. The shim's
+tests use their own fake director, which now answers the registry opcodes too.
+
 ## Unreleased (remote-thread injection is the only activation)
 
 The in-memory import patch is gone: the injector no longer writes a first

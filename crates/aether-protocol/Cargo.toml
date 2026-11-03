@@ -7,7 +7,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-aether-provider.workspace = true
 aether-registry.workspace = true
 
 [dev-dependencies]

@@ -22,10 +22,12 @@ Conventions used throughout:
 
 The three crates that define the wire are `aether-ipc` (shared memory, ring,
 arena), `aether-protocol` (opcodes, statuses, payload codecs, `shim.cfg`) and
-`aether-env` (environment names). `crates/aether-director` is an older Rust
-director kept as the shim's test counterpart (README, "Test-only"); where it is
-cited below as "the Rust director", it shows how a director has answered, not
-a rule. Cairn's Clojure director (`aether.director.*` in the Cairn repository)
+`aether-env` (environment names). An older Rust director lived in this
+repository as the shim's test counterpart; it is removed, and the shim's tests
+run against their own fake director (`crates/aether-shim/tests/fakedirector`).
+Where it is mentioned below as "the old Rust director (removed)", and where
+"both directors" means it and Cairn's, it shows how a director has answered,
+not a rule. Cairn's Clojure director (`aether.director.*` in the Cairn repository)
 is the production director; its wire code is `src/aether/director/proto.clj`,
 `ring.clj`, `ring/backing.clj`, `registry.clj`, `env.clj`, `launch.clj` and
 `java/src/aether/director/Native.java` (the atomics on the mapping, VarHandle
@@ -105,8 +107,8 @@ Source: `crates/aether-ipc/src/layout.rs`, `crates/aether-ipc/src/ring.rs`
 - `slot_stride = align8(32 + payload_cap)` where `align8(n) = (n + 7) & !7`.
 - `slot_off(s) = 48 + s * slot_stride`; the slot's payload starts at
   `slot_off(s) + 32`.
-- The arena, if any, starts at `VFS_ARENA_OFFSET` (the Rust and Cairn
-  directors both put it at `48 + slot_count * slot_stride`, directly after the
+- The arena, if any, starts at `VFS_ARENA_OFFSET` (the old Rust director and
+  Cairn's both put it at `48 + slot_count * slot_stride`, directly after the
   last slot) and is `VFS_ARENA_LEN` bytes long.
 - The mapping must be 8-byte aligned (`crates/aether-ipc/src/seg.rs`,
   `SharedSeg::from_raw`); section views and `mmap` are page-aligned.
@@ -222,12 +224,11 @@ client, because an `ABANDONED` slot and its bank stay the director's.
 
 - A slot whose `payload_len > payload_cap` MUST be completed with
   `ST_BAD_REQUEST` and payload length 0 (Cairn's `dispatch` does this). The
-  old Rust test director does not: `read_request` returns `None`,
+  old Rust director (removed) did not: `read_request` returns `None`,
   `RingServer::serve_one` returns `Err(BadResponse)`
-  (`crates/aether-ipc/src/endpoint.rs`), and `worker_loop` exits on it
-  (`crates/aether-director/src/ipc.rs`), leaving the slot `PROCESSING` for
-  ever and the director one thread short. That is a known defect, not
-  behaviour to copy.
+  (`crates/aether-ipc/src/endpoint.rs`), and its worker loop exited on it,
+  leaving the slot `PROCESSING` for ever and the director one thread short.
+  That was a defect, not behaviour to copy.
 - A handler that fails (throws, panics) MUST still complete its slot, with
   `ST_IO_ERROR` (Cairn: `Guard/call ... (reply p/io-error 0)`).
 
@@ -267,13 +268,12 @@ to 4 requests at once (8 for reads of 4 MiB or more) and waits for all of them
 
 ### 2.6 The bulk arena and its banks
 
-Source: `crates/aether-ipc/src/arena.rs`, `crates/aether-director/src/ipc.rs`
-(`worker_loop`), `crates/aether-ipc/src/concurrent.rs` (`read_fragmented`).
+Source: `crates/aether-ipc/src/arena.rs`, `crates/aether-ipc/src/concurrent.rs`
+(`read_fragmented`).
 
 The arena is cut into banks, one per slot:
 
-- `banks = slot_count` (the Rust director passes `geom.slot_count`; Cairn uses
-  `slot-count`).
+- `banks = slot_count` (Cairn uses `slot-count`).
 - `bank_size = max(arena_len / banks, 4096)`.
 - Slot `s` owns bank `s % banks`, at mapping offset
   `arena_offset + (s % banks) * bank_size`.
@@ -303,9 +303,9 @@ Sizing rules a director must meet, from what the shim sends:
 
 ### 2.7 Default geometry
 
-Both directors use these numbers (`crates/aether-director/src/ipc.rs`
-`DEFAULT_SLOT_COUNT`, `crates/aether-ipc/src/arena.rs` `DEFAULT_PAYLOAD_CAP`,
-`DEFAULT_ARENA_BYTES`, `DEFAULT_WORKER_COUNT`; Cairn `proto.clj` `geometry`).
+Both directors use these numbers (`crates/aether-ipc/src/arena.rs`
+`DEFAULT_PAYLOAD_CAP`, `DEFAULT_ARENA_BYTES`, `DEFAULT_WORKER_COUNT`; Cairn
+`proto.clj` `geometry`).
 Nothing in the shim requires them; it reads the geometry from the header and
 the environment.
 
@@ -318,7 +318,7 @@ the environment.
 | `arena_len` | — | 33 554 432 (32 MiB) |
 | `bank_size` | `max(arena_len / slot_count, 4096)` | 1 048 576 |
 | map size (`VFS_RING_BYTES`) | `max(round_up(ring + arena, 65536), 2 MiB)` | 67 174 400 |
-| workers | Rust default 4, clamped to `1..=slot_count`; Cairn default 16 | — |
+| workers | old Rust director 4 (`DEFAULT_WORKER_COUNT`), clamped to `1..=slot_count`; Cairn default 16 | — |
 
 ### 2.8 Client concurrency and `worker_hint`
 
@@ -359,8 +359,7 @@ in a request says which process sent it, so:
 ### 2.9 Windows backing: a named section and two events
 
 Source: `crates/aether-win/src/mapping.rs`, `crates/aether-win/src/event_notifier.rs`,
-`crates/aether-shim/src/director.rs` (`connect_source`),
-`crates/aether-director/src/ipc.rs` (`start_with_workers`).
+`crates/aether-shim/src/director.rs` (`connect_source`).
 
 | Object | Director creates with | Shim opens with | Named by |
 |---|---|---|---|
@@ -368,7 +367,7 @@ Source: `crates/aether-win/src/mapping.rs`, `crates/aether-win/src/event_notifie
 | Server event | `CreateEventW(NULL, FALSE /*auto-reset*/, FALSE, name)`; existing is an error | `OpenEventW(EVENT_MODIFY_STATE = 0x0002, FALSE, name)`; failure is tolerated (no wake) | `VFS_SERVER_EV` |
 | Client event | as the server event | not opened by the shim | `VFS_CLIENT_EV` |
 
-Names are free-form. The Rust director uses `<section>_srv` and
+Names are free-form. The old Rust director (removed) used `<section>_srv` and
 `<section>_cli`; Cairn names its section
 `Local\vfs_ring_clj_<pid>_<ms>_<counter>` and its events the same plus `_srv`
 and `_cli` (`ring.clj`, `ring-name`; `ring/backing.clj`). A name must be unique
@@ -477,9 +476,9 @@ STAGE_EXEC:
 
 - Relative to the root, components joined by `/`, no leading or trailing `/`.
 - The root itself is `"."`.
-- Folded (lowercased by `aether_core::fold`: ASCII lowercase for ASCII
+- Folded (lowercased by `aether_casefold::fold`: ASCII lowercase for ASCII
   strings, else `char::to_lowercase` of every character,
-  `crates/aether-core/src/casefold.rs`) except in a request that creates a
+  `crates/aether-casefold/src/lib.rs`) except in a request that creates a
   name (a write OPEN, MKDIR, RENAME targets), which keeps the caller's
   spelling so that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
@@ -505,7 +504,7 @@ result. There is no locale, no context and no normalisation:
 - The mapping is the one of the Unicode version in the Rust standard library
   the release was built with (`rust-toolchain.toml`).
 
-Source: `crates/aether-core/src/casefold.rs`.
+Source: `crates/aether-casefold/src/lib.rs`.
 
 **Two properties it does not have:**
 
@@ -541,13 +540,12 @@ disagrees with a shim built against another about which names are equal. Any
 change to it is a wire version bump (section 7).
 
 **Path syntax a director should accept:** `/`-separated, no leading slash,
-`"."` for the root; that is the only form the shim sends. The existing
-directors differ on anything else, so a client must not rely on it:
+`"."` for the root; that is the only form the shim sends. Directors have
+differed on anything else, so a client must not rely on it:
 
-- The Rust director normalises every path with
-  `aether_compose::path::normalize` (`\` to `/`, strip `/` at both ends, drop
-  empty and `.` components, resolve `..`, error if `..` leaves the root;
-  `crates/aether-compose/src/path.rs`).
+- The old Rust director (removed) normalised every path (`\` to `/`, strip
+  `/` at both ends, drop empty and `.` components, resolve `..`, error if `..`
+  leaves the root).
 - Cairn normalises the same way (`src/aether/director/path.clj`, `normalize`)
   except that its OPEN refuses, with `ST_BAD_REQUEST`, a path that starts
   with `/` or `\` or contains `\` at all (`ring.clj`, `wellformed?`).
@@ -600,8 +598,7 @@ Source: `crates/aether-protocol/src/lib.rs` (`OP_*`, `OPCODES`,
 | 24 | STAGE_EXEC | path request | real path, utf8… | 0 |
 
 **Any other opcode** (including 0, 4, 12 and 25 and up) is answered
-`ST_BAD_REQUEST` with an empty payload by both directors
-(`crates/aether-director/src/ring_dispatch.rs`, the `_` arm; Cairn `ring.clj`,
+`ST_BAD_REQUEST` with an empty payload by both directors (Cairn `ring.clj`,
 `dispatch`).
 
 ### 3.4 Each opcode
@@ -654,9 +651,8 @@ directory record for every entry, directories included
 directory (as the golden vector does).
 
 The whole listing is one reply and must fit `payload_cap`. Unknown root:
-`ST_NOT_FOUND`. The Rust director replies to an oversized listing with the
-overflow status `i32::MIN` (section 2.5, step 3); Cairn does the same
-(`p/overflow`).
+`ST_NOT_FOUND`. Both directors reply to an oversized listing with the
+overflow status `i32::MIN` (section 2.5, step 3; Cairn `p/overflow`).
 
 #### 3.4.3 OPEN (3)
 
@@ -668,7 +664,7 @@ Request (`encode_open_req`):
 | 4 | 4 | u32 | `oflags` (table below) |
 | 8 | rest | utf8… | `vpath` |
 
-Open flags (`crates/aether-provider/src/status.rs`):
+Open flags (`crates/aether-protocol/src/status.rs`):
 
 | Bit | Value | Name | Meaning |
 |---:|---:|---|---|
@@ -703,12 +699,12 @@ Reply (`encode_open_resp`), 24 bytes:
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
   read cache (`crates/aether-ipc/src/readcache/mod.rs`) caches small reads only
   through read-only, immutable handles. Never set it for a write open or a
-  directory (the Rust director clears it for both).
+  directory (the old Rust director cleared it for both).
 - `mount_gen`: a generation the director bumps whenever a root's content is
   replaced. The cache keys a file's blocks by (root, folded path, size,
   `mount_gen`), so two immutable opens of one path with equal size and
-  `mount_gen` must have identical content. The Rust director starts at 1 and
-  bumps on every mount/unmount; Cairn always sends 1.
+  `mount_gen` must have identical content. The old Rust director (removed)
+  started at 1 and bumped on every mount/unmount; Cairn always sends 1.
 - Errors: unknown root `ST_NOT_FOUND`; `OPEN_WRITE` on a root with no writable
   provider `ST_READ_ONLY`; `OPEN_EXCL` on an existing path `ST_EXISTS`;
   missing path without `OPEN_CREATE` `ST_NOT_FOUND`.
@@ -819,9 +815,8 @@ Request (`encode_names_req`):
 Reply (`encode_names_resp`): the stored spelling of each component of `vpath`
 from index `skip` on, joined by `/`, no length prefix, exactly
 `components - skip` names. A component the director has no entry for SHOULD
-come back as it was sent, as the Rust director does
-(`Director::stored_names`). A director MAY instead answer `ST_NOT_FOUND` for a
-path it does not have (Cairn does, `ring.clj`, `op-stored-names`). The shim
+come back as it was sent, as the old Rust director's did. A director MAY
+instead answer `ST_NOT_FOUND` for a path it does not have (Cairn does, `ring.clj`, `op-stored-names`). The shim
 discards a reply with the wrong number of names, and on any non-OK status or
 discarded reply uses the caller's own spelling (`FuseClient::stored_names`).
 Used for `GetFinalPathNameByHandle`.
@@ -845,7 +840,7 @@ Request (`encode_rename_x_req`):
 A rename between two roots. A file is copied to `to_root` (replacing what is
 there) and removed from `from_root`; a directory is refused with
 `ST_CROSS_ROOT`, which the shim reports as `STATUS_NOT_SAME_DEVICE`
-(`crates/aether-provider/src/status.rs`). Equal roots behave as RENAME. Reply:
+(`crates/aether-protocol/src/status.rs`). Equal roots behave as RENAME. Reply:
 status only.
 
 #### 3.4.14 STAGE_EXEC (24)
@@ -866,7 +861,7 @@ loader may resolve elsewhere) the image path is left as it was.
 
 ### 3.5 Status values
 
-Source: `crates/aether-provider/src/status.rs`, `crates/aether-protocol/src/lib.rs`
+Source: `crates/aether-protocol/src/status.rs`, `crates/aether-protocol/src/lib.rs`
 (`STATUSES`), `crates/aether-ipc/src/ring.rs` (overflow).
 
 | Value | Name | Meaning |
@@ -900,7 +895,7 @@ differences changes what a well-formed shim request gets. A new director
 should answer `ST_BAD_REQUEST` for a short payload or an escaping path, and
 `ST_NOT_FOUND` for an unknown root.
 
-| Op | Rust director (`ring_dispatch.rs`, `director.rs`) | Cairn (`ring.clj`) |
+| Op | Old Rust director (removed) | Cairn (`ring.clj`) |
 |---|---|---|
 | GETATTR | short or escaping: `ST_BAD_REQUEST`; unknown root: OK, `found = 0` | short, escaping or unknown root: OK, `found = 0` |
 | READDIR | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` | all three: `ST_NOT_FOUND` |
@@ -922,7 +917,7 @@ decodes it with replacement characters and carries on.
 | slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply | `crates/aether-protocol/src/lib.rs` |
 | READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk | `crates/aether-protocol/src/lib.rs` |
 | OPEN reply byte 17 | 0 | `0x01` | `OPEN_RESP_IMMUTABLE` | `crates/aether-protocol/src/lib.rs` |
-| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `crates/aether-provider/src/status.rs` |
+| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `crates/aether-protocol/src/status.rs` |
 
 The slot `flags` word is ignored for every opcode but READ, and bits other
 than bit 0 are ignored for READ, by both directors.
@@ -935,7 +930,7 @@ Opcodes 15-22 virtualise the registry through an overlay the director keeps.
 The shim sends them only when `VFS_REGISTRY` is affirmative (section 5.3) and
 every registry detour installed (`crates/aether-shim/src/regclient.rs`,
 `enabled`). A director without a registry layer answers all eight
-`ST_NOT_SUPPORTED` (`crates/aether-director/src/ring_dispatch.rs`).
+`ST_NOT_SUPPORTED`.
 
 ### 4.1 Field encodings and limits
 
@@ -964,7 +959,7 @@ through `read_failed`, and the hook falls back to the real key.
 ### 4.2 Key paths
 
 Source: `crates/aether-registry/src/path.rs` (`canonical`, `to_nt`),
-`crates/aether-director/src/registry.rs` (`valid_path`).
+`crates/aether-registry/src/overlay.rs` (`valid_path`).
 
 A key path is the canonical NT form: `\Registry` then non-empty components,
 single `\` separators, no trailing `\`, no `.` or `..` components. `Registry`,
@@ -1001,7 +996,7 @@ operation.
 | 21 | REG_RENAME_KEY | `path:str \| new_leaf:str` | `version:u64` |
 | 22 | REG_CHANGED | `path:str \| subtree:u8 \| since:u64` | `version:u64 \| changed:u8` |
 
-REG_LOOKUP `state` (`encode_reg_lookup_reply`; `crates/aether-director/src/registry.rs`, `lookup_state`):
+REG_LOOKUP `state` (`encode_reg_lookup_reply`):
 
 | Value | Meaning |
 |---:|---|
@@ -1033,13 +1028,12 @@ order is not checked and a duplicate `folded` key keeps the last one; send them
 sorted and unique, as both encoders do.
 
 A REG_KEY reply longer than `payload_cap - 8` must be answered
-`ST_REPLY_TOO_LARGE` instead
-(`crates/aether-director/src/ring_dispatch/registry.rs`); the shim then serves
+`ST_REPLY_TOO_LARGE` instead; the shim then serves
 the real key alone. A director may apply the same rule to every registry reply
 (Cairn does, `op-registry`); the other replies are at most 10 bytes, so only
 REG_KEY's can ever reach it.
 
-Errors (`crates/aether-director/src/registry.rs`, `reg_status`): name too
+Errors: name too
 long, data too large, invalid path, too deep: `ST_BAD_REQUEST`; not found:
 `ST_NOT_FOUND`; already exists: `ST_EXISTS`. REG_RENAME_KEY with a `new_leaf`
 of `.` or `..` is `ST_BAD_REQUEST`.
@@ -1077,8 +1071,8 @@ A write reply that is not exactly 8 bytes counts as a failed write
 ### 4.5 Registry generation (`reg_gen`)
 
 Distinct from the overlay `version` in replies. The director keeps one
-generation per session (the Rust `RegistryGeneration` and Cairn's both start
-at 1) and publishes it into every ring header it serves (offset 40, atomic
+generation per session (the old Rust director's `RegistryGeneration` and
+Cairn's both start at 1) and publishes it into every ring header it serves (offset 40, atomic
 fetch-max, never backward). It moves on **every successful registry write,
 before the write's reply is published**, and whenever a registry layer is
 attached or detached.
@@ -1091,10 +1085,9 @@ the shim then caches nothing and asks the director every time
 non-zero generation before the shim attaches, and must bump it before
 replying to any write, or other processes will keep serving stale answers.
 
-The existing directors differ when no registry is served. The Rust director
-registers every ring with its `RegistryGeneration` at start
-(`crates/aether-director/src/ipc.rs`, `publish_registry_to`), which publishes
-the current generation, 1, at once, registry or not. Cairn publishes only
+Directors have differed when no registry is served. The old Rust director
+(removed) registered every ring with its `RegistryGeneration` at start, which
+published the current generation, 1, at once, registry or not. Cairn publishes only
 when it has a registry (`ring.clj`, `start`), so its header keeps `reg_gen =
 0`. Neither matters to the shim without `VFS_REGISTRY`, which then sends no
 registry request at all.
@@ -1193,8 +1186,7 @@ handshake.
 
 Written by both directors and named by `VFS_FUSE_CFG`; nothing in the shim or
 the injector reads it. Lines of `key=value`, `\n`-terminated
-(`crates/aether-director/src/ipc.rs`, `write_thin_config`; Cairn
-`launch.clj`, `fuse-cfg`):
+(Cairn `launch.clj`, `fuse-cfg`):
 
 ```
 section=<name>          (file mode, Cairn only: ring_path=<path>)

@@ -73,7 +73,7 @@ fn synth_file_id(handle: HANDLE) -> i64 {
 /// handle to it reports. `None` for a path under no root.
 pub(super) fn path_file_id(path: &str) -> Option<i64> {
     let (root, vpath) = crate::director::global()?.vpath_under_root(path)?;
-    Some(aether_core::finalname::path_id(&format!("{}:{vpath}", root.0)) as i64)
+    Some(aether_redirect::finalname::path_id(&format!("{}:{vpath}", root.0)) as i64)
 }
 
 /// Whether this host names file objects `\??\C:\…` (Wine) or
@@ -281,7 +281,8 @@ unsafe fn fuse_query_information(
             // reads the length.
             // SAFETY: `info` is non-null and valid for `length` bytes (hook/mod.rs).
             let buf = unsafe { caller_buf(info, length as usize) };
-            let (fit, written) = put_file_name(aether_core::finalname::volume_relative(&path), buf);
+            let (fit, written) =
+                put_file_name(aether_redirect::finalname::volume_relative(&path), buf);
             let status = match fit {
                 Fit::Mismatch => return STATUS_INFO_LENGTH_MISMATCH,
                 Fit::Overflow => STATUS_BUFFER_OVERFLOW,

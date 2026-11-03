@@ -1,6 +1,6 @@
 use super::*;
 use crate::cache::OsConsultGuard;
-use aether_core::PathError;
+use crate::PathError;
 
 /// `OsConsultGuard`'s own reentrancy mechanics, independent of any real
 /// OS call or hook — the crash this guard fixes (see its doc comment)

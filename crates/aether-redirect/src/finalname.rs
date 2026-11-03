@@ -12,7 +12,7 @@
 //!
 //! Pure: the listing is asked for through a closure.
 
-use crate::fold;
+use aether_casefold::fold;
 
 /// The components of a DOS path, without its NT prefix: `\??\C:\A\b` and
 /// `C:/A/b/` both give `["C:", "A", "b"]`.

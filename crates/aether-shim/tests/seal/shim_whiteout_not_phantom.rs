@@ -35,9 +35,15 @@
 use crate::fakedirector;
 use crate::ntapi;
 
-use aether_provider::overlay_layer_dir;
 use aether_redirect::RootId;
 use aether_shim::install;
+
+/// The physical directory an overlay rooted at `overlay_root` uses for
+/// `root`'s writes: `root-<n>`, the naming the shim-local overlay and a
+/// director's write layer shared.
+fn overlay_layer_dir(overlay_root: &std::path::Path, root: RootId) -> std::path::PathBuf {
+    overlay_root.join(format!("root-{}", root.0))
+}
 
 const KEPT: &[u8] = b"kept";
 const GONE: &[u8] = b"gone";

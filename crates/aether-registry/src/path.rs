@@ -99,9 +99,9 @@ pub fn to_nt(canonical: &str, user_sid: Option<&str>) -> String {
     out
 }
 
-/// Case fold used for every lookup (`aether_core::fold`).
+/// Case fold used for every lookup (`aether_casefold::fold`).
 pub fn fold(s: &str) -> String {
-    aether_core::fold(s)
+    aether_casefold::fold(s)
 }
 
 pub fn parent(canonical: &str) -> Option<&str> {

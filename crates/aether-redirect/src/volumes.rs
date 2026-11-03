@@ -247,7 +247,7 @@ fn nt_key_for_win32_path(win32_path: &str) -> String {
 fn junction_aliases(root: &str) -> Vec<(String, String)> {
     const MAX_ANCESTOR_LEVELS: usize = 2;
     let root_win32 = strip_nt_prefix(root);
-    let Ok(root_norm) = aether_core::normalize_vpath(root) else {
+    let Ok(root_norm) = crate::normalize_vpath(root) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -332,7 +332,7 @@ fn junction_aliases(_root: &str) -> Vec<(String, String)> {
 #[cfg(windows)]
 fn reparse_target_norm(path: &std::path::Path) -> Option<String> {
     let real = aether_win::reparse_point_target(&path.to_string_lossy())?;
-    aether_core::normalize_vpath(&real).ok()
+    crate::normalize_vpath(&real).ok()
 }
 
 /// Whether `candidate`'s normalized components start with all of `root`'s —
@@ -358,7 +358,7 @@ fn is_component_prefix(root: &str, candidate: &str) -> bool {
     root_comps
         .iter()
         .zip(cand_comps.iter())
-        .all(|(r, c)| aether_core::fold(r) == aether_core::fold(c))
+        .all(|(r, c)| aether_casefold::fold(r) == aether_casefold::fold(c))
 }
 
 /// Convert `GetVolumeNameForVolumeMountPointW`'s Win32 spelling of a
@@ -675,7 +675,7 @@ mod tests {
         let map = resolve_volume_map(&root_str);
         let raw = format!(r"\??\{}\a.esp", link_dir.to_string_lossy());
         let got = crate::canon::canonicalise(&raw, &map).unwrap();
-        let root_norm = aether_core::normalize_vpath(&root_str).unwrap();
+        let root_norm = crate::normalize_vpath(&root_str).unwrap();
         assert!(
             !is_component_prefix(&root_norm, &got),
             "a junction pointing to an unrelated directory was wrongly pulled into the root: {got}"

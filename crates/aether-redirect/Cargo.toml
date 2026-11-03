@@ -7,12 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-aether-core.workspace = true
-# `RootId` only — the vocabulary type a multi-root `RootMap` answers with, so
-# the shim's client predicate and the director's wire name the same roots by
-# the same type rather than by two parallel `u32`s. `aether-provider` has no
-# dependencies of its own, so this adds no transitive weight.
-aether-provider.workspace = true
+# The fold every vpath component goes through before it crosses the ring.
+aether-casefold.workspace = true
+# `RootId` only: the wire's root type, which a multi-root `RootMap` answers with.
+aether-protocol.workspace = true
 # Raw Win32 volume/path lookups (QueryDosDeviceW, GetVolumeNameForVolumeMountPointW,
 # GetLongPathNameW, GetFinalPathNameByHandleW) live in aether-win, not here: this crate
 # is `#![forbid(unsafe_code)]`, and aether-win is the existing home for confined FFI.

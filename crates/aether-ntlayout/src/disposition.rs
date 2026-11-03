@@ -101,10 +101,10 @@ pub fn is_append_only(access: u32) -> bool {
 ///   **both**, same as `FILE_SUPERSEDE` — this is the case the brief already
 ///   flagged for a re-check.
 ///
-/// Cross-checked against `DiskProvider::open` (`disk.rs`), which folds these
-/// straight into `OpenOptions::create/create_new/truncate`, and the
-/// conformance fixture's `open`, which create-if-absent-then-truncate in that
-/// order — both agree with the mapping above.
+/// Cross-checked against the old Rust director's `DiskProvider::open`, which
+/// folded these straight into `OpenOptions::create/create_new/truncate`, and
+/// its conformance fixture's `open`, which create-if-absent-then-truncate in
+/// that order (both removed) — both agreed with the mapping above.
 pub fn open_create_flags(disposition: u32) -> u32 {
     use aether_protocol::{OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC};
     match disposition {

@@ -83,14 +83,13 @@ The ones that ship:
 | `aether-shim-dll` | The shim DLL: `DllMain` bootstrap |
 | `aether-shim` | The NT detours and the director client |
 | `aether-ipc` | The shared-memory control ring and bulk arena, OS-free |
-| `aether-protocol` | Wire codecs, opcodes, the shim's bootstrap config |
-| `aether-provider` | The provider contract (`Capabilities`, `VPath`, conformance suite) |
-| `aether-redirect` | Pure path core: root map and canonicalisation |
+| `aether-protocol` | Wire codecs, opcodes, statuses, open flags, `RootId`, the shim's bootstrap config |
+| `aether-redirect` | Pure path core: root map, canonicalisation, vpath normalization, DOS wildcards, final names |
+| `aether-casefold` | The case fold names cross the ring in (file paths and registry keys) |
 | `aether-ntlayout` | Pure NT byte layouts and decisions for the hooks |
 | `aether-registry` | Registry overlay tree and its merge with a real key |
 | `aether-win` | Windows shared memory, events and volume lookups |
 | `aether-pe` | Pure PE byte parsing |
-| `aether-core` | Pure merged-tree resolver (layers, tombstones, case folding) |
 | `aether-env` | Every `VFS_*` environment switch, defined once |
 
 The test fixtures, Windows programs the tests run under the shim:

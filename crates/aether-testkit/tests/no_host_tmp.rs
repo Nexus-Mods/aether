@@ -218,8 +218,10 @@ fn no_host_side_test_uses_the_host_temp_dir() {
             bad.push(format!("{}:{line_no}: {pat}: {line}", path.display()));
         }
     }
+    // A floor under the non-exempt crates' file count (49 at the last count),
+    // so a walk that breaks fails instead of passing on nothing.
     assert!(
-        scanned > 50,
+        scanned > 40,
         "scanned only {scanned} files; did the walk break?"
     );
     assert!(

@@ -1,5 +1,5 @@
 //! DOS wildcard matching.
-use crate::casefold::fold;
+use aether_casefold::fold;
 
 /// Case-insensitive DOS wildcard match. Supports `*`, `?`, and the DOS
 /// meta-characters `<` (DOS_STAR ≈ `*` for MVP), `>` (DOS_QM), `"` (DOS_DOT).

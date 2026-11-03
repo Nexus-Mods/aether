@@ -12,6 +12,12 @@ repository. The old Rust director and the crates only it used are deleted:
 `aether-director`, `aether-compose`, `aether-zip` and `aether-unix`.
 `aether-inject` no longer depends on `aether-core` or `aether-zip`. The shim's
 tests use their own fake director, which now answers the registry opcodes too.
+`aether-provider` and `aether-core` are removed as well: the wire's statuses,
+`OPEN_*` flags and `RootId` are `aether-protocol`'s (`aether_protocol::ST_*`,
+the provider re-exports are gone), the case fold is the new dependency-free
+`aether-casefold` (`aether_casefold::fold`, `cmp_ci`), and vpath normalization,
+`wildcard_match` and `finalname` are `aether-redirect`'s; the merged-tree
+resolver, the provider traits and the conformance suite went with them.
 
 ## Unreleased (remote-thread injection is the only activation)
 

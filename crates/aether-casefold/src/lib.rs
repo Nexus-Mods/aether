@@ -1,4 +1,5 @@
 //! Case folding — single source of truth for case-insensitive comparison.
+#![forbid(unsafe_code)]
 
 /// Lowercase simple case fold. MVP uses `char::to_lowercase` (Unicode simple
 /// folding). This is the single source of truth for case-insensitive matching.

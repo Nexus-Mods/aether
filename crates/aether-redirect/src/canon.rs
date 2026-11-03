@@ -15,7 +15,8 @@
 //! drive letter itself away, and letting the drive be popped away is a real
 //! bypass — see `dotdot_traversal_through_the_drive_root_clamps_to_the_same_file`.
 
-use aether_core::{fold, normalize_vpath, PathError};
+use crate::{normalize_vpath, PathError};
+use aether_casefold::fold;
 
 /// The object-manager tokens that name a *namespace* rather than a file, one
 /// path component each. A leading run of these — in any order, any number of

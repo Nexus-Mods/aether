@@ -2,7 +2,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aether_core::{fold, normalize_vpath, PathError};
+use crate::{normalize_vpath, PathError};
+use aether_casefold::fold;
 
 use crate::cache::{cache_suppressed, OsConsultGuard, PathCache, DEFAULT_CACHE_CAPACITY};
 use crate::{canonicalise, expand_short_component, RootHit, RootId, VolumeMap};

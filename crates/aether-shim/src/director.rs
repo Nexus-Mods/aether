@@ -296,7 +296,7 @@ pub struct FuseClient {
     /// [`NAME_TTL_MS`], which bounds what a change made by anyone else — the
     /// host, another process on the same session — can cost: a stale
     /// spelling for that long.
-    names: std::sync::Mutex<aether_core::finalname::NameCache>,
+    names: std::sync::Mutex<aether_redirect::finalname::NameCache>,
     /// What the cache's clock counts from.
     started: std::time::Instant,
     arena_len: usize,
@@ -433,7 +433,7 @@ impl FuseClient {
             payload_cap,
             roots,
             declared: decls,
-            names: std::sync::Mutex::new(aether_core::finalname::NameCache::new(
+            names: std::sync::Mutex::new(aether_redirect::finalname::NameCache::new(
                 NAME_TTL_MS,
                 NAME_CACHE_ENTRIES,
             )),
@@ -783,7 +783,7 @@ impl FuseClient {
 
     /// The final DOS path of something under a managed root that was opened
     /// as `nt_path`: the root as it was declared, then each component as it
-    /// is stored — see `aether_core::finalname`. `None` for a path under no
+    /// is stored — see `aether_redirect::finalname`. `None` for a path under no
     /// root.
     ///
     /// This is what `GetFinalPathNameByHandleW` must answer for a virtual
@@ -806,7 +806,7 @@ impl FuseClient {
             .map(|(_, p)| p.as_str())
             .collect();
         let stored = self.stored_names(root, &under);
-        let mut name = aether_core::finalname::final_dos_path(path, &under, &spellings, |i| {
+        let mut name = aether_redirect::finalname::final_dos_path(path, &under, &spellings, |i| {
             stored.get(i).cloned()
         });
         // A named stream is part of what was opened, not of where the file
@@ -884,7 +884,7 @@ impl FuseClient {
             return Some((root, folded));
         }
         let (_, under) = self.roots.resolve(plain)?;
-        match aether_core::finalname::opened_tail(plain, &under) {
+        match aether_redirect::finalname::opened_tail(plain, &under) {
             Some(tail) => Some((root, tail.join("/"))),
             None => Some((root, folded)),
         }
@@ -938,13 +938,13 @@ impl FuseClient {
         let (root, comps) = self.roots.resolve(path)?;
         let mut vpath = comps.join("/");
         if let Some(stream) = stream {
-            // `aether_core::fold`, matching the components `RootMap` already
+            // `aether_casefold::fold`, matching the components `RootMap` already
             // folded: one string on the wire, one fold. Behaviourally
             // identical for the ASCII stream names anything real uses, but a
             // second fold spelled differently inside the very function that
             // builds the wire vpath is how the ring's two sides drifted apart
             // in the first place.
-            vpath.push_str(&aether_core::fold(stream));
+            vpath.push_str(&aether_casefold::fold(stream));
         }
         Some((root, vpath))
     }
@@ -1067,7 +1067,7 @@ mod tests {
         map.resolve(path).map(|(r, c)| {
             let mut v = c.join("/");
             if let Some(s) = stream {
-                v.push_str(&aether_core::fold(s));
+                v.push_str(&aether_casefold::fold(s));
             }
             (r, v)
         })

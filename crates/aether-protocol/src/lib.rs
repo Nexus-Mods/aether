@@ -1,19 +1,16 @@
-//! Pure wire and provider contracts for the VFS stack: wire codecs, status/opcodes, and
-//! the provider contract (re-exported from `aether-provider`). No OS I/O. The vocabulary
-//! is FUSE-style RPC, but nothing here touches `/dev/fuse`. Registry ops use
-//! `aether-registry`'s portable node model.
+//! The pure wire contract for the VFS stack: wire codecs, opcodes, statuses, open flags and
+//! the root id. No OS I/O. The vocabulary is FUSE-style RPC, but nothing here touches
+//! `/dev/fuse`. Registry ops use `aether-registry`'s portable node model.
 #![forbid(unsafe_code)]
 
+mod root;
 pub mod shimcfg;
+mod status;
 mod wire;
 use wire::{put_str, Rd};
 
-pub use aether_provider::{
-    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported,
-    read_only, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
-    VPath, KIND_DIR, KIND_FILE, KIND_TOMBSTONE,
-};
-pub use aether_provider::{
+pub use root::RootId;
+pub use status::{
     OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, ST_BAD_FH,
     ST_BAD_REQUEST, ST_CROSS_ROOT, ST_EXISTS, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY,
     ST_NOT_FOUND, ST_NOT_SUPPORTED, ST_NO_SPACE, ST_OK, ST_READ_ONLY, ST_REPLY_TOO_LARGE,
@@ -125,8 +122,8 @@ pub struct OpenResp {
     pub fh: u64,
     pub size: u64,
     pub is_dir: bool,
-    /// The bytes behind `fh` cannot change while it is open (the provider
-    /// that serves it says so: `Provider::is_immutable`). A client may cache
+    /// The bytes behind `fh` cannot change while it is open (the director's
+    /// layer that serves it says so). A client may cache
     /// what it reads through such a handle. Always `false` for a write open.
     /// Carried in what was padding, so a director that predates it says
     /// `false` and a client that predates it ignores it.

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use aether_core::fold;
+use aether_casefold::fold;
 use aether_ntlayout::DirItem;
 use aether_redirect::is_whiteout;
 

@@ -10,7 +10,8 @@ publish.workspace = true
 aether-redirect.workspace = true
 # Pure NT layouts and decisions the hooks apply.
 aether-ntlayout.workspace = true
-aether-core.workspace = true
+# The fold vpath components cross the ring in.
+aether-casefold.workspace = true
 aether-protocol.workspace = true
 aether-ipc.workspace = true
 aether-win.workspace = true
@@ -34,8 +35,6 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# The seal tests name the write layer's directory (`overlay_layer_dir`).
-aether-provider.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

@@ -215,7 +215,7 @@ unsafe fn serve_dir_query(
                         let mut items = strip_whiteout_markers(items);
                         if let Some(ref w) = wildcard {
                             items.retain(|i| {
-                                aether_core::wildcard_match(w, &i.name)
+                                aether_redirect::wildcard_match(w, &i.name)
                                     || i.name.eq_ignore_ascii_case(w)
                             });
                         }

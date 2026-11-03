@@ -215,8 +215,8 @@ unsafe fn director_delete_or_rename(
         let target = unsafe { parse_rename_target(info, length) };
         match target.as_deref().and_then(|t| c.route_as_spelled(t)) {
             Some((dst_root, dst)) => {
-                c.names_changed(dst_root, &aether_core::fold(&dst));
-                crate::read_cache::invalidate_path(dst_root.0, &aether_core::fold(&dst));
+                c.names_changed(dst_root, &aether_casefold::fold(&dst));
+                crate::read_cache::invalidate_path(dst_root.0, &aether_casefold::fold(&dst));
                 let renamed = if dst_root == root {
                     c.rename(root, &src, &dst)
                 } else {

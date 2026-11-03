@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/aether-core",
-  "crates/aether-provider",
+  # The case fold every name crosses the ring in, shared by file paths
+  # (aether-redirect) and registry keys (aether-registry). No dependencies.
+  "crates/aether-casefold",
   # Pure PE byte parsing, extracted from aether-inject so the director can stage
   # Windows executables on any host OS. No OS API and no dependencies: a PE is
   # a file format, not a platform. See
@@ -13,7 +14,7 @@ members = [
   # Dev-only helpers shared by integration tests (stored-zip writer, artefact locator).
   "crates/aether-testkit",
   # Registry overlay model (paths, copy-on-write tree). Portable: depends only on
-  # aether-core. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
+  # aether-casefold. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
   "crates/aether-registry",
   "crates/aether-ipc",
   "crates/aether-inject",
@@ -67,7 +68,7 @@ unimplemented = "warn"
 
 [workspace.dependencies]
 # Internal crates.
-aether-core = { path = "crates/aether-core" }
+aether-casefold = { path = "crates/aether-casefold" }
 aether-env = { path = "crates/aether-env" }
 aether-fixture-support = { path = "crates/aether-fixture-support" }
 aether-inject = { path = "crates/aether-inject" }
@@ -75,7 +76,6 @@ aether-ipc = { path = "crates/aether-ipc" }
 aether-ntlayout = { path = "crates/aether-ntlayout" }
 aether-pe = { path = "crates/aether-pe" }
 aether-protocol = { path = "crates/aether-protocol" }
-aether-provider = { path = "crates/aether-provider" }
 aether-redirect = { path = "crates/aether-redirect" }
 aether-registry = { path = "crates/aether-registry" }
 aether-shim = { path = "crates/aether-shim" }
@@ -84,14 +84,8 @@ aether-win = { path = "crates/aether-win" }
 
 # Shared external crates: one version spec each. Members add their own
 # `features` / `optional` on top.
-blake3 = "1.8"
-clap = "4"
-proptest = "1.11"
 tempfile = "3.27"
 serde_json = "1"
-thiserror = "2"
-toml = "0.8"
-redb = "4.3"
 windows-sys = "0.61"
 
 # Everything here unwinds so the library can catch panics at FFI boundaries
@@ -99,7 +93,7 @@ windows-sys = "0.61"
 [profile.dev]
 panic = "unwind"
 
-# Third-party code (zstd, redb, blake3, ...) optimised even in debug builds, so
+# Third-party code (retour, its disassembler, ...) optimised even in debug builds, so
 # debug tests and the debug Proton e2e run near release speed. Workspace crates
 # stay at opt-level 0 for debuggability. Optimisation only, no behaviour change.
 [profile.dev.package."*"]

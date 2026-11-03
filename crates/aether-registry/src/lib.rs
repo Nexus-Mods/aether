@@ -1,6 +1,6 @@
 //! Registry overlay model: canonical key paths and a copy-on-write overlay tree.
 //!
-//! Portable on purpose (depends only on `aether-core` for case folding) so the
+//! Portable on purpose (depends only on `aether-casefold` for case folding) so the
 //! persistence format, merged view and director logic build and test on Linux.
 
 pub mod format;

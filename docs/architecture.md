@@ -89,37 +89,37 @@ the game only through the ring.
 
 ## 3. The layers
 
-### 3.1 Content model: `aether-core`
+### 3.1 Content model (a director's)
 
-Pure, OS-free, no I/O. Given enumerated layers, it produces a merged tree and
-answers `resolve(vpath)`. It knows about:
+Pure, OS-free, no I/O. Given enumerated layers, a director produces a merged
+tree and answers `resolve(vpath)`. It knows about:
 
 - **Layer precedence**: later layers win.
 - **Tombstones**: a first-class entry kind meaning "hide what is beneath".
   Deleting in an overlay must not reveal the file it was covering.
 - **Case folding**: Windows is case-insensitive; the virtual tree must be too,
   without being case-*destructive* (the original spelling is preserved for
-  enumeration).
-- **Wildcards**: enumeration filters (`*.esm`) are matched here, not in the hook.
+  enumeration). The fold is part of the wire: `aether-casefold`'s `fold`,
+  which the shim applies to every vpath before it is sent (`wire.md`).
+- **Wildcards**: enumeration filters (`*.esm`) are not sent; the shim matches
+  them over a listing (`aether_redirect::wildcard_match`).
 
 Keeping this layer pure makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Providers and composition: `aether-provider`, a director's providers (and the `aether-storage` add-on)
+### 3.2 Providers and composition: a director's providers (and the `aether-storage` add-on)
 
-Everything that can supply bytes implements the `Provider` trait
-(`aether-provider`), addressed by `(RootId, relative path)` via `VPath` rather
-than a bare string. The root id lets one provider instance serve
+Everything that can supply bytes implements a provider contract (the old Rust
+director's `Provider` trait, removed with it), addressed by `(RootId, relative
+path)` rather than a bare string; `RootId` is the wire's (`aether-protocol`). The root id lets one provider instance serve
 several virtualized locations at once and still tell `[1, "a"]` from
 `[0, "a"]` apart. A provider declares its `Capabilities` once, at
 construction; a read-only provider implements a five-method floor
 (`capabilities`, `getattr`, `readdir`, `open`, `close`, plus `read_at` or
 `read_next`), and everything past that defaults to `ST_NOT_SUPPORTED`. One
-conformance suite, `aether_provider::assert_conformance`, runs the case subset
-implied by a provider's declared capabilities against every implementation
-(Rust today, host-language bindings later), so none can drift from the
-others. Full detail: [`aether-provider/README.md`](../crates/aether-provider/README.md)
-and the pluggable-providers design spec's §5 (not imported).
+conformance suite ran the case subset implied by a provider's declared
+capabilities against every implementation, so none could drift from the
+others. Full detail: the pluggable-providers design spec's §5 (not imported).
 
 #### Why `immutable` and `slow` are separate flags
 
@@ -806,9 +806,10 @@ Content source is not a factor: zip and disk providers measure the same
 The system's characteristic failure is **silence**: work that is skipped rather
 than work that errors. Tests are shaped around that.
 
-- **Pure layers are unit-tested** (`aether-core`, `aether-redirect`, `aether-ntlayout`,
-  `aether-registry`, `aether-ipc`, `aether-pe`): merge order, tombstones, case folding,
-  wildcards, NT byte layouts, ring state transitions. They build and test on
+- **Pure layers are unit-tested** (`aether-casefold`, `aether-redirect`, `aether-ntlayout`,
+  `aether-registry`, `aether-protocol`, `aether-ipc`, `aether-pe`): case folding, path
+  canonicalisation, wildcards, NT byte layouts, registry merges, wire codecs, ring state
+  transitions. They build and test on
   Linux.
 - **Hook behaviour is tested in-process.** Integration binaries install the real
   detours into the test process and then use ordinary `std::fs` and raw NT calls
@@ -887,14 +888,13 @@ observer before concluding the process is idle.
 
 | crate | role |
 |---|---|
-| `aether-core` | pure merged-tree resolver: layers, tombstones, case folding, wildcards |
-| `aether-provider` | provider contract: `Capabilities`, `VPath`, `Provider`, conformance suite |
-| `aether-protocol` | ring wire codecs and opcodes, the shim bootstrap config (`VFSC` v2); re-exports the provider contract |
+| `aether-casefold` | the case fold every name crosses the ring in, for file paths and registry keys; no dependencies |
+| `aether-protocol` | ring wire codecs, opcodes, statuses, open flags and `RootId`; the shim bootstrap config (`VFSC` v2) |
 | `aether-ipc` | control ring + bulk arena + read cache, OS-free |
 | `aether-win` | Windows shared memory, events and volume lookups |
 | `aether-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
 | `aether-env` | every `VFS_*` switch, defined once, with a drift test |
-| `aether-redirect` | pure path core: root map and canonicalisation |
+| `aether-redirect` | pure path core: root map, canonicalisation, vpath normalization, DOS wildcards, a handle's final name |
 | `aether-ntlayout` | pure NT byte layouts and decisions for the shim's hooks |
 | `aether-shim` / `aether-shim-dll` | NT detours, the director client, synthetic handles, sections, registry hooks |
 | `aether-inject` | injection and process creation (`aether-injector`) |

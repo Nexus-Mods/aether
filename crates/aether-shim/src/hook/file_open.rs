@@ -381,7 +381,7 @@ unsafe fn try_fuse_mkdir(
     // folded path. See `FuseClient::vpath_as_spelled`.
     let (root, vp) = client.route_as_spelled(path)?;
     let vp = vp.as_str();
-    client.names_changed(root, &aether_core::fold(vp));
+    client.names_changed(root, &aether_casefold::fold(vp));
     match client.mkdir(root, vp, 0o755) {
         Ok(()) => {
             // Synthesize a virtual directory handle directly — do NOT OP_OPEN the

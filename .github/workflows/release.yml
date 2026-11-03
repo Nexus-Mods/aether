@@ -61,8 +61,8 @@ jobs:
           if ($env:TAG -and $env:TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "tag $env:TAG is not v<semver>" }
           if ($sign -and -not $env:EXPECTED_SIGNER) { throw 'signing needs the repository variable EXPECTED_SIGNER' }
           Write-Host "tag '$env:TAG': prerelease=$pre, sign=$sign"
-          "prerelease=$($pre.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          "sign=$($sign.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Value "prerelease=$($pre.ToString().ToLower())"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Value "sign=$($sign.ToString().ToLower())"
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - name: Build the natives and fixtures (bin/build-natives.ps1)
@@ -74,7 +74,7 @@ jobs:
           Write-Host "natives key: $key"
           New-Item -ItemType Directory -Force dist\out | Out-Null
           [IO.File]::WriteAllText((Join-Path $PWD 'dist\out\natives-key.txt'), "$key`n")
-          "key=$key" >> $env:GITHUB_OUTPUT
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Value "key=$key"
       # The newest earlier full release with this key: its natives are the
       # same build, already signed. Checked, never trusted by name.
       - name: Reuse an earlier release's signed natives
@@ -91,14 +91,14 @@ jobs:
             gh release download $t -p natives-key.txt -D $d --clobber 2>$null
             if ($LASTEXITCODE -or -not (Test-Path "$d\natives-key.txt")) { continue }
             if ((Get-Content -Raw "$d\natives-key.txt").Trim() -ne $key) { continue }
-            Write-Host "release $t has natives key $key: reusing its natives"
+            Write-Host "release $t has natives key ${key}: reusing its natives"
             gh release download $t -p natives.zip -D $d --clobber
             if ($LASTEXITCODE) { throw "could not download $t's natives.zip" }
             Expand-Archive -LiteralPath "$d\natives.zip" -DestinationPath "$d\natives" -Force
             $bad = @(& .\bin\check-signatures.ps1 -Path ($names | ForEach-Object { Join-Path "$d\natives" $_ }))
             if ($bad.Count) { throw "release $t's natives fail the signature check: $($bad -join '; ')" }
             foreach ($n in $names) { Copy-Item -LiteralPath (Join-Path "$d\natives" $n) -Destination (Join-Path 'dist\natives' $n) -Force }
-            "from=$t" >> $env:GITHUB_OUTPUT
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Value "from=$t"
             exit 0
           }
           Write-Host "no earlier full release has natives key $key"
@@ -142,7 +142,7 @@ jobs:
           }
           [IO.File]::WriteAllText((Join-Path $PWD "$out\SHA256SUMS"), (($sums -join "`n") + "`n"))
           Get-Content "$out\SHA256SUMS"
-          "signed=$($signed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Value "signed=$($signed.ToString().ToLower())"
       - name: Publish the release
         if: env.TAG != ''
         run: |

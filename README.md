@@ -22,9 +22,9 @@ doesn't look beside it for `vcruntime140.dll`, and a PC may have no VC++
 runtime. They are staged as `aether-injector.exe`, `aether_shim_dll.dll`,
 `aether-injector32.exe` and `aether_shim_dll32.dll`.
 
-How it fits together: Cairn's
-[docs/aether-vfs/](https://github.com/Nexus-Mods/cairn/tree/master/docs/aether-vfs)
-(start with `architecture.md`) until they move here. The code
+Writing a director: [docs/wire.md](docs/wire.md), the wire contract byte by
+byte. How it fits together: [docs/architecture.md](docs/architecture.md); the
+rules the hooks keep: [docs/shim-invariants.md](docs/shim-invariants.md). The code
 here was split from Cairn's `rust/` on 2026-11-03, with its history; before
 that it lived in [halgari/aether-vfs](https://github.com/halgari/aether-vfs).
 

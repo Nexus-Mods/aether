@@ -25,7 +25,7 @@ pub fn ensure_fixtures() {
         cmd.current_dir(&workspace).args([
             "build",
             "-p",
-            "aether-shim-dll",
+            "aether-shim",
             "-p",
             "aether-fixture-vproxy",
             "--quiet",
@@ -55,7 +55,7 @@ fn colocate_profile_artifacts() {
     let Some(profile_dir) = profile_dir_from_test_exe() else {
         return;
     };
-    for name in ["aether_shim_dll.dll", "vproxy.dll"] {
+    for name in ["aether_shim.dll", "vproxy.dll"] {
         let dest = profile_dir.join(name);
         if dest.is_file() {
             continue;
@@ -113,7 +113,7 @@ fn find_near(reference: &Path, name: &str) -> Option<PathBuf> {
 /// The shim DLL's path.
 #[allow(dead_code)] // used by some test binaries, not all
 pub fn locate_shim() -> String {
-    locate_artifact("aether_shim_dll.dll")
+    locate_artifact("aether_shim.dll")
 }
 
 /// Wait up to ~2 s for this process to have no child processes left, and

@@ -5,7 +5,7 @@ Windows programs do it:
 
 - **`aether-injector.exe`** (crate `aether-inject`): starts the game's process and
   loads the shim into it by remote-thread injection.
-- **`aether_shim_dll.dll`** (crate `aether-shim-dll`, hooks in `aether-shim`): runs
+- **`aether_shim.dll`** (crate `aether-shim`, hooks in `aether-hooks`): runs
   inside the game and detours its NT file and registry calls, answering every
   operation on a managed path from a director over a shared-memory ring.
 
@@ -19,8 +19,8 @@ Windows binaries everywhere, running inside Wine there.
 Both ship for x64 and x86 (32-bit games and tools), with the C runtime
 linked in (`+crt-static`): the shim loads inside the game, where Windows
 doesn't look beside it for `vcruntime140.dll`, and a PC may have no VC++
-runtime. They are staged as `aether-injector.exe`, `aether_shim_dll.dll`,
-`aether-injector32.exe` and `aether_shim_dll32.dll`.
+runtime. They are staged as `aether-injector.exe`, `aether_shim.dll`,
+`aether-injector32.exe` and `aether_shim32.dll`.
 
 Writing a director: [docs/wire.md](docs/wire.md), the wire contract byte by
 byte. How it fits together: [docs/architecture.md](docs/architecture.md); the
@@ -80,8 +80,8 @@ The ones that ship:
 | Crate | Role |
 |-------|------|
 | `aether-inject` | The injector: starts the target, injects the shim (the `aether-injector` binary) |
-| `aether-shim-dll` | The shim DLL: `DllMain` bootstrap |
-| `aether-shim` | The NT detours and the director client |
+| `aether-shim` | The shim DLL: `DllMain` bootstrap |
+| `aether-hooks` | The NT detours and the director client |
 | `aether-ipc` | The shared-memory control ring and bulk arena, OS-free |
 | `aether-protocol` | Wire codecs, opcodes, statuses, open flags, `RootId`, the shim's bootstrap config |
 | `aether-redirect` | Pure path core: root map, canonicalisation, vpath normalization, DOS wildcards, final names |
@@ -104,7 +104,7 @@ in a cargo invocation of its own (cargo#6313). `aether-testkit` holds helpers
 shared by the tests.
 
 Directors live outside this repository. The shim's tests run against their own
-fake director (`crates/aether-shim/tests/fakedirector`), which answers the file
+fake director (`crates/aether-hooks/tests/fakedirector`), which answers the file
 and registry opcodes from memory.
 
 `panic = "unwind"` throughout (`aether-protocol/tests/unwind.rs` pins it). The

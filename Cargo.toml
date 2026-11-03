@@ -22,8 +22,8 @@ members = [
   # for the shim, split out so they build and test on any host.
   "crates/aether-ntlayout",
   "crates/aether-redirect",
+  "crates/aether-hooks",
   "crates/aether-shim",
-  "crates/aether-shim-dll",
   "crates/aether-win",
   # The test fixtures: seven Windows programs the tests run under the shim
   # (aether-fixture-read, -writepath, -escape, -prefs, -registry, -steam,
@@ -50,7 +50,7 @@ publish = false
 
 # Unsafe is denied by default; a crate (or a test/bin root) that is FFI by
 # nature says so with `#![allow(unsafe_code)]`, which makes the surface explicit.
-# Not enabled yet because they need hundreds of edits in aether-shim / aether-win /
+# Not enabled yet because they need hundreds of edits in aether-hooks / aether-win /
 # the fixtures: rust `unsafe_op_in_unsafe_fn` and clippy
 # `undocumented_unsafe_blocks`.
 [workspace.lints.rust]
@@ -65,6 +65,7 @@ unimplemented = "warn"
 # Internal crates.
 aether-casefold = { path = "crates/aether-casefold" }
 aether-env = { path = "crates/aether-env" }
+aether-hooks = { path = "crates/aether-hooks" }
 aether-inject = { path = "crates/aether-inject" }
 aether-ipc = { path = "crates/aether-ipc" }
 aether-ntlayout = { path = "crates/aether-ntlayout" }
@@ -72,7 +73,6 @@ aether-pe = { path = "crates/aether-pe" }
 aether-protocol = { path = "crates/aether-protocol" }
 aether-redirect = { path = "crates/aether-redirect" }
 aether-registry = { path = "crates/aether-registry" }
-aether-shim = { path = "crates/aether-shim" }
 aether-testkit = { path = "crates/aether-testkit" }
 aether-win = { path = "crates/aether-win" }
 

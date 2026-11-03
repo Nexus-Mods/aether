@@ -27,7 +27,7 @@ fn profile_dir() -> PathBuf {
 
 fn colocate_only() {
     let profile_dir = profile_dir();
-    for name in ["aether_shim_dll.dll", "vproxy.dll"] {
+    for name in ["aether_shim.dll", "vproxy.dll"] {
         let dest = profile_dir.join(name);
         if dest.is_file() {
             continue;

@@ -16,7 +16,7 @@ function Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
   if ($Ok) { Write-Host "ok   $Name" } else { Write-Host "FAIL $Name $Detail"; $failed.Add($Name) }
 }
 
-$names = @('aether-injector.exe', 'aether_shim_dll.dll', 'aether-injector32.exe', 'aether_shim_dll32.dll')
+$names = @('aether-injector.exe', 'aether_shim.dll', 'aether-injector32.exe', 'aether_shim32.dll')
 
 # The releases the fake gh knows: each a folder of its assets.
 $releases = Join-Path $work 'releases'
@@ -82,13 +82,13 @@ try {
   $r = Invoke-Reuse 'ourkey' $pass $out
   Check 'a release without natives-key.txt does not stop the search' ($r.Exit -eq 0) $r.Out
   Check 'the matching release is reused' ($r.From -eq 'v0.1.0') "from='$($r.From)' $($r.Out)"
-  Check 'its natives replace the built ones' ((Get-Content -Raw (Join-Path $out 'aether_shim_dll.dll')).Trim() -eq 'v0.1.0 aether_shim_dll.dll')
+  Check 'its natives replace the built ones' ((Get-Content -Raw (Join-Path $out 'aether_shim.dll')).Trim() -eq 'v0.1.0 aether_shim.dll')
   Check 'the check is told the signer' ($r.Out.Contains('checked 4 as CN=Test')) $r.Out
 
   $out = Join-Path $work 'dist2'
   $r = Invoke-Reuse 'ourkey' $fail $out
   Check 'natives that fail the check stop the release' ($r.Exit -ne 0) $r.Out
-  Check 'and are not reused' ((Get-Content -Raw (Join-Path $out 'aether_shim_dll.dll')).Trim() -eq 'built')
+  Check 'and are not reused' ((Get-Content -Raw (Join-Path $out 'aether_shim.dll')).Trim() -eq 'built')
   Check 'no reuse is reported' ($r.From -eq '')
 
   $out = Join-Path $work 'dist3'

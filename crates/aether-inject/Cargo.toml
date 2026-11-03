@@ -33,12 +33,12 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-aether-shim.workspace = true
-# `aether-shim-dll` is NOT a dev-dependency: a cdylib cannot be `use`d, so the edge only ordered the
+aether-hooks.workspace = true
+# `aether-shim` is NOT a dev-dependency: a cdylib cannot be `use`d, so the edge only ordered the
 # build — and `tests/common` already builds this package (plus the other PE
 # fixtures) with a nested cargo at test runtime. As a dependency it was built a
 # second time as its own artifact target, and both units wrote
-# `deps/aether_shim_dll.dll`, which is the cargo#6313 collision that made
+# `deps/aether_shim.dll`, which is the cargo#6313 collision that made
 # `--all-targets` unusable.
 # PE fixtures (the shim, vproxy) are built by the tests via a nested
 # `cargo build -p …` (see tests/common).

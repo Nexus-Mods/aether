@@ -30,7 +30,7 @@ pub struct RunConfig {
     pub args: Vec<String>,
     /// Working directory for the child (typically the managed game root).
     pub current_dir: Option<String>,
-    /// The shim DLL (`aether_shim_dll.dll`).
+    /// The shim DLL (`aether_shim.dll`).
     pub dll_path: String,
     pub config_path: String,
     pub ready_path: String,

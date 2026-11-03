@@ -5,6 +5,15 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (the shim DLL is `aether_shim.dll`)
+
+The shim DLL is `aether_shim.dll` (x64) and `aether_shim32.dll` (x86), was
+`aether_shim_dll.dll` / `aether_shim_dll32.dll`; the injectors keep their
+names. The crates are renamed to match: the NT detours and director client
+(was `aether-shim`) are `aether-hooks` (`aether_hooks::`), and the cdylib
+(was `aether-shim-dll`) is `aether-shim`; build it with
+`cargo build -p aether-shim`. `contract/artifacts.json` names the new files.
+
 ## Unreleased (the old Rust director is removed)
 
 Aether ships only the shim and the injector; directors live outside this

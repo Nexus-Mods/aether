@@ -427,7 +427,7 @@ mod tests {
 
     /// Stage 2b task 5: the ring's *payload* layouts changed (every
     /// path-carrying request gained a leading `root:u32`), and the injected
-    /// `aether_shim_dll.dll` is known to go stale silently. A stale shim would
+    /// `aether_shim.dll` is known to go stale silently. A stale shim would
     /// send the old shape into a current director, whose decoder would read
     /// the first four bytes of the path as a root id and the rest as a
     /// truncated path — a plausible-looking wrong answer, not a failure.

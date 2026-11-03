@@ -49,13 +49,13 @@ try {
   $env:RUSTFLAGS = '-C target-feature=+crt-static'
   try {
     Invoke-Step 'build x64 injector and shim' {
-      cargo build --release --target x86_64-pc-windows-msvc -p aether-inject -p aether-shim-dll
+      cargo build --release --target x86_64-pc-windows-msvc -p aether-inject -p aether-shim
     }
     Invoke-Step 'build i686 injector' {
       cargo build --release --target i686-pc-windows-msvc -p aether-inject --bin aether-injector
     }
     Invoke-Step 'build i686 shim' {
-      cargo build --release --target i686-pc-windows-msvc -p aether-shim-dll
+      cargo build --release --target i686-pc-windows-msvc -p aether-shim
     }
   } finally {
     $env:RUSTFLAGS = $old
@@ -65,9 +65,9 @@ try {
   $t = Join-Path $root 'target'
   $natives = [ordered]@{}
   $natives[$contract.natives.x64.injector] = "$t\x86_64-pc-windows-msvc\release\aether-injector.exe"
-  $natives[$contract.natives.x64.shim] = "$t\x86_64-pc-windows-msvc\release\aether_shim_dll.dll"
+  $natives[$contract.natives.x64.shim] = "$t\x86_64-pc-windows-msvc\release\aether_shim.dll"
   $natives[$contract.natives.x86.injector] = "$t\i686-pc-windows-msvc\release\aether-injector.exe"
-  $natives[$contract.natives.x86.shim] = "$t\i686-pc-windows-msvc\release\aether_shim_dll.dll"
+  $natives[$contract.natives.x86.shim] = "$t\i686-pc-windows-msvc\release\aether_shim.dll"
 
   # Checked where they were built, before anything is staged: a failed check
   # leaves the staged set as it was.
@@ -121,7 +121,7 @@ try {
   if ($Fixtures) {
     # host target, no crt-static: the tests look in target/release.
     # aether-inject's bins include aether-probe.exe, a fixture of its own.
-    Invoke-Step 'build host injector and shim' { cargo build --release -p aether-inject -p aether-shim-dll }
+    Invoke-Step 'build host injector and shim' { cargo build --release -p aether-inject -p aether-shim }
     # vproxy's import library must exist before staticimp links against it
     Invoke-Step 'build fixtures' {
       cargo build --release -p aether-fixtures -p aether-fixture-vproxy

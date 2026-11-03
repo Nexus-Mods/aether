@@ -3,7 +3,7 @@
 //! A harness reads the shim's hook-stats report (`VFS_SHIM_STATS_LOG`) after a
 //! fixture exits, and asserts on it: an open was routed, a hook ran, a path was
 //! classified. That report is a periodic snapshot with no exit flush
-//! (`aether_shim::hookstats::banner` says why there is none), so a fixture whose
+//! (`aether_hooks::hookstats::banner` says why there is none), so a fixture whose
 //! last calls come microseconds before exit must stay alive until a report
 //! that covers them is on disk. [`outlive_a_covering_report`] is that wait,
 //! and a fixture exits [`NO_COVERING_REPORT_EXIT`] when it gives up.

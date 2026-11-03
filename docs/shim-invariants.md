@@ -1,6 +1,6 @@
 # Shim invariants and incident notes
 
-The hook code under `rust/crates/aether-shim/src/hook/` keeps each invariant in two to five lines of
+The hook code under `rust/crates/aether-hooks/src/hook/` keeps each invariant in two to five lines of
 comment next to the code it protects. The history behind it (the traces, the measurements, the
 wrong turns) lives here. Each subsection quotes the comment that used to sit in the code, as it
 stood when it moved; "above" and "below" in the quoted text refer to the code it was written in.
@@ -48,7 +48,7 @@ A thread terminated while holding a `std::sync::Mutex` leaves it locked
 forever, and not poisoned, so every `if let Ok(..)` in this crate is
 no defence against it. At process exit Windows terminates every thread
 but one before `DLL_PROCESS_DETACH`, and the surviving thread then closes
-handles on its way out. `aether_shim_dll`'s own `DllMain` records this exact
+handles on its way out. `aether_shim`'s own `DllMain` records this exact
 hazard for a different lock: "one killed mid-write leaves a lock the flush
 waits on forever".
 
@@ -720,7 +720,7 @@ panic is counted loudly rather than swallowed.
 # Visibility
 
 `pub` because the shim's `extern "system"` surface is not confined to this
-crate: `aether-shim-dll` owns `DllMain` and `vfs_shim_sync_bootstrap`, which are
+crate: `aether-shim` owns `DllMain` and `vfs_shim_sync_bootstrap`, which are
 entry points Windows and the OEP stub call, and which must contain their
 panics for the same reason and by the same route. One containment function for
 the whole injected DLL is what lets
@@ -926,7 +926,7 @@ and then run un-virtualised on a cold prefix. A launcher that creates a child
 with an explicit environment block lacking the variable gets the default (the
 same launcher would also lose `VFS_SHIM_CONFIG`).
 
-**Tests.** `aether-shim/tests/diagnostics/child_inject_fails_closed.rs` (the spawn
+**Tests.** `aether-hooks/tests/diagnostics/child_inject_fails_closed.rs` (the spawn
 fails, no child remains, the child never ran) and, for the success half,
 `proton-launch-test`'s `a-child-the-program-starts-under-proton-is-virtualised-too`
 (ported from the deleted `vfs-embed`'s `proton_launch`).

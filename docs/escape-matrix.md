@@ -1,9 +1,9 @@
 # Escape matrix: Gate 2
 
 > **Historical, names as of 2026-08-14.** This is a dated record of the gate 2 and gate 4
-> measurements. Since then `hook.rs` became the `aether-shim/src/hook/` modules (the matching
+> measurements. Since then `hook.rs` became the `aether-hooks/src/hook/` modules (the matching
 > `hook.rs:NNNN` line references are gone), the `fuse_client` module became
-> `aether-shim/src/director.rs` (the client type is still `FuseClient`), and the shim-local `Engine` (with its snapshot,
+> `aether-hooks/src/director.rs` (the client type is still `FuseClient`), and the shim-local `Engine` (with its snapshot,
 > `decide`, `cow_seed` and `whiteout`) was deleted: the shim always has a director and the
 > overlay's copy-up lives there (the old Rust director was later removed from this repository). `vfs-directord::registry` is gone with the daemon's
 > old registry, and `vfs-launch` with the CLI. A child process is now injected **fail closed**:
@@ -129,7 +129,7 @@ read.
 **Correction: this did not extend to name-based metadata queries, and an
 earlier version of this document claimed it did by the same mechanism;
 that claim was false.** `qattr_hook`/`qfull_hook`/`qibn_hook`
-(`crates/aether-shim/src/hook.rs`) never call `decide` at all. Each asks
+(`crates/aether-hooks/src/hook.rs`) never call `decide` at all. Each asks
 `fuse_path_attr`, which consults `fuse_client::vpath_under_root` (never
 `RootMap::decide`), then the shim-local write overlay, then falls through to
 the real filesystem if neither answers. While `vpath_under_root` was the
@@ -501,7 +501,7 @@ for marginal benefit over the one spelling this gate's own escape matrix
 exercises.
 
 **A real timing defect found and fixed while verifying this.** The obvious
-place to resolve these aliases is `aether-shim::Engine::build`, called once
+place to resolve these aliases is `aether-hooks::Engine::build`, called once
 from the shim's DLL bootstrap, which seemed like "session start". It is not
 early enough: the injector's own bootstrap sequence guarantees hooks are
 live *before* the target process's own `main()` runs, which means a
@@ -532,11 +532,11 @@ introduced a *new* re-entrancy hazard, the same shape as the
 (`aether_win::reparse_point_target`'s `CreateFileW`, directory listings) from
 inside the first hooked call ever made in the process. Since that call
 is itself intercepted by the same injected process's hooks, it re-enters
-`aether-shim::Engine::map` on the same thread, before the first call's
+`aether-hooks::Engine::map` on the same thread, before the first call's
 `OnceLock::get_or_init` closure has returned. `std::sync::Once` documents
 that shape as unspecified behaviour ("a panic or a deadlock"), observed
 here as an unresponsive process burning CPU rather than a clean crash.
-Fixed with `aether-shim::engine`'s own thread-local guard (`MAP_INIT_DEPTH` /
+Fixed with `aether-hooks::engine`'s own thread-local guard (`MAP_INIT_DEPTH` /
 `MapInitGuard`): a re-entrant call answers `None` ("not ready yet") instead
 of touching the still-initializing `RootMap` again, and every caller
 already had a fail-safe `PassThrough`/`false`/`None` path for this
@@ -805,7 +805,7 @@ outcome here:
 - `cargo clippy --all-targets -- -D warnings`: clean.
 - No bypass removed: `Decision::Redirect`, `Decision::Serve`, the DRM
   exceptions, the passthrough, and the write fall-through are all still
-  present and unmodified by this task. `aether-shim::Engine::map`'s lazy
+  present and unmodified by this task. `aether-hooks::Engine::map`'s lazy
   resolution and its reentrancy guard change *when* and *how safely* the
   volume/junction table is built, never what a decision does once it has
   one.
@@ -894,7 +894,7 @@ is the only remaining `PassThrough`. See that function's own doc comment
 (`crates/aether-redirect/src/lib.rs`) for why `Dir` denies rather than serving:
 this pure, snapshot-only function has no ring connection and cannot itself
 hand back a director-served directory handle; that handle comes from
-`aether-shim::hook::try_fuse_create`'s live path, unaffected by this change and
+`aether-hooks::hook::try_fuse_create`'s live path, unaffected by this change and
 already correct for every directory the provider graph knows about.
 
 **Scope: reads only.** This closes the *read* path; a write open
@@ -941,15 +941,15 @@ that is *not* mounted as a provider, and the shipping config's own mount
 stack never leaves anything in that state. The property this task
 adds is demonstrated by the tests, not the launch:
 `aether-redirect::real_on_disk_file_under_root_with_no_snapshot_entry_is_denied`,
-`aether-shim::engine::tests::real_on_disk_file_under_root_not_in_snapshot_is_denied`,
-and `aether-shim::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
+`aether-hooks::engine::tests::real_on_disk_file_under_root_not_in_snapshot_is_denied`,
+and `aether-hooks::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
 each construct, directly, the orphaned-content shape the live launch's own
 layering never produces.
 
 ### The Mod Organizer consequence, confirmed by reproduction
 
 The prediction above is correct, and verified directly rather than assumed:
-`aether-shim::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
+`aether-hooks::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
 builds a real junction (`mklink /J`) inside a real managed root pointing at a
 real, external staging directory holding real bytes, confirms `std::fs::read`
 through the junction returns those bytes (proving the junction is
@@ -985,7 +985,7 @@ see the update note above):
    (`aether-director::path::strip_prefix`; `vfs-directord::registry::add_source`,
    ~line 184, stores the mount string exactly as given), but every vpath the
    shim ever sends over the ring is already lowercased
-   (`aether-shim::fuse_client::normalize_path_for_root`) before
+   (`aether-hooks::fuse_client::normalize_path_for_root`) before
    `vpath_under_root` sees it. This section's previous example,
    `mount = "Data/SomeMod"`, can therefore never match a live open: a
    mixed-case prefix is compared against an always-lowercase path and never
@@ -1058,7 +1058,7 @@ flips in the escape-matrix e2e's positive canary (vectors 1, 3, 4, 7 and 9:
 share), each going from `opened` to `not-found`. All five share one root
 cause, and it is more consequential than any single vector: all five are
 recognised as under-root only by `RootMap::compute_under_root`'s
-canonicalisation, never by `aether-shim::fuse_client::vpath_under_root`, the
+canonicalisation, never by `aether-hooks::fuse_client::vpath_under_root`, the
 router that decides whether an open reaches the director at all.
 `vpath_under_root` does plain, case/separator-normalized string prefix
 matching against the literal root and the staging-directory alias; it has no
@@ -1338,7 +1338,7 @@ more specific thing: the outcome, and the state of real disk afterwards.
 Vector 14 has been described throughout this document, in the fixture, and in
 the e2e expectation tables as "a child process launched without the shim
 injected... there is no hook in that process to intercept anything". That is
-not what happens. `aether-shim/src/hook.rs` detours
+not what happens. `aether-hooks/src/hook.rs` detours
 `kernelbase!CreateProcessInternalW` (the funnel under every `CreateProcess*`),
 force-suspends the child, and injects the same DLL into it. Measured:
 
@@ -1393,7 +1393,7 @@ the accurate claim. "A game could have read unserved files out of a directory
 listing last week" is not.
 
 Enumeration does not consult `RootMap::decide` at all. `serve_dir_query`
-(`crates/aether-shim/src/hook.rs`) asks `FuseClient::vpath_under_root`, a
+(`crates/aether-hooks/src/hook.rs`) asks `FuseClient::vpath_under_root`, a
 different predicate from the one that admitted the handle to the shim's
 directory table (`path_is_ours`, which accepts either the engine's root notion
 or the client's). When the two disagreed, or when no client was installed, the

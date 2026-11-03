@@ -129,7 +129,7 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
   "CFLAGS_i686-pc-windows-msvc=-Wno-error=implicit-function-declaration")
 # `${flags[@]+…}`: macOS's bash 3.2 calls an empty array unbound under `set -u`.
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
-  -p aether-inject -p aether-shim-dll -p aether-fixtures -p aether-fixture-vproxy
+  -p aether-inject -p aether-shim -p aether-fixtures -p aether-fixture-vproxy
 # staticimp links vproxy.dll.lib through its build.rs, with no Cargo edge to
 # the cdylib (cargo#6313): vproxy is built first, in the invocation above
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
@@ -137,7 +137,7 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
 
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" \
   -p aether-inject --bin aether-injector
-"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" -p aether-shim-dll
+"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" -p aether-shim
 
 src="target/$target/$profile"
 src32="target/$target32/$profile"
@@ -150,9 +150,9 @@ mkdir -p "$natives_dst" "$dst"
 for f in "${ARTIFACTS[@]}"; do
   case "$f" in
     "$injector64") from="$src/aether-injector.exe" ;;
-    "$shim64") from="$src/aether_shim_dll.dll" ;;
+    "$shim64") from="$src/aether_shim.dll" ;;
     "$injector32") from="$src32/aether-injector.exe" ;;
-    "$shim32") from="$src32/aether_shim_dll.dll" ;;
+    "$shim32") from="$src32/aether_shim.dll" ;;
     *) from="$src/$f" ;;
   esac
   [[ -f "$from" ]] || die "the build succeeded but did not produce $from"

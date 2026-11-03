@@ -2,7 +2,7 @@
 //! crate dependency (no `windows-sys`) — everything the fixture needs is a
 //! handful of `kernel32` exports (always linked on a Windows MSVC target)
 //! plus `ntdll!NtCreateFile`, looked up dynamically via `GetProcAddress`
-//! exactly the way `aether-shim`'s own NT test helpers do, so no `ntdll.lib`
+//! exactly the way `aether-hooks`'s own NT test helpers do, so no `ntdll.lib`
 //! import library is needed at link time either.
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -71,7 +71,7 @@ extern "system" {
     /// itself routes this to `NtQueryAttributesFile`/`NtQueryFullAttributesFile`
     /// or (Windows 11) `NtQueryInformationByName`'s `FileStatBasicInformation`
     /// class, exactly the hook family (`qattr_hook`/`qfull_hook`/`qibn_hook`,
-    /// `aether-shim/src/hook/file_attr.rs`) the metadata-gap test (vector `4m`, below)
+    /// `aether-hooks/src/hook/file_attr.rs`) the metadata-gap test (vector `4m`, below)
     /// exercises. Returns `INVALID_FILE_ATTRIBUTES` on failure; call
     /// `GetLastError` for why.
     pub fn GetFileAttributesW(lpFileName: *const u16) -> u32;

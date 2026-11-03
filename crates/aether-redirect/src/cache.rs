@@ -27,7 +27,7 @@ thread_local! {
     /// `expand_short_name` (via `aether_win::final_path_for_open`) opens a real
     /// `CreateFileW` handle on the candidate path to ask the OS what it
     /// actually names. When this crate is consulted from inside an injected
-    /// process whose own `NtCreateFile`/`NtOpenFile` are hooked (`aether-shim`'s
+    /// process whose own `NtCreateFile`/`NtOpenFile` are hooked (`aether-hooks`'s
     /// whole reason for existing), that `CreateFileW` call is itself
     /// intercepted and fed back through the very same decision path —
     /// `create_hook` -> `decision_for` -> `RootMap::under_root` ->
@@ -102,7 +102,7 @@ impl Drop for OsConsultGuard {
 /// session), just arriving from outside this crate instead of from inside
 /// `compute_under_root`. The caller who knows the provenance must say so
 /// explicitly, by holding this guard for the duration of every
-/// `RootMap`-backed decision it makes with such a path. See `aether-shim`'s
+/// `RootMap`-backed decision it makes with such a path. See `aether-hooks`'s
 /// `parent_dir_of_handle` for the concrete caller-side case.
 #[must_use = "the suppression ends as soon as this guard is dropped"]
 pub struct UncachedScope(());

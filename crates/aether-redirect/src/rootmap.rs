@@ -64,7 +64,7 @@ pub struct RootMap {
 
 impl RootMap {
     /// A single root, answering as [`RootId::DEFAULT`] — the shape tests and
-    /// one-root callers want. The production caller (`aether-shim`'s `FuseClient`)
+    /// one-root callers want. The production caller (`aether-hooks`'s `FuseClient`)
     /// declares every session root through
     /// [`RootMap::with_roots`] instead.
     ///
@@ -111,7 +111,7 @@ impl RootMap {
             // everything under this root rather than routing it. Fail
             // closed at construction instead of at every lookup: reachable
             // today via `VFS_VIRTUAL_DIR=""` (checked for unset, not empty,
-            // at `aether-shim`'s `director::try_init_from_env`) and newly plausible now
+            // at `aether-hooks`'s `director::try_init_from_env`) and newly plausible now
             // that a second declared root can be malformed independently of
             // the first.
             if norm.is_empty() {

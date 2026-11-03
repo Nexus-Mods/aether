@@ -247,7 +247,7 @@ fn strip_all_nt_prefixes(s: &str) -> &str {
 /// same file — but a caller building a vpath to send to the director must
 /// not discard it. A named stream that does not exist has to come back
 /// not-found; resolving it to the base path instead would answer a request
-/// for `f.esp:s` with `f.esp`'s bytes. See `aether-shim`'s
+/// for `f.esp:s` with `f.esp`'s bytes. See `aether-hooks`'s
 /// `FuseClient::vpath_under_root`, which re-attaches what this returns.
 pub fn split_stream_suffix(raw: &str) -> (&str, Option<&str>) {
     let base = strip_stream_suffix(raw);

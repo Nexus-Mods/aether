@@ -8,7 +8,7 @@ vendor/retour is retour 0.3.1 (https://github.com/Hpmason/retour-rs), a fork
 of detour-rs, Copyright (C) 2017 Elliott Linder, which includes minhook-rs,
 Copyright (C) 2015 Jascha Neutelings. Both are licensed under the BSD
 2-Clause License; the full text is in vendor/retour/LICENSE. It is compiled
-into the shim DLL (aether_shim_dll.dll, aether_shim_dll32.dll).
+into the shim DLL (aether_shim.dll, aether_shim32.dll).
 
 bin/download-codesigntool.ps1 is adapted from download-codesigntool.ps1 of
 Vortex (https://github.com/Nexus-Mods/Vortex), Copyright (C) the Vortex

@@ -31,7 +31,7 @@ fn no_ring_configured_aborts_the_launch() {
 
     // Content is irrelevant: the decisive assertion is that the process never
     // runs at all, so it never gets far enough to read anything.
-    let config_bytes = aether_shim::encode_config(root.to_str().unwrap());
+    let config_bytes = aether_hooks::encode_config(root.to_str().unwrap());
     let config_path = base.join("shim.cfg");
     std::fs::write(&config_path, &config_bytes).unwrap();
 

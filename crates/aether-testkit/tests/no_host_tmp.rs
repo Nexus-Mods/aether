@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 /// Wine prefix's Windows temp and not the host's `/tmp`. Each: (crate, reason).
 const EXEMPT_CRATES: &[(&str, &str)] = &[
     (
-        "aether-shim",
+        "aether-hooks",
         "Windows DLL tests; run under Wine, where temp_dir() is the prefix's temp",
     ),
-    ("aether-shim-dll", "Windows-only shim DLL"),
+    ("aether-shim", "Windows-only shim DLL"),
     ("aether-inject", "Windows injector tests; run under Wine"),
     ("vfs-payload", "Windows-only injected payload"),
     (

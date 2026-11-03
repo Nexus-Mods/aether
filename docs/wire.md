@@ -24,7 +24,7 @@ The three crates that define the wire are `aether-ipc` (shared memory, ring,
 arena), `aether-protocol` (opcodes, statuses, payload codecs, `shim.cfg`) and
 `aether-env` (environment names). An older Rust director lived in this
 repository as the shim's test counterpart; it is removed, and the shim's tests
-run against their own fake director (`crates/aether-shim/tests/fakedirector`).
+run against their own fake director (`crates/aether-hooks/tests/fakedirector`).
 Where it is mentioned below as "the old Rust director (removed)", and where
 "both directors" means it and Cairn's, it shows how a director has answered,
 not a rule. Cairn's Clojure director (`aether.director.*` in the Cairn repository)
@@ -45,7 +45,7 @@ is the production director; its wire code is `src/aether/director/proto.clj`,
 |---|---|---|
 | Director | any process, any language | Creates the shared memory, initialises the ring header, writes the handshake environment and `shim.cfg`, starts the injector, then serves requests until the launch ends. It owns all content: the shim never opens an archive or store itself. |
 | Injector | `aether-injector.exe` (x64), `aether-injector32.exe` (x86) | Started by the director. Creates the target process suspended and loads the shim with a remote `LoadLibrary` (the only activation), waits for the shim's ready report, releases or kills the target, then waits for the target's process tree and exits with the first process's exit code. |
-| Shim | `aether_shim_dll.dll` (x64), `aether_shim_dll32.dll` (x86) | Loaded into the target before any of its code runs. Reads its environment, attaches to the ring, sends one `HEARTBEAT`, installs NT detours, and from then on asks the director about every file and (optionally) registry operation under a managed root. Injects itself into child processes the target starts. |
+| Shim | `aether_shim.dll` (x64), `aether_shim32.dll` (x86) | Loaded into the target before any of its code runs. Reads its environment, attaches to the ring, sends one `HEARTBEAT`, installs NT detours, and from then on asks the director about every file and (optionally) registry operation under a managed root. Injects itself into child processes the target starts. |
 
 Binary names: `contract/artifacts.json` (`natives`).
 
@@ -257,13 +257,13 @@ are multiples of 8) and an atomic 8-byte fetch-max on `reg_gen` (offset 40,
 within it abandons its slots and reports `ST_IO_ERROR` to the hooked call. A
 client spins for `CLIENT_SPIN_BUDGET` (1 ms) before it starts yielding; the
 shim then calls `SwitchToThread` until 20 ms have passed and `Sleep(1)` after
-(`crates/aether-shim/src/director.rs`, `IDLE_YIELD`).
+(`crates/aether-hooks/src/director.rs`, `IDLE_YIELD`).
 
 **Order of service.** Slots are independent: a director may take and answer
 them in any order and from any number of threads. Requests from one shim
 thread are issued one at a time, except a pipelined read, which publishes up
 to 4 requests at once (8 for reads of 4 MiB or more) and waits for all of them
-(`crates/aether-shim/src/director.rs`, `PIPELINE_DEPTH`,
+(`crates/aether-hooks/src/director.rs`, `PIPELINE_DEPTH`,
 `PIPELINE_DEPTH_STREAM`, `STREAM_BYTES`).
 
 ### 2.6 The bulk arena and its banks
@@ -359,7 +359,7 @@ in a request says which process sent it, so:
 ### 2.9 Windows backing: a named section and two events
 
 Source: `crates/aether-win/src/mapping.rs`, `crates/aether-win/src/event_notifier.rs`,
-`crates/aether-shim/src/director.rs` (`connect_source`).
+`crates/aether-hooks/src/director.rs` (`connect_source`).
 
 | Object | Director creates with | Shim opens with | Named by |
 |---|---|---|---|
@@ -379,7 +379,7 @@ honours `VFS_RING_PATH` on Windows too.
 ### 2.10 Linux under Wine: a file both sides map
 
 Source: `crates/aether-unix/src/mapping.rs`, `crates/aether-win/src/mapping.rs`
-(`open_file_backed`), `crates/aether-shim/src/director.rs` (`ring_source`).
+(`open_file_backed`), `crates/aether-hooks/src/director.rs` (`ring_source`).
 
 A page-file section has no identity outside one Windows (or Wine) session, so a
 native Linux director and a shim under Wine share a file:
@@ -406,7 +406,7 @@ re-check it in a loop; a lost wake costs latency, never a request
 
 | Mode | Shim (client) | Director (server) |
 |---|---|---|
-| Section | `SetEvent(server_ev)` after publishing and after freeing a slot; spins for its reply (`crates/aether-shim/src/director.rs`, `WakeServerSpinClient`) | `EventNotifier`: after serving a request, spins for `VFS_RING_SPIN_US` µs (default 400); otherwise `WaitForSingleObject(server_ev, 1)`. Sets `client_ev` after completing (the shim does not wait on it). |
+| Section | `SetEvent(server_ev)` after publishing and after freeing a slot; spins for its reply (`crates/aether-hooks/src/director.rs`, `WakeServerSpinClient`) | `EventNotifier`: after serving a request, spins for `VFS_RING_SPIN_US` µs (default 400); otherwise `WaitForSingleObject(server_ev, 1)`. Sets `client_ev` after completing (the shim does not wait on it). |
 | File | no event; spins | `AdaptiveNotifier`: spins for `VFS_RING_SPIN_US` µs (default 400) after the last completed request, then sleeps 100 µs, 500 µs once quiet for more than 5 ms, 2000 µs once quiet for more than 50 ms. |
 
 Sources: `crates/aether-win/src/event_notifier.rs` (`spin_budget`,
@@ -452,7 +452,7 @@ A reply's payload is meaningful only when `status == ST_OK (0)`. Every
 director error path in both directors replies with an empty payload. The shim
 decodes a reply payload only after checking `status == ST_OK`; a reply that
 then fails to decode is treated as `ST_BAD_REQUEST`
-(`crates/aether-shim/src/director.rs`).
+(`crates/aether-hooks/src/director.rs`).
 
 ### 3.2 Shared encodings
 
@@ -471,7 +471,7 @@ STAGE_EXEC:
 | 0 | 4 | u32 | `root` |
 | 4 | rest | utf8… | `vpath` |
 
-**vpaths** as the shim sends them (`crates/aether-shim/src/director.rs`,
+**vpaths** as the shim sends them (`crates/aether-hooks/src/director.rs`,
 `vpath_under_root`, `vpath_as_spelled`, `wire_vpath`):
 
 - Relative to the root, components joined by `/`, no leading or trailing `/`.
@@ -618,7 +618,7 @@ A missing path is **`ST_OK` with `found = 0`** and the other fields zero, not
 an error status. A root the director does not serve is also `found = 0` (both
 directors). The shim treats `ST_NOT_FOUND` the same as `found = 0`; any other
 non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
-(`crates/aether-shim/src/hook/file_attr.rs`).
+(`crates/aether-hooks/src/hook/file_attr.rs`).
 
 #### 3.4.2 READDIR (2)
 
@@ -641,7 +641,7 @@ Entry:
 | 8 | i64 | `mtime` |
 
 The shim presents the listing to the program whole and unaltered (the cursor
-over it is `EnumState`, `crates/aether-shim/src/hook/dirquery.rs`), apart from
+over it is `EnumState`, `crates/aether-hooks/src/hook/dirquery.rs`), apart from
 dropping old `<name>.__vfs_wh__` whiteout markers. It adds no `.` or `..`
 entries, so a director should not include them either; it does not sort or
 otherwise interpret the order, so the program sees entries in the order sent.
@@ -800,7 +800,7 @@ Request (`encode_close_req`), 8 bytes: `fh:u64`. Reply: status only. Unknown
 
 Request: empty payload, flags 0. Reply: `ST_OK`, empty. The shim sends exactly
 one, right after attaching, and fails its load unless it gets `ST_OK`
-(`crates/aether-shim/src/director.rs`, `try_init_from_env`).
+(`crates/aether-hooks/src/director.rs`, `try_init_from_env`).
 
 #### 3.4.12 STORED_NAMES (14)
 
@@ -850,7 +850,7 @@ on-disk Windows path to start it from, UTF-8, the whole payload. The director
 puts the program on real disk first (a child's image is opened by the kernel
 before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing.
 
-How the shim uses it (`crates/aether-shim/src/hook/child_start.rs`): for each
+How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): for each
 candidate image path that routes under a root it first sends GETATTR, and
 sends STAGE_EXEC only for the first candidate that is a file (`found`, not
 `is_dir`). On success the child is started from the returned path. If no
@@ -928,7 +928,7 @@ than bit 0 are ignored for READ, by both directors.
 
 Opcodes 15-22 virtualise the registry through an overlay the director keeps.
 The shim sends them only when `VFS_REGISTRY` is affirmative (section 5.3) and
-every registry detour installed (`crates/aether-shim/src/regclient.rs`,
+every registry detour installed (`crates/aether-hooks/src/regclient.rs`,
 `enabled`). A director without a registry layer answers all eight
 `ST_NOT_SUPPORTED`.
 
@@ -952,7 +952,7 @@ Source: `crates/aether-protocol/src/lib.rs` (registry codecs),
 
 The shim never sends a registry request larger than `payload_cap`:
 `RegClient::request` refuses it locally with `ST_BAD_REQUEST`
-(`crates/aether-shim/src/regclient.rs`). For a write that becomes
+(`crates/aether-hooks/src/regclient.rs`). For a write that becomes
 `STATUS_INVALID_PARAMETER` (section 4.4); for REG_LOOKUP or REG_KEY it goes
 through `read_failed`, and the hook falls back to the real key.
 
@@ -978,7 +978,7 @@ codec checks only length and UTF-8).
 Value names arrive as UTF-8 converted from the caller's UTF-16; value `ty` is
 the Windows `REG_*` type number; value data is the raw bytes the caller passed
 to `NtSetValueKey` (for `REG_SZ`, UTF-16LE with whatever terminator the caller
-included) (`crates/aether-shim/src/regwrite.rs`).
+included) (`crates/aether-hooks/src/regwrite.rs`).
 
 ### 4.3 Requests and replies
 
@@ -1046,10 +1046,10 @@ it. The persisted file format (`crates/aether-registry/src/format.rs`,
 
 ### 4.4 Shim handling of registry replies
 
-`crates/aether-shim/src/regclient.rs`: a read (REG_LOOKUP, REG_KEY) that fails
+`crates/aether-hooks/src/regclient.rs`: a read (REG_LOOKUP, REG_KEY) that fails
 for any reason is a fallback: the hook serves the real key alone. A write that
 fails is not retried against the real registry. Its status becomes the NT
-status the caller gets (`crates/aether-shim/src/regwrite.rs`, `write_status`):
+status the caller gets (`crates/aether-hooks/src/regwrite.rs`, `write_status`):
 
 | Director status | NT status |
 |---|---|
@@ -1058,7 +1058,7 @@ status the caller gets (`crates/aether-shim/src/regwrite.rs`, `write_status`):
 | `ST_EXISTS` (rename, create) | `STATUS_CANNOT_DELETE` |
 | anything else | `STATUS_UNSUCCESSFUL` |
 
-The exception is a key create (`crates/aether-shim/src/regkeys.rs`): a
+The exception is a key create (`crates/aether-hooks/src/regkeys.rs`): a
 REG_CREATE_KEY answered `ST_EXISTS` (another thread or process created the key
 first) is followed by a fresh REG_LOOKUP, and if that says present the key is
 opened; otherwise the create fails `STATUS_UNSUCCESSFUL`. There
@@ -1123,7 +1123,7 @@ expected }`. Any of these fails the shim's load with ready-file content
 
 What the current shim does with it: it decodes it (as a version and shape
 check) and uses neither field. The client's roots come from the environment
-(`crates/aether-shim/src/bootstrap.rs`). Write `root` as root 0 and the static
+(`crates/aether-hooks/src/bootstrap.rs`). Write `root` as root 0 and the static
 imports the launch needs; both directors write it with no static imports.
 
 ### 5.2 The handshake tables
@@ -1143,7 +1143,7 @@ removal must remove every spelling (`is_handshake`).
 ### 5.3 Each name's value
 
 Sources: `crates/aether-env/src/lib.rs` (constants and `ALL`), readers in
-`crates/aether-shim/src/director.rs`, `crates/aether-shim-dll/src/lib.rs`,
+`crates/aether-hooks/src/director.rs`, `crates/aether-shim/src/lib.rs`,
 `crates/aether-inject/src/`. Booleans: an **opt-in** switch is on only for
 `1`, `true`, `yes`, `on` (ASCII case-insensitive); an **opt-out** switch is
 off only for `0`, `false`, `no`, `off` (`opt_in`, `opt_out`).
@@ -1214,7 +1214,7 @@ aether-injector <target> <shim_dll> <config> <ready> [-- args...]
 | Position | Meaning |
 |---:|---|
 | 1 | Target EXE (full path). |
-| 2 | Shim DLL (full path), of the target's bitness: `aether_shim_dll.dll` for x64, `aether_shim_dll32.dll` with `aether-injector32.exe` for x86. |
+| 2 | Shim DLL (full path), of the target's bitness: `aether_shim.dll` for x64, `aether_shim32.dll` with `aether-injector32.exe` for x86. |
 | 3 | Path of `shim.cfg`; becomes `VFS_SHIM_CONFIG`. |
 | 4 | Path of the ready file; becomes `VFS_SHIM_READY`. Other files are named by appending a suffix to it. |
 | 5… | Target arguments. If argument 5 is exactly `--` it is dropped. |
@@ -1252,7 +1252,7 @@ injector's environment. Before starting it deletes `<ready>`,
 ### 6.2 The ready file
 
 Written by the shim to `VFS_SHIM_READY` before its `DllMain` returns
-(`crates/aether-shim-dll/src/lib.rs`); classified by the injector
+(`crates/aether-shim/src/lib.rs`); classified by the injector
 (`crates/aether-inject/src/inject.rs`, `classify_ready`). Contents are the
 whole file, no newline:
 
@@ -1299,7 +1299,7 @@ treats any 2 or 3 as the injector's (`src/aether/director/proton/launch.clj`,
 
 ### 6.4 Child processes: the ready and failed events
 
-Source: `crates/aether-shim/src/child.rs`. When the target starts a child, the
+Source: `crates/aether-hooks/src/child.rs`. When the target starts a child, the
 shim in the parent injects the shim into it and waits. The child's shim
 signals with two named events. Both sides create them with
 `CreateEventW(NULL, TRUE /*manual reset*/, FALSE, name)`: the parent creates

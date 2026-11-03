@@ -23,7 +23,7 @@ fn a_config_version_mismatch_kills_the_process_with_the_message() {
     std::fs::create_dir_all(&root).unwrap();
 
     // A well-formed config from "another build": same shape, version 3.
-    let mut config_bytes = aether_shim::encode_config(root.to_str().unwrap());
+    let mut config_bytes = aether_hooks::encode_config(root.to_str().unwrap());
     config_bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
     let config_path = base.join("shim.cfg");
     std::fs::write(&config_path, &config_bytes).unwrap();

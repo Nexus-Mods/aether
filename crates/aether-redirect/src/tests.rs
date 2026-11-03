@@ -313,11 +313,11 @@ fn under_root_recognises_an_8dot3_style_spelling_of_the_root() {
 /// `with_capacity`, so the root is stored in the spelling an unfolded path
 /// presents — **was implemented and reverted.** It works at this layer and
 /// breaks the layer above: measured under a short-spelled `TMP`, the
-/// daemon e2e/`aether-shim`/`aether-redirect` suites went from 271 passed /
+/// daemon e2e/`aether-hooks`/`aether-redirect` suites went from 271 passed /
 /// 11 failed to 250 passed / 33 failed.
 ///
 /// The reason is that `RootMap` is not the only thing that holds a root.
-/// `aether-shim` derives overlay paths and seal decisions from the root's
+/// `aether-hooks` derives overlay paths and seal decisions from the root's
 /// **as-declared** spelling, so expanding it here desynchronises the map's
 /// view of the root from the shim's. The 22 new failures were concentrated
 /// exactly there — copy-up, write seals, second-root overlays, and
@@ -335,7 +335,7 @@ fn under_root_recognises_an_8dot3_style_spelling_of_the_root() {
 /// tried and what it costs.
 #[test]
 #[cfg(windows)]
-#[ignore = "known gap: expanding the declared root here desynchronises aether-shim's \
+#[ignore = "known gap: expanding the declared root here desynchronises aether-hooks's \
             own view of it — see this test's doc comment for the measurement"]
 fn a_root_declared_in_8dot3_form_recognises_its_long_form_paths() {
     let base = std::env::temp_dir().join(format!(
@@ -460,7 +460,7 @@ fn os_consulted_resolution_is_never_cached() {
 }
 
 /// Gate-review finding: a path a *caller* assembled from its own OS query
-/// (e.g. `aether-shim` resolving `OBJECT_ATTRIBUTES.RootDirectory` via
+/// (e.g. `aether-hooks` resolving `OBJECT_ATTRIBUTES.RootDirectory` via
 /// `GetFinalPathNameByHandleW` on a handle it does not own) carries no `~`
 /// and no other marker `compute_under_root` can see — from here it is
 /// indistinguishable from an ordinary literal path, so on its own it

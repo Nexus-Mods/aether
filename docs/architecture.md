@@ -249,7 +249,7 @@ On Linux the ring file is named `state_dir/ring.bin`, but when
 that name is a symlink to a file there (mode 0600, in a 0700 directory), so the
 ring's pages are never written to disk.
 
-### 3.5 The shim: `aether-shim`, `aether-redirect`, `aether-ntlayout`
+### 3.5 The shim: `aether-shim`, `aether-hooks`, `aether-redirect`, `aether-ntlayout`
 
 Detours on ntdll, installed inside the game. For each intercepted call it
 decides: is this path ours? If yes, serve it (from the director, or from a
@@ -257,7 +257,7 @@ synthetic handle); if no, call the original function so the rest of the system
 is untouched.
 
 **The shim always runs with a director.** Its client (`FuseClient`, in
-`aether-shim/src/director.rs`) owns the ring. There is no standalone engine and no
+`aether-hooks/src/director.rs`) owns the ring. There is no standalone engine and no
 shim-local answer: the shim holds no tree and no write overlay of its own, and
 without the director's client attached nothing is under a managed root. Writes,
 copy-up and whiteouts are the director's overlay provider's (§3.2); the shim
@@ -268,7 +268,7 @@ disk under a root.
 falls under, and its canonical spelling), so the policy is unit-testable away
 from the hooks. `aether-ntlayout` holds the pure NT byte layouts the hooks fill in
 (directory records, dispositions, object names), so they are tested on any host.
-The hooks themselves live in `aether-shim/src/hook/`, one module per concern
+The hooks themselves live in `aether-hooks/src/hook/`, one module per concern
 (open, attributes, I/O, mutation, directory queries, sections, registry, close);
 the invariants each one keeps are in
 [`shim-invariants.md`](shim-invariants.md).
@@ -286,7 +286,7 @@ A game makes huge numbers of tiny reads (one launch of a 3,472-mod list read
 call), and over the ring each is a round trip. So the shim keeps a block
 cache in front of the director for **small reads of immutable files**
 (`aether_ipc::readcache`, OS-free so native tests and `ring-bench` run the same
-code; wired in by `aether-shim`'s `read_cache.rs`):
+code; wired in by `aether-hooks`'s `read_cache.rs`):
 
 - A synchronous `NtReadFile` shorter than 64 KiB is served from aligned
   64 KiB units; a miss fetches one unit with one bulk read through the same
@@ -752,7 +752,7 @@ directory listing is a spelling of the paths it names, so the sealed root applie
 to it in full: under a managed root the director's `readdir` is the whole
 answer, never merged with the real directory behind the mount. If the director
 cannot be asked, the listing is empty rather than drained from disk. See
-`serve_dir_query` in `aether-shim/src/hook/dirquery.rs`, and
+`serve_dir_query` in `aether-hooks/src/hook/dirquery.rs`, and
 [`escape-matrix.md`](./escape-matrix.md) for the fall-through this replaced and
 the test that holds it closed.
 
@@ -814,7 +814,7 @@ than work that errors. Tests are shaped around that.
 - **Hook behaviour is tested in-process.** Integration binaries install the real
   detours into the test process and then use ordinary `std::fs` and raw NT calls
   against the fake director in `tests/fakedirector`.
-  One install per process, so every `#[test]` in `aether-shim/tests/`
+  One install per process, so every `#[test]` in `aether-hooks/tests/`
   re-executes itself in a fresh process (`tests/common`), and the scenarios are
   grouped into a few binaries by concern. These are Windows executables: on
   Linux they run under Wine (`bin/wine-shim-tests`, not imported; the Wine tests come with the port of these tests to the Clojure director).
@@ -896,7 +896,7 @@ observer before concluding the process is idle.
 | `aether-env` | every `VFS_*` switch, defined once, with a drift test |
 | `aether-redirect` | pure path core: root map, canonicalisation, vpath normalization, DOS wildcards, a handle's final name |
 | `aether-ntlayout` | pure NT byte layouts and decisions for the shim's hooks |
-| `aether-shim` / `aether-shim-dll` | NT detours, the director client, synthetic handles, sections, registry hooks |
+| `aether-hooks` / `aether-shim` | NT detours, the director client, synthetic handles, sections, registry hooks |
 | `aether-inject` | injection and process creation (`aether-injector`) |
 | `aether-pe` | pure PE byte parsing, so any host can stage Windows executables |
 | `aether-fixtures` | the test fixtures: Windows probe programs the tests run under the shim (`aether-fixture-read`, `-writepath`, `-escape`, `-prefs`, `-registry`, `-steam`, `-nvapi`) and the library they share |

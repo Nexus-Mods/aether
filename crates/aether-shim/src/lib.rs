@@ -1,102 +1,121 @@
-#![deny(unsafe_code)]
+//! The shim DLL.
+//!
+//! `DllMain` bootstraps synchronously on `DLL_PROCESS_ATTACH`. The DLL arrives
+//! through a remote `LoadLibrary` into a suspended process (injection), so
+//! nothing of the program has run yet, and a failed bootstrap returns `FALSE`,
+//! which fails the `LoadLibrary`; the launcher then kills the process. The
+//! program never runs un-virtualised.
+#![allow(unsafe_code)]
 
-//! `aether-shim`: installs NT detours that answer every operation on a path under a
-//! managed root from the director, over its ring. There is no shim-local answer: without the director's
-//! client attached nothing is under a root.
+use core::ffi::c_void;
+use windows_sys::Win32::Foundation::{HINSTANCE, TRUE};
 
-#[macro_use]
-mod detour_table;
-mod bootstrap;
-/// Lock-free record of the hook currently executing, in a shared file.
-pub mod breadcrumb;
-mod child;
-pub mod director;
-mod exception_log;
-mod handle_tags;
-mod hook;
-mod hookstats;
-mod lazy_section;
-pub mod loadlog;
-mod ntbuf;
-mod ntdef;
-#[allow(unsafe_code)]
-mod peb;
-mod read_cache;
-/// The registry hooks' client for the director's registry overlay.
-pub mod regclient;
-mod regkeys;
-mod regnotify;
-mod regquery;
-mod regwrite;
-mod sync;
-mod synth_file;
-mod synth_section;
-mod tramp;
-mod whereami;
+const DLL_PROCESS_ATTACH: u32 = 1;
 
-pub use bootstrap::{bootstrap_failed_content, bootstrap_from_config_path, BootstrapError};
-pub use child::{finish_ready_handshake, signal_bootstrap_failed};
-// The encoders (and `StaticImport`) live in `aether_protocol::shimcfg` — pure
-// byte assembly with no Windows dependency — so a native Linux Director can
-// build a shim config too. Re-exported here so every existing caller
-// (`aether-inject`'s tests, `aether-shim/tests/diagnostics/exit_stall_repro.rs`)
-// keeps compiling unchanged against `aether_shim::`.
-pub use aether_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
-#[doc(hidden)]
-pub use hook::as_shim_io_for_tests;
-/// Run one `extern "system"` entry point's body with its panic contained.
+/// Standard DLL entry point.
+/// (windows-sys 0.61 dropped the `BOOL` alias; the ABI return is a plain `i32`.)
 ///
-/// Exported for `aether-shim-dll`, which owns the injected DLL's other
-/// `extern "system"` entry point (`DllMain`). An
-/// unwind out of any `extern` frame is an immediate `abort()` of the *game*
-/// process, so "every entry point of the shim contains its panic" is a property
-/// of the DLL rather than of this crate — and it is checked as one, across both
-/// crates' sources, by
-/// `no_extern_hook_bypasses_the_panic_containment_macro`.
-pub use hook::contain_panic;
-pub use hook::{
-    install, registry_detours_installed, skipped_detours, tracked_handle_count, HookGuard,
-    InstallError,
-};
-/// The under-root open classifier's counters. Exported so a gate's own tests
-/// can assert that a bypass class it closed reads **zero** — see
-/// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
-/// quietly start (or stop) counting again.
-pub use hookstats::{
-    child_inject_refused_count, child_inject_refused_total, delete_on_close_refused_count,
-    hook_panic_count, hook_panics_total, link_refused_count, outcome_count, reg_notify_count,
-    reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
-    reg_write_refused_count, unrouted_director_opens, OpenOutcome, RegNotify,
-};
-
-/// The canonical path the registry hooks recorded for a key handle (synthetic or
-/// pass-through), if they track it. For tests and diagnostics.
-pub fn registry_handle_path(handle: isize) -> Option<String> {
-    regkeys::path_of(handle)
+/// Deliberately does **nothing** on `DLL_PROCESS_DETACH`. Flushing a final
+/// hook-stats report from there was built and measured on 2026-08-15, and it
+/// wedged injected processes at exit — every other thread is already
+/// terminated by then, and one killed mid-write leaves a lock the flush waits
+/// on forever inside the loader lock. See `aether_hooks::hookstats::banner` for
+/// the measurement and for what the reports say instead.
+///
+/// Bootstrap runs under the loader lock. It must not wait on another thread or
+/// load a library whose `DllMain` would: it reads its config, maps the
+/// director's ring and patches ntdll, and the threads it starts are not waited
+/// for.
+///
+/// ## Panic containment
+///
+/// This is an `extern "system"` entry point, so an unwind out of it is an
+/// immediate `abort()` — inside the loader lock, the worst place in the process
+/// to die. `aether_hooks::contain_panic` is the same wrapper the ntdll detours use.
+/// A panic fails the load like any other bootstrap failure, and leaves a
+/// breadcrumb.
+#[no_mangle]
+pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
+    aether_hooks::contain_panic(
+        "DllMain",
+        || {
+            if reason != DLL_PROCESS_ATTACH {
+                return TRUE;
+            }
+            aether_hooks::loadlog::note(&format!(
+                "DllMain attach: image {}",
+                std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            ));
+            let ok = bootstrap();
+            aether_hooks::finish_ready_handshake();
+            if ok {
+                TRUE
+            } else {
+                // A spawning parent waits on this rather than on its timeout.
+                aether_hooks::signal_bootstrap_failed();
+                0
+            }
+        },
+        || {
+            log_boot("DllMain panicked — this process is NOT virtualized");
+            aether_hooks::signal_bootstrap_failed();
+            0
+        },
+    )
 }
 
-/// Live key handles the registry hooks track: (synthetic, pass-through).
-pub fn registry_handle_counts() -> (usize, usize) {
-    regkeys::counts()
+/// Whether the shim came up. A failure is also written to the ready file, so a
+/// launcher polling it reports why.
+fn bootstrap() -> bool {
+    let config = match aether_env::text(aether_env::SHIM_CONFIG).ok_or(()) {
+        Ok(c) => c,
+        Err(_) => {
+            log_boot("VFS_SHIM_CONFIG unset");
+            return false;
+        }
+    };
+    match aether_hooks::bootstrap_from_config_path(&config) {
+        Ok(guard) => {
+            core::mem::forget(guard);
+            if let Some(ready) = aether_env::text(aether_env::SHIM_READY) {
+                let _ = std::fs::write(&ready, aether_env::READY_OK);
+            }
+            true
+        }
+        // A director was configured and FUSE failed to attach.
+        Err(aether_hooks::BootstrapError::Fuse(msg)) => {
+            log_boot(&format!("FUSE init failed: {msg}"));
+            if let Some(ready) = aether_env::text(aether_env::SHIM_READY) {
+                let _ = std::fs::write(
+                    &ready,
+                    format!("{}{msg}", aether_env::READY_FUSE_FAILED_PREFIX),
+                );
+            }
+            false
+        }
+        // Any other bootstrap failure (a config from another build, an unreadable
+        // config, a hook that would not install).
+        Err(e) => {
+            log_boot(&format!(
+                "bootstrap_from_config_path({config}) failed: {e:?}"
+            ));
+            if let Some(ready) = aether_env::text(aether_env::SHIM_READY) {
+                let _ = std::fs::write(&ready, aether_hooks::bootstrap_failed_content(&e));
+            }
+            false
+        }
+    }
 }
 
-/// Key handles with a kept enumeration snapshot (registry query hooks). For tests and
-/// diagnostics.
-pub fn registry_enum_states() -> usize {
-    regquery::states()
-}
-
-/// Handles the registry hooks remember as not keys they serve. For tests and diagnostics.
-pub fn registry_not_ours_count() -> usize {
-    regkeys::not_ours_count()
-}
-
-/// Registry change notifications waiting on the overlay. For tests and diagnostics.
-pub fn registry_notify_pending() -> usize {
-    regnotify::pending()
-}
-
-/// Whether a handle value is one of the registry hooks' synthetic key handles.
-pub fn is_synthetic_key_handle(handle: isize) -> bool {
-    regkeys::is_synthetic(handle)
+fn log_boot(msg: &str) {
+    if let Some(ready) = aether_env::text(aether_env::SHIM_READY) {
+        let path = format!("{ready}.boot.log");
+        let _ = std::fs::write(&path, msg.as_bytes());
+    }
+    // And the load log in the state directory, which a child that has no
+    // ready file of its own still reaches. Never `%TEMP%`: that is under the
+    // user's profile.
+    aether_hooks::loadlog::note(msg);
 }

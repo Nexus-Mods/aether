@@ -35,13 +35,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-hooks"
+version = "0.1.0"
+dependencies = [
+ "aether-casefold",
+ "aether-env",
+ "aether-inject",
+ "aether-ipc",
+ "aether-ntlayout",
+ "aether-pe",
+ "aether-protocol",
+ "aether-redirect",
+ "aether-registry",
+ "aether-win",
+ "retour",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "aether-inject"
 version = "0.1.0"
 dependencies = [
  "aether-env",
+ "aether-hooks",
  "aether-pe",
  "aether-protocol",
- "aether-shim",
  "windows-sys 0.61.2",
 ]
 
@@ -91,26 +109,8 @@ dependencies = [
 name = "aether-shim"
 version = "0.1.0"
 dependencies = [
- "aether-casefold",
  "aether-env",
- "aether-inject",
- "aether-ipc",
- "aether-ntlayout",
- "aether-pe",
- "aether-protocol",
- "aether-redirect",
- "aether-registry",
- "aether-win",
- "retour",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "aether-shim-dll"
-version = "0.1.0"
-dependencies = [
- "aether-env",
- "aether-shim",
+ "aether-hooks",
  "windows-sys 0.61.2",
 ]
 

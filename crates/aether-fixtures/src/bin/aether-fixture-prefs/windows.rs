@@ -12,7 +12,7 @@
 //! NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile → NtUnlockFile → NtClose
 //! ```
 //!
-//! `NtLockFile` had no detour in `aether-shim`, so the real kernel got handed a
+//! `NtLockFile` had no detour in `aether-hooks`, so the real kernel got handed a
 //! synthetic handle and answered `STATUS_INVALID_HANDLE`; the profile API then
 //! abandoned the whole call and handed its caller back the *default* string it
 //! was passed. The game therefore received no INI data at all — not stale data,

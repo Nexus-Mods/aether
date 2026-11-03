@@ -1,12 +1,12 @@
 {
   "wire_version": 4,
   "natives": {
-    "x64": { "injector": "aether-injector.exe", "shim": "aether_shim_dll.dll" },
-    "x86": { "injector": "aether-injector32.exe", "shim": "aether_shim_dll32.dll" }
+    "x64": { "injector": "aether-injector.exe", "shim": "aether_shim.dll" },
+    "x86": { "injector": "aether-injector32.exe", "shim": "aether_shim32.dll" }
   },
   "fixtures": [
     "aether-injector.exe",
-    "aether_shim_dll.dll",
+    "aether_shim.dll",
     "aether-probe.exe",
     "aether-fixture-read.exe",
     "aether-fixture-writepath.exe",

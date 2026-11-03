@@ -24,7 +24,7 @@ fn a_shim_that_never_reports_ready_gets_the_process_killed() {
     let config_path = base.join("shim.cfg");
     std::fs::write(
         &config_path,
-        aether_shim::encode_config(root.to_str().unwrap()),
+        aether_hooks::encode_config(root.to_str().unwrap()),
     )
     .unwrap();
     let ready_path = base.join("ready.flag");

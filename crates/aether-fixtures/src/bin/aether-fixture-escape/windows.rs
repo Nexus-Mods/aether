@@ -132,7 +132,7 @@
 //! the fourteen-vector matrix above.** Built to prove/document a gap the
 //! final whole-branch review of Gate 3 found in `docs/escape-matrix.md`'s own
 //! claim of metadata containment: `qattr_hook`/`qfull_hook`/`qibn_hook`
-//! (`aether-shim/src/hook/file_attr.rs`) never call `RootMap::decide` at all. They consult
+//! (`aether-hooks/src/hook/file_attr.rs`) never call `RootMap::decide` at all. They consult
 //! `fuse_path_attr`, which asks `FuseClient::vpath_under_root` — which was
 //! the client's own string-prefix predicate, not the canonicaliser this whole
 //! matrix is about — before falling through to the real filesystem. `4m`
@@ -827,7 +827,7 @@ fn vector_enum_listing(abs: &str) -> Line {
     // `serve_dir_query` sits behind. Deliberately the ordinary API a game or
     // a mod manager would use, not a hand-rolled NT call: this vector is
     // about what an unremarkable listing shows, and the two entry points'
-    // agreement is already covered by `aether-shim`'s `hook_enum_parity`.
+    // agreement is already covered by `aether-hooks`'s `hook_enum_parity`.
     match std::fs::read_dir(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Line::new("enum", dir, "not-found", ENUM_NOTE)

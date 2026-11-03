@@ -123,7 +123,7 @@ pub const LAUNCH_IMAGE: &str = "VFS_LAUNCH_IMAGE";
 /// Where the daemon publishes its endpoint for clients to discover.
 pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
 /// Directory holding the Windows artefacts a Proton launch needs
-/// (`aether-injector.exe`, `aether_shim_dll.dll`), used instead of
+/// (`aether-injector.exe`, `aether_shim.dll`), used instead of
 /// the directory beside the running executable. An explicit
 /// `LaunchOpts::shim_dll` still wins. The Proton tests read it too.
 pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
@@ -184,7 +184,7 @@ pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
 /// shim gets into a process, so nothing reads it. The name stays in the
 /// handshake tables because hosts set it.
 pub const FORCE_INJECTION: &str = "VFS_FORCE_INJECTION";
-/// Test-only: force `aether_shim::director::try_init_from_env` to report a
+/// Test-only: force `aether_hooks::director::try_init_from_env` to report a
 /// connect failure, regardless of ring configuration. Exists to exercise a
 /// director-launched process's abort path without a director that is
 /// actually broken.
@@ -471,7 +471,7 @@ pub const ESCAPE_ACCESS: &str = "VFS_ESCAPE_ACCESS";
 ///
 /// Needed because `aether-redirect`'s `RootMap` volume/junction table is
 /// resolved once, when the shim bootstraps (`FuseClient::connect_source` in
-/// `aether-shim`): a junction the fixture created *after* that would not exist
+/// `aether-hooks`): a junction the fixture created *after* that would not exist
 /// yet at the moment resolution ran, and would never be picked up afterward
 /// (the table is resolved once, not on a schedule). The fixture only runs once
 /// the shim is up, so a `mklink /J` it spawned itself always comes too late. Creating the junction from

@@ -1,8 +1,7 @@
 //! Generic injector: a command-line wrapper over `run_target_with_shim`. The
 //! host (the director, or a test) sets the ring env (VFS_RING_SECTION etc.) and
-//! spawns this bin; this bin starts the target with the shim (import-activated
-//! or injected),
-//! which inherits the env and connects its FuseClient back to the host's ring.
+//! spawns this bin; this bin starts the target with the shim injected, which
+//! inherits the env and connects its FuseClient back to the host's ring.
 //!
 //! Usage:
 //!   aether-injector <target_exe> <shim_dll> <config_file> <ready_file> [-- target_args...]
@@ -78,10 +77,6 @@ fn main() {
         env_remove: Vec::new(),
         virtual_image: None,
         virtual_cwd: None,
-        // Remote-thread injection when the host asks for it: the in-memory
-        // import patch edits the image's headers, which a SteamStub wrapper
-        // that verifies itself (SkyrimSE.exe) refuses to run under.
-        force_injection: aether_env::opt_in(aether_env::FORCE_INJECTION),
     })
     // The whole tree, not just the first process: a launcher that starts the
     // game and exits (skse64_loader.exe) has not ended the launch, and the

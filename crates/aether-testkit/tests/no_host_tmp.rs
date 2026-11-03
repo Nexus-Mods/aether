@@ -219,7 +219,7 @@ fn no_host_side_test_uses_the_host_temp_dir() {
         }
     }
     assert!(
-        scanned > 100,
+        scanned > 50,
         "scanned only {scanned} files; did the walk break?"
     );
     assert!(

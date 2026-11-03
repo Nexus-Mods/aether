@@ -7,8 +7,8 @@ use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{CloseHandle, SetLastError, ERROR_PROCESS_ABORTED, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    QueryFullProcessImageNameW, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
+    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB,
+    CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -143,38 +143,24 @@ pub(super) unsafe fn cpiw_hook_body(
                 return 0;
             }
         }
-        // A patched child loads the shim through its own import table, and the
-        // loader refuses to start it without one, so it is not injected:
-        // injecting would load a second copy.
-        let patched = child_imports_shim(hprocess);
         crate::loadlog::note(&format!(
-            "child {pid}: created from {:?} (cmd {:?}), told cwd {:?}, import-patched {patched}",
+            "child {pid}: created from {:?} (cmd {:?}), told cwd {:?}",
             // SAFETY: NUL-terminated strings or null, as the caller's.
             unsafe { super::child_start::wide_opt(app_eff) },
             // SAFETY: as above.
             unsafe { super::child_start::wide_opt(cmd) },
             plan.as_ref().and_then(|p| p.virtual_cwd.as_deref()),
         ));
-        if patched {
-            if !caller_suspended {
-                // SAFETY: FFI call with valid arguments.
-                unsafe { ResumeThread(hthread) };
-            }
-            return r;
-        }
         match inject_child(
             hprocess,
             hthread,
             pid,
             SELF_DLL.get().map(String::as_str),
             child_ready_timeout_ms(),
-            caller_suspended,
         ) {
             Ok(()) => {
-                // Remote injection never resumed the primary thread; the
-                // in-memory patch path already did (and left it running, so
-                // this resume is then a no-op). Either way a child the caller
-                // did not ask to keep suspended runs now.
+                // Remote injection never resumes the primary thread, so a
+                // child the caller did not ask to keep suspended runs now.
                 if !caller_suspended {
                     // SAFETY: FFI call with valid arguments.
                     unsafe { ResumeThread(hthread) };
@@ -208,22 +194,6 @@ pub(super) unsafe fn cpiw_hook_body(
 /// in whatever job its parent is in, as every other child does. See docs/shim-invariants.md, "Children stay in the launch's job".
 fn child_creation_flags(flags: u32) -> u32 {
     (flags | CREATE_SUSPENDED) & !CREATE_BREAKAWAY_FROM_JOB
-}
-
-/// Whether the child's EXE imports the shim first (staging patched it).
-///
-/// Read from the real disk, not through the VFS: staging's copy is mounted
-/// *below* the curated content, so the VFS answers the image's path with the
-/// original, unpatched EXE.
-fn child_imports_shim(process: HANDLE) -> bool {
-    // `None` means this thread is already inside the shim's own I/O, where
-    // every file call goes to the real disk anyway.
-    let _real_disk = super::entry::ShimIoGuard::enter();
-    let mut buf = vec![0u16; 32768];
-    let mut len = buf.len() as u32;
-    // SAFETY: a process handle from `CreateProcess`, into a buffer of `len` units.
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) };
-    ok != 0 && aether_inject::exe_imports_shim(&String::from_utf16_lossy(&buf[..len as usize]))
 }
 
 /// Kill a child that could not be injected and make the `CreateProcess` call

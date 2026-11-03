@@ -1,8 +1,8 @@
 #![deny(unsafe_code)]
 
 //! Launch a target process with the VFS shim: [`run_target_with_shim`] starts
-//! an import-patched exe normally, or injects the shim into an unpatched one,
-//! and waits for that process. [`spawn_target_with_shim`] does the same inside
+//! it suspended, injects the shim on a remote thread, and waits for that
+//! process. [`spawn_target_with_shim`] does the same inside
 //! a Job Object and hands back a [`ProcessTree`], which ends only when every
 //! process the target started has exited.
 
@@ -13,7 +13,6 @@ mod cli;
 mod env_block;
 mod inject;
 mod map;
-mod mem_inject;
 mod pe;
 mod procparams;
 mod steam_helper;
@@ -21,8 +20,6 @@ mod tree;
 
 /// A target's environment block, built from another (see `env_block`).
 pub use env_block::{build as build_env_block, current as current_env_block};
-/// In-memory import patch of a suspended image (`mem_inject`).
-pub use mem_inject::{patch_imports_in_memory, MemPatchRefused};
 pub use pe::map_image_from_pe_bytes_local;
 /// Tell a suspended process its virtual command line and working directory.
 pub use procparams::rewrite as rewrite_process_parameters;
@@ -59,11 +56,6 @@ pub struct RunConfig {
     pub virtual_cwd: Option<String>,
     /// Variables the target does not inherit from this process.
     pub env_remove: Vec<String>,
-    /// Skip the in-memory import patch and inject the shim on a remote thread.
-    /// For tests of the injection path itself (where `dll_path` is a full path,
-    /// which the loader's name-based import resolution cannot use); production
-    /// launches leave it `false` and prefer the in-memory patch.
-    pub force_injection: bool,
 }
 
 /// Failure points in launch + inject + run.
@@ -112,11 +104,11 @@ pub enum InjectError {
     Terminate,
 }
 
-pub use artifacts::{exe_imports_shim, find_near};
+pub use artifacts::find_near;
 pub use cli::{parse_injector_args, InjectorArgs};
 pub use inject::{
-    expand_primary_stack, inject_dll, inject_dll_exit_code, resume_primary_thread,
-    run_target_with_shim, spawn_target_with_shim, PRIMARY_STACK_BYTES,
+    expand_primary_stack, inject_dll, inject_dll_exit_code, run_target_with_shim,
+    spawn_target_with_shim, PRIMARY_STACK_BYTES,
 };
 pub use steam_helper::{
     active_process_pid, check_helper_command, clear_active_process_pid, running_under_wine,

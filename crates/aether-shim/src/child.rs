@@ -89,11 +89,6 @@ pub(crate) fn inject_child(
     pid: u32,
     full_shim_dll: Option<&str>,
     timeout_ms: u32,
-    // The caller asked for a suspended child. The in-memory import patch needs
-    // the primary thread to run so the loader loads the shim, so it is used
-    // only when the child is not meant to stay suspended; otherwise the shim
-    // goes in on a remote thread, which leaves the primary suspended.
-    caller_suspended: bool,
 ) -> Result<(), ChildInjectError> {
     let full_shim_dll = full_shim_dll.ok_or(ChildInjectError::NoShimDll)?;
     // this shim loads into a process of its own bitness only
@@ -112,52 +107,7 @@ pub(crate) fn inject_child(
             thread,
             aether_inject::PRIMARY_STACK_BYTES,
         );
-        // Prefer the in-memory import patch: the loader loads the shim before
-        // the child's own static imports initialise (those read the game's
-        // files, which are in the VFS). Remote injection runs them first, on
-        // the injected thread, which is what refused SkyrimSE.exe — its
-        // imports fault before the shim is up. Fall back to injection only
-        // when the patch is refused, and record which path.
-        // `VFS_FORCE_INJECTION`: the launch asked for remote injection only.
-        let patched = if aether_env::opt_in(aether_env::FORCE_INJECTION) {
-            Err(aether_inject::MemPatchRefused::Forced)
-        } else {
-            aether_inject::patch_imports_in_memory(process)
-        };
-        match patched {
-            Ok(()) => {
-                if caller_suspended {
-                    // The caller (SKSE) created the child suspended and will
-                    // resume it itself. The shim is first in the import order,
-                    // so when it is resumed the loader loads and bootstraps the
-                    // shim before any game code — and a failed bootstrap returns
-                    // FALSE, which fails process start (the loader's own
-                    // fail-closed, the same guarantee file import-patching
-                    // relies on). We do not resume, and cannot wait for a
-                    // signal that only comes on the caller's later resume.
-                    crate::loadlog::note(&format!(
-                        "child {pid}: activation in-memory import patch (left suspended for the caller)"
-                    ));
-                    return Ok(());
-                }
-                crate::loadlog::note(&format!("child {pid}: activation in-memory import patch"));
-                // Not caller-suspended: the shim runs as the loader processes
-                // imports, so the primary thread must run; the caller does not
-                // resume an unsuspended child again.
-                aether_inject::resume_primary_thread(thread);
-                let wait = wait_ready(process, pid, timeout_ms);
-                crate::loadlog::note(&format!("child {pid}: ready wait {wait:?}"));
-                return match wait {
-                    ReadyWait::Ready => Ok(()),
-                    ReadyWait::BootstrapFailed => Err(ChildInjectError::BootstrapFailed),
-                    ReadyWait::Exited => Err(ChildInjectError::ChildExited),
-                    ReadyWait::TimedOut => Err(ChildInjectError::ReadyTimeout),
-                };
-            }
-            Err(e) => crate::loadlog::note(&format!(
-                "child {pid}: activation remote injection (in-memory import patch refused: {e:?})"
-            )),
-        }
+        crate::loadlog::note(&format!("child {pid}: activation remote injection"));
         match aether_inject::inject_dll_exit_code(process, full_shim_dll, timeout_ms) {
             Ok(code) => crate::loadlog::note(&format!(
                 "child {pid}: remote LoadLibrary({full_shim_dll}) returned, thread exit {code:#x}"

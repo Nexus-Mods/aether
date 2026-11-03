@@ -6,7 +6,7 @@ a director can be implemented in any language from this file alone. Every
 number here was read from the source; each table names the file it comes from,
 relative to the repository root.
 
-Wire version: **4** (`crates/aether-ipc/src/layout.rs`, `VERSION`).
+Wire version: 4 (`crates/aether-ipc/src/layout.rs`, `VERSION`).
 
 Conventions used throughout:
 
@@ -42,7 +42,7 @@ is the production director; its wire code is `src/aether/director/proto.clj`,
 | Party | Binary | Role |
 |---|---|---|
 | Director | any process, any language | Creates the shared memory, initialises the ring header, writes the handshake environment and `shim.cfg`, starts the injector, then serves requests until the launch ends. It owns all content: the shim never opens an archive or store itself. |
-| Injector | `aether-injector.exe` (x64), `aether-injector32.exe` (x86) | Started by the director. Creates the target process with the shim loaded (import patch or remote `LoadLibrary`), waits for the shim's ready report, releases or kills the target, then waits for the target's process tree and exits with the first process's exit code. |
+| Injector | `aether-injector.exe` (x64), `aether-injector32.exe` (x86) | Started by the director. Creates the target process suspended and loads the shim with a remote `LoadLibrary` (the only activation), waits for the shim's ready report, releases or kills the target, then waits for the target's process tree and exits with the first process's exit code. |
 | Shim | `aether_shim_dll.dll` (x64), `aether_shim_dll32.dll` (x86) | Loaded into the target before any of its code runs. Reads its environment, attaches to the ring, sends one `HEARTBEAT`, installs NT detours, and from then on asks the director about every file and (optionally) registry operation under a managed root. Injects itself into child processes the target starts. |
 
 Binary names: `contract/artifacts.json` (`natives`).
@@ -337,7 +337,7 @@ limit   = max(workers - reserve, 1)
 
 A director should therefore publish its real thread count in `worker_hint`
 before the shim attaches, and run at least that many threads. Each shim reads
-`worker_hint` **once**, when it attaches (`DataGate::for_ring`, called from
+`worker_hint` once, when it attaches (`DataGate::for_ring`, called from
 `FuseClient::connect_source`); a later change is not seen by processes already
 attached. The gate is process-local; nothing about it crosses the ring.
 
@@ -345,7 +345,7 @@ attached. The gate is process-local; nothing about it crosses the ring.
 
 A session has one ring, and every process of the launch shares it. A child
 the target starts inherits the `VFS_*` environment, gets the shim injected
-(section 6.4), attaches the **same** ring and sends its own HEARTBEAT. Nothing
+(section 6.4), attaches the same ring and sends its own HEARTBEAT. Nothing
 in a request says which process sent it, so:
 
 - file handles (`fh`) are ring-global: a director must issue them uniquely
@@ -383,9 +383,9 @@ Source: `crates/aether-unix/src/mapping.rs`, `crates/aether-win/src/mapping.rs`
 (`open_file_backed`), `crates/aether-shim/src/director.rs` (`ring_source`).
 
 A page-file section has no identity outside one Windows (or Wine) session, so a
-native Linux director and a shim under Wine share a **file**:
+native Linux director and a shim under Wine share a file:
 
-- The director creates the file, grows it to at least the map size **before**
+- The director creates the file, grows it to at least the map size before
   mapping it (an `mmap` past end of file faults on touch), never shrinks an
   existing file, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`. The Rust
   `FileMapping::create` reuses an existing file grow-only; Cairn deletes and
@@ -394,7 +394,7 @@ native Linux director and a shim under Wine share a **file**:
   FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)`, refuses
   a file shorter than `VFS_RING_BYTES`, and maps it with an unnamed
   `CreateFileMappingW` over that handle.
-- `VFS_RING_PATH` is the path **as the shim sees it** (a Wine `C:` or `Z:`
+- `VFS_RING_PATH` is the path as the shim sees it (a Wine `C:` or `Z:`
   path); the director maps the same file by its host path.
 - **`VFS_RING_PATH` wins over `VFS_RING_SECTION`** when both are set; an empty
   `VFS_RING_PATH` counts as unset. In file mode the shim opens no event.
@@ -479,7 +479,7 @@ STAGE_EXEC:
 - The root itself is `"."`.
 - Folded (lowercased by `aether_core::fold`: ASCII lowercase for ASCII
   strings, else `char::to_lowercase` of every character,
-  `crates/aether-core/src/casefold.rs`) **except** in a request that creates a
+  `crates/aether-core/src/casefold.rs`) except in a request that creates a
   name (a write OPEN, MKDIR, RENAME targets), which keeps the caller's
   spelling so that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
@@ -807,7 +807,7 @@ candidate image path that routes under a root it first sends GETATTR, and
 sends STAGE_EXEC only for the first candidate that is a file (`found`, not
 `is_dir`). On success the child is started from the returned path. If no
 candidate was staged, every candidate path is absolute, and at least one was
-under a root, the child is **refused** (`out.refuse`), not started from
+under a root, the child is refused (`out.refuse`), not started from
 whatever is really on disk at that path. Otherwise (a relative name the
 loader may resolve elsewhere) the image path is left as it was.
 
@@ -839,8 +839,8 @@ statuses take the next free negative number.
 #### 3.5.1 Malformed requests: what each director answers
 
 The status for a payload too short for its fixed fields, a path that escapes
-its root (`..` above it), or a root the director does not serve is **not
-uniform** across the existing directors. The shim treats every non-OK status
+its root (`..` above it), or a root the director does not serve is not
+uniform across the existing directors. The shim treats every non-OK status
 as a failure of the call (only `ST_NOT_FOUND`, `ST_EXISTS`, `ST_READ_ONLY`,
 `ST_CROSS_ROOT` and the like get specific NT statuses), so none of these
 differences changes what a well-formed shim request gets. A new director
@@ -889,7 +889,7 @@ every registry detour installed (`crates/aether-shim/src/regclient.rs`,
 Source: `crates/aether-protocol/src/lib.rs` (registry codecs),
 `crates/aether-protocol/src/wire.rs`, `crates/aether-registry/src/overlay.rs`.
 
-- `str` = `len:u32 | utf8[len]`. Limits count **UTF-16 code units**
+- `str` = `len:u32 | utf8[len]`. Limits count UTF-16 code units
   (`utf16_len`), the registry's own unit.
 - Booleans are one byte, exactly 0 or 1.
 - Every registry decoder consumes its input exactly; trailing bytes are
@@ -1031,7 +1031,7 @@ before the write's reply is published**, and whenever a registry layer is
 attached or detached.
 
 The shim caches REG_LOOKUP and REG_KEY answers per folded path under the
-generation it read **before** asking, and uses a cached answer only while the
+generation it read before asking, and uses a cached answer only while the
 header still holds that generation. Generation 0 means "nothing published":
 the shim then caches nothing and asks the director every time
 (`RegClient::cached`). So a director that serves the registry must publish a
@@ -1126,7 +1126,7 @@ off only for `0`, `false`, `no`, `off` (`opt_in`, `opt_out`).
 | `VFS_SHIM_CONFIG` | injector | shim | Path of `shim.cfg`. Unset: the shim fails its load. |
 | `VFS_SHIM_READY` | injector | shim | Path of the ready file (section 6.2). The shim removes it from its own environment after writing, so children do not inherit it. |
 | `VFS_CHILD_REFUSED_LOG` | injector | shim | `<ready>.child-refused`: the shim appends `<image> <reason>\n` for each child it had to kill. |
-| `VFS_FORCE_INJECTION` | director | injector, shim | Opt-in: use remote-thread `LoadLibrary` only, never the in-memory import patch (Cairn always sets `1`). |
+| `VFS_FORCE_INJECTION` | director | — | Accepted and ignored: remote-thread `LoadLibrary` is the only activation (Cairn still sets `1`). |
 
 Also read, outside the tables: `VFS_READY_TIMEOUT_SECS` (decimal seconds,
 default 180, minimum 1) bounds the injector's wait for the shim and the shim's
@@ -1177,15 +1177,15 @@ aether-injector <target> <shim_dll> <config> <ready> [-- args...]
 Fewer than four arguments: the usage line on stderr, exit 2.
 
 The target's command line is `"<target>"` followed by ` "<arg>"` for each
-argument, with **no escaping** (`crates/aether-inject/src/inject.rs`,
+argument, with no escaping (`crates/aether-inject/src/inject.rs`,
 `command_line_for`). An argument that contains `"` or ends in `\` is mangled
 by the target's command-line parser (a trailing `\` escapes the closing
 quote). A director must not pass such arguments, or must accept that they
 arrive changed.
 
 Under Wine, every injector argument (target, shim DLL, config, ready file)
-and every path in a `VFS_*` variable is in the **Windows form the target
-sees** (`C:\...` or `Z:\...`), not the host path. The director reads the ready
+and every path in a `VFS_*` variable is in the Windows form the target
+sees (`C:\...` or `Z:\...`), not the host path. The director reads the ready
 file and its siblings by the corresponding host path.
 
 **The shim's own DLL dependencies must resolve in the target.** The shim is
@@ -1228,7 +1228,7 @@ On any injection failure the injector writes one line to
 
 | Line | Cause |
 |---|---|
-| `target-exited:<code as 0x… hex>` | The target exited before reporting ready (e.g. `0xc0000135`). Also an import-activated target that the loader refused (`0xC0000135`, `0xC0000142`). |
+| `target-exited:<code as 0x… hex>` | The target exited before reporting ready (e.g. `0xc0000135`). |
 | `ready-timeout:<seconds>` | No verdict within `VFS_READY_TIMEOUT_SECS`. |
 | `fuse-failed:<reason>` | The shim reported `fuse-failed:`. |
 | `bootstrap-failed:<reason>` | The shim reported `bootstrap-failed:`. |
@@ -1287,7 +1287,7 @@ Rules:
 
 - **A wire-version bump is always an Aether major version.** The shim refuses
   a ring of any other version at attach, so an old director and a new shim (or
-  the reverse) cannot run together at all. `layout.rs` bumps it whenever a
+  the reverse) cannot run together. `layout.rs` bumps it whenever a
   payload layout or the slot state machine changes.
 - **A minor version may add an opcode or a flag only where an old director's
   answer to it is safe.** An old director answers an unknown opcode
@@ -1365,7 +1365,7 @@ and `{name "sub", is_dir true, size 0, mtime 0}`. The line is 54 bytes:
 | 46 | `00 00 00 00 00 00 00 00` | entry 1 `mtime` | 0 |
 | 54 | — | end | |
 
-Note the entries are packed: nothing aligns `size` or `mtime`. As a reply in a
+The entries are packed: nothing aligns `size` or `mtime`. As a reply in a
 slot this would be `status = 0`, `payload_len = 54`, `ack = low32(req_id)`,
 these 54 bytes at the slot's payload offset, then `state` CAS
 `PROCESSING -> COMPLETED`.

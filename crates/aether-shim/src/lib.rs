@@ -46,8 +46,8 @@ pub use aether_protocol::shimcfg::{encode_config, encode_config_full, StaticImpo
 pub use hook::as_shim_io_for_tests;
 /// Run one `extern "system"` entry point's body with its panic contained.
 ///
-/// Exported for `aether-shim-dll`, which owns the injected DLL's two other
-/// `extern "system"` entry points (`DllMain` and `vfs_shim_activated`). An
+/// Exported for `aether-shim-dll`, which owns the injected DLL's other
+/// `extern "system"` entry point (`DllMain`). An
 /// unwind out of any `extern` frame is an immediate `abort()` of the *game*
 /// process, so "every entry point of the shim contains its panic" is a property
 /// of the DLL rather than of this crate — and it is checked as one, across both

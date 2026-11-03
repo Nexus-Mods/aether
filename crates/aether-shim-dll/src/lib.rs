@@ -1,12 +1,10 @@
 //! The shim DLL.
 //!
-//! `DllMain` bootstraps synchronously on `DLL_PROCESS_ATTACH`, however the DLL
-//! arrived: as the first static import of a patched exe (import activation),
-//! or through a remote `LoadLibrary` into a suspended process (injection). In
-//! both cases nothing of the program has run yet, and a failed bootstrap
-//! returns `FALSE`, which fails the load: process start (0xC0000142) for an
-//! import, the `LoadLibrary` for an injection, whose launcher then kills the
-//! process. Either way the program never runs un-virtualised.
+//! `DllMain` bootstraps synchronously on `DLL_PROCESS_ATTACH`. The DLL arrives
+//! through a remote `LoadLibrary` into a suspended process (injection), so
+//! nothing of the program has run yet, and a failed bootstrap returns `FALSE`,
+//! which fails the `LoadLibrary`; the launcher then kills the process. The
+//! program never runs un-virtualised.
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
@@ -66,13 +64,6 @@ pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_v
             0
         },
     )
-}
-
-/// The export a patched exe imports, so the loader has a symbol to bind. It
-/// does nothing: the work happened in `DllMain`, before anything could call it.
-#[no_mangle]
-pub extern "system" fn vfs_shim_activated() -> u32 {
-    aether_shim::contain_panic("vfs_shim_activated", || 1, || 0)
 }
 
 /// Whether the shim came up. A failure is also written to the ready file, so a

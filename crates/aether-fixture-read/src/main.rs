@@ -198,8 +198,7 @@ fn spawn_copy_of_self() {
         }),
     };
     // `VFS_FIXTURE_SPAWN_SUSPENDED` creates the child suspended and resumes it
-    // itself, the way SKSE starts SkyrimSE.exe — the shape that needs the
-    // in-memory import patch to work on a suspended child.
+    // itself, the way SKSE starts SkyrimSE.exe.
     #[cfg(windows)]
     if std::env::var_os("VFS_FIXTURE_SPAWN_SUSPENDED").is_some() {
         spawn_suspended(&me);
@@ -222,9 +221,8 @@ fn spawn_copy_of_self() {
 }
 
 /// Create the child suspended, then resume it — SKSE's shape. The shim's
-/// process hook injects it while it is suspended; the in-memory import patch
-/// leaves it suspended for this resume, and the shim bootstraps as the loader
-/// runs. Exits 0 iff the child exits 0.
+/// process hook injects it while it is suspended and leaves it suspended for
+/// this resume. Exits 0 iff the child exits 0.
 #[cfg(windows)]
 fn spawn_suspended(exe: &std::path::Path) {
     use std::os::windows::process::CommandExt;

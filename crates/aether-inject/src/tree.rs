@@ -356,9 +356,6 @@ impl Drop for Shared {
 pub struct ProcessTree {
     shared: Arc<Shared>,
     pid: u32,
-    /// The target imported the shim itself (staging patched it), so a loader
-    /// refusal reads as an exit code — see [`finish_code`].
-    import_activated: bool,
     untracked: Option<String>,
 }
 
@@ -413,7 +410,6 @@ impl ProcessTree {
     pub(crate) unsafe fn new(
         process: HANDLE,
         pid: u32,
-        import_activated: bool,
         job: Option<Job>,
         untracked: Option<String>,
     ) -> ProcessTree {
@@ -428,7 +424,6 @@ impl ProcessTree {
         ProcessTree {
             shared: Arc::new(Shared { process, job }),
             pid,
-            import_activated,
             untracked,
         }
     }
@@ -479,7 +474,7 @@ impl ProcessTree {
             }
             code
         };
-        finish_code(self.import_activated, code).map(Some)
+        Ok(Some(code as i32))
     }
 
     /// [`ProcessTree::try_wait`], waiting up to `timeout` for the tree to end.
@@ -524,39 +519,9 @@ impl ProcessTree {
     }
 }
 
-/// How a target's exit code reads as a launch result.
-///
-/// An import-activated target that the loader refused to start (the shim
-/// missing, `0xC0000135`, or its `DllMain` failing, `0xC0000142`) ran nothing
-/// of the program: that is a failed launch, not an exit code.
-pub(crate) fn finish_code(import_activated: bool, code: u32) -> Result<i32, InjectError> {
-    match code {
-        0xC000_0135 | 0xC000_0142 if import_activated => Err(InjectError::TargetExited(code)),
-        c => Ok(c as i32),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_loader_refusal_is_an_error_only_for_an_import_activated_target() {
-        assert!(matches!(
-            finish_code(true, 0xC000_0135),
-            Err(InjectError::TargetExited(0xC000_0135))
-        ));
-        assert!(matches!(
-            finish_code(true, 0xC000_0142),
-            Err(InjectError::TargetExited(0xC000_0142))
-        ));
-        assert_eq!(
-            finish_code(false, 0xC000_0135).unwrap(),
-            0xC000_0135u32 as i32
-        );
-        assert_eq!(finish_code(true, 0).unwrap(), 0);
-        assert_eq!(finish_code(true, 7).unwrap(), 7);
-    }
 
     /// The job kills on close and lets no process leave it: a child that
     /// asked to break away would otherwise outlive the launch (the shim drops

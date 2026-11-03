@@ -2,7 +2,7 @@
 //! state directory.
 //!
 //! A shim that fails to come up in a process nobody is watching — a child a
-//! launcher starts, injected rather than import-activated — otherwise leaves
+//! launcher starts — otherwise leaves
 //! only its spawner's verdict ("ready-timeout"). So every process's shim says
 //! here what it did (`DllMain` entered, each bootstrap step, the outcome), and
 //! a spawner says what injecting a child returned. Appended to

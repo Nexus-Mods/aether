@@ -5,6 +5,21 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (remote-thread injection is the only activation)
+
+The in-memory import patch is gone: the injector no longer writes a first
+import of the shim into a suspended target's headers, the shim no longer does
+it for children, and an EXE that imports the shim (staged with the import
+written in) is no longer recognised and left alone. Every process gets the
+shim by remote `LoadLibrary`. With it went `aether_pe`'s import-patch API
+(`add_first_import`, `first_import_is`, `SHIM_IMPORT_DLL`,
+`SHIM_IMPORT_SYMBOL`, the SteamStub helpers, `mem_patch`),
+`aether_inject::patch_imports_in_memory` and `exe_imports_shim`,
+`RunConfig::force_injection`, and the shim's `vfs_shim_activated` export.
+`VFS_FORCE_INJECTION` is still a handshake name and has no effect. The shim's
+load log loses `, import-patched …` from its `created from` line and
+`(in-memory import patch refused: …)` from its `activation` line.
+
 ## Unreleased (Aether: crates and binaries renamed `vfs-*` to `aether-*`)
 
 The code now lives in its own repository, Nexus-Mods/aether, split from
@@ -16,7 +31,7 @@ Cairn's `rust/`. Every crate is renamed `vfs-*` to `aether-*` (Rust paths
 (`vproxy.dll` keeps its name). Nothing on the wire changes: the `VFS_*`
 environment variables, the ring and config magics (`VFIP`, `VFSC`), the
 wire version, the `Local\vfs_shim_ready_<pid>`/`vfs_shim_failed_<pid>`
-events, the `vfs_shim_activated` export, and the text the shim and the
+events, the `vfs_shim_activated` export (since removed, above), and the text the shim and the
 injector print (`vfs-shim hook stats`, `[vfs-injector] ...`) are as they
 were. The entries below use the names of their time.
 

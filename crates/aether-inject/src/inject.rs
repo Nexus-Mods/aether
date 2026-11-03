@@ -5,7 +5,6 @@
 use core::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
-use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -23,13 +22,12 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION,
 };
 
-use crate::tree::{finish_code, Job, ProcessTree};
+use crate::tree::{Job, ProcessTree};
 use crate::{InjectError, RunConfig};
 
 /// The primary thread's stack for a virtualised process. The shim adds frames
 /// to every intercepted call, and the stock 1 MiB stack overflows under that
-/// (`0xC00000FD`). An import-patched exe carries it in its header; an injected
-/// process gets it from [`expand_primary_stack`].
+/// (`0xC00000FD`). An injected process gets it from [`expand_primary_stack`].
 pub const PRIMARY_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// `STACK_SIZE_PARAM_IS_A_RESERVATION`: `CreateRemoteThread`'s size is the
@@ -405,10 +403,8 @@ unsafe fn fail_closed(pi: &PROCESS_INFORMATION, e: InjectError) -> InjectError {
 
 /// Launch the target with the shim, and wait for it (unless `cfg.detach`).
 ///
-/// A target exe that imports the shim first (staging patched it) is started
-/// normally ([`start_import_activated`]). Any other is injected, the
-/// way SKSE injects its DLL: created suspended, its primary stack grown to
-/// [`PRIMARY_STACK_BYTES`], the shim `LoadLibrary`'d on a remote thread (which
+/// The target is injected the way SKSE injects its DLL: created suspended,
+/// its primary stack grown to [`PRIMARY_STACK_BYTES`], the shim `LoadLibrary`'d on a remote thread (which
 /// runs process initialisation and then the shim's bootstrap), and resumed
 /// only once the shim's ready file says it is up. Any failure kills it before
 /// it has run.
@@ -433,7 +429,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         let code = exited(started.process);
         CloseHandle(started.process);
         match code {
-            Some(c) => finish_code(started.import_activated, c),
+            Some(c) => Ok(c as i32),
             None => Err(InjectError::ExitCode),
         }
     }
@@ -464,15 +460,7 @@ pub fn spawn_target_with_shim(cfg: RunConfig) -> Result<ProcessTree, InjectError
     };
     let started = start_target(&cfg, job.as_mut(), &env)?;
     // SAFETY: `started.process` is live and owned; the tree takes it over.
-    Ok(unsafe {
-        ProcessTree::new(
-            started.process,
-            started.pid,
-            started.import_activated,
-            job,
-            no_job,
-        )
-    })
+    Ok(unsafe { ProcessTree::new(started.process, started.pid, job, no_job) })
 }
 
 /// The environment block the target starts with, and a clean slate for its
@@ -517,8 +505,6 @@ struct Started {
     /// Its process handle, owned by the receiver. The thread handle is closed.
     process: HANDLE,
     pid: u32,
-    /// It imported the shim itself — see [`finish_code`].
-    import_activated: bool,
 }
 
 /// Start the target with the shim (see [`run_target_with_shim`]) and, when
@@ -528,10 +514,6 @@ fn start_target(
     job: Option<&mut Job>,
     env: &[u16],
 ) -> Result<Started, InjectError> {
-    if crate::exe_imports_shim(&cfg.target_exe) {
-        return start_import_activated(cfg, job, env);
-    }
-
     let timeout_ms = u32::try_from(cfg.ready_timeout.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: CreateProcessW + inject + resume.
     unsafe {
@@ -570,37 +552,6 @@ fn start_target(
             eprintln!(
                 "vfs-inject: expand_primary_stack failed ({e:?}) — resuming with stock 1MiB stack"
             );
-        }
-
-        // Prefer the in-memory import patch: the loader then loads the shim
-        // first, so its `DllMain` runs before the target's own static imports
-        // initialise. Remote-thread injection runs those imports first (they
-        // read the game's files, which are in the VFS, before the shim is up),
-        // which is what refused `SkyrimSE.exe`. Fall back to it only when the
-        // in-memory patch is refused, and say which path was taken.
-        if !cfg.force_injection {
-            match crate::patch_imports_in_memory(pi.hProcess) {
-                Ok(()) => {
-                    eprintln!("vfs-inject: activation: in-memory import patch");
-                    ResumeThread(pi.hThread);
-                    // The shim bootstraps as the loader processes imports, after
-                    // the resume, and writes the ready file. Poll it to the
-                    // deadline, as the import-activated path does.
-                    let state = poll_ready(pi.hProcess, &cfg.ready_path, cfg.ready_timeout);
-                    if let Err(e) = state {
-                        return Err(fail_closed(&pi, e));
-                    }
-                    CloseHandle(pi.hThread);
-                    return Ok(Started {
-                        process: pi.hProcess,
-                        pid: pi.dwProcessId,
-                        import_activated: false,
-                    });
-                }
-                Err(e) => eprintln!(
-                "vfs-inject: activation: remote injection (in-memory import patch refused: {e:?})"
-            ),
-            }
         }
 
         if let Err(e) = inject_dll(pi.hProcess, &cfg.dll_path, timeout_ms) {
@@ -642,41 +593,7 @@ fn start_target(
         Ok(Started {
             process: pi.hProcess,
             pid: pi.dwProcessId,
-            import_activated: false,
         })
-    }
-}
-
-/// Poll `ready_path` until the shim writes its verdict, the target exits, or
-/// `timeout` passes. For the in-memory import patch, where the shim runs only
-/// after the primary thread is resumed.
-///
-/// # Safety
-/// `process` is the live, resumed target.
-#[allow(unsafe_code)]
-unsafe fn poll_ready(
-    process: HANDLE,
-    ready_path: &str,
-    timeout: Duration,
-) -> Result<(), InjectError> {
-    let began = Instant::now();
-    loop {
-        match std::fs::read_to_string(ready_path)
-            .map(|c| classify_ready(&c))
-            .unwrap_or(ReadyState::Pending)
-        {
-            ReadyState::Ready => return Ok(()),
-            ReadyState::Failed(e) => return Err(e),
-            ReadyState::Pending => {}
-        }
-        // SAFETY: a zero-timeout poll of a handle we own.
-        if let Some(code) = exited(process) {
-            return Err(InjectError::TargetExited(code));
-        }
-        if began.elapsed() > timeout {
-            return Err(InjectError::Timeout);
-        }
-        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -707,91 +624,6 @@ unsafe fn tell_where(process: HANDLE, cfg: &RunConfig) -> Result<(), InjectError
     // SAFETY: as this function's contract.
     unsafe { crate::procparams::rewrite(process, cmd.as_deref(), cfg.virtual_cwd.as_deref()) }
         .map_err(InjectError::Bootstrap)
-}
-
-/// Start a target whose exe imports the shim first. No payload, no remote
-/// thread: the loader runs the shim's `DllMain` before any other import
-/// initialises, and a failed bootstrap fails process start there. Returns
-/// once the shim has said something in its ready file, or the target has
-/// exited.
-///
-/// Created suspended only to be assigned to `job` before it runs, then
-/// resumed at once; without a job it is started running, as it always was.
-fn start_import_activated(
-    cfg: &RunConfig,
-    job: Option<&mut Job>,
-    env: &[u16],
-) -> Result<Started, InjectError> {
-    let mut cmd_w = wide(&command_line(cfg));
-    let app_w = wide(&cfg.target_exe);
-    let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
-    let started = Instant::now();
-    // Suspended to be put in `job`, or to be told where it is, before it runs.
-    let rewrite = cfg.virtual_image.is_some() || cfg.virtual_cwd.is_some();
-    let flags = if job.is_some() || rewrite {
-        CREATE_SUSPENDED
-    } else {
-        0
-    };
-    // SAFETY: CreateProcessW with valid, NUL-terminated buffers; the thread
-    // handle is closed here and the process handle handed to the caller.
-    unsafe {
-        let (pi, _) = match Job::create_process(
-            job,
-            app_w.as_ptr(),
-            cmd_w.as_mut_ptr(),
-            flags | CREATE_UNICODE_ENVIRONMENT,
-            env.as_ptr().cast(),
-            cwd_w
-                .as_ref()
-                .map(|v| v.as_ptr())
-                .unwrap_or(core::ptr::null()),
-        ) {
-            Ok(created) => created,
-            Err(why) => return Err(InjectError::CreateProcessFailed(why)),
-        };
-        if flags & CREATE_SUSPENDED != 0 {
-            if let Err(e) = tell_where(pi.hProcess, cfg) {
-                return Err(fail_closed(&pi, e));
-            }
-            ResumeThread(pi.hThread);
-        }
-        CloseHandle(pi.hThread);
-        // Report when the shim said ready, for the timing comparison.
-        loop {
-            if let Ok(c) = std::fs::read_to_string(&cfg.ready_path) {
-                if !c.is_empty() {
-                    eprintln!(
-                        "vfs-inject: import activation: shim ready after {} ms: {c}",
-                        started.elapsed().as_millis()
-                    );
-                    break;
-                }
-            }
-            if exited(pi.hProcess).is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        Ok(Started {
-            process: pi.hProcess,
-            pid: pi.dwProcessId,
-            import_activated: true,
-        })
-    }
-}
-
-/// Resume a suspended thread (the child's primary, after an in-memory import
-/// patch). A no-op on a thread that is already running.
-///
-/// # Safety
-/// `thread` is a live thread handle with `THREAD_SUSPEND_RESUME`.
-#[allow(unsafe_code)]
-pub unsafe fn resume_primary_thread(thread: HANDLE) {
-    // SAFETY: a resume of a thread handle we own.
-    unsafe {
-        ResumeThread(thread);
-    }
 }
 
 #[cfg(test)]

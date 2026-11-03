@@ -873,27 +873,19 @@ so it cannot inject), the child exiting early, `LoadLibrary` not starting or not
 finishing within the timeout, the child's shim reporting a bootstrap failure,
 and no ready signal once `LoadLibrary` has returned.
 
-**A patched child is not injected.** When the child's EXE imports the shim
-first (staging patched it; `child_imports_shim` reads the real file, because
-the VFS serves the unpatched original at that path), the hook resumes it, or
-leaves it suspended for the caller, without injecting: the loader loads the
-shim through the import and refuses to start the process if it cannot, so the
-rule holds without the hook. Injecting it as well would load a second shim.
-Every other child is injected as above.
+**Remote injection is the only activation.** The target and each child are
+created suspended, get the shim by remote `LoadLibrary`, and only then run
+(or, for a child its caller created suspended, are left suspended for the
+caller to resume). Native Windows and Wine run the same activation. This is
+what `skse64_loader.exe` and the `SkyrimSE.exe` it creates suspended need:
+SKSE injects its own DLL into the suspended child after the shim is in.
 
-**`Activation::Inject` is remote injection everywhere.** A launch with
-`Activation::Inject` sets `RunConfig::force_injection` for the target and
-`VFS_FORCE_INJECTION=1` in its environment, which every descendant inherits.
-With it, neither the injector nor the child hook tries the in-memory import
-patch: the target and each child are created suspended, get the shim by remote
-`LoadLibrary`, and only then run (or, for a child its caller created suspended,
-are left suspended for the caller to resume). That is the path every launch
-under Wine takes, where the in-memory patch is refused (`UnderWine`), so Proton
-and native Windows run the same activation. It is the one Haskill uses for
-`skse64_loader.exe` and the `SkyrimSE.exe` it creates suspended: SkyrimSE's
-Steam DRM rejects an in-memory-patched image ("Application load error
-3:0000065432"), and SKSE injects its own DLL into the suspended child after the
-shim is in.
+An in-memory import patch (a new first import of the shim written into the
+image's headers before it ran) was the default activation until 2026-11-03,
+with an EXE patched on disk as a variant. It was removed: SkyrimSE's Steam DRM
+rejects an import-patched image ("Application load error 3:0000065432"), and
+two activations meant two sets of rules. `VFS_FORCE_INJECTION`, which chose
+remote injection then, is still accepted and has no effect.
 
 **Nothing is skipped on purpose.** The hook does not exempt system processes,
 helpers or anything else; `VFS_INJECT_*` switches (`INJECT_CWD`,

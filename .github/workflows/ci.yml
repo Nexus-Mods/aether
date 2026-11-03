@@ -81,7 +81,8 @@ jobs:
         run: .\bin\build-natives.ps1 -Fixtures -RequireDumpbin
       - name: Natives key
         shell: powershell
-        run: Write-Host "natives key: $(.\bin\natives-key.ps1)"
+        run: |
+          Write-Host "natives key: $(.\bin\natives-key.ps1)"
 
   # The crates that build on Linux (format, lint of the `#[cfg(unix)]` half
   # that nothing else compiles, their tests), then the cross-build of the

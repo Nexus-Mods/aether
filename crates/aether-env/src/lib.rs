@@ -1251,6 +1251,24 @@ pub mod handshake {
     }
 }
 
+/// The handshake tables as `contract/env.json`, the file a release ships for
+/// directors: `{"transport": [...], "inject": [...], "config": [...]}`, each
+/// the table's names in order, two-space indented, ending in a newline.
+/// Written by hand: the names are plain `VFS_*` ASCII, and this crate takes
+/// no dependencies.
+pub fn contract_json() -> String {
+    let table = |key: &str, names: &[&str]| {
+        let items: Vec<String> = names.iter().map(|n| format!("    \"{n}\"")).collect();
+        format!("  \"{key}\": [\n{}\n  ]", items.join(",\n"))
+    };
+    format!(
+        "{{\n{},\n{},\n{}\n}}\n",
+        table("transport", handshake::TRANSPORT),
+        table("inject", handshake::INJECT),
+        table("config", handshake::CONFIG)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,7 +5,8 @@
 #   powershell -ExecutionPolicy Bypass -File bin\natives-key.ps1
 #
 # The inputs are the files git tracks among Cargo.toml, Cargo.lock,
-# rust-toolchain.toml, vendor/, crates/ and bin/build-natives.ps1, read from
+# rust-toolchain.toml, vendor/, crates/, bin/build-natives.ps1 and
+# contract/artifacts.json (the names the four are staged under), read from
 # the working tree, except the fixtures' crates (crates/*fixture*) and the
 # test kit (crates/aether-testkit): a change there changes no native. They are
 # sorted by path (ordinal), and each is hashed as its UTF-8 path, a NUL, its
@@ -27,7 +28,7 @@ $oldEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 try {
   $global:LASTEXITCODE = 0
-  $listed = & git -C $root ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml vendor crates bin/build-natives.ps1 ':(exclude,glob)crates/*fixture*/**' ':(exclude)crates/aether-testkit'
+  $listed = & git -C $root ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml vendor crates bin/build-natives.ps1 contract/artifacts.json ':(exclude,glob)crates/*fixture*/**' ':(exclude)crates/aether-testkit'
   if ($LASTEXITCODE) { throw "natives-key: git ls-files failed (exit $LASTEXITCODE)" }
 } finally {
   [Console]::OutputEncoding = $oldEncoding

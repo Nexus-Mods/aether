@@ -67,6 +67,7 @@ command -v cargo > /dev/null || die "cargo not found (install Rust via rustup)"
 cargo xwin --version > /dev/null 2>&1 \
   || die "cargo-xwin not found (cargo install --locked cargo-xwin)"
 command -v rustup > /dev/null || die "rustup not found (needed for the Windows target)"
+command -v jq > /dev/null || die "jq not found (it reads contract/artifacts.json: sudo apt install jq, or brew install jq)"
 # LLVM 19 or later: lld-link 18 rejects the `/EXPORT:_DllMain@12,EXPORTAS,DllMain`
 # rustc gives the i686 shim. Ubuntu's versioned packages put the unversioned
 # names (clang, clang-cl, lld-link, llvm-lib) only in /usr/lib/llvm-19/bin.
@@ -91,22 +92,21 @@ target=x86_64-pc-windows-msvc
 # the 32-bit injector and shim, for 32-bit (WOW64) programs: built for i686
 # and staged under these names
 target32=i686-pc-windows-msvc
-ARTIFACTS=(
-  aether-injector.exe
-  aether_shim_dll.dll
-  aether-injector32.exe
-  aether_shim_dll32.dll
-  aether-fixture-read.exe
-  aether-fixture-steam.exe
-  aether-fixture-nvapi.exe
-  aether-fixture-registry.exe
-  aether-fixture-writepath.exe
-  aether-fixture-escape.exe
-  aether-fixture-prefs.exe
-  vproxy.dll
-  aether-staticimp.exe
-  aether-probe.exe
-)
+# What is staged comes from contract/artifacts.json, the list a release ships
+# and bin/build-natives.ps1 reads too: the four natives under their staged
+# names, then the fixtures.
+contract=contract/artifacts.json
+native() { jq -er ".natives.$1.$2" "$contract"; }
+injector64="$(native x64 injector)" && shim64="$(native x64 shim)" \
+  && injector32="$(native x86 injector)" && shim32="$(native x86 shim)" \
+  || die "$contract lacks a native's name"
+ARTIFACTS=("$injector64" "$shim64" "$injector32" "$shim32")
+while IFS= read -r f; do
+  case " ${ARTIFACTS[*]} " in
+    *" $f "*) ;;
+    *) ARTIFACTS+=("$f") ;;
+  esac
+done < <(jq -er '.fixtures[]' "$contract" | tr -d '\r')
 
 export XWIN_ACCEPT_LICENSE=1
 # the CRT and SDK libraries of both architectures (the 32-bit injector and shim link x86)
@@ -151,15 +151,17 @@ dst="target/$profile"
 mkdir -p "$natives_dst" "$dst"
 for f in "${ARTIFACTS[@]}"; do
   case "$f" in
-    aether-injector32.exe) from="$src32/aether-injector.exe" ;;
-    aether_shim_dll32.dll) from="$src32/aether_shim_dll.dll" ;;
+    "$injector64") from="$src/aether-injector.exe" ;;
+    "$shim64") from="$src/aether_shim_dll.dll" ;;
+    "$injector32") from="$src32/aether-injector.exe" ;;
+    "$shim32") from="$src32/aether_shim_dll.dll" ;;
     *) from="$src/$f" ;;
   esac
   [[ -f "$from" ]] || die "the build succeeded but did not produce $from"
   cp -f "$from" "$dst/$f"
   echo "  $dst/$f"
   case "$f" in
-    aether-injector*.exe | aether_shim_dll*.dll)
+    "$injector64" | "$shim64" | "$injector32" | "$shim32")
       cp -f "$from" "$natives_dst/$f"
       echo "  $natives_dst/$f"
       ;;

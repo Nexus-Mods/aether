@@ -24,6 +24,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
+# The names the natives are staged under, and the fixture files: one list,
+# which a release ships (contract.zip) and bin/build-windows reads too
+$contract = Get-Content -Raw -LiteralPath (Join-Path $root 'contract\artifacts.json') | ConvertFrom-Json
 if (-not $Out) { $Out = Join-Path $root 'target\natives' }
 # a relative -Out is the caller's, not the root's (the script changes into the root below)
 if (-not [IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location).Path $Out }
@@ -57,14 +60,13 @@ try {
     $env:RUSTFLAGS = $old
   }
 
-  # staged name -> what the build produced
+  # staged name (contract/artifacts.json) -> what the build produced
   $t = Join-Path $root 'target'
-  $natives = [ordered]@{
-    'aether-injector.exe'   = "$t\x86_64-pc-windows-msvc\release\aether-injector.exe"
-    'aether_shim_dll.dll'   = "$t\x86_64-pc-windows-msvc\release\aether_shim_dll.dll"
-    'aether-injector32.exe' = "$t\i686-pc-windows-msvc\release\aether-injector.exe"
-    'aether_shim_dll32.dll' = "$t\i686-pc-windows-msvc\release\aether_shim_dll.dll"
-  }
+  $natives = [ordered]@{}
+  $natives[$contract.natives.x64.injector] = "$t\x86_64-pc-windows-msvc\release\aether-injector.exe"
+  $natives[$contract.natives.x64.shim] = "$t\x86_64-pc-windows-msvc\release\aether_shim_dll.dll"
+  $natives[$contract.natives.x86.injector] = "$t\i686-pc-windows-msvc\release\aether-injector.exe"
+  $natives[$contract.natives.x86.shim] = "$t\i686-pc-windows-msvc\release\aether_shim_dll.dll"
 
   # Checked where they were built, before anything is staged: a failed check
   # leaves the staged set as it was.
@@ -124,16 +126,11 @@ try {
       cargo build --release -p aether-fixture-read -p aether-fixture-writepath -p aether-fixture-escape -p aether-fixture-prefs -p aether-fixture-vproxy -p aether-fixture-registry -p aether-fixture-steam -p aether-fixture-nvapi
     }
     Invoke-Step 'build fixture staticimp' { cargo build --release -p aether-fixture-staticimp }
-    # Every file the tests read from target/release, so a build that left one
-    # out fails here rather than as a test's skip.
+    # Every file the tests read from target/release (contract/artifacts.json's
+    # fixtures), so a build that left one out fails here rather than as a
+    # test's skip.
     $release = Join-Path $root 'target\release'
-    $fixtureFiles = @(
-      'aether-injector.exe', 'aether_shim_dll.dll', 'aether-probe.exe',
-      'aether-fixture-read.exe', 'aether-fixture-writepath.exe', 'aether-fixture-escape.exe', 'aether-fixture-prefs.exe',
-      'vproxy.dll', 'aether-staticimp.exe',
-      'aether-fixture-registry.exe', 'aether-fixture-steam.exe', 'aether-fixture-nvapi.exe'
-    )
-    foreach ($f in $fixtureFiles) {
+    foreach ($f in @($contract.fixtures)) {
       if (-not (Test-Path -LiteralPath (Join-Path $release $f) -PathType Leaf)) {
         throw "build-natives: step 'build fixtures' did not produce $release\$f"
       }

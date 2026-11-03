@@ -13,3 +13,9 @@ description = "The complete VFS_* environment switch surface: one definition per
 
 [lints]
 workspace = true
+
+# The contract test (tests/contract.rs) reads the JSON and the ring's wire
+# version; the library itself stays free of dependencies.
+[dev-dependencies]
+aether-ipc.workspace = true
+serde_json.workspace = true

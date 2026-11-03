@@ -1,0 +1,21 @@
+{
+  "wire_version": 4,
+  "natives": {
+    "x64": { "injector": "aether-injector.exe", "shim": "aether_shim_dll.dll" },
+    "x86": { "injector": "aether-injector32.exe", "shim": "aether_shim_dll32.dll" }
+  },
+  "fixtures": [
+    "aether-injector.exe",
+    "aether_shim_dll.dll",
+    "aether-probe.exe",
+    "aether-fixture-read.exe",
+    "aether-fixture-writepath.exe",
+    "aether-fixture-escape.exe",
+    "aether-fixture-prefs.exe",
+    "vproxy.dll",
+    "aether-staticimp.exe",
+    "aether-fixture-registry.exe",
+    "aether-fixture-steam.exe",
+    "aether-fixture-nvapi.exe"
+  ]
+}

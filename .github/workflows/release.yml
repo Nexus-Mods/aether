@@ -79,29 +79,11 @@ jobs:
       # same build, already signed. Checked, never trusted by name.
       - name: Reuse an earlier release's signed natives
         id: reuse
+        env:
+          KEY: ${{ steps.key.outputs.key }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $key = '${{ steps.key.outputs.key }}'
-          $contract = Get-Content -Raw contract\artifacts.json | ConvertFrom-Json
-          $names = @($contract.natives.x64.injector, $contract.natives.x64.shim, $contract.natives.x86.injector, $contract.natives.x86.shim)
-          $tags = @(gh release list --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName') | Where-Object { $_ -and $_ -ne $env:TAG }
-          foreach ($t in $tags) {
-            $d = Join-Path $env:RUNNER_TEMP "reuse-$t"
-            New-Item -ItemType Directory -Force $d | Out-Null
-            gh release download $t -p natives-key.txt -D $d --clobber 2>$null
-            if ($LASTEXITCODE -or -not (Test-Path "$d\natives-key.txt")) { continue }
-            if ((Get-Content -Raw "$d\natives-key.txt").Trim() -ne $key) { continue }
-            Write-Host "release $t has natives key ${key}: reusing its natives"
-            gh release download $t -p natives.zip -D $d --clobber
-            if ($LASTEXITCODE) { throw "could not download $t's natives.zip" }
-            Expand-Archive -LiteralPath "$d\natives.zip" -DestinationPath "$d\natives" -Force
-            $bad = @(& .\bin\check-signatures.ps1 -Path ($names | ForEach-Object { Join-Path "$d\natives" $_ }))
-            if ($bad.Count) { throw "release $t's natives fail the signature check: $($bad -join '; ')" }
-            foreach ($n in $names) { Copy-Item -LiteralPath (Join-Path "$d\natives" $n) -Destination (Join-Path 'dist\natives' $n) -Force }
-            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Value "from=$t"
-            exit 0
-          }
-          Write-Host "no earlier full release has natives key $key"
+          .\bin\reuse-natives.ps1 -Key $env:KEY -Tag $env:TAG -Out dist\natives
+          if ($LASTEXITCODE) { throw 'reuse-natives failed' }
       - name: CodeSignTool
         if: steps.reuse.outputs.from == '' && steps.decide.outputs.sign == 'true'
         run: .\bin\download-codesigntool.ps1

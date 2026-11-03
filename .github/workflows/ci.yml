@@ -83,6 +83,14 @@ jobs:
         shell: powershell
         run: |
           Write-Host "natives key: $(.\bin\natives-key.ps1)"
+      # release.yml's scripts, against fake tools: no secrets, no network
+      - name: Signing and reuse scripts (self-tests)
+        shell: powershell
+        run: |
+          .\bin\sign.tests.ps1
+          if ($LASTEXITCODE) { throw 'sign.tests.ps1 failed' }
+          .\bin\reuse-natives.tests.ps1
+          if ($LASTEXITCODE) { throw 'reuse-natives.tests.ps1 failed' }
 
   # The crates that build on Linux (format, lint of the `#[cfg(unix)]` half
   # that nothing else compiles, their tests), then the cross-build of the

@@ -1,0 +1,164 @@
+# Builds a release of Aether and publishes it.
+#
+# A tag v<semver> makes a GitHub release with these assets:
+#   natives.zip     the four natives (contract/artifacts.json's names)
+#   fixtures.zip    the test fixtures, with the host-target injector and shim
+#                   beside them (unsigned: test-only)
+#   contract.zip    contract/*.json and the protocol's golden vectors
+#   natives-key.txt what the natives are built from (bin/natives-key.ps1)
+#   SHA256SUMS      the SHA-256 of each of the others
+#
+# Signing (SSL.com eSigner, the ES_* secrets; EXPECTED_SIGNER names who must
+# have signed): a tag without a '-' (v0.1.0) is a full release and its natives
+# are signed; one with a '-' (v0.1.0-rc.1) is a prerelease and its natives are
+# signed only when a manual run asks (input `sign`). Either way, when an
+# earlier full release has the same natives key, its signed natives are
+# reused, byte for byte, after their signatures are checked: a release that
+# changes no native spends no signature. A prerelease whose natives are
+# unsigned says so in its notes.
+#
+# A manual run (workflow_dispatch) on a branch builds the same assets and
+# uploads them as a workflow artifact instead of publishing.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: Sign the natives (costs an eSigner signature per file unless an earlier release's are reused)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_SIGNER: ${{ vars.EXPECTED_SIGNER }}
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      SIGN_INPUT: ${{ inputs.sign && 'true' || 'false' }}
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - name: What this run makes
+        id: decide
+        run: |
+          $pre = $env:TAG -and $env:TAG.Contains('-')
+          $full = $env:TAG -and -not $pre
+          $sign = $full -or ($env:SIGN_INPUT -eq 'true')
+          if ($env:TAG -and $env:TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "tag $env:TAG is not v<semver>" }
+          if ($sign -and -not $env:EXPECTED_SIGNER) { throw 'signing needs the repository variable EXPECTED_SIGNER' }
+          Write-Host "tag '$env:TAG': prerelease=$pre, sign=$sign"
+          "prerelease=$($pre.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          "sign=$($sign.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Build the natives and fixtures (bin/build-natives.ps1)
+        run: .\bin\build-natives.ps1 -Fixtures -RequireDumpbin -Out dist\natives
+      - name: Natives key
+        id: key
+        run: |
+          $key = .\bin\natives-key.ps1
+          Write-Host "natives key: $key"
+          New-Item -ItemType Directory -Force dist\out | Out-Null
+          [IO.File]::WriteAllText((Join-Path $PWD 'dist\out\natives-key.txt'), "$key`n")
+          "key=$key" >> $env:GITHUB_OUTPUT
+      # The newest earlier full release with this key: its natives are the
+      # same build, already signed. Checked, never trusted by name.
+      - name: Reuse an earlier release's signed natives
+        id: reuse
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $key = '${{ steps.key.outputs.key }}'
+          $contract = Get-Content -Raw contract\artifacts.json | ConvertFrom-Json
+          $names = @($contract.natives.x64.injector, $contract.natives.x64.shim, $contract.natives.x86.injector, $contract.natives.x86.shim)
+          $tags = @(gh release list --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName') | Where-Object { $_ -and $_ -ne $env:TAG }
+          foreach ($t in $tags) {
+            $d = Join-Path $env:RUNNER_TEMP "reuse-$t"
+            New-Item -ItemType Directory -Force $d | Out-Null
+            gh release download $t -p natives-key.txt -D $d --clobber 2>$null
+            if ($LASTEXITCODE -or -not (Test-Path "$d\natives-key.txt")) { continue }
+            if ((Get-Content -Raw "$d\natives-key.txt").Trim() -ne $key) { continue }
+            Write-Host "release $t has natives key $key: reusing its natives"
+            gh release download $t -p natives.zip -D $d --clobber
+            if ($LASTEXITCODE) { throw "could not download $t's natives.zip" }
+            Expand-Archive -LiteralPath "$d\natives.zip" -DestinationPath "$d\natives" -Force
+            $bad = @(& .\bin\check-signatures.ps1 -Path ($names | ForEach-Object { Join-Path "$d\natives" $_ }))
+            if ($bad.Count) { throw "release $t's natives fail the signature check: $($bad -join '; ')" }
+            foreach ($n in $names) { Copy-Item -LiteralPath (Join-Path "$d\natives" $n) -Destination (Join-Path 'dist\natives' $n) -Force }
+            "from=$t" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          Write-Host "no earlier full release has natives key $key"
+      - name: CodeSignTool
+        if: steps.reuse.outputs.from == '' && steps.decide.outputs.sign == 'true'
+        run: .\bin\download-codesigntool.ps1
+      - name: Sign the four natives
+        if: steps.reuse.outputs.from == '' && steps.decide.outputs.sign == 'true'
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\bin\sign.ps1 -CheckOnly
+          if ($LASTEXITCODE) { throw 'the eSigner credential check failed' }
+          $contract = Get-Content -Raw contract\artifacts.json | ConvertFrom-Json
+          $files = @($contract.natives.x64.injector, $contract.natives.x64.shim, $contract.natives.x86.injector, $contract.natives.x86.shim) |
+            ForEach-Object { Join-Path 'dist\natives' $_ }
+          .\bin\sign.ps1 -Path $files
+          if ($LASTEXITCODE) { throw 'signing failed' }
+          $bad = @(& .\bin\check-signatures.ps1 -Path $files)
+          if ($bad.Count) { throw "the signed natives fail the signature check: $($bad -join '; ')" }
+      - name: Package
+        id: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signed = ('${{ steps.reuse.outputs.from }}' -ne '') -or ('${{ steps.decide.outputs.sign }}' -eq 'true')
+          if ('${{ steps.decide.outputs.prerelease }}' -ne 'true' -and $env:TAG -and -not $signed) { throw 'a full release must have signed natives' }
+          $contract = Get-Content -Raw contract\artifacts.json | ConvertFrom-Json
+          $out = 'dist\out'
+          $natives = @($contract.natives.x64.injector, $contract.natives.x64.shim, $contract.natives.x86.injector, $contract.natives.x86.shim) |
+            ForEach-Object { Join-Path 'dist\natives' $_ }
+          Compress-Archive -LiteralPath $natives -DestinationPath "$out\natives.zip" -Force
+          $fixtures = @($contract.fixtures) | ForEach-Object { Join-Path 'target\release' $_ }
+          Compress-Archive -LiteralPath $fixtures -DestinationPath "$out\fixtures.zip" -Force
+          Compress-Archive -LiteralPath contract\artifacts.json, contract\env.json, crates\aether-protocol\tests\golden\vectors.txt -DestinationPath "$out\contract.zip" -Force
+          $sums = Get-ChildItem -LiteralPath $out -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower())  $($_.Name)"
+          }
+          [IO.File]::WriteAllText((Join-Path $PWD "$out\SHA256SUMS"), (($sums -join "`n") + "`n"))
+          Get-Content "$out\SHA256SUMS"
+          "signed=$($signed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+      - name: Publish the release
+        if: env.TAG != ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signed = '${{ steps.package.outputs.signed }}' -eq 'true'
+          $from = '${{ steps.reuse.outputs.from }}'
+          $natives = if ($from) { "signed, reused from $from" } elseif ($signed) { 'signed' } else { 'UNSIGNED (a prerelease for testing)' }
+          $notes = "Natives: $natives.`nNatives key: ${{ steps.key.outputs.key }}.`nCheck the assets with ``sha256sum -c SHA256SUMS``."
+          $flags = @()
+          if ('${{ steps.decide.outputs.prerelease }}' -eq 'true' -or -not $signed) { $flags += '--prerelease' }
+          $assets = Get-ChildItem -LiteralPath dist\out -File | ForEach-Object { $_.FullName }
+          gh release create $env:TAG @assets --title $env:TAG --notes $notes --verify-tag @flags
+          if ($LASTEXITCODE) { throw 'gh release create failed' }
+      - name: Upload the assets (a run without a tag)
+        if: env.TAG == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-release
+          path: dist/out

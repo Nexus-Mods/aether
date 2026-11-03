@@ -110,6 +110,23 @@ them.
 vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim
 builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history.
 
+## Releases
+
+A tag `v<semver>` makes a release ([`release.yml`](.github/workflows/release.yml))
+with `natives.zip` (the four natives), `fixtures.zip` (the test fixtures and
+the host-target injector and shim), `contract.zip` (`contract/artifacts.json`,
+`contract/env.json` and the protocol's golden vectors), `natives-key.txt` and
+`SHA256SUMS`. Check a download with `sha256sum -c SHA256SUMS`, and the
+natives' signatures with `bin\check-signatures.ps1 -Path <files> -Signer
+'CN=Black Tree Gaming Ltd, O=Black Tree Gaming Ltd, L=Exeter, C=GB'`.
+
+A tag without a `-` is a full release, and its natives are signed (SSL.com
+eSigner, [`bin/sign.ps1`](bin/sign.ps1)). A tag with one (`v0.2.0-rc.1`) is a
+prerelease for testing, with unsigned natives unless a manual run asks for
+signing. When an earlier full release has the same natives key, its signed
+natives are reused byte for byte, so a release that changes no native signs
+nothing. `bin\sign.tests.ps1` tests the signing script against fake tools.
+
 ## License
 
 GPL-3.0-or-later ([LICENSE](LICENSE)).

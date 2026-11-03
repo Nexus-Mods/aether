@@ -1,4 +1,4 @@
-//! What the test fixtures (`aether-fixture-*`) share.
+//! What the test fixtures (this crate's `aether-fixture-*` programs) share.
 //!
 //! A harness reads the shim's hook-stats report (`VFS_SHIM_STATS_LOG`) after a
 //! fixture exits, and asserts on it: an open was routed, a hook ran, a path was

@@ -36,39 +36,11 @@ const EXEMPT_CRATES: &[(&str, &str)] = &[
         "Windows-only crate (Win32 file mappings and volumes)",
     ),
     (
-        "aether-fixture-escape",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
-        "aether-fixture-nvapi",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
-        "aether-fixture-prefs",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
-        "aether-fixture-read",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
-        "aether-fixture-registry",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
         "aether-fixture-staticimp",
         "Windows fixture executable, runs under Wine",
     ),
     (
-        "aether-fixture-steam",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
         "aether-fixture-vproxy",
-        "Windows fixture executable, runs under Wine",
-    ),
-    (
-        "aether-fixture-writepath",
         "Windows fixture executable, runs under Wine",
     ),
 ];

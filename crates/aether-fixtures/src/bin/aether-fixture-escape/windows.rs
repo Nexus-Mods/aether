@@ -1604,10 +1604,10 @@ pub fn main() {
     // Stay until the shim's stats report covers every vector above: a
     // caller reads it after exit for evidence that each vector's open was
     // classified, and the last vectors land within milliseconds of exit
-    // (aether_fixture_support says why a fixed wait isn't enough).
-    if let Err(e) = aether_fixture_support::outlive_a_covering_report() {
+    // (aether_fixtures says why a fixed wait isn't enough).
+    if let Err(e) = aether_fixtures::outlive_a_covering_report() {
         eprintln!("aether-fixture-escape: no covering stats report [21]: {e}");
-        std::process::exit(aether_fixture_support::NO_COVERING_REPORT_EXIT);
+        std::process::exit(aether_fixtures::NO_COVERING_REPORT_EXIT);
     }
 
     std::process::exit(0);

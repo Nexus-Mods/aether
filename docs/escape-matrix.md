@@ -597,7 +597,7 @@ comfortably clearing that granularity regardless of the configured
 interval. (Later, 2026-10-30: a floor bounds the fixture's sleep, not whether
 the reporter thread runs in it, and on a loaded 2-vCPU CI runner it often
 didn't. The fixtures now wait until the report on disk has been replaced
-twice after their last call, `aether_fixture_support::outlive_a_covering_report`.)
+twice after their last call, `aether_fixtures::outlive_a_covering_report`.)
 
 **A methodology fix, not a production change: vector 7's junction is now
 created by the test harness, not the fixture.** `aether-fixture-escape`'s own

@@ -18,6 +18,12 @@ the provider re-exports are gone), the case fold is the new dependency-free
 `aether-casefold` (`aether_casefold::fold`, `cmp_ci`), and vpath normalization,
 `wildcard_match` and `finalname` are `aether-redirect`'s; the merged-tree
 resolver, the provider traits and the conformance suite went with them.
+The fixtures are three crates instead of nine: `aether-fixtures` (the seven
+`aether-fixture-*.exe` programs, under the same names, and the shared
+library that was `aether-fixture-support`), `aether-fixture-vproxy` and
+`aether-fixture-staticimp`; build them with
+`cargo build -p aether-fixtures -p aether-fixture-vproxy`, then
+`cargo build -p aether-fixture-staticimp`.
 
 ## Unreleased (remote-thread injection is the only activation)
 

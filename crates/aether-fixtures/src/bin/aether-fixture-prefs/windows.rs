@@ -416,11 +416,11 @@ pub fn main() {
     }
     // Stay until the shim's stats report covers every call above: the
     // harness reads it after exit for the hook rows and the synthetic-lock
-    // section, and this whole run is a few milliseconds (aether_fixture_support
+    // section, and this whole run is a few milliseconds (aether_fixtures
     // says why a fixed wait isn't enough).
-    if let Err(e) = aether_fixture_support::outlive_a_covering_report() {
+    if let Err(e) = aether_fixtures::outlive_a_covering_report() {
         eprintln!("FIXTURE FAIL [21]: {e}");
-        exit(aether_fixture_support::NO_COVERING_REPORT_EXIT);
+        exit(aether_fixtures::NO_COVERING_REPORT_EXIT);
     }
     exit(0);
 }

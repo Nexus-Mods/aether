@@ -5,8 +5,9 @@
 #   bin/build-natives.ps1 [-Fixtures] [-Out <dir>] [-RequireDumpbin]
 #
 #   -Out             where the four are staged (default target/natives)
-#   -Fixtures        also build the test fixtures (every aether-fixture-* crate and
-#                    aether-inject's aether-probe) and the host-target injector and
+#   -Fixtures        also build the test fixtures (aether-fixtures' programs,
+#                    aether-fixture-vproxy and -staticimp, and aether-inject's
+#                    aether-probe) and the host-target injector and
 #                    shim into target/release, where the tests (and a
 #                    director's) look
 #   -RequireDumpbin  fail, rather than warn, when dumpbin (Visual Studio's MSVC
@@ -123,7 +124,7 @@ try {
     Invoke-Step 'build host injector and shim' { cargo build --release -p aether-inject -p aether-shim-dll }
     # vproxy's import library must exist before staticimp links against it
     Invoke-Step 'build fixtures' {
-      cargo build --release -p aether-fixture-read -p aether-fixture-writepath -p aether-fixture-escape -p aether-fixture-prefs -p aether-fixture-vproxy -p aether-fixture-registry -p aether-fixture-steam -p aether-fixture-nvapi
+      cargo build --release -p aether-fixtures -p aether-fixture-vproxy
     }
     Invoke-Step 'build fixture staticimp' { cargo build --release -p aether-fixture-staticimp }
     # Every file the tests read from target/release (contract/artifacts.json's

@@ -25,9 +25,9 @@
 //! existing path did not fail as expected, 17 in-place open refused, 18
 //! in-place content missing or short (a blank destination, not a seeded
 //! copy-up), 19 in-place write, 20 in-place readback mismatch, 21
-//! (`aether_fixture_support::NO_COVERING_REPORT_EXIT`) no
+//! (`aether_fixtures::NO_COVERING_REPORT_EXIT`) no
 //! `VFS_SHIM_STATS_LOG` report covering the run appeared (see
-//! `aether_fixture_support::outlive_a_covering_report`).
+//! `aether_fixtures::outlive_a_covering_report`).
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
@@ -270,10 +270,10 @@ fn main() {
 
     // Stay until the shim's stats report covers everything above: the
     // harness reads it after exit, and these last opens land microseconds
-    // before it (aether_fixture_support says why a fixed wait isn't enough).
-    if let Err(e) = aether_fixture_support::outlive_a_covering_report() {
+    // before it (aether_fixtures says why a fixed wait isn't enough).
+    if let Err(e) = aether_fixtures::outlive_a_covering_report() {
         eprintln!("WRITEPATH FIXTURE FAIL [21]: {e}");
-        exit(aether_fixture_support::NO_COVERING_REPORT_EXIT);
+        exit(aether_fixtures::NO_COVERING_REPORT_EXIT);
     }
     exit(0);
 }

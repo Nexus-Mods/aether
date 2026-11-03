@@ -1,0 +1,77 @@
+[package]
+name = "aether-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The test fixtures: Windows programs the tests run under the shim, and what they share"
+# Every bin is declared below, under the executable name the tests and
+# contract/artifacts.json look for.
+autobins = false
+
+# What the fixtures share: waiting, before exit, for a shim stats report that
+# covers the run.
+[lib]
+name = "aether_fixtures"
+path = "src/lib.rs"
+
+# Reads a virtual file (and the phases its environment switches add).
+[[bin]]
+name = "aether-fixture-read"
+path = "src/bin/aether-fixture-read/main.rs"
+
+# The write path.
+[[bin]]
+name = "aether-fixture-writepath"
+path = "src/bin/aether-fixture-writepath/main.rs"
+
+# Paths that try to escape the managed root.
+[[bin]]
+name = "aether-fixture-escape"
+path = "src/bin/aether-fixture-escape/main.rs"
+
+# The INI profile API.
+[[bin]]
+name = "aether-fixture-prefs"
+path = "src/bin/aether-fixture-prefs/main.rs"
+
+# Registry probe for the registry overlay's end-to-end test: a scripted Win32
+# registry sequence whose transcript must not change when the overlay is on.
+[[bin]]
+name = "aether-fixture-registry"
+path = "src/bin/aether-fixture-registry/main.rs"
+
+# Steam API probe for the Proton launch path: loads a game's own
+# steam_api64.dll and reports what it sees of the Steam client.
+[[bin]]
+name = "aether-fixture-steam"
+path = "src/bin/aether-fixture-steam/main.rs"
+
+# NVAPI probe for the Proton launch path: initialises NVAPI and loads NGX.
+[[bin]]
+name = "aether-fixture-nvapi"
+path = "src/bin/aether-fixture-nvapi/main.rs"
+
+[dependencies]
+aether-env.workspace = true
+
+# The union of what the bins call: read (files, I/O, threads, toolhelp, the
+# loader) and registry (security, the registry).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+aether-testkit.workspace = true
+
+[lints]
+workspace = true

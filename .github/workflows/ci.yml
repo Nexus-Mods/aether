@@ -63,7 +63,7 @@ jobs:
       # (cargo#6313), so on a clean target dir vproxy must be built first or
       # the link fails with LNK1181. Hence two builds, in this order.
       - name: Build inject artifacts
-        run: cargo build -p aether-inject -p aether-shim-dll -p aether-fixture-read -p aether-fixture-writepath -p aether-fixture-escape -p aether-fixture-prefs -p aether-fixture-vproxy && cargo build -p aether-fixture-staticimp
+        run: cargo build -p aether-inject -p aether-shim-dll -p aether-fixtures -p aether-fixture-vproxy && cargo build -p aether-fixture-staticimp
       # `--no-fail-fast`: without it cargo stops at the first failing test
       # binary and hides how much of the suite broke. No `-p`: every member.
       - name: Rust tests (every crate)
@@ -100,7 +100,7 @@ jobs:
     timeout-minutes: 75
     env:
       # Every crate that builds on Linux. The rest (aether-shim, aether-shim-dll,
-      # aether-inject, aether-win, aether-fixture-*) pull Windows-only code (`retour`,
+      # aether-inject, aether-win, aether-fixture*) pull Windows-only code (`retour`,
       # Win32) and are linted and tested by the windows job.
       LINUX_CRATES: >-
         -p aether-ipc -p aether-protocol -p aether-casefold -p aether-pe

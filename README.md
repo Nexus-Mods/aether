@@ -92,12 +92,16 @@ The ones that ship:
 | `aether-pe` | Pure PE byte parsing |
 | `aether-env` | Every `VFS_*` environment switch, defined once |
 
-The test fixtures, Windows programs the tests run under the shim:
+The test fixtures, Windows programs the tests run under the shim, are three
+crates. `aether-fixtures` holds seven programs and the library they share:
 `aether-fixture-read` (reads a virtual file), `-writepath` (the write path),
 `-escape` (paths that try to escape the managed root), `-prefs` (the INI profile
-API), `-vproxy` and `-staticimp` (a statically imported proxy DLL, pre-init
-injection), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and
-the registry overlay). `aether-testkit` holds helpers shared by the tests.
+API), `-steam`, `-nvapi` and `-registry` (probes for the Proton path and the
+registry overlay). `aether-fixture-vproxy` and `aether-fixture-staticimp` are a
+statically imported proxy DLL and the program that imports it (pre-init
+injection); staticimp links vproxy's import library, so vproxy is built first,
+in a cargo invocation of its own (cargo#6313). `aether-testkit` holds helpers
+shared by the tests.
 
 Directors live outside this repository. The shim's tests run against their own
 fake director (`crates/aether-shim/tests/fakedirector`), which answers the file

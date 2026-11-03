@@ -899,7 +899,8 @@ observer before concluding the process is idle.
 | `aether-shim` / `aether-shim-dll` | NT detours, the director client, synthetic handles, sections, registry hooks |
 | `aether-inject` | injection and process creation (`aether-injector`) |
 | `aether-pe` | pure PE byte parsing, so any host can stage Windows executables |
-| `vfs-fixture-*` | Windows probe programs the tests run under the shim |
+| `aether-fixtures` | the test fixtures: Windows probe programs the tests run under the shim (`aether-fixture-read`, `-writepath`, `-escape`, `-prefs`, `-registry`, `-steam`, `-nvapi`) and the library they share |
+| `aether-fixture-vproxy` / `aether-fixture-staticimp` | a proxy DLL (`vproxy.dll`) and a program that imports it statically, for injection before static imports initialise; built in that order, in two cargo invocations (cargo#6313) |
 | `aether-testkit` | dev-only helpers shared by integration tests |
 | `vfs-bench` | (not imported) `ring-bench` and `skyrim-live`, the benchmark and live-launch harnesses |
 

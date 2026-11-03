@@ -15,40 +15,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-fixture-escape"
-version = "0.1.0"
-dependencies = [
- "aether-env",
- "aether-fixture-support",
-]
-
-[[package]]
-name = "aether-fixture-nvapi"
-version = "0.1.0"
-
-[[package]]
-name = "aether-fixture-prefs"
-version = "0.1.0"
-dependencies = [
- "aether-env",
- "aether-fixture-support",
-]
-
-[[package]]
-name = "aether-fixture-read"
-version = "0.1.0"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "aether-fixture-registry"
-version = "0.1.0"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "aether-fixture-staticimp"
 version = "0.1.0"
 dependencies = [
@@ -56,27 +22,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-fixture-steam"
-version = "0.1.0"
-
-[[package]]
-name = "aether-fixture-support"
-version = "0.1.0"
-dependencies = [
- "aether-env",
- "aether-testkit",
-]
-
-[[package]]
 name = "aether-fixture-vproxy"
 version = "0.1.0"
 
 [[package]]
-name = "aether-fixture-writepath"
+name = "aether-fixtures"
 version = "0.1.0"
 dependencies = [
  "aether-env",
- "aether-fixture-support",
+ "aether-testkit",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -487,6 +487,59 @@ STAGE_EXEC:
 A director must look paths up case-insensitively under the same fold, and must
 treat a path that would leave its root (`..` above the root) as an error.
 
+#### Case folding
+
+The fold is part of the wire: the shim sends folded paths, and a director has
+to agree with it about which names are the same name.
+
+**The function.** `fold(s)` replaces every character of `s` with its Rust
+`char::to_lowercase` (the Unicode lowercase mapping, including the
+unconditional multi-character mappings of `SpecialCasing.txt`), character by
+character. An all-ASCII string is lowercased byte by byte, which gives the same
+result. There is no locale, no context and no normalisation:
+
+- `Σ` always folds to `σ`; the final-sigma rule of `str::to_lowercase` is not
+  applied, because the fold works one character at a time.
+- Composed and decomposed forms stay different names: `é` (U+00E9) and `e`
+  plus U+0301 do not fold to the same string.
+- The mapping is the one of the Unicode version in the Rust standard library
+  the release was built with (`rust-toolchain.toml`).
+
+Source: `crates/aether-core/src/casefold.rs`.
+
+**Two properties it does not have:**
+
+1. It does not preserve length. `İ` (U+0130) is two bytes in UTF-8 and folds
+   to three (`i` followed by U+0307). Never cut a folded string at an offset
+   measured on the unfolded one; compare component by component.
+2. It is not Windows' case equivalence. NTFS compares names through its
+   uppercase table, one UTF-16 unit at a time. `İ` folds to a different name
+   under this fold, not to a case variant of itself, so "the folded spelling
+   names the same file on NTFS" is not a valid argument for any name that
+   reaches a real filesystem.
+
+**What a director must do:**
+
+- Treat two names as the same entry exactly when their folds are equal: key
+  and compare by `fold`, never by a different lowercasing (ASCII-only, a
+  locale's, or NTFS's). The shim's caches depend on this equality. The read
+  cache keeps a file's blocks under (root, folded path), the name cache keeps
+  stored spellings under folded paths, and the registry cache keeps keys under
+  folded paths. A delete or rename drops entries by folded path. If the
+  director considered two spellings one file while their folds differed, a
+  rename through one spelling would leave the other's cached blocks in place,
+  and the game would read stale bytes.
+- Keep the spelling a name was created with. A request that creates a name (a
+  write OPEN, MKDIR, a RENAME's target) carries the caller's spelling, and
+  STORED_NAMES and READDIR answer with stored spellings. The fold is for
+  matching only.
+- Fold `Registry`, `Machine`, `User` and every key and value name the same way
+  (section 4).
+
+Changing the fold changes the wire: a director built against one fold
+disagrees with a shim built against another about which names are equal. Any
+change to it is a wire version bump (section 7).
+
 **Path syntax a director should accept:** `/`-separated, no leading slash,
 `"."` for the root; that is the only form the shim sends. The existing
 directors differ on anything else, so a client must not rely on it:

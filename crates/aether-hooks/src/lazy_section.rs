@@ -19,9 +19,21 @@
 //! chunk made readable. Another thread that touches the chunk meanwhile
 //! faults, waits for the fill in the handler (`FILL_LOCK`), and then reads
 //! the bytes. Where a second view cannot fill ([`second_view_fills`]: a host
-//! whose `NtAllocateVirtualMemory` will not commit inside a view), the
-//! region is private memory committed readable before its fill, as before,
-//! and there another thread can read the chunk's zeros while it fills.
+//! whose second view does not see the first view's commit), or the region's
+//! section cannot be had (the commit or pool limit, 32-bit address space),
+//! the region is private memory committed readable before its fill, as
+//! before, and there another thread can read the chunk's zeros while it
+//! fills. Each region's backing is counted (`hookstats::lazy_region_count`).
+//!
+//! **Cost.** A private `MEM_RESERVE` charges nothing until a chunk is
+//! committed. A mapped `SEC_RESERVE` section does: measured on Windows 11
+//! (`GetPerformanceInfo` around a mapping), about 4 MiB of commit and 2 MiB
+//! of paged pool per GiB of file, before any chunk is filled (a 64 GiB
+//! region: 257 MiB and 128 MiB), most likely page tables and prototype PTEs.
+//! Created but not mapped it costs about nothing. So a load order with tens
+//! of GiB of archives above the eager limit pays a few hundred MiB of commit
+//! and about 100 MiB of paged pool for them. A region whose section cannot
+//! be had at that price takes the private fallback, not a failed section.
 #![allow(unsafe_code)]
 
 use core::cell::Cell;
@@ -247,22 +259,8 @@ unsafe fn fill_into(
     let client = crate::director::global()?;
     let dest = match target {
         Target::At(a) => a,
-        Target::View { section, offset } => {
-            // SAFETY: an open section, mapped for this fill only.
-            let v = unsafe {
-                MapViewOfFile(
-                    section as _,
-                    FILE_MAP_WRITE,
-                    (offset >> 32) as u32,
-                    offset as u32,
-                    span,
-                )
-            };
-            if v.Value.is_null() {
-                return None;
-            }
-            v.Value as usize
-        }
+        // SAFETY: an open section, mapped for this fill only.
+        Target::View { section, offset } => unsafe { second_view(section, offset, span) }?,
     };
     // SAFETY: `span` writable bytes at `dest`, per the contract or the view.
     let out = unsafe { core::slice::from_raw_parts_mut(dest as *mut u8, span) };
@@ -277,42 +275,107 @@ unsafe fn fill_into(
     n
 }
 
+/// A writable view of `span` bytes of `section` at `offset`, only where
+/// those pages are committed and writable in it (`VirtualQuery`); `None`,
+/// with nothing mapped, otherwise. So a host whose second view does not see
+/// the first view's commit refuses the fill rather than taking an access
+/// violation the handler would not serve (the fill worker's, or one inside
+/// the program's `NtCreateSection`).
+///
+/// # Safety
+/// `section` is an open section at least `offset + span` bytes long.
+unsafe fn second_view(section: usize, offset: u64, span: usize) -> Option<usize> {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+    // SAFETY: per the contract; the view is unmapped here unless returned.
+    unsafe {
+        let v = MapViewOfFile(
+            section as _,
+            FILE_MAP_WRITE,
+            (offset >> 32) as u32,
+            offset as u32,
+            span,
+        );
+        if v.Value.is_null() {
+            return None;
+        }
+        let mut m: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
+        let n = VirtualQuery(
+            v.Value,
+            &mut m,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        );
+        if n == 0 || m.State != MEM_COMMIT || m.Protect != PAGE_READWRITE || m.RegionSize < span {
+            UnmapViewOfFile(v);
+            return None;
+        }
+        Some(v.Value as usize)
+    }
+}
+
+/// The probe's answer, once it is definite: 0 not yet, 1 works, 2 cannot.
+static SECOND_VIEW: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// Whether a chunk can be filled through a second view while the region's
 /// own view of it stays inaccessible: a commit `PAGE_NOACCESS` inside a view
-/// of a `SEC_RESERVE` section, a write through another view, a protection
-/// change, and the byte read back through the first. Probed once per
-/// process; a host that cannot keeps private-memory regions.
-fn second_view_fills() -> bool {
-    static WORKS: OnceLock<bool> = OnceLock::new();
+/// of a `SEC_RESERVE` section, a write through another view (only once
+/// [`second_view`] has seen it committed), a protection change, and the byte
+/// read back through the first.
+///
+/// `Some` is definite and kept for the process: the host does it, or the
+/// sequence ran and misbehaved. `None` (a section, commit or view that could
+/// not be had, at the commit or pool limit say) is asked again at the next
+/// section, which meanwhile takes private memory.
+fn second_view_fills() -> Option<bool> {
+    match SECOND_VIEW.load(Ordering::Acquire) {
+        1 => return Some(true),
+        2 => return Some(false),
+        _ => {}
+    }
     // SAFETY: a section and views this function creates and releases.
-    *WORKS.get_or_init(|| unsafe {
-        let Some((base, section)) = reserve_shared(CHUNK) else {
-            return false;
-        };
-        let ok = 'probe: {
+    let answer = unsafe {
+        let (base, section) = reserve_shared(CHUNK)?;
+        let answer = 'probe: {
             if VirtualAlloc(base as _, PAGE, MEM_COMMIT, PAGE_NOACCESS).is_null() {
-                break 'probe false;
+                break 'probe None;
             }
-            let v = MapViewOfFile(section as _, FILE_MAP_WRITE, 0, 0, PAGE);
-            if v.Value.is_null() {
-                break 'probe false;
-            }
-            core::ptr::write_volatile(v.Value as *mut u8, 0x5A);
-            UnmapViewOfFile(v);
+            let Some(v) = second_view(section, 0, PAGE) else {
+                // Committed in the first view, not in the second.
+                break 'probe Some(false);
+            };
+            core::ptr::write_volatile(v as *mut u8, 0x5A);
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ });
             let mut old = 0;
-            VirtualProtect(base as _, PAGE, PAGE_READWRITE, &mut old) != 0
-                && old == PAGE_NOACCESS
-                && core::ptr::read_volatile(base as *const u8) == 0x5A
+            Some(
+                VirtualProtect(base as _, PAGE, PAGE_READWRITE, &mut old) != 0
+                    && old == PAGE_NOACCESS
+                    && core::ptr::read_volatile(base as *const u8) == 0x5A,
+            )
         };
         release_va(base, section);
-        ok
-    })
+        answer
+    }?;
+    SECOND_VIEW.store(if answer { 1 } else { 2 }, Ordering::Release);
+    Some(answer)
+}
+
+/// A test's "no pagefile section can be had" ([`fail_shared_reserve`]).
+#[cfg(feature = "test-support")]
+static FAIL_SHARED: AtomicBool = AtomicBool::new(false);
+
+/// While `on`, [`reserve_shared`] fails, as at the commit or pool limit.
+#[cfg(feature = "test-support")]
+pub(crate) fn fail_shared_reserve(on: bool) {
+    FAIL_SHARED.store(on, Ordering::Relaxed);
 }
 
 /// A pagefile section of `len` bytes with nothing committed (`SEC_RESERVE`),
 /// and one writable view of all of it: the view's address and the section's
 /// handle.
 unsafe fn reserve_shared(len: usize) -> Option<(usize, usize)> {
+    #[cfg(feature = "test-support")]
+    if FAIL_SHARED.load(Ordering::Relaxed) {
+        return None;
+    }
     let len64 = len as u64;
     // SAFETY: an unnamed pagefile section; the view is of all of it.
     unsafe {
@@ -375,14 +438,32 @@ pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option
         ensure_veh();
     }
     ensure_worker();
-    let (base_u, section) = if second_view_fills() {
-        reserve_shared(reserved)?
-    } else {
-        let base = VirtualAlloc(core::ptr::null(), reserved, MEM_RESERVE, PAGE_NOACCESS);
-        if base.is_null() {
-            return None;
+    // A section of its own where the host fills through a second view and
+    // one can be had; otherwise private memory, which maps the file all the
+    // same but can show a chunk's zeros mid-fill. Decided per section and
+    // counted (`hookstats::lazy_region_count`).
+    use crate::hookstats::{note_lazy_region, LazyBacking};
+    let shared = match second_view_fills() {
+        Some(true) => match reserve_shared(reserved) {
+            Some(s) => Ok(s),
+            None => Err(LazyBacking::PrivateReserveFailed),
+        },
+        Some(false) => Err(LazyBacking::PrivateNoSecondView),
+        None => Err(LazyBacking::PrivateReserveFailed),
+    };
+    let (base_u, section) = match shared {
+        Ok(s) => {
+            note_lazy_region(LazyBacking::Shared);
+            s
         }
-        (base as usize, 0)
+        Err(why) => {
+            let base = VirtualAlloc(core::ptr::null(), reserved, MEM_RESERVE, PAGE_NOACCESS);
+            if base.is_null() {
+                return None;
+            }
+            note_lazy_region(why);
+            (base as usize, 0)
+        }
     };
     if !track(base_u, reserved, file_size, fh, true, section) {
         release_va(base_u, section);
@@ -933,6 +1014,27 @@ mod tests {
         );
     }
 
+    /// A second view is written only where its pages are committed and
+    /// writable: over an uncommitted range it is refused (not written, so a
+    /// host whose views do not share commit cannot crash the process), and
+    /// once the first view commits the range it is given.
+    #[test]
+    fn a_second_view_of_an_uncommitted_range_is_refused() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, section) = unsafe { reserve_shared(CHUNK) }.expect("a section");
+        assert!(
+            unsafe { second_view(section, 0, PAGE) }.is_none(),
+            "a view of uncommitted pages was handed out"
+        );
+        assert!(!unsafe { VirtualAlloc(base as _, PAGE, MEM_COMMIT, PAGE_NOACCESS) }.is_null());
+        let v = unsafe { second_view(section, 0, PAGE) }.expect("a view of committed pages");
+        unsafe {
+            core::ptr::write_volatile(v as *mut u8, 7);
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ });
+            release_va(base, section);
+        }
+    }
+
     #[test]
     fn two_views_at_one_base_are_refcounted() {
         let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -990,8 +1092,9 @@ mod tests {
     #[test]
     fn a_demand_paged_region_is_a_section_view_here() {
         let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(
+        assert_eq!(
             second_view_fills(),
+            Some(true),
             "this host cannot fill through a second view"
         );
         let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");

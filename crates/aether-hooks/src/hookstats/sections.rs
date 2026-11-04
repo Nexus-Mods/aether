@@ -15,9 +15,84 @@
 //!
 //! A failed demand-paged fill that a retry then filled is in the fills'
 //! `failed` count ([`super::note_fill_end`]), not here.
+//!
+//! Also here, ungated: how each demand-paged region is backed
+//! ([`lazy_region_count`]), which says whether a chunk can be read mid-fill
+//! (`crate::lazy_section`, "Filling"):
+//!
+//! | Label | Counted when |
+//! |---|---|
+//! | `shared` | the region is a view of its own pagefile section: no chunk is readable before its fill |
+//! | `private-no-second-view` | this host cannot fill through a second view: private memory, a chunk is readable mid-fill |
+//! | `private-reserve-failed` | the region's section could not be had (commit or pool limit, address space): private memory, as above |
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
+
+/// How a demand-paged region is backed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub(crate) enum LazyBacking {
+    Shared = 0,
+    PrivateNoSecondView = 1,
+    PrivateReserveFailed = 2,
+}
+
+/// Number of [`LazyBacking`]s.
+pub(super) const LAZY_BACKING_N: usize = 3;
+
+impl LazyBacking {
+    const ALL: [LazyBacking; LAZY_BACKING_N] = [
+        LazyBacking::Shared,
+        LazyBacking::PrivateNoSecondView,
+        LazyBacking::PrivateReserveFailed,
+    ];
+
+    /// The label the count and the report use.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            LazyBacking::Shared => "shared",
+            LazyBacking::PrivateNoSecondView => "private-no-second-view",
+            LazyBacking::PrivateReserveFailed => "private-reserve-failed",
+        }
+    }
+}
+
+pub(super) static LAZY_REGIONS: [AtomicU64; LAZY_BACKING_N] =
+    [const { AtomicU64::new(0) }; LAZY_BACKING_N];
+
+/// Record how a new demand-paged region is backed.
+pub(crate) fn note_lazy_region(backing: LazyBacking) {
+    LAZY_REGIONS[backing as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many demand-paged regions were backed as `label` says (see the
+/// module's second table); 0 for a label that names none.
+pub fn lazy_region_count(label: &str) -> u64 {
+    LazyBacking::ALL
+        .iter()
+        .find(|k| k.label() == label)
+        .map_or(0, |k| LAZY_REGIONS[*k as usize].load(Ordering::Relaxed))
+}
+
+/// The counts, by id.
+pub(super) fn lazy_regions_snapshot() -> [u64; LAZY_BACKING_N] {
+    core::array::from_fn(|i| LAZY_REGIONS[i].load(Ordering::Relaxed))
+}
+
+/// The regions' backings, one line, when any region was made private: the
+/// line that says a chunk could be read mid-fill in this process.
+pub(super) fn render_lazy_regions(snap: &Snapshot) -> String {
+    let [shared, no_view, reserve] = snap.lazy_regions;
+    if no_view == 0 && reserve == 0 {
+        return String::new();
+    }
+    format!(
+        "demand-paged regions: shared {shared} / private (no second-view fill) {no_view} / \
+         private (section reserve failed) {reserve}   <-- private regions can show a chunk's \
+         zeros mid-fill\n"
+    )
+}
 
 /// What could not be filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

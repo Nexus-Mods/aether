@@ -316,6 +316,9 @@ fn a_lazy_section_fills_on_first_touch_only() {
     let file = open(&root.join(FILE), GENERIC_READ);
     let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
     let v = view(section);
+    // Filled through a second view: the path this host takes.
+    assert_eq!(aether_hooks::lazy_region_count("shared"), 1);
+    assert_eq!(aether_hooks::lazy_region_count("private-reserve-failed"), 0);
 
     let mark = served.recorder.mark();
     assert!(bytes(v, TOUCH, PAGE) == want[TOUCH..TOUCH + PAGE]);
@@ -757,6 +760,40 @@ fn an_unmap_naming_this_process_by_a_real_handle_retires_a_synthetic_view() {
     let again = unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ }) };
     assert_eq!(again, 0, "the synthetic view was not retired");
     close(me);
+    close(section);
+    close(file);
+}
+
+/// A demand-paged section whose own pagefile section cannot be had (the
+/// test switch; in the field, the commit or pool limit, or 32-bit address
+/// space) is still made, from private memory, and counted as such.
+#[test]
+fn a_lazy_section_whose_section_reserve_fails_is_private_and_still_reads() {
+    isolate!();
+    aether_hooks::fail_shared_lazy_reserve(true);
+    let want = pattern(LAZY);
+    let (root, served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("the section, from private memory");
+    let v = view(section);
+    assert_eq!(aether_hooks::lazy_region_count("private-reserve-failed"), 1);
+    assert_eq!(aether_hooks::lazy_region_count("shared"), 0);
+    let mark = served.recorder.mark();
+    assert!(bytes(v, TOUCH, CHUNK) == want[TOUCH..TOUCH + CHUNK]);
+    assert_eq!(read_offsets(served, mark), [TOUCH as u64]);
+    unmap(v);
+    close(section);
+    close(file);
+
+    // The switch off, the next section takes the shared path again: a
+    // failure is not kept for the process.
+    aether_hooks::fail_shared_lazy_reserve(false);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section);
+    assert_eq!(aether_hooks::lazy_region_count("shared"), 1);
+    assert!(bytes(v, TOUCH, PAGE) == want[TOUCH..TOUCH + PAGE]);
+    unmap(v);
     close(section);
     close(file);
 }

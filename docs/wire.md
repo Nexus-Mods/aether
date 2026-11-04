@@ -845,6 +845,17 @@ filled on first touch is asked again up to three times and then raises
 `STATUS_IN_PAGE_ERROR`, as NT does when a mapped file's paging read fails.
 Past `size`, a page holds zeros.
 
+None of this changes what the director sees; it is how the shim holds the
+bytes (`crates/aether-hooks/src/lazy_section.rs`). A section filled on first
+touch (a file over 256 MiB) is a view of a pagefile section of the shim's
+own, so no thread reads a page before its fill is in place. That costs about
+4 MiB of commit and 2 MiB of paged pool per GiB of file while it is mapped
+(measured on Windows 11), before any page is filled. Where that section
+cannot be had, or the host cannot fill through a second view, the shim
+uses private memory instead, which costs nothing up front but can show a
+page's zeros to another thread while the page fills; the stats report counts
+each kind.
+
 #### 3.4.5 WRITE (6)
 
 Request (`Request::Write`):

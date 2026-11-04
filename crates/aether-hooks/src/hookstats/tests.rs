@@ -283,6 +283,7 @@ fn empty_snapshot() -> Snapshot {
         fills_completed: 0,
         fills_failed: 0,
         section_failures: [0; super::sections::SECTION_FAILURE_N],
+        lazy_regions: [0; super::sections::LAZY_BACKING_N],
         last_in_page_addr: 0,
         fill_bytes: 0,
         fill_nanos: 0,
@@ -445,4 +446,21 @@ fn a_section_failure_is_counted_by_label_and_reported() {
     assert!(s.contains("in-page-error"), "{s}");
     assert!(!s.contains("eager-fill"), "{s}");
     assert!(s.contains("0x12340000"), "{s}");
+}
+
+#[test]
+fn a_lazy_region_s_backing_is_counted_and_a_private_one_reported() {
+    let before = lazy_region_count("private-reserve-failed");
+    note_lazy_region(LazyBacking::PrivateReserveFailed);
+    assert_eq!(lazy_region_count("private-reserve-failed"), before + 1);
+    assert_eq!(lazy_region_count("no-such-label"), 0);
+
+    let mut snap = empty_snapshot();
+    snap.lazy_regions = [5, 0, 0];
+    assert_eq!(super::sections::render_lazy_regions(&snap), "");
+    snap.lazy_regions = [5, 1, 2];
+    let s = super::sections::render_lazy_regions(&snap);
+    assert!(s.contains("shared 5"), "{s}");
+    assert!(s.contains("no second-view fill) 1"), "{s}");
+    assert!(s.contains("section reserve failed) 2"), "{s}");
 }

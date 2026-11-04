@@ -33,6 +33,7 @@ pub(super) struct Snapshot {
     pub(super) fills_completed: u64,
     pub(super) fills_failed: u64,
     pub(super) section_failures: [u64; sections::SECTION_FAILURE_N],
+    pub(super) lazy_regions: [u64; sections::LAZY_BACKING_N],
     pub(super) last_in_page_addr: usize,
     pub(super) fill_bytes: u64,
     pub(super) fill_nanos: u64,
@@ -115,6 +116,7 @@ pub(super) fn snapshot() -> Snapshot {
         fills_completed: FILLS_COMPLETED.load(Ordering::Relaxed),
         fills_failed: FILLS_FAILED.load(Ordering::Relaxed),
         section_failures: sections::section_failures_snapshot(),
+        lazy_regions: sections::lazy_regions_snapshot(),
         last_in_page_addr: sections::LAST_IN_PAGE_ADDR.load(Ordering::Relaxed),
         fill_bytes: FILL_BYTES.load(Ordering::Relaxed),
         fill_nanos: FILL_NANOS.load(Ordering::Relaxed),
@@ -271,7 +273,7 @@ pub(super) fn banner() -> String {
 pub(super) fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render_child_inject_refused(&snap),
@@ -280,6 +282,7 @@ pub(super) fn render_report() -> String {
         render_read_cache(&snap),
         render_async(&snap),
         render_fills(&snap),
+        sections::render_lazy_regions(&snap),
         render_name_queries(&snap),
         render_reg_fallbacks(&snap),
         render_stats(&snap),

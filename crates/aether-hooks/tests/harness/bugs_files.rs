@@ -287,8 +287,10 @@ fn query_dir(h: HANDLE, len: usize, restart: bool) -> (i32, Vec<String>) {
             let next = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
             let n = u32::from_le_bytes(buf[off + 60..off + 64].try_into().unwrap()) as usize;
             let units: Vec<u16> = buf[off + 64..off + 64 + n]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             names.push(String::from_utf16_lossy(&units));
             if next == 0 {

@@ -131,10 +131,10 @@ unsafe fn fuse_create_section(
             return STATUS_UNSUCCESSFUL;
         };
         let mut pe = vec![0u8; size as usize];
-        match client.read_fragmented(fh, 0, &mut pe) {
-            Ok(n) if n == pe.len() => {}
-            Ok(n) if n > 0 => pe.truncate(n),
-            _ => return STATUS_INVALID_FILE_FOR_SECTION,
+        // Whole or not at all, as a data section's fill (docs/wire.md 3.4.4):
+        // a truncated image is not the file.
+        if !read_whole_retrying(client, fh, &mut pe) {
+            return STATUS_UNSUCCESSFUL;
         }
         if !aether_pe::pe_looks_like_image(&pe) {
             return STATUS_INVALID_FILE_FOR_SECTION;
@@ -509,4 +509,22 @@ fn pe_cache_dir() -> std::path::PathBuf {
             .unwrap_or_else(|| std::env::temp_dir().join("vfs-pe-cache"))
     })
     .clone()
+}
+
+/// Read all of `buf` from the start of `fh`: the first try and up to
+/// [`crate::lazy_section::FILL_RETRIES`] more, none started after the
+/// client's deadline has passed since the first, as a demand-paged fill is
+/// asked again. `true` only when the director answered every byte.
+fn read_whole_retrying(client: &crate::director::FuseClient, fh: u64, buf: &mut [u8]) -> bool {
+    let started = std::time::Instant::now();
+    let mut tries = 0;
+    loop {
+        if matches!(client.read_fragmented(fh, 0, buf), Ok(n) if n == buf.len()) {
+            return true;
+        }
+        tries += 1;
+        if tries > crate::lazy_section::FILL_RETRIES || started.elapsed() >= client.deadline() {
+            return false;
+        }
+    }
 }

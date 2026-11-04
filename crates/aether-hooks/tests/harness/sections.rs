@@ -559,3 +559,74 @@ fn a_short_fill_at_the_file_s_end_is_zero_filled_as_nt_does() {
         close(file);
     }
 }
+
+// ---- image sections: reads that fail or come back short ------------------
+
+/// `System32\version.dll`'s bytes, to serve, with the shim told to write the
+/// image it hands the kernel beside a config in this test's own folder.
+fn system_dll() -> Vec<u8> {
+    let system = std::env::var_os("SystemRoot").expect("SystemRoot");
+    let pe = std::fs::read(Path::new(&system).join("System32").join("version.dll"))
+        .expect("a system DLL to serve");
+    let cfg = aether_testkit::tempdir().expect("temp folder");
+    std::env::set_var(aether_env::SHIM_CONFIG, cfg.path().join("shim.cfg"));
+    std::mem::forget(cfg);
+    pe
+}
+
+const DLL: &str = "bin/version.dll";
+
+#[test]
+fn a_short_image_read_fails_the_section() {
+    isolate!();
+    let pe = system_dll();
+    // OPEN gives the DLL's size; the director holds half of it.
+    let half = (pe.len() / 2) as u64;
+    let (root, served) = serve(
+        Fake::new().with(DLL, pe, ReadStyle::ShorterThanClaimed(half)),
+        false,
+    );
+    let file = open(&root.join(DLL), GENERIC_READ | GENERIC_EXECUTE);
+    let mark = served.recorder.mark();
+    assert_eq!(
+        mapping(file, PAGE_READONLY | SEC_IMAGE),
+        Err(ERROR_GEN_FAILURE),
+        "a short image read must fail the section as a failed eager fill does"
+    );
+    // The try and up to three more.
+    let tries = read_offsets(served, mark)
+        .iter()
+        .filter(|&&o| o == 0)
+        .count();
+    assert_eq!(
+        tries,
+        4,
+        "READs from offset 0: {:?}",
+        read_offsets(served, mark)
+    );
+    close(file);
+}
+
+#[test]
+fn an_image_read_that_fails_once_is_asked_again() {
+    isolate!();
+    let pe = system_dll();
+    let (root, served) = serve(Fake::new().with(DLL, pe.clone(), ReadStyle::Whole), false);
+    let file = open(&root.join(DLL), GENERIC_READ | GENERIC_EXECUTE);
+    let id = served.faults.arm(
+        Match {
+            op: Some(Opcode::Read),
+            path_prefix: Some(DLL.to_string()),
+            times: Some(1),
+            ..Match::default()
+        },
+        Fault::Status(Status::IoError),
+    );
+    let section = mapping(file, PAGE_READONLY | SEC_IMAGE).expect("an image section");
+    assert_eq!(served.faults.applied(id), 1, "the fault never fired");
+    let v = view(section);
+    assert_eq!(bytes(v, 0, 2), b"MZ");
+    unmap(v);
+    close(section);
+    close(file);
+}

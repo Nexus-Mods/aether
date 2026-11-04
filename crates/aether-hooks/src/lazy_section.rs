@@ -69,8 +69,9 @@ const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 use crate::ntdef::{STATUS_ACCESS_VIOLATION, STATUS_IN_PAGE_ERROR, STATUS_UNSUCCESSFUL};
 
 /// How many times a failed fill is asked again within one fault before the
-/// fault becomes `STATUS_IN_PAGE_ERROR`.
-const FILL_RETRIES: u32 = 3;
+/// fault becomes `STATUS_IN_PAGE_ERROR`, and a failed image read before its
+/// section fails.
+pub(crate) const FILL_RETRIES: u32 = 3;
 
 /// A shim-owned VA range backing one synthetic section.
 struct OwnedRegion {

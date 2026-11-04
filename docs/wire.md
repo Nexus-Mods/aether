@@ -810,9 +810,11 @@ len` means end of file; the shim stops there. Errors: unknown `fh`
 For a section over a file (a program's `CreateFileMappingW`), the shim takes
 OPEN's `size` as the file's end: a READ that fails, or answers short of
 `min(len, size - offset)`, fails the fill. A section filled at creation then
-fails (`STATUS_UNSUCCESSFUL`); a page filled on first touch is asked again up
-to three times and then raises `STATUS_IN_PAGE_ERROR`, as NT does when a
-mapped file's paging read fails. Past `size`, a page holds zeros.
+fails (`STATUS_UNSUCCESSFUL`); an image section (`SEC_IMAGE`) is read whole,
+asked again up to three times, and then fails (`STATUS_UNSUCCESSFUL`); a page
+filled on first touch is asked again up to three times and then raises
+`STATUS_IN_PAGE_ERROR`, as NT does when a mapped file's paging read fails.
+Past `size`, a page holds zeros.
 
 #### 3.4.5 WRITE (6)
 

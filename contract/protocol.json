@@ -385,14 +385,47 @@
     {"name": "cross-root", "number": -12}
   ],
   "open_flags": [
-    {"name": "read", "bit": 1},
-    {"name": "write", "bit": 2},
-    {"name": "create", "bit": 4},
-    {"name": "excl", "bit": 8},
-    {"name": "trunc", "bit": 16},
-    {"name": "append", "bit": 32}
+    {"name": "read", "mask": 1},
+    {"name": "write", "mask": 2},
+    {"name": "create", "mask": 4},
+    {"name": "excl", "mask": 8},
+    {"name": "trunc", "mask": 16},
+    {"name": "append", "mask": 32}
   ],
   "request_flags": [
-    {"name": "read_bulk", "bit": 1}
+    {"name": "read_bulk", "mask": 1}
+  ],
+  "types": [
+    {"name": "u32", "wire": "little-endian unsigned 32-bit integer"},
+    {"name": "u64", "wire": "little-endian unsigned 64-bit integer"},
+    {"name": "i64", "wire": "little-endian signed 64-bit integer"},
+    {"name": "root_id", "wire": "u32, a root's id"},
+    {"name": "open_flags", "wire": "u32 of the open_flags masks"},
+    {"name": "bool", "wire": "one byte, exactly 0 or 1 (a decoder refuses others)"},
+    {"name": "bool_lenient", "wire": "one byte, written 0 or 1, any non-zero reads as true"},
+    {"name": "bool_bit0", "wire": "one byte, bit 0 is the value, the rest written 0 and ignored"},
+    {"name": "lookup_state", "wire": "one byte, the values in the values attribute"},
+    {"name": "child_state", "wire": "one byte, the values in the values attribute"},
+    {"name": "pad", "wire": "size bytes, written 0, skipped on read; optional means a reader may find them missing"},
+    {"name": "str_u32", "wire": "len:u32 then len bytes of UTF-8; max_utf16 is a limit in UTF-16 units"},
+    {"name": "str_rest", "wire": "the rest of the payload as UTF-8"},
+    {"name": "bytes_u32", "wire": "len:u32, then pad_after_len zero bytes if given, then len bytes; max is a limit on len"},
+    {"name": "list_u32", "wire": "count:u32 then count items, each laid out as the fields in of"},
+    {"name": "optional_node", "wire": "has_node:u8 (a bool) then, if 1, the fields in node"},
+    {"name": "inline_or_bulk", "wire": "a READ reply: if the bulk_bit mask is set in its first u32 the reply is the fields in bulk, else the fields in inline"}
+  ],
+  "attributes": [
+    {"name": "size", "wire": "pad: the number of bytes"},
+    {"name": "optional", "wire": "pad: true if a reader may find the bytes missing"},
+    {"name": "max", "wire": "bytes_u32: the largest len a decoder accepts"},
+    {"name": "max_utf16", "wire": "str_u32: the longest string a decoder accepts, in UTF-16 units"},
+    {"name": "pad_after_len", "wire": "bytes_u32: the number of zero bytes between len and the data"},
+    {"name": "values", "wire": "lookup_state, child_state: the byte's values"},
+    {"name": "of", "wire": "list_u32: the fields of each item"},
+    {"name": "node", "wire": "optional_node: the fields of the node"},
+    {"name": "bulk_bit", "wire": "inline_or_bulk: the mask of the bit in the first u32 that selects bulk"},
+    {"name": "inline", "wire": "inline_or_bulk: the fields when that bit is clear"},
+    {"name": "bulk", "wire": "inline_or_bulk: the fields when that bit is set"},
+    {"name": "bit31", "wire": "in a bulk field's len: this u32 has bit 31 (the bulk_bit) set on the wire, and the value is the other 31 bits"}
   ]
 }

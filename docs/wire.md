@@ -378,7 +378,7 @@ honours `VFS_RING_PATH` on Windows too.
 
 ### 2.10 Linux under Wine: a file both sides map
 
-Source: `crates/aether-unix/src/mapping.rs`, `crates/aether-win/src/mapping.rs`
+Source: `crates/aether-filering/src/lib.rs` (`FileRing`), `crates/aether-win/src/mapping.rs`
 (`open_file_backed`), `crates/aether-hooks/src/director.rs` (`ring_source`).
 
 A page-file section has no identity outside one Windows (or Wine) session, so a
@@ -387,7 +387,7 @@ native Linux director and a shim under Wine share a file:
 - The director creates the file, grows it to at least the map size before
   mapping it (an `mmap` past end of file faults on touch), never shrinks an
   existing file, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`. The Rust
-  `FileMapping::create` reuses an existing file grow-only; Cairn deletes and
+  `FileRing::create` reuses an existing file grow-only; Cairn deletes and
   recreates it (`ring/backing.clj`) so a stale reader keeps the old inode.
 - The shim opens `VFS_RING_PATH` with `CreateFileW(FILE_GENERIC_READ |
   FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)`, refuses
@@ -576,6 +576,38 @@ and checked equal by `crates/aether-protocol/tests/contract.rs`
 (`UPDATE_CONTRACT=1` rewrites it). It is the machine-readable form of the
 layouts below, for building a director's tables in another language.
 
+The file defines its own field types, so it can be read without this
+document. Its `"types"` section gives each field type's wire form, and
+`"attributes"` the keys a field may carry besides `name` and `type`; both are
+generated from the code, and the types are:
+
+| Type | Wire form |
+|---|---|
+| `u32` | little-endian unsigned 32-bit integer |
+| `u64` | little-endian unsigned 64-bit integer |
+| `i64` | little-endian signed 64-bit integer |
+| `root_id` | u32, a root's id |
+| `open_flags` | u32 of the open_flags masks |
+| `bool` | one byte, exactly 0 or 1 (a decoder refuses others) |
+| `bool_lenient` | one byte, written 0 or 1, any non-zero reads as true |
+| `bool_bit0` | one byte, bit 0 is the value, the rest written 0 and ignored |
+| `lookup_state` | one byte, the values in the values attribute |
+| `child_state` | one byte, the values in the values attribute |
+| `pad` | size bytes, written 0, skipped on read; optional means a reader may find them missing |
+| `str_u32` | len:u32 then len bytes of UTF-8; max_utf16 is a limit in UTF-16 units |
+| `str_rest` | the rest of the payload as UTF-8 |
+| `bytes_u32` | len:u32, then pad_after_len zero bytes if given, then len bytes; max is a limit on len |
+| `list_u32` | count:u32 then count items, each laid out as the fields in of |
+| `optional_node` | has_node:u8 (a bool) then, if 1, the fields in node |
+| `inline_or_bulk` | a READ reply: if the bulk_bit mask is set in its first u32 the reply is the fields in bulk, else the fields in inline |
+
+Attributes (`size`, `optional`, `max`, `max_utf16`, `pad_after_len`, `values`,
+`of`, `node`, `bulk_bit`, `inline`, `bulk`, `bit31`) are defined in the file's
+`"attributes"` section, and `bit31` marks the `len` of a bulk READ reply, whose
+top bit is the bulk flag. The `"open_flags"` and `"request_flags"` lists give
+each flag's `"mask"`, the value it has in the word (`append` is 32), not a bit
+index.
+
 | # | Name | Request | Reply (on ST_OK) | Shim sends flags |
 |---:|---|---|---|---|
 | 1 | GETATTR | path request | 18 bytes, 3.4.1 | 0 |
@@ -696,7 +728,7 @@ Reply (`Reply::Open`), 24 bytes:
 | 0 | 8 | u64 | `fh`: the director's handle |
 | 8 | 8 | u64 | `size` |
 | 16 | 1 | u8 | `is_dir` |
-| 17 | 1 | u8 | `flags`: bit 0 `OPEN_RESP_IMMUTABLE` (1); other bits zero |
+| 17 | 1 | u8 | `flags`: bit 0 is `immutable` (1); other bits zero |
 | 18 | 2 | — | zero |
 | 20 | 4 | u32 | `mount_gen` |
 
@@ -890,6 +922,13 @@ Source: `crates/aether-protocol/src/status.rs` (`Status`, `Status::ALL`),
 Values 0 to -11 are fixed by the shim, which matches statuses by number. New
 statuses take the next free negative number.
 
+The `ST_*` names are this document's names for the wire values. In Rust
+each is a `Status` variant (`ST_NOT_FOUND` is `Status::NotFound`), and in
+`contract/protocol.json` its lowercase, hyphenated name (`"not-found"`). The
+`OPEN_*` flags of 3.4.3 map the same way: `OPEN_CREATE` is
+`OpenFlags::CREATE` in Rust and `"create"` in the JSON's `open_flags`, whose
+`"mask"` is the value in the table (`OPEN_APPEND` is 32).
+
 #### 3.5.1 Malformed requests: what each director answers
 
 The status for a payload too short for its fixed fields, a path that escapes
@@ -920,10 +959,10 @@ decodes it with replacement characters and carries on.
 
 | Where | Bit | Value | Name | Source |
 |---|---:|---:|---|---|
-| slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply | `crates/aether-protocol/src/lib.rs` |
-| READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk | `crates/aether-protocol/src/lib.rs` |
-| OPEN reply byte 17 | 0 | `0x01` | `OPEN_RESP_IMMUTABLE` | `crates/aether-protocol/src/lib.rs` |
-| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `crates/aether-protocol/src/status.rs` |
+| slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply | `RequestFlags::READ_BULK` in `crates/aether-protocol/src/status.rs` |
+| READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk | `READ_RESP_BULK_BIT` in `crates/aether-protocol/src/table.rs` |
+| OPEN reply byte 17 | 0 | `0x01` | `immutable` | `OpenResp::immutable` in `crates/aether-protocol/src/table.rs` |
+| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `OpenFlags` in `crates/aether-protocol/src/status.rs` |
 
 The slot `flags` word is ignored for every opcode but READ, and bits other
 than bit 0 are ignored for READ, by both directors.

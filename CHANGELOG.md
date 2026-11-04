@@ -24,7 +24,22 @@ those hold their slot through `aether-ipc`'s held-slot calls) and the
 reference director the shim's tests run against. `aether_ipc::layout`
 re-exports `Opcode` instead of the `OP_*` constants, and
 `aether_ntlayout::open_create_flags` returns `OpenFlags`. The shim's
-`FuseClient` and `RegClient` return `Status` as their error, not an `i32`.
+`FuseClient` and `RegClient` methods return `Status` as their error, not an
+`i32`, with three exceptions: `FuseClient::delete` returns `CallError`, which
+separates a director's refusal from a call that failed before one answered;
+`FuseClient::read_fragmented` still returns the `i32` of `aether_ipc`'s bulk
+read as its error; and `FuseClient::read_cached` returns `Option<usize>`, `None`
+when the cache does not serve the read.
+
+Three crates are new. `aether-rpc` and `aether-refdirector` are as above, and
+`aether-filering` is a ring in a memory-mapped file on any OS
+(`FileRing::create`, `FileRing::open`), the Wine arrangement of `docs/wire.md`
+2.10 for a native tool; it replaces the deleted `aether-unix`'s mapping.
+`contract/protocol.json` is new too, the protocol table as data, with the
+meaning of each field type in its `"types"` section. `aether-rpc` is compiled
+into the shim DLL. The wire does not change, but the natives' sources do: the
+shim and the injector's dependencies are different, so the next release signs
+new natives.
 
 ## Unreleased (the shim DLL is `aether_shim.dll`)
 

@@ -6,28 +6,51 @@
 //! bytes before `mount_gen`) still appears, as an entry named `"pad"`, so a
 //! reader can count offsets from the file alone.
 //!
-//! A field is `{"name", "type"}` plus attributes for its type. The types:
-//!
-//! | type | wire form |
-//! |---|---|
-//! | `u32`, `u64`, `i64` | little-endian integer |
-//! | `root_id` | `u32`, a root's id |
-//! | `open_flags` | `u32` of the `open_flags` bits |
-//! | `bool` | one byte, exactly 0 or 1 (a decoder refuses others) |
-//! | `bool_lenient` | one byte, written 0 or 1, any non-zero reads as true |
-//! | `bool_bit0` | one byte, bit 0 is the value, the rest written 0 and ignored |
-//! | `lookup_state` | one byte, the values in the `values` attribute |
-//! | `child_state` | one byte, the values in the `values` attribute |
-//! | `pad` | `size` bytes, written 0, skipped on read; `optional` if a reader may find them missing |
-//! | `str_u32` | `len:u32` then UTF-8; `max_utf16` is a limit in UTF-16 units |
-//! | `str_rest` | the rest of the payload as UTF-8 |
-//! | `bytes_u32` | `len:u32` then bytes; `max` is a limit; `pad_after_len` zero bytes follow `len` |
-//! | `list_u32` | `count:u32` then `count` items, each the fields in `of` |
-//! | `optional_node` | `has_node:u8` (`bool`) then, if 1, the fields in `node` |
-//! | `inline_or_bulk` | a READ reply: bit 31 of the first word picks `bulk`, else `inline` |
+//! A field is `{"name", "type"}` plus attributes for its type. [`TYPES`] and
+//! [`ATTRIBUTES`] say what each one means on the wire; the JSON carries both,
+//! so the published file is self-contained.
 
 use crate::status::{OpenFlags, RequestFlags, Status};
 use crate::table::Opcode;
+
+/// The field types and what each is on the wire, in the order the JSON lists
+/// them. A test checks that every type a message uses is here and that every
+/// one here is used.
+pub(crate) const TYPES: &[(&str, &str)] = &[
+    ("u32", "little-endian unsigned 32-bit integer"),
+    ("u64", "little-endian unsigned 64-bit integer"),
+    ("i64", "little-endian signed 64-bit integer"),
+    ("root_id", "u32, a root's id"),
+    ("open_flags", "u32 of the open_flags masks"),
+    ("bool", "one byte, exactly 0 or 1 (a decoder refuses others)"),
+    ("bool_lenient", "one byte, written 0 or 1, any non-zero reads as true"),
+    ("bool_bit0", "one byte, bit 0 is the value, the rest written 0 and ignored"),
+    ("lookup_state", "one byte, the values in the values attribute"),
+    ("child_state", "one byte, the values in the values attribute"),
+    ("pad", "size bytes, written 0, skipped on read; optional means a reader may find them missing"),
+    ("str_u32", "len:u32 then len bytes of UTF-8; max_utf16 is a limit in UTF-16 units"),
+    ("str_rest", "the rest of the payload as UTF-8"),
+    ("bytes_u32", "len:u32, then pad_after_len zero bytes if given, then len bytes; max is a limit on len"),
+    ("list_u32", "count:u32 then count items, each laid out as the fields in of"),
+    ("optional_node", "has_node:u8 (a bool) then, if 1, the fields in node"),
+    ("inline_or_bulk", "a READ reply: if the bulk_bit mask is set in its first u32 the reply is the fields in bulk, else the fields in inline"),
+];
+
+/// The attributes a field may carry besides `name` and `type`.
+pub(crate) const ATTRIBUTES: &[(&str, &str)] = &[
+    ("size", "pad: the number of bytes"),
+    ("optional", "pad: true if a reader may find the bytes missing"),
+    ("max", "bytes_u32: the largest len a decoder accepts"),
+    ("max_utf16", "str_u32: the longest string a decoder accepts, in UTF-16 units"),
+    ("pad_after_len", "bytes_u32: the number of zero bytes between len and the data"),
+    ("values", "lookup_state, child_state: the byte's values"),
+    ("of", "list_u32: the fields of each item"),
+    ("node", "optional_node: the fields of the node"),
+    ("bulk_bit", "inline_or_bulk: the mask of the bit in the first u32 that selects bulk"),
+    ("inline", "inline_or_bulk: the fields when that bit is clear"),
+    ("bulk", "inline_or_bulk: the fields when that bit is set"),
+    ("bit31", "in a bulk field's len: this u32 has bit 31 (the bulk_bit) set on the wire, and the value is the other 31 bits"),
+];
 
 /// One field of a message as the table describes it.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,14 +216,15 @@ fn fields_json(fields: &[Entry]) -> J {
     J::Arr(fields.iter().map(entry_json).collect())
 }
 
-/// A flag set as `[{"name", "bit"}]`; `bit` is the mask (`0x20` is 32).
+/// A flag set as `[{"name", "mask"}]`; `mask` is the flag's value as a
+/// mask (append is 32), not a bit index.
 fn flags_json<'a>(flags: impl Iterator<Item = (&'a str, u32)>) -> J {
     J::Arr(
         flags
             .map(|(name, bits)| {
                 J::Obj(vec![
                     ("name", J::Owned(name.to_ascii_lowercase())),
-                    ("bit", J::Num(i64::from(bits))),
+                    ("mask", J::Num(i64::from(bits))),
                 ])
             })
             .collect(),
@@ -216,11 +240,14 @@ fn flags_json<'a>(flags: impl Iterator<Item = (&'a str, u32)>) -> J {
 ///               "reply_strict", "reply": [fields]}],
 ///  "reserved_opcodes": [4, 12],
 ///  "statuses": [{"name", "number"}],
-///  "open_flags": [{"name", "bit"}],
-///  "request_flags": [{"name", "bit"}]}
+///  "open_flags": [{"name", "mask"}],
+///  "request_flags": [{"name", "mask"}],
+///  "types": [{"name", "wire"}],
+///  "attributes": [{"name", "wire"}]}
 /// ```
 ///
-/// Fields are in wire order; the types are listed in the module docs.
+/// Fields are in wire order; "types" and "attributes" say what each field
+/// type and attribute means.
 /// Two-space indented, ending in a newline, so the checked-in file is
 /// byte-stable. Written by hand, as `aether_env::contract_json` is: the crate
 /// needs no JSON library.
@@ -255,6 +282,14 @@ pub fn contract_json() -> String {
             ])
         })
         .collect();
+    let defs = |table: &'static [(&'static str, &'static str)]| {
+        J::Arr(
+            table
+                .iter()
+                .map(|&(name, wire)| J::Obj(vec![("name", J::Str(name)), ("wire", J::Str(wire))]))
+                .collect(),
+        )
+    };
     let doc = J::Obj(vec![
         ("wire_version", J::Num(i64::from(crate::WIRE_VERSION))),
         ("opcodes", J::Arr(opcodes)),
@@ -268,6 +303,8 @@ pub fn contract_json() -> String {
             "request_flags",
             flags_json(RequestFlags::all().iter_names().map(|(n, f)| (n, f.bits()))),
         ),
+        ("types", defs(TYPES)),
+        ("attributes", defs(ATTRIBUTES)),
     ]);
     let mut out = String::new();
     doc.write(&mut out, 0);

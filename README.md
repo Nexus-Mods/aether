@@ -84,6 +84,7 @@ The ones that ship:
 | `aether-hooks` | The NT detours and the director client |
 | `aether-ipc` | The shared-memory control ring and bulk arena, OS-free |
 | `aether-protocol` | Wire codecs, opcodes, statuses, open flags, `RootId`, the shim's bootstrap config |
+| `aether-rpc` | Typed ring ends: the client the shim calls the director with, and the `Director` trait a director implements |
 | `aether-redirect` | Pure path core: root map, canonicalisation, vpath normalization, DOS wildcards, final names |
 | `aether-casefold` | The case fold names cross the ring in (file paths and registry keys) |
 | `aether-ntlayout` | Pure NT byte layouts and decisions for the hooks |
@@ -103,9 +104,12 @@ injection); staticimp links vproxy's import library, so vproxy is built first,
 in a cargo invocation of its own (cargo#6313). `aether-testkit` holds helpers
 shared by the tests.
 
-Directors live outside this repository. The shim's tests run against their own
-fake director (`crates/aether-hooks/tests/fakedirector`), which answers the file
-and registry opcodes from memory.
+Directors live outside this repository. The shim's tests run against a
+director in memory (`crates/aether-hooks/tests/fakedirector`), built on
+`aether-refdirector`: the reference director, which answers every file and
+registry opcode, and a null one that answers each with the smallest valid
+reply, to measure the ring alone. `aether-filering` maps a ring in a file on
+any OS, the Wine arrangement of `docs/wire.md` 2.10 for a native tool.
 
 `panic = "unwind"` throughout (`aether-protocol/tests/unwind.rs` pins it). The
 vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim

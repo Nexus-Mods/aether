@@ -70,3 +70,78 @@ fn every_field_has_a_name_and_a_type() {
         check(&o["reply"], o["name"].as_str().unwrap());
     }
 }
+
+#[test]
+fn the_json_defines_every_type_and_attribute_it_uses() {
+    fn used(fields: &serde_json::Value, types: &mut Vec<String>, attrs: &mut Vec<String>) {
+        for f in fields.as_array().unwrap() {
+            types.push(f["type"].as_str().unwrap().to_string());
+            for (k, v) in f.as_object().unwrap() {
+                if !["name", "type"].contains(&k.as_str()) {
+                    attrs.push(k.clone());
+                }
+                if v.is_array() {
+                    used(v, types, attrs);
+                }
+            }
+        }
+    }
+    let v: serde_json::Value = serde_json::from_str(&contract_json()).unwrap();
+    let (mut types, mut attrs) = (Vec::new(), Vec::new());
+    for o in v["opcodes"].as_array().unwrap() {
+        used(&o["request"], &mut types, &mut attrs);
+        used(&o["reply"], &mut types, &mut attrs);
+    }
+    let defined = |section: &str| -> Vec<String> {
+        v[section]
+            .as_array()
+            .unwrap_or_else(|| panic!("no \"{section}\" section"))
+            .iter()
+            .map(|t| {
+                assert!(t["wire"].as_str().is_some_and(|w| !w.is_empty()));
+                t["name"].as_str().unwrap().to_string()
+            })
+            .collect()
+    };
+    let (dt, da) = (defined("types"), defined("attributes"));
+    for t in &types {
+        assert!(dt.contains(t), "type {t} is not defined in \"types\"");
+    }
+    for a in &attrs {
+        assert!(
+            da.contains(a),
+            "attribute {a} is not defined in \"attributes\""
+        );
+    }
+    // nothing defined that no message uses
+    for t in &dt {
+        assert!(types.contains(t), "type {t} is defined but unused");
+    }
+    for a in &da {
+        assert!(attrs.contains(a), "attribute {a} is defined but unused");
+    }
+    // flag lists hold masks
+    for list in ["open_flags", "request_flags"] {
+        for f in v[list].as_array().unwrap() {
+            assert!(
+                f.get("mask").is_some() && f.get("bit").is_none(),
+                "{list}: {f}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_wire_document_lists_the_json_types() {
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/wire.md"))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&contract_json()).unwrap();
+    for t in v["types"].as_array().unwrap() {
+        let row = format!(
+            "| `{}` | {} |",
+            t["name"].as_str().unwrap(),
+            t["wire"].as_str().unwrap()
+        );
+        assert!(doc.contains(&row), "docs/wire.md 3.3 lacks the row {row}");
+    }
+}

@@ -106,6 +106,7 @@ jobs:
         -p aether-ipc -p aether-protocol -p aether-casefold -p aether-pe
         -p aether-env -p aether-registry -p aether-testkit
         -p aether-ntlayout -p aether-redirect -p aether-filering
+        -p aether-rpc -p aether-refdirector
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain (rust-toolchain.toml)

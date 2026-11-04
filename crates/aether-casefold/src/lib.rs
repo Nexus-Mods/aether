@@ -50,6 +50,17 @@ fn fold_unicode(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
 }
 
+/// Whether `a` and `b` fold to the same string, `fold(a) == fold(b)`, without
+/// building either fold.
+pub fn eq_folded(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
+}
+
 /// Case-insensitive comparison. Fold-equal strings compare `Equal`; callers that
 /// need stable output rely on a stable sort. (Directory siblings are keyed by
 /// folded name, so a case-only collision can never occur among them.)
@@ -66,6 +77,19 @@ mod tests {
     fn folds_ascii_and_unicode() {
         assert_eq!(fold("FooBAR.ESP"), "foobar.esp");
         assert_eq!(fold("ÄÖÜ"), "äöü");
+    }
+
+    #[test]
+    fn eq_folded_is_equality_of_the_folds() {
+        let words = [
+            "File.txt", "file.TXT", "File.tx", "", "ÄÖÜ", "äöü", "Äö", "ǅ", "ǆ", "İ", "i̇", "ẞ",
+            "ß", "K", "K", "k",
+        ];
+        for a in words {
+            for b in words {
+                assert_eq!(eq_folded(a, b), fold(a) == fold(b), "{a:?} {b:?}");
+            }
+        }
     }
 
     #[test]

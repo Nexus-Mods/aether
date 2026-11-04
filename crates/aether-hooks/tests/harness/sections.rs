@@ -642,3 +642,59 @@ fn an_image_read_that_fails_once_is_asked_again() {
     close(section);
     close(file);
 }
+
+// ---- demand-paged: two threads on one chunk ------------------------------
+
+#[test]
+fn a_second_thread_never_reads_a_chunk_before_its_fill_is_done() {
+    isolate!();
+    use std::time::Duration;
+    let want = pattern(LAZY);
+    let (root, served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section) as usize;
+    let mark = served.recorder.mark();
+    // The first thread's fill READ is held until released.
+    let id = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..reads(Opcode::Read)
+        },
+        Fault::Delay(Duration::from_secs(10)),
+    );
+    let first = std::thread::spawn(move || bytes(v as *const u8, TOUCH, PAGE));
+    assert!(
+        served.faults.wait_applied(id, 1, Duration::from_secs(10)),
+        "the first touch's READ never reached the director"
+    );
+    // A second thread reads another page of the same chunk while the fill
+    // is held: it must wait for the fill, never see what is there before.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let _ = tx.send(bytes(v as *const u8, TOUCH + 2 * PAGE, PAGE));
+    });
+    let early = rx.recv_timeout(Duration::from_millis(500));
+    served.faults.release();
+    let got = match early {
+        Ok(b) => b,
+        Err(_) => rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the second thread's read"),
+    };
+    assert!(
+        got == want[TOUCH + 2 * PAGE..TOUCH + 3 * PAGE],
+        "the second thread read the chunk mid-fill (all zeros: {})",
+        got.iter().all(|&b| b == 0)
+    );
+    assert!(first.join().unwrap() == want[TOUCH..TOUCH + PAGE]);
+    second.join().unwrap();
+    assert_eq!(
+        read_offsets(served, mark),
+        [TOUCH as u64],
+        "one fill serves both threads"
+    );
+    unmap(v as *const u8);
+    close(section);
+    close(file);
+}

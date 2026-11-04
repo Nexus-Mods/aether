@@ -280,6 +280,10 @@ struct Graph {
     /// both are held.
     dirs: Mutex<HashMap<String, String>>,
     handles: Mutex<HashMap<u64, Handle>>,
+    /// Held for the whole of each file request, so a request is served
+    /// whole (wire.md 2.8.1: "the state before it or the state after it,
+    /// never a mixture"); taken before every other lock.
+    serve: Mutex<()>,
     next_fh: AtomicU64,
     /// The next file identity ([`Entry::id`]).
     next_id: AtomicU64,
@@ -550,6 +554,7 @@ impl Reference {
                 files: Mutex::new(HashMap::new()),
                 dirs: Mutex::new(HashMap::new()),
                 handles: Mutex::new(HashMap::new()),
+                serve: Mutex::new(()),
                 next_fh: AtomicU64::new(1),
                 next_id: AtomicU64::new(1),
                 writable: Vec::new(),
@@ -823,6 +828,20 @@ impl Reference {
     }
 }
 
+impl Reference {
+    /// RENAME, for a caller already holding the serve lock (RENAME and
+    /// RENAME_X between equal roots).
+    fn rename_whole(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
+        Tally::bump(&self.tally.renames, &key(root.0, from));
+        if escapes(to) {
+            return Err(Status::BadRequest);
+        }
+        let from_key = self.graph.resolve_name(root, from)?;
+        self.graph.resolve_name(root, to)?;
+        self.move_entry(from_key, root, to, false)
+    }
+}
+
 impl Director for Reference {
     fn heartbeat(&mut self) -> Result<(), Status> {
         Ok(())
@@ -831,6 +850,8 @@ impl Director for Reference {
     /// A missing path, and any path on a root not served, is OK with
     /// nothing found (`docs/wire.md` 3.4.1).
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let vpath = match self.graph.resolve_name(root, path) {
             Err(Status::NotFound) => {
                 return Ok(AttrResp {
@@ -869,6 +890,8 @@ impl Director for Reference {
     /// zero-byte file to the director and comes back in its listing. A
     /// reference that filtered it would hide that defect.
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         // The shim sends "." for the root itself.
         let dir = match path {
             "." | "" => self.graph.resolve(root, "")?,
@@ -925,6 +948,8 @@ impl Director for Reference {
     }
 
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let g = &self.graph;
         self.tally
             .wire_opens
@@ -1033,6 +1058,8 @@ impl Director for Reference {
         offset: u64,
         len: u32,
     ) -> Result<ReadReply<'_>, Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let Some(Handle { vpath, file, .. }) = self.graph.handle(fh) else {
             return Err(Status::BadFh);
         };
@@ -1087,6 +1114,8 @@ impl Director for Reference {
 
     /// On an append handle the offset is ignored (`docs/wire.md` 3.4.3).
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let Some(Handle {
             vpath,
             file,
@@ -1129,6 +1158,8 @@ impl Director for Reference {
 
     /// Truncate or extend: how the shim's `truncate` reaches the director.
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let Some(Handle { vpath, file, .. }) = self.graph.handle(fh) else {
             return Err(Status::BadFh);
         };
@@ -1154,19 +1185,17 @@ impl Director for Reference {
     /// mount `Status::ReadOnly`. The target keeps the caller's spelling
     /// (`docs/wire.md` 3.2), so a rename to another case respells the file.
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
-        Tally::bump(&self.tally.renames, &key(root.0, from));
-        if escapes(to) {
-            return Err(Status::BadRequest);
-        }
-        let from_key = self.graph.resolve_name(root, from)?;
-        self.graph.resolve_name(root, to)?;
-        self.move_entry(from_key, root, to, false)
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
+        self.rename_whole(root, from, to)
     }
 
     /// A file, or a directory with nothing under it, as `docs/wire.md` 3.4.8
     /// deletes them: a directory with anything
     /// under it is `Status::IoError`, the root `Status::BadRequest`.
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         Tally::bump(&self.tally.deletes, &key(root.0, path));
         let vpath = self.graph.resolve_name(root, path)?;
         if is_root_key(&vpath) {
@@ -1201,6 +1230,8 @@ impl Director for Reference {
     /// open does (3.4.3). A missing parent, or a file there, is
     /// `Status::NotFound`, as for a creating OPEN.
     fn mkdir(&mut self, root: RootId, _: u32, path: &str) -> Result<(), Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let g = &self.graph;
         let vpath = g.resolve_name(root, path)?;
         if g.write_fails(&vpath) {
@@ -1235,6 +1266,8 @@ impl Director for Reference {
     /// Releases and counts the handle; an unknown one is `Status::BadFh`
     /// (`docs/wire.md` 3.4.10).
     fn close(&mut self, fh: u64) -> Result<(), Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         let Some(h) = self.graph.handles.lock().unwrap().remove(&fh) else {
             return Err(Status::BadFh);
         };
@@ -1248,6 +1281,8 @@ impl Director for Reference {
     /// components past `skip`. A `skip` past the last component is an empty
     /// reply (wire.md does not say).
     fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         self.graph.resolve_name(root, path)?;
         let dirs = self.graph.dirs.lock().unwrap();
         let files = self.graph.files.lock().unwrap();
@@ -1271,11 +1306,13 @@ impl Director for Reference {
         from: &str,
         to: &str,
     ) -> Result<(), Status> {
+        let graph = self.graph.clone();
+        let _whole = graph.serve.lock().unwrap();
         if escapes(from) || escapes(to) {
             return Err(Status::BadRequest);
         }
         if from_root == to_root {
-            return self.rename(from_root, from, to);
+            return self.rename_whole(from_root, from, to);
         }
         let from_key = self.graph.resolve_name(from_root, from)?;
         self.graph.resolve_name(to_root, to)?;

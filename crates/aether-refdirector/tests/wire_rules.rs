@@ -783,3 +783,36 @@ fn a_zero_length_write_changes_nothing() {
     assert_eq!(d.contents("a"), Some(b"abc".to_vec()));
     assert_eq!(d.get_attr(R0, "a").unwrap().size, 3);
 }
+
+/// wire.md 2.8.1: a request is served whole, "the state before it or the
+/// state after it, never a mixture". An OPEN_CREATE and a MKDIR of one
+/// name, sent at once from two threads over and over, leave one entry of
+/// one kind: never a file and a directory both at the name.
+#[test]
+fn a_create_and_a_mkdir_of_one_name_never_both_land() {
+    let base = Reference::new().writable_under("saves").with_dir("saves");
+    for i in 0..300 {
+        let name = format!("saves/n{i}");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (mut a, mut b) = (base.share(), base.share());
+        let (ba, bb) = (barrier.clone(), barrier);
+        let (na, nb) = (name.clone(), name.clone());
+        let t = std::thread::spawn(move || {
+            ba.wait();
+            a.open(R0, OpenFlags::WRITE | OpenFlags::CREATE, &na)
+                .is_ok()
+        });
+        bb.wait();
+        let made_dir = b.mkdir(R0, 0o755, &nb).is_ok();
+        let made_file = t.join().unwrap();
+        assert!(
+            !(made_file && made_dir),
+            "{name}: both the create and the MKDIR succeeded"
+        );
+        let mut d = base.share();
+        let mut l = Listing::default();
+        d.read_dir(R0, "saves", &mut l).unwrap();
+        let here = l.iter().filter(|e| e.name == format!("n{i}")).count();
+        assert_eq!(here, 1, "{name}: listed {here} times");
+    }
+}

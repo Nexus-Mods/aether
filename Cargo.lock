@@ -135,6 +135,7 @@ version = "0.1.0"
 dependencies = [
  "aether-casefold",
  "aether-protocol",
+ "aether-testkit",
  "aether-win",
 ]
 

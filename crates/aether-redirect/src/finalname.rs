@@ -131,7 +131,14 @@ pub fn final_dos_path_by_listing(
 pub struct NameCache {
     ttl_ms: u64,
     capacity: usize,
-    names: std::collections::HashMap<(u32, String), (String, u64)>,
+    /// Per root: folded path to its last component's stored spelling and
+    /// when it was learned. Keyed by root first, so a lookup borrows the
+    /// path as a `&str`.
+    names: std::collections::HashMap<u32, std::collections::HashMap<String, (String, u64)>>,
+    /// The path a lookup builds, kept between lookups so that a hit
+    /// allocates nothing: [`NameCache::remember`] sizes it for every path it
+    /// stores.
+    scratch: std::cell::Cell<String>,
 }
 
 impl NameCache {
@@ -143,15 +150,16 @@ impl NameCache {
             ttl_ms,
             capacity: capacity.max(1),
             names: std::collections::HashMap::new(),
+            scratch: std::cell::Cell::new(String::new()),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.names.len()
+        self.names.values().map(|t| t.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
+        self.names.values().all(|t| t.is_empty())
     }
 
     /// The stored spellings of the leading components of `under` that are
@@ -159,20 +167,42 @@ impl NameCache {
     /// first that is not.
     pub fn leading(&self, root: u32, under: &[String], now_ms: u64) -> Vec<String> {
         let mut out = Vec::new();
-        let mut path = String::new();
+        self.leading_with(root, under, now_ms, |name| out.push(name.to_string()));
+        out
+    }
+
+    /// [`NameCache::leading`] without building a list: `each` is given the
+    /// spelling of each leading component that is known and fresh, in order,
+    /// and the count is returned. Allocates nothing for a path no longer
+    /// than one [`NameCache::remember`] stored.
+    pub fn leading_with(
+        &self,
+        root: u32,
+        under: &[String],
+        now_ms: u64,
+        mut each: impl FnMut(&str),
+    ) -> usize {
+        let Some(tree) = self.names.get(&root) else {
+            return 0;
+        };
+        let mut path = self.scratch.take();
+        path.clear();
+        let mut known = 0;
         for comp in under {
             if !path.is_empty() {
                 path.push('/');
             }
             path.push_str(comp);
-            match self.names.get(&(root, path.clone())) {
+            match tree.get(path.as_str()) {
                 Some((name, at)) if now_ms.saturating_sub(*at) < self.ttl_ms => {
-                    out.push(name.clone())
+                    each(name);
+                    known += 1;
                 }
                 _ => break,
             }
         }
-        out
+        self.scratch.set(path);
+        known
     }
 
     /// Remember `names` as the spellings of `under[first..]`, learned at
@@ -188,26 +218,32 @@ impl NameCache {
         if first > under.len() || names.len() != under.len() - first {
             return;
         }
-        if self.names.len() + names.len() > self.capacity {
+        if self.len() + names.len() > self.capacity {
             self.names.clear();
         }
+        let longest = under.iter().map(|c| c.len() + 1).sum::<usize>();
+        let scratch = self.scratch.get_mut();
+        scratch.reserve(longest.saturating_sub(scratch.len()));
+        let tree = self.names.entry(root).or_default();
         for (i, name) in names.iter().enumerate() {
             let path = under[..first + i + 1].join("/");
-            self.names.insert((root, path), (name.clone(), now_ms));
+            tree.insert(path, (name.clone(), now_ms));
         }
     }
 
     /// Forget how `folded` (a folded, `/`-joined path under `root`) and
     /// everything beneath it is spelled: it was created, renamed or removed.
     pub fn forget(&mut self, root: u32, folded: &str) {
+        let Some(tree) = self.names.get_mut(&root) else {
+            return;
+        };
         let folded = folded.trim_matches('/');
         if folded.is_empty() || folded == "." {
-            self.names.retain(|(r, _), _| *r != root);
+            tree.clear();
             return;
         }
         let below = format!("{folded}/");
-        self.names
-            .retain(|(r, path), _| *r != root || !(path == folded || path.starts_with(&below)));
+        tree.retain(|path, _| !(path == folded || path.starts_with(&below)));
     }
 }
 

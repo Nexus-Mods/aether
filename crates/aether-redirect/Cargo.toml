@@ -18,3 +18,7 @@ aether-win.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The counting allocator (`tests/name_cache_alloc.rs`).
+aether-testkit.workspace = true

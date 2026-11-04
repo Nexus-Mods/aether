@@ -28,7 +28,7 @@
 #![allow(unsafe_code)]
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -39,6 +39,7 @@ use aether_rpc::{Tap, TapAction};
 use aether_win::SharedMapping;
 use std::cell::Cell;
 use std::time::Instant;
+use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::{CreateEventW, Sleep, WaitForSingleObject};
 
 // The tests know the reference director by its old name here.
@@ -120,6 +121,11 @@ pub(crate) struct Options {
     pub worker_hint: u32,
     /// The transport.
     pub ring: RingKind,
+    /// [`RingKind::SectionWithWake`]: how long a serve thread waits on the
+    /// event, in milliseconds (`INFINITE`, `u32::MAX`, waits for ever: a
+    /// request the shim does not signal then hangs, and every look at the
+    /// ring is a wake). Default [`WAKE_WAIT_MS`], a bound only.
+    pub wake_wait_ms: u32,
     /// `Some`: the shim's client gives up on a request after this
     /// ([`aether_hooks::director::FuseClient::with_deadline`]), heartbeat
     /// included, and is installed through `install_global`.
@@ -143,6 +149,7 @@ impl Default for Options {
             arena_len: ARENA_LEN,
             worker_hint: 0,
             ring: RingKind::Section,
+            wake_wait_ms: WAKE_WAIT_MS,
             deadline: None,
             reg_gen: RegGen::Reference,
             attach_faults: Vec::new(),
@@ -169,6 +176,27 @@ pub(crate) struct Served {
     pub attach: Result<(), FuseInitError>,
     /// The [`Options::attach_faults`], in order.
     pub attach_faults: Vec<FaultId>,
+    /// What the serve threads' waits on the wake event ended in (all zero
+    /// unless [`RingKind::SectionWithWake`]).
+    pub wakes: Arc<WakeStats>,
+}
+
+/// How the serve threads' waits on the director's wake event ended.
+#[derive(Debug, Default)]
+pub(crate) struct WakeStats {
+    /// Waits that ended because the event was signalled.
+    pub signalled: AtomicU64,
+    /// Waits that ended because their time was up.
+    pub timeouts: AtomicU64,
+}
+
+impl WakeStats {
+    pub fn signalled(&self) -> u64 {
+        self.signalled.load(Ordering::SeqCst)
+    }
+    pub fn timeouts(&self) -> u64 {
+        self.timeouts.load(Ordering::SeqCst)
+    }
 }
 
 impl Served {
@@ -232,6 +260,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
         arena_len,
         worker_hint,
         ring,
+        wake_wait_ms,
         deadline,
         reg_gen,
         attach_faults,
@@ -307,18 +336,21 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
         n => n,
     }
     .clamp(1, slots.max(1)) as usize;
+    let wakes = Arc::new(WakeStats::default());
     let chain = (
         (recorder.clone(), (overrides.clone(), faults.clone())),
         Extra(tap.map(|t| Arc::new(Mutex::new(t)))),
     );
+    let thread_wakes = wakes.clone();
     std::thread::Builder::new()
         .name("fake-director".into())
         .spawn(move || {
             // Never set: the threads serve until the ring goes away with the
             // process.
             static STOP: AtomicBool = AtomicBool::new(false);
+            let stats = thread_wakes;
             let notifier = move || match wake {
-                Some(h) => Wake::Event(h),
+                Some(h) => Wake::Event(h, stats.clone(), wake_wait_ms),
                 None => Wake::Poll(Cell::new(None)),
             };
             std::thread::scope(|s| {
@@ -355,6 +387,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
         seg,
         attach,
         attach_faults: attach_ids,
+        wakes,
     }
 }
 
@@ -378,8 +411,9 @@ enum Wake {
     /// makes no handle (std's `thread::sleep` creates a waitable timer and
     /// closes it through the hooked `NtClose`). `None`: nothing served yet.
     Poll(Cell<Option<Instant>>),
-    /// The event's handle, as an address (a `HANDLE` is not `Send`).
-    Event(usize),
+    /// The event's handle, as an address (a `HANDLE` is not `Send`), where
+    /// to count how its waits end, and how long a wait is (ms).
+    Event(usize, Arc<WakeStats>, u32),
 }
 
 impl Notifier for Wake {
@@ -392,8 +426,12 @@ impl Notifier for Wake {
             },
             // SAFETY: the event is leaked with the ring, so the handle stays
             // valid for the process.
-            Wake::Event(h) => unsafe {
-                WaitForSingleObject(h as _, WAKE_WAIT_MS);
+            Wake::Event(h, ref stats, ms) => unsafe {
+                match WaitForSingleObject(h as _, ms) {
+                    WAIT_OBJECT_0 => stats.signalled.fetch_add(1, Ordering::SeqCst),
+                    WAIT_TIMEOUT => stats.timeouts.fetch_add(1, Ordering::SeqCst),
+                    _ => 0,
+                };
             },
         }
     }

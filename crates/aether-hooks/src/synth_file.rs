@@ -53,16 +53,8 @@ pub(crate) fn open_dir_unissued() -> Option<isize> {
     insert(0, false, 0, true, None, false)
 }
 
-pub(crate) fn open_fuse_at(
-    fh: u64,
-    size: u64,
-    is_dir: bool,
-    abs_path: Option<String>,
-) -> Option<isize> {
-    open_fuse_at_ex(fh, size, is_dir, abs_path, false)
-}
-
-/// Like [`open_fuse_at`], but for a handle opened with NT append-only access
+/// A handle the director issued (`fh`, from an OPEN). `append_only`: opened
+/// with NT append-only access
 /// (`FILE_APPEND_DATA` without `FILE_WRITE_DATA`): the tracked position seeds
 /// at the file's *current* size (end of file), matching what the kernel
 /// would enforce for a real handle opened the same way. Seeding at `0` — what

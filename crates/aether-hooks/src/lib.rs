@@ -53,6 +53,15 @@ pub use hook::as_shim_io_for_tests;
 pub fn set_eager_section_max(bytes: u64) {
     lazy_section::set_eager_max(bytes);
 }
+/// Call `observe` with the process handle and id of each child the process
+/// hook creates, before the child is injected: what a test reads of the
+/// child (its image, say) while it exists. `false` when one is already set.
+/// Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn on_child_created(observe: fn(windows_sys::Win32::Foundation::HANDLE, u32)) -> bool {
+    hook::CHILD_CREATED.set(observe).is_ok()
+}
 /// Run one `extern "system"` entry point's body with its panic contained.
 ///
 /// Exported for `aether-shim`, which owns the injected DLL's other

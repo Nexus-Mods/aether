@@ -32,6 +32,12 @@ pub(super) type CreateProcessInternalWFn = unsafe extern "system" fn(
 /// process-creation hook can inject the same DLL into children.
 pub(super) static SELF_DLL: OnceLock<String> = OnceLock::new();
 
+/// A test's observer of each child this hook created, called with the
+/// child's process handle and id before it is injected (and so before it may
+/// be killed). Not in the shipped shim.
+#[cfg(feature = "test-support")]
+pub(crate) static CHILD_CREATED: OnceLock<fn(HANDLE, u32)> = OnceLock::new();
+
 /// `CreateProcessInternalW` hook: force the child to start suspended, inject
 /// the shim (which bootstraps inside its `LoadLibrary`), then resume, unless the
 /// caller asked for a suspended child, which it gets still suspended. The child
@@ -132,6 +138,10 @@ pub(super) unsafe fn cpiw_hook_body(
         let hprocess = unsafe { (*pi).hProcess };
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
         let hthread = unsafe { (*pi).hThread };
+        #[cfg(feature = "test-support")]
+        if let Some(observe) = CHILD_CREATED.get() {
+            observe(hprocess, pid);
+        }
         // Started in a backing directory: told its virtual one before it runs.
         if let Some(dir) = plan.as_ref().and_then(|p| p.virtual_cwd.as_deref()) {
             // SAFETY: a suspended process this call just created.

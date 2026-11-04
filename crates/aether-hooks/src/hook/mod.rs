@@ -41,6 +41,8 @@ pub use self::handles::tracked_handle_count;
 pub use self::install::{
     install, registry_detours_installed, skipped_detours, HookGuard, InstallError,
 };
+#[cfg(feature = "test-support")]
+pub(crate) use self::process::CHILD_CREATED;
 pub(crate) use self::registry::reg_real;
 
 // Every module reaches the others' `pub(super)` items through here.

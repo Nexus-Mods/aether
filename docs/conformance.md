@@ -8,9 +8,11 @@ each answer with the one the scenario expects. Scenarios live in
 `contract/scenarios/` and their format is described in
 `contract/scenarios/README.md`.
 
-A run has up to three parts, all through the same adapter:
+A run has up to four parts, all through the same adapter:
 
-- **Scenarios**, the files in `--scenarios` (always).
+- **Scenarios**, the files in `--scenarios` (always). A step may name the
+  client that sends it; every client but 0 is a process of its own
+  ("Several clients" below).
 - **Malformed requests** (`--malformed`): payloads that are not valid
   requests, sent on the raw ring, and the answers wire.md gives them
   ("Malformed requests" below).
@@ -18,6 +20,9 @@ A run has up to three parts, all through the same adapter:
   from a seed, each step compared with the reference director's answer, and
   the first failure shrunk and written as a scenario file ("Generated cases"
   below).
+- **Concurrent clients** (`--concurrent N`): N clients at once, each playing
+  a generated case over a subtree of its own, their requests in flight
+  together across every slot of the ring ("Concurrent clients" below).
 
 ## What it checks
 
@@ -56,7 +61,15 @@ For every scenario, and for each generated case and the malformed part:
     is non-zero before the first registry request; a successful
     REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or
     REG_RENAME_KEY leaves it greater after the reply than before the
-    request; and it never goes backward.
+    request; and it never goes backward. With several clients, each step's
+    generation is the one its own client read in its own mapping, so a write
+    by one process must be visible to the next request of another.
+- **What only a second client sees** (2.5, 2.6, 2.8.1): handles paired
+  across every client of the ring, so one process may present another's
+  handle and a number open in any process is open for all; a request in a
+  slot other than 0 answered within the timeout; a bulk reply's data in the
+  bank of the slot it answers ("Slot `s` owns bank `s % banks`"); a
+  completed slot's `ack` naming the request it holds.
 
 ## What it does not check
 
@@ -89,13 +102,15 @@ are the only exceptions, and each is allowed by the wire.md text quoted
 Where wire.md allows more than one answer to a request, the scenario lists
 them (`one_of`) and names the section that allows it.
 
-**What a run does not exercise.** Several processes on one ring, concurrent
-requests, the director's thread count against `worker_hint` (2.8), how
-quickly a director wakes (2.11), `shim.cfg` and the injector (5.1, 6), and
-the read cache's rule (3.4.3) across a remount, which no scenario makes. The
-handshake variables a run does not use
-(`VFS_VIRTUAL_ROOTS`, `VFS_REGISTRY` and the rest) are not checked against
-the tree.
+**What a run does not exercise.** The director's thread count against
+`worker_hint` (2.8: a run keeps its data requests below the limit the hint
+gives, as the shim does, but cannot count a director's threads), how
+quickly a director wakes (2.11), `shim.cfg` and the injector (5.1, 6), a
+process killed while it holds a slot (a slot left `CLAIMED` is lost to the
+ring, and wire.md says nothing to recover it), and the read cache's rule
+(3.4.3) across a remount, which no scenario makes. The handshake variables a
+run does not use (`VFS_VIRTUAL_ROOTS`, `VFS_REGISTRY` and the rest) are not
+checked against the tree.
 
 ## The scenarios
 
@@ -140,6 +155,10 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `registry-create-key`, `-delete-key`, `-rename-key` | key create, delete, rename, children (4.3) |
 | `registry-changed` | REG_CHANGED, with `since` in the director's numbering (4.3) |
 | `registry-limits`, `-key-too-large` | name, depth and reply limits; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
+| `multi-handle-shared` | a handle opened by one process read, written and closed by another; closed for all once one closes it; a bulk READ from slot 1 in bank 1 (2.6, 2.8.1, 3.4.3) |
+| `multi-handles-unique` | three processes' handles, all open at once, unique across them (2.8.1, 3.4.3) |
+| `multi-write-visible` | one process's writes, truncation and new file seen by another in GETATTR, READDIR, OPEN and READ (2.8.1, 3.4.1 to 3.4.5) |
+| `multi-registry-gen` | one process's registry writes move `reg_gen` in another's mapping and change its answers (2.8.1, 4.3, 4.5) |
 
 **Left out because wire.md does not fix the answer**, so no scenario
 asserts it: READDIR of a path that is not a directory; a path below a file
@@ -173,6 +192,107 @@ Still left out of every part of a run:
 - A WRITE or request larger than the ring's payload, and a registry value over
   `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
   REG_KEY is covered only as a `one_of`, since the cap is the director's.
+
+## Several clients
+
+A step may carry `"client": n` (default 0, `contract/scenarios/README.md`).
+The run attaches one client per number a scenario names. Client 0 is the
+run itself. Every other client is a process of its own, `aether-conform
+client-worker` (`crates/aether-conform/src/clients.rs`):
+
+- it starts with the mount's handshake variables as its environment (any
+  `VFS_*` variable of the run's own removed first);
+- it attaches from them exactly as the run does, to a file ring or to a
+  named section and its events;
+- it sends the HEARTBEAT the shim sends, then the requests the run gives it,
+  one at a time.
+
+Client `k` claims from slot `k` (mod the slot count), as a client thread
+whose hint is `k` does (2.5). So a scenario with two clients uses two slots
+and two banks, where one client sending one request at a time only ever
+uses slot 0. The wire's promises are about processes (2.8.1: "every process
+of the launch shares it"). That is why scenario clients are processes, each
+mapping the ring for itself, and not threads sharing the run's mapping.
+
+One comparison session serves all the clients of a scenario, so handles are
+paired ring-global, as 2.8.1 has them. The loader refuses an OPEN that
+expects a number still open in any client. A client process that cannot
+start, attach or send its HEARTBEAT fails the scenario, as a failed attach
+does.
+
+A scenario cannot say that a process is killed (2.8.1: it "never sends
+CLOSE for its open handles"), so a test does it
+(`crates/aether-conform/tests/run.rs`, `a_killed_client`), on a file ring
+and on a section. It kills a client process holding open handles, then
+checks:
+
+- the director goes on answering this process and a new client process;
+- the new client reads through a handle the killed one left open (the
+  director keeps them until the session ends);
+- new handles do not collide with the old ones.
+
+## Concurrent clients
+
+`run --concurrent N` plays `--concurrent-cases C` rounds (default 64) of N
+clients at once (`crates/aether-conform/src/concurrent.rs`). The rounds come
+from `--seed` (as `--generate`'s cases do, and the same seed if both are
+given) and have at most `--steps` operations per client.
+
+**A round.** Each client `k` gets a generated case ("Generated cases" below)
+limited to one root with a writable provider and no registry layer. The
+overlay's version is one counter for the whole session, so one client's
+registry writes would change another's answers. The case's tree and paths
+move under the directory `c<k>` of root 0: a STORED_NAMES `skip` goes up by
+one, and expected handle numbers move into a range of their own. The
+clients' subtrees are disjoint, so each client's answers are its own case's
+whatever the others do, and the reference predicts them exactly. Before a
+round is played, it is checked against an in-process reference serving the
+combined tree; a case that answers otherwise there is a generator error.
+Root 0 also holds one file per slot under `sweep/`, each with its own size
+and bytes.
+
+**Playing it.** Every client is a thread with its own mapping of the ring,
+its own HEARTBEAT, its own comparison session and its own registry
+generation rules. Each sends its steps one at a time, claiming from the next
+slot of a cursor the clients share. Data requests (READ, WRITE, SETATTR and
+write OPENs) stay below 2.8's limit, `data_limit(worker_hint, slot_count)`,
+as the shim keeps them. A closed handle, or one never issued, is always sent
+as a stand-in near `u64::MAX`, never as the number the director closed,
+since the director may have issued that number to another client already.
+Then the sweep, which gives every slot and bank work:
+
+- an OPEN of each sweep file, each claimed from its own slot, so every slot
+  carries a request;
+- a GETATTR in every slot at once;
+- a bulk READ of each sweep file from its own slot, in waves of the data
+  limit, each wave in flight together.
+
+Each answer must have its own file's size or bytes.
+
+**What fails a round**, besides a step whose answer is not its client's
+expectation:
+
+| Rule | wire.md |
+|---|---|
+| Every request is answered within `--timeout`, whichever slot it is in. | 2.5: "Every taken slot MUST be completed"; slots are taken "in any order and from any number of threads" |
+| A reply is the answer to the request in its slot: each client's requests name its own paths and contents, so a reply written into another request's slot fails that client's comparison, and the sweep's answers differ slot by slot. | 2.5 |
+| A completed slot's `ack` is the low 32 bits of its request's `req_id`. | 2.5, "The client's read" |
+| A bulk reply's data lies in the bank of the slot it answers. | 2.6: "Slot `s` owns bank `s % banks`" |
+| An `fh` is not issued to one client while another has it open; a number counts as closed once its CLOSE is sent. | 2.8.1: "a director must issue them uniquely across all processes of the ring"; 3.4.3 |
+| `reg_gen` never goes backward in any client's mapping. | 4.5 |
+
+At the end, every slot must have carried a request. A director may answer
+any READ inline (3.4.4), so a bank that never carried a bulk reply is not a
+failure. The report's `concurrent` entry, and a line on stderr, say how many
+slots and banks were used and the most requests in flight at once. The first
+round that fails is written to the failures folder as
+`concurrent-<seed>-<round>.json`. It is a scenario whose steps are marked
+with their clients, which `run --scenarios` replays one step at a time. A
+fault that needs requests in flight together may not show in the replay.
+
+Concurrent clients are threads of the run, not processes, since a round has
+many of them. The processes the wire speaks of are what the `multi-*`
+scenarios and the killed-client test cover, over both kinds of ring.
 
 ## Malformed requests
 
@@ -446,15 +566,19 @@ aether-conform run --director "java -jar my-director-adapter.jar" --scenarios co
 | `--cases N` | How many generated cases. Default 64. |
 | `--seed S` | The seed the cases are made from. Default: from the clock, printed. |
 | `--steps M` | The most operations per case. Default 32. |
-| `--failures DIR` | Where the shrunk failing case is written. Default `aether-conform-failures-<seed>` in the temporary directory. |
+| `--failures DIR` | Where the shrunk failing case, and a failing concurrent round, are written. Default `aether-conform-failures-<seed>` in the temporary directory. |
+| `--concurrent N` | Also play rounds of N clients at once ("Concurrent clients"). `--seed`, `--steps` and `--failures` apply to them too. |
+| `--concurrent-cases C` | How many rounds, each a case per client. Default 64. |
 
 Exit code: 0 when every scenario passes, 1 when any fails, 2 on a usage
 error, a scenario that does not load, an adapter error, or a generator error
 (the reference answered a generated request otherwise than wire.md says).
 
-CI runs the committed scenarios, `--malformed` and `--generate --cases 1024`
-against the reference, over a file ring on Linux and Windows and over a
-section on Windows, with the workflow run's id as the seed. Measured on a
+CI runs the committed scenarios, `--malformed`, `--generate --cases 1024`
+and `--concurrent 4 --concurrent-cases 256` against the reference, over a
+file ring on Linux and Windows and over a section on Windows, with the
+workflow run's id as the seed. The concurrent rounds take about 15 s per
+ring with a debug build on a 16-thread Windows machine. Measured on a
 16-thread Windows machine with a debug build, 1024 cases take about 19 s over
 a file ring (each mount creates a 16 MiB ring file) and 8 s over a section;
 pinned to two cores, 512 take 8.4 s and 3.5 s. At two to three times slower
@@ -463,7 +587,8 @@ on CI's 2-vCPU runners that is about one minute for the Windows step.
 `aether-conform reference-adapter [--ring file|section]` is an adapter for
 the reference director (`aether_refdirector::Reference`, built with
 `Reference::from_tree`), served with the same loop a Rust director runs
-(`aether_rpc::serve_with_arena`) on its own thread. It is what a run is
+(`aether_rpc::serve_with_arena`) on four threads, each with its own handle
+on the reference (`Reference::share`), with `worker_hint` 4. It is what a run is
 checked against in this repository's tests, and an example of what an
 adapter does. Its hidden `--break <rule>` switch, for this repository's tests
 only, makes it break one rule on purpose (`aether_conform::adapters::Break`),
@@ -471,7 +596,19 @@ so the tests can show that generation and the malformed part find it; the
 hidden `test-adapter --misbehave stale-immutable` (every read open of a file
 `immutable`, under one `mount_gen`) and `--misbehave frozen-reg-gen` (the
 registry generation never moved by a write) do the same for the checks
-across steps.
+across steps. These four do it for the checks across clients:
+
+- `--misbehave per-slot-fh`: handles numbered per slot, as a per-connection
+  handle table would number them;
+- `--misbehave slot-zero-only`: only slot 0 ever taken;
+- `--misbehave bank-zero`: every bulk reply in bank 0;
+- `--misbehave swap-replies`: two requests in flight together each get the
+  other's reply, under their own `ack`.
+
+Each passes every single-client scenario, since one client sending one
+request at a time only uses slot 0. `swap-replies` passes every scenario,
+since a scenario's steps go one at a time. Each fails the concurrent
+clients.
 
 ## Reading a report
 

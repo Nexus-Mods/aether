@@ -689,11 +689,9 @@ fn a_failing_round_is_written_inside_the_tests_own_folder() {
     );
     assert_eq!(code, Some(1), "{all}");
     assert!(!entry(&entries, "concurrent").1, "{entries:?}");
-    let shared = std::env::temp_dir().join("aether-conform-failures-11");
     assert!(
-        !Path::new(&file).starts_with(&shared),
-        "written to the shared {}: {file}",
-        shared.display()
+        !file.contains("aether-conform-failures-11"),
+        "written to the shared default folder: {file}"
     );
     assert!(
         Path::new(&file).starts_with(aether_testkit::scratch_root()),

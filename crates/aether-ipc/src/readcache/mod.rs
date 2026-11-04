@@ -73,7 +73,7 @@
 //! would have returned, or no answer at all.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 mod config;
@@ -87,8 +87,8 @@ pub use config::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_RUN, DEFAULT_THRESHOLD,
 };
 use config::{
-    COLD_AFTER_FAILED_FETCHES, COLD_AFTER_MISSES, COLD_MAX_READS, COLD_READS, PRESSURE_MEMORY,
-    RETIRED_DIAGS,
+    COLD_AFTER_FAILED_FETCHES, COLD_AFTER_MISSES, COLD_MAX_READS, COLD_READS, MAX_BLOCKED_PER_ROOT,
+    PRESSURE_MEMORY, RETIRED_DIAGS,
 };
 pub use file::FileRef;
 use file::{Entry, Flight, Name, Slot, SlotKind, State, Version};
@@ -103,17 +103,70 @@ struct FileTable {
     by_name: HashMap<Name, Arc<Entry>>,
     /// Size past which the next registration sweeps out unused entries.
     sweep_at: usize,
+    /// Paths deleted or renamed through this process, per root: nothing at
+    /// or under one is cached again ([`ReadCache::invalidate_path`]). Empty
+    /// until the first, so until then an open looks at nothing more.
+    blocked: HashMap<u32, Blocked>,
 }
 
 const SWEEP_MIN: usize = 1024;
 
 /// One root's deleted and renamed paths, folded: a file at or under any of
 /// them is never cached again.
+///
+/// Kept small: a path under one already held adds nothing, adding one drops
+/// those under it, and past [`MAX_BLOCKED_PER_ROOT`] a path is replaced by
+/// its parent, and a top-level name by the whole root. Each step blocks a
+/// superset of what was blocked before, so the cost of the bound is files
+/// no longer cached, never an answer served that should not be.
 #[derive(Default)]
 struct Blocked {
     /// The whole root ([`ReadCache::invalidate_path`] of `""` or `"."`).
     whole: bool,
     prefixes: HashSet<String>,
+}
+
+impl Blocked {
+    /// Whether `path` (folded, trimmed of `/`) is at or under a blocked
+    /// path: a lookup per component, borrowing slices of `path`, so nothing
+    /// is allocated.
+    fn covers(&self, path: &str) -> bool {
+        self.whole
+            || self.prefixes.contains(path)
+            || path
+                .match_indices('/')
+                .any(|(i, _)| self.prefixes.contains(&path[..i]))
+    }
+
+    /// Block `path` (folded, trimmed of `/`, not empty).
+    fn add(&mut self, path: &str) {
+        if self.covers(path) {
+            return;
+        }
+        let mut p = path;
+        loop {
+            let under = format!("{p}/");
+            self.prefixes.retain(|q| !q.starts_with(&under));
+            self.prefixes.insert(p.to_string());
+            if self.prefixes.len() <= MAX_BLOCKED_PER_ROOT {
+                return;
+            }
+            // Over the cap: block the parent instead, which takes in `p`
+            // and its siblings; a top-level name takes in the whole root.
+            match p.rsplit_once('/') {
+                Some((parent, _)) => p = parent,
+                None => {
+                    self.block_all();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn block_all(&mut self) {
+        self.whole = true;
+        self.prefixes = HashSet::new();
+    }
 }
 
 /// How a read came by one of its units.
@@ -145,12 +198,6 @@ pub struct ReadCache {
     /// Diagnostics of files swept out of the file table, so the per-file
     /// table covers the whole run.
     retired: Mutex<HashMap<Name, FileDiag>>,
-    /// Paths deleted or renamed through this process, per root: nothing at
-    /// or under one is cached again ([`ReadCache::invalidate_path`]).
-    blocked: Mutex<HashMap<u32, Blocked>>,
-    /// Whether `blocked` holds anything: until it does, an open looks at
-    /// nothing more than this.
-    any_blocked: AtomicBool,
 }
 
 impl Default for ReadCache {
@@ -174,14 +221,13 @@ impl ReadCache {
             files: Mutex::new(FileTable {
                 by_name: HashMap::new(),
                 sweep_at: SWEEP_MIN,
+                blocked: HashMap::new(),
             }),
             lru: Mutex::new(BTreeMap::new()),
             used: AtomicUsize::new(0),
             tick: AtomicU64::new(1),
             counters: Counters::default(),
             retired: Mutex::new(HashMap::new()),
-            blocked: Mutex::new(HashMap::new()),
-            any_blocked: AtomicBool::new(false),
         }
     }
 
@@ -197,26 +243,6 @@ impl ReadCache {
 
     fn now(&self) -> u64 {
         self.tick.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Whether `path` (folded, under `root`) is at or under a path this
-    /// process deleted or renamed. One relaxed load while nothing has been;
-    /// after that a lookup per component of `path`, borrowing slices of it,
-    /// so nothing is allocated.
-    fn is_blocked(&self, root: u32, path: &str) -> bool {
-        if !self.any_blocked.load(Ordering::Relaxed) {
-            return false;
-        }
-        let b = lock(&self.blocked);
-        let Some(r) = b.get(&root) else {
-            return false;
-        };
-        let path = path.trim_matches('/');
-        r.whole
-            || r.prefixes.contains(path)
-            || path
-                .match_indices('/')
-                .any(|(i, _)| r.prefixes.contains(&path[..i]))
     }
 
     /// A handle on `path` (folded, under `root`) was opened, `size` bytes,
@@ -238,23 +264,33 @@ impl ReadCache {
         immutable: bool,
         write: bool,
     ) -> FileRef {
-        // Before the file table: `blocked` is never held with another lock.
-        let blocked = !write && immutable && self.is_blocked(root, path);
         let name = Name {
             root,
             path: path.to_string(),
         };
-        let entry = {
+        let (entry, blocked) = {
             let mut reg = lock(&self.files);
+            // Under the same lock as `invalidate_path`, so an open racing a
+            // delete or rename of its parent sees it or comes before it.
+            let blocked = !write
+                && immutable
+                && !reg.blocked.is_empty()
+                && reg
+                    .blocked
+                    .get(&root)
+                    .is_some_and(|b| b.covers(path.trim_matches('/')));
             if reg.by_name.len() >= reg.sweep_at {
                 self.sweep(&mut reg);
             }
-            Arc::clone(reg.by_name.entry(name.clone()).or_insert_with(|| {
-                Arc::new(Entry {
-                    name,
-                    state: Mutex::new(State::default()),
-                })
-            }))
+            (
+                Arc::clone(reg.by_name.entry(name.clone()).or_insert_with(|| {
+                    Arc::new(Entry {
+                        name,
+                        state: Mutex::new(State::default()),
+                    })
+                })),
+                blocked,
+            )
         };
         let version = Version { size, mount_gen };
         let mut st = lock(&entry.state);
@@ -385,19 +421,16 @@ impl ReadCache {
     /// renamed onto it: drop it and everything under it, and never cache any
     /// of it again, a file under it this process has not opened yet
     /// included. An empty path or `"."` is the whole root.
+    ///
+    /// The shim calls this before it asks the director, so a delete or
+    /// rename the director refuses still blocks the path: the outcome is not
+    /// always known (a transport error), and blocking only costs caching.
+    /// A file the table holds is blocked by its own poisoned entry, not by
+    /// a path in the set, so a directory later made at its name is not
+    /// blocked by it.
     pub fn invalidate_path(&self, root: u32, path: &str) {
         let path = path.trim_matches('/');
         let whole_root = path.is_empty() || path == ".";
-        {
-            let mut b = lock(&self.blocked);
-            let r = b.entry(root).or_default();
-            if whole_root {
-                r.whole = true;
-            } else if !r.prefixes.contains(path) {
-                r.prefixes.insert(path.to_string());
-            }
-            self.any_blocked.store(true, Ordering::Release);
-        }
         let mut reg = lock(&self.files);
         let hit: Vec<Arc<Entry>> = reg
             .by_name
@@ -412,22 +445,17 @@ impl ReadCache {
             })
             .cloned()
             .collect();
-        if !whole_root {
-            // Not opened yet, perhaps, but a later immutable open of a path
-            // this process has renamed or deleted must not be believed.
-            let name = Name {
-                root,
-                path: path.to_string(),
-            };
-            reg.by_name.entry(name.clone()).or_insert_with(|| {
-                Arc::new(Entry {
-                    name,
-                    state: Mutex::new(State {
-                        poisoned: true,
-                        ..State::default()
-                    }),
-                })
-            });
+        // Not opened yet, perhaps, but a later immutable open of a path this
+        // process has renamed or deleted, or of one under it, must not be
+        // believed. A file the table holds, with nothing held under it, needs
+        // no entry here: its own entry is poisoned below, and poisoned
+        // entries are never swept. So a process that writes and deletes
+        // temporary files adds nothing to the set.
+        let held_file = !hit.is_empty() && hit.iter().all(|e| e.name.path == path);
+        if whole_root {
+            reg.blocked.entry(root).or_default().block_all();
+        } else if !held_file {
+            reg.blocked.entry(root).or_default().add(path);
         }
         for e in hit {
             let mut st = lock(&e.state);

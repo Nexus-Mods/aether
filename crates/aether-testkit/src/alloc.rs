@@ -65,10 +65,35 @@ unsafe impl GlobalAlloc for Counting {
 /// Runs `f` and returns its result with the number of allocations it made on
 /// this thread. Counting stops when `f` returns, so dropping the result is
 /// the caller's and is not counted.
+///
+/// A call inside another counts on its own, and its allocations count for
+/// the outer one too. If `f` panics, the thread is left as it was.
 pub fn allocations<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    /// Puts the thread back as the call found it, also when `f` unwinds.
+    struct Restore {
+        armed: bool,
+        count: usize,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let inner = COUNT.get();
+            ARMED.set(self.armed);
+            COUNT.set(if self.armed {
+                self.count + inner
+            } else {
+                self.count
+            });
+        }
+    }
+    let restore = Restore {
+        armed: ARMED.get(),
+        count: COUNT.get(),
+    };
     COUNT.set(0);
     ARMED.set(true);
     let r = std::hint::black_box(f());
     ARMED.set(false);
-    (r, COUNT.get())
+    let n = COUNT.get();
+    drop(restore);
+    (r, n)
 }

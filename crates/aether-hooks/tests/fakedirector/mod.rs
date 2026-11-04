@@ -113,6 +113,9 @@ pub(crate) struct Options {
     /// The worker count the ring header states (`ring::set_worker_hint`); 0
     /// states none. The fake serves on that many threads, at most one per
     /// slot, and on `aether_ipc::DEFAULT_WORKER_COUNT` when it is 0.
+    /// It also sets how many data requests the shim keeps in flight
+    /// (`aether_ipc::concurrent::data_limit`: 3 for a hint of 0 on 8 slots,
+    /// 6 for 8), so a test that needs a deep pipeline sets it, and `slots`.
     pub worker_hint: u32,
     /// The transport.
     pub ring: RingKind,
@@ -443,6 +446,10 @@ fn ring_file() -> std::path::PathBuf {
 /// Another client on the ring [`install`] serves, as a second injected process of the session
 /// would have: its own mapping of the section, its own `FuseClient`.
 pub(crate) fn second_client(virtual_dir: &Path) -> aether_hooks::director::FuseClient {
+    assert!(
+        std::env::var_os(aether_env::RING_SECTION).is_some(),
+        "second_client connects to the section ring; a RingKind::File ring has none"
+    );
     let env = |name: &str| -> String { std::env::var(name).unwrap() };
     aether_hooks::director::FuseClient::connect(
         &section_name(),

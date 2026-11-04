@@ -120,15 +120,7 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
     if FUSE.get().is_some() {
         return Ok(());
     }
-    // Test-only escape hatch (see the constant's doc comment in `aether-env`): lets
-    // the launch-abort path be exercised without standing up a director that is
-    // actually broken.
-    if aether_env::opt_in(aether_env::TEST_FUSE_INIT_FAIL) {
-        return Err(FuseInitError::ConnectFailed(format!(
-            "forced failure via {}",
-            aether_env::TEST_FUSE_INIT_FAIL
-        )));
-    }
+    forced_failure()?;
     let client = client_from_env()?;
     client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
     let _ = FUSE.set(client);
@@ -151,7 +143,21 @@ pub fn install_global(client: FuseClient) -> Result<(), FuseClient> {
 #[doc(hidden)]
 #[cfg(feature = "test-support")]
 pub fn connect_from_env() -> Result<FuseClient, FuseInitError> {
+    forced_failure()?;
     client_from_env()
+}
+
+/// Test-only escape hatch (see the constant's doc comment in `aether-env`): lets
+/// the launch-abort path be exercised without standing up a director that is
+/// actually broken.
+fn forced_failure() -> Result<(), FuseInitError> {
+    if aether_env::opt_in(aether_env::TEST_FUSE_INIT_FAIL) {
+        return Err(FuseInitError::ConnectFailed(format!(
+            "forced failure via {}",
+            aether_env::TEST_FUSE_INIT_FAIL
+        )));
+    }
+    Ok(())
 }
 
 /// What [`try_init_from_env`] connects: the ring and roots the environment

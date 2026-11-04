@@ -40,3 +40,24 @@ fn allocations_counts_only_this_thread() {
     drop(s);
     assert_eq!(aether_testkit::alloc::allocations(|| ()).1, 0);
 }
+
+#[test]
+fn a_panic_inside_leaves_the_thread_uncounted_and_a_nested_call_counts_for_both() {
+    use aether_testkit::alloc::allocations;
+    let unwound = std::panic::catch_unwind(|| allocations(|| panic!("inside")));
+    assert!(unwound.is_err());
+    assert_eq!(allocations(|| ()).1, 0);
+    // A panic inside an outer call: the outer one keeps counting its own.
+    let ((), outer) = allocations(|| {
+        let _ = std::panic::catch_unwind(|| allocations(|| panic!("inside")));
+        drop(vec![0u8; 8]);
+    });
+    assert!(outer >= 1, "{outer}");
+
+    let ((inner, a), outer) = allocations(|| {
+        let a = vec![0u8; 8];
+        (allocations(|| vec![0u8; 8]), a)
+    });
+    assert_eq!((inner.1, outer), (1, 2));
+    drop((inner, a));
+}

@@ -5,6 +5,35 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (director conformance)
+
+The wire does not change: the golden vectors, the wire version (4),
+`contract/env.json`, `contract/artifacts.json` and the shim and injector are as
+they were. New: `aether-conform` (crate `aether-conform`), a binary that tests
+any director against the contract. `aether-conform run --director "<adapter
+command>"` mounts each scenario's tree through the director's adapter, attaches
+to its ring as the shim would, plays the requests and compares the answers;
+`--malformed` sends requests that are not valid ones and `--generate` plays
+generated trees and operation sequences against the reference, shrinking and
+saving the first failure as a scenario. `aether-conform reference-adapter`
+serves the reference director behind the adapter protocol. The scenarios are
+data in `contract/scenarios/`, shipped in `contract.zip`, and each release
+carries `aether-conform-windows-x64.zip` and `aether-conform-linux-x64.tar.gz`
+(unsigned) in its assets and `SHA256SUMS`. `docs/conformance.md` describes the
+adapter protocol and every comparison rule that relaxes equality.
+
+`aether-refdirector` changed to answer as `docs/wire.md` says: a directory's
+size is 0, WRITE and SETATTR on a directory handle are `ST_IS_DIR`, MKDIR,
+RENAME and RENAME_X keep the caller's spelling and have the documented
+statuses, and a write open on a root with no writable provider is read-only.
+`aether-filering`'s `create` removes and recreates the ring file instead of
+truncating it. `docs/wire.md` now says where directors may differ: READDIR
+order, times, the registry's version numbering, MKDIR over an existing
+directory (`ST_OK` or `ST_EXISTS`), and the names that exist only in a
+read-only lower layer; and what both directors do: a WRITE writes every byte or
+fails, DELETE and RENAME of a non-empty directory, the live size of a file with
+open handles.
+
 ## Unreleased (the wire is one typed table)
 
 The wire does not change: every golden vector, the wire version (4),

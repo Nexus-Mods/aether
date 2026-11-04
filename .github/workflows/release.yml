@@ -6,6 +6,10 @@
 #                   beside them (unsigned: test-only)
 #   contract.zip    contract/*.json, the protocol's golden vectors and
 #                   contract/scenarios/ (what a director must do, as data)
+#   aether-conform-windows-x64.zip   aether-conform.exe, the tool that checks
+#   aether-conform-linux-x64.tar.gz  a director against the wire contract
+#                   (docs/conformance.md): unsigned, never loaded into a game,
+#                   built every release whether or not the natives are reused
 #   natives-key.txt what the natives are built from (bin/natives-key.ps1)
 #   SHA256SUMS      the SHA-256 of each of the others
 #
@@ -40,7 +44,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # aether-conform for Linux, built natively. Unsigned. The release job adds
+  # it to the assets, so it is in SHA256SUMS and published with the rest.
+  conform-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Build aether-conform (release)
+        run: cargo build --release -p aether-conform
+      - name: Package aether-conform-linux-x64.tar.gz
+        run: |
+          mkdir -p dist
+          tar -czf dist/aether-conform-linux-x64.tar.gz -C target/release aether-conform
+          tar -tzf dist/aether-conform-linux-x64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aether-conform-linux
+          path: dist/aether-conform-linux-x64.tar.gz
+          if-no-files-found: error
+
   release:
+    needs: conform-linux
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -68,6 +95,12 @@ jobs:
         run: rustup toolchain install
       - name: Build the natives and fixtures (bin/build-natives.ps1)
         run: .\bin\build-natives.ps1 -Fixtures -RequireDumpbin -Out dist\natives
+      # The conformance tool is not a native: never signed, and built whether
+      # or not the natives are reused below.
+      - name: Build aether-conform (release)
+        run: |
+          cargo build --release -p aether-conform
+          if ($LASTEXITCODE) { throw 'cargo build of aether-conform failed' }
       - name: Natives key
         id: key
         run: |
@@ -106,6 +139,11 @@ jobs:
           if ($LASTEXITCODE) { throw 'signing failed' }
           $bad = @(& .\bin\check-signatures.ps1 -Path $files)
           if ($bad.Count) { throw "the signed natives fail the signature check: $($bad -join '; ')" }
+      - name: aether-conform for Linux (from the conform-linux job)
+        uses: actions/download-artifact@v4
+        with:
+          name: aether-conform-linux
+          path: dist/out
       - name: Package
         id: package
         run: |
@@ -117,6 +155,8 @@ jobs:
           $natives = @($contract.natives.x64.injector, $contract.natives.x64.shim, $contract.natives.x86.injector, $contract.natives.x86.shim) |
             ForEach-Object { Join-Path 'dist\natives' $_ }
           Compress-Archive -LiteralPath $natives -DestinationPath "$out\natives.zip" -Force
+          Compress-Archive -LiteralPath 'target\release\aether-conform.exe' -DestinationPath "$out\aether-conform-windows-x64.zip" -Force
+          if (-not (Test-Path -LiteralPath "$out\aether-conform-linux-x64.tar.gz")) { throw 'the Linux aether-conform is missing' }
           $fixtures = @($contract.fixtures) | ForEach-Object { Join-Path 'target\release' $_ }
           Compress-Archive -LiteralPath $fixtures -DestinationPath "$out\fixtures.zip" -Force
           # contract.zip: the JSON and the vectors at the top, the scenarios in

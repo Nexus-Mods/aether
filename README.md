@@ -119,7 +119,9 @@ builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history.
 
 A tag `v<semver>` makes a release ([`release.yml`](.github/workflows/release.yml))
 with `natives.zip` (the four natives), `fixtures.zip` (the test fixtures and
-the host-target injector and shim), `contract.zip` (`contract/artifacts.json`,
+the host-target injector and shim), `aether-conform-windows-x64.zip` and
+`aether-conform-linux-x64.tar.gz` (the conformance tool, unsigned: see
+"Checking a director"), `contract.zip` (`contract/artifacts.json`,
 `contract/env.json`, `contract/protocol.json`, the protocol's golden vectors and
 `contract/scenarios/`, the conformance scenarios), `natives-key.txt` and
 `SHA256SUMS`. Check a download with `sha256sum -c SHA256SUMS`, and the
@@ -132,6 +134,29 @@ prerelease for testing, with unsigned natives unless a manual run asks for
 signing. When an earlier full release has the same natives key, its signed
 natives are reused byte for byte, so a release that changes no native signs
 nothing. `bin\sign.tests.ps1` tests the signing script against fake tools.
+
+## Checking a director
+
+`aether-conform` plays the scenarios of `contract/scenarios/` against a
+director and compares every answer with the one the contract gives. Every
+release carries it for Windows (`aether-conform-windows-x64.zip`) and Linux
+(`aether-conform-linux-x64.tar.gz`), unsigned, since it is a test tool that is
+never loaded into a game, and the scenarios are in `contract.zip`. Unpack both,
+then:
+
+```
+aether-conform run --director "<your adapter command>" --scenarios scenarios
+```
+
+The adapter is a small program you write that mounts a scenario's tree in your
+director and tells the run which ring to attach to; the adapter protocol, what
+a run checks and where the contract lets directors differ are in
+[docs/conformance.md](docs/conformance.md). `--malformed` also sends requests
+that are not valid ones, and `--generate` plays generated trees and operation
+sequences (`--cases`, `--seed`), shrinking and saving the first failure as a
+scenario file you can replay. `aether-conform reference-adapter` is the
+reference director behind an adapter, a working example. To build it from
+source: `cargo build --release -p aether-conform`.
 
 ## License
 

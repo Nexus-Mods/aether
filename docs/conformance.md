@@ -383,6 +383,10 @@ arena is sent without it, as the shim would, and its note says so.
 
 ## Running it
 
+Every release has `aether-conform-windows-x64.zip` and `aether-conform-linux-x64.tar.gz`
+(unsigned) and the scenarios in `contract.zip`; in the examples below, `target/debug/aether-conform`
+is that binary and `contract/scenarios` the unpacked `scenarios` folder.
+
 ```sh
 cargo build -p aether-conform
 # The reference director, over a ring file:

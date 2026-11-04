@@ -11,7 +11,8 @@ fn reg_op(ctx: &'static Ctx, op: Op, i: usize) -> Seen {
     match op {
         // A few value names, again and again: the key's values all cross in
         // one REG_KEY reply, which a value per write would grow past
-        // `payload_cap` (and the read then falls back, as an overflow does).
+        // `payload_cap`, and every read of the key would then fail
+        // (wire.md 4.4).
         Op::Call(h) => reg_call(ctx, h, i % 8),
         Op::WriteChunks(_) => unreachable!("a registry call writes no file"),
     }

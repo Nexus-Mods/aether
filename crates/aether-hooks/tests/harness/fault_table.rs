@@ -77,7 +77,7 @@ pub(crate) enum HookedOp {
     StoredNames,
     /// `CreateProcessW` of an image under a root (STAGE_EXEC).
     StageExec,
-    /// `RegQueryValueExW` (REG_KEY).
+    /// `NtQueryValueKey` (REG_KEY).
     RegRead,
     /// `NtSetValueKey` (REG_SET_VALUE).
     RegWrite,
@@ -286,6 +286,7 @@ pub(crate) const STATUS_FILE_IS_A_DIRECTORY: i32 = 0xC000_00BAu32 as i32;
 pub(crate) const STATUS_NOT_SAME_DEVICE: i32 = 0xC000_00D4u32 as i32;
 pub(crate) const STATUS_CANNOT_DELETE: i32 = 0xC000_0121u32 as i32;
 pub(crate) const STATUS_KEY_DELETED: i32 = 0xC000_017Cu32 as i32;
+pub(crate) const STATUS_REGISTRY_IO_FAILED: i32 = 0xC000_016Bu32 as i32;
 pub(crate) const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 /// The NTSTATUS names a cell may hold, written without `STATUS_`.
@@ -301,6 +302,7 @@ const NT_NAMES: &[(i32, &str)] = &[
     (STATUS_NOT_SAME_DEVICE, "NOT_SAME_DEVICE"),
     (STATUS_CANNOT_DELETE, "CANNOT_DELETE"),
     (STATUS_KEY_DELETED, "KEY_DELETED"),
+    (STATUS_REGISTRY_IO_FAILED, "REGISTRY_IO_FAILED"),
 ];
 
 /// What the program gets when `fault` answers `op`'s request.
@@ -378,7 +380,13 @@ pub(crate) fn expected(op: HookedOp, fault: FaultClass) -> Expect {
             F::NoReply | F::Overflow => nt(STATUS_OBJECT_NAME_COLLISION),
             _ => fail,
         },
-        O::StoredNames | O::RegRead => Expect::Fallback,
+        O::StoredNames => Expect::Fallback,
+        O::RegRead => match fault {
+            // The key's overlay is larger than one reply: it holds what the real
+            // key does not, so the read fails rather than serve the real key.
+            F::Status(Status::ReplyTooLarge) | F::Overflow => nt(STATUS_REGISTRY_IO_FAILED),
+            _ => Expect::Fallback,
+        },
         O::StageExec => Expect::Win32(ERROR_FILE_NOT_FOUND),
         O::RegWrite => match fault {
             F::Status(Status::BadRequest) => nt(STATUS_INVALID_PARAMETER),
@@ -403,13 +411,16 @@ pub(crate) const COLUMNS: &[(&str, &[FaultClass])] = &[
     ),
     ("`ST_CROSS_ROOT`", &[FaultClass::Status(Status::CrossRoot)]),
     (
+        "`ST_REPLY_TOO_LARGE`",
+        &[FaultClass::Status(Status::ReplyTooLarge)],
+    ),
+    (
         "any other status",
         &[
             FaultClass::Status(Status::NotADirectory),
             FaultClass::Status(Status::IoError),
             FaultClass::Status(Status::BadFh),
             FaultClass::Status(Status::NotSupported),
-            FaultClass::Status(Status::ReplyTooLarge),
             FaultClass::UnknownNegative,
             FaultClass::Positive,
         ],
@@ -823,6 +834,14 @@ extern "system" {
         single: u8,
         name: *const crate::ntapi::UnicodeString,
         restart: u8,
+    ) -> i32;
+    fn NtQueryValueKey(
+        key: isize,
+        name: *const c_void,
+        class: u32,
+        info: *mut c_void,
+        len: u32,
+        ret: *mut u32,
     ) -> i32;
     fn NtSetValueKey(
         key: isize,
@@ -1529,24 +1548,30 @@ pub(crate) fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
     let k = ctx.key as isize;
     match op {
         HookedOp::RegRead => {
-            use windows_sys::Win32::System::Registry::RegQueryValueExW;
-            let name = crate::reg::wide("v");
-            let (mut data, mut len, mut ty) = ([0u8; 4], 4u32, 0u32);
-            // SAFETY: a key this test opened, a 4-byte buffer.
-            let st = unsafe {
-                RegQueryValueExW(
-                    k as _,
-                    name.as_ptr(),
-                    core::ptr::null(),
-                    &mut ty,
-                    data.as_mut_ptr(),
-                    &mut len,
-                )
-            };
-            match (st, u32::from_le_bytes(data)) {
-                (0, 2) => Ok(Expect::Nt(STATUS_SUCCESS)),
-                (0, 1) => Ok(Expect::Fallback),
-                other => Err(format!("RegQueryValueExW: {other:?}")),
+            // KEY_VALUE_PARTIAL_INFORMATION: TitleIndex, Type, DataLength, Data.
+            const KEY_VALUE_PARTIAL_INFORMATION: u32 = 2;
+            let mut info = [0u8; 16];
+            let mut ret = 0u32;
+            let st = crate::reg::with_us("v", |name| {
+                // SAFETY: a key this test opened, a name and a 16-byte buffer.
+                unsafe {
+                    NtQueryValueKey(
+                        k,
+                        name.cast(),
+                        KEY_VALUE_PARTIAL_INFORMATION,
+                        info.as_mut_ptr().cast(),
+                        info.len() as u32,
+                        &mut ret,
+                    )
+                }
+            });
+            if st != STATUS_SUCCESS {
+                return status(st);
+            }
+            match u32::from_le_bytes(info[12..16].try_into().unwrap()) {
+                2 => Ok(Expect::Nt(STATUS_SUCCESS)),
+                1 => Ok(Expect::Fallback),
+                v => Err(format!("NtQueryValueKey: the value {v}")),
             }
         }
         HookedOp::RegWrite => {

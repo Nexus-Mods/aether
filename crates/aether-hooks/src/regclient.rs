@@ -17,8 +17,10 @@
 //! **Errors.** Every call returns the director's status as `Err`: a request
 //! that could not be sent or was never answered is `Status::IoError`, a director with no
 //! registry attached `Status::NotSupported`, a `REG_KEY` answer too large for the ring
-//! `Status::ReplyTooLarge`. A failed read is counted as a fallback in the shim stats; the caller
-//! then serves the real key alone. A failed write is never retried against the real registry;
+//! `Status::ReplyTooLarge` (the director's own status, or the ring's overflow, which says the
+//! same). A failed read is counted as a fallback in the shim stats and the caller serves the real
+//! key alone, except a key too large to read: its overlay holds what the real key does not, so
+//! the caller fails the read (`docs/wire.md` 4.4) and nothing is counted. A failed write is never retried against the real registry;
 //! the caller returns `STATUS_UNSUCCESSFUL`.
 
 use std::collections::HashMap;
@@ -35,6 +37,9 @@ use crate::director::{self, FuseClient};
 /// this between two writes; the bound only stops a pathological enumeration from growing it
 /// without end.
 const CACHE_ENTRIES: usize = 4096;
+
+/// The status a ring sends for a reply longer than its `payload_cap` (`docs/wire.md` 2.5).
+const RING_OVERFLOW: i32 = i32::MIN;
 
 /// Registry virtualisation is on for this process: the host set [`aether_env::REGISTRY`] (it does
 /// so only while a registry layer is attached), every registry detour was installed
@@ -191,7 +196,8 @@ pub fn changed(path: &str, subtree: bool, since: u64) -> Result<(bool, u64), Sta
 fn read_failed<T>(status: Status) -> Result<T, Status> {
     if IN_WRITE.with(|w| w.get()) {
         crate::hookstats::note_reg_write_refused();
-    } else {
+    } else if status != Status::ReplyTooLarge {
+        // A key too large to read is failed, not served from the real registry.
         crate::hookstats::note_reg_read_fallback();
     }
     Err(status)
@@ -342,10 +348,16 @@ impl<'a> RegClient<'a> {
     }
 
     /// One `REG_KEY` round trip: the key's node, owned (the reply decodes it).
+    /// A reply past `payload_cap`, which the ring sends as its overflow status, is
+    /// `Status::ReplyTooLarge`, as the director's own answer would be.
     fn fetch_key(&self, path: &str) -> Result<Option<Node>, Status> {
-        self.read(&Request::RegKey { path }, |r| match r {
+        self.request(&Request::RegKey { path }, |r| match r {
             Reply::RegKey(k) => Some(k.node.map(std::borrow::Cow::into_owned)),
             _ => None,
+        })
+        .map_err(|e| match e {
+            CallError::UnknownStatus(RING_OVERFLOW) => Status::ReplyTooLarge,
+            e => director::failed(e),
         })
     }
 

@@ -1097,11 +1097,11 @@ call it made. A cell names an NTSTATUS without its `STATUS_` prefix, or:
 
 The columns:
 
-- A named status (`ST_NOT_FOUND` to `ST_CROSS_ROOT`): that status, with an
+- A named status (`ST_NOT_FOUND` to `ST_REPLY_TOO_LARGE`): that status, with an
   empty payload, for a request the director never carried out.
 - **any other status**: `ST_NOT_A_DIRECTORY`, `ST_IO_ERROR`, `ST_BAD_FH`,
-  `ST_NOT_SUPPORTED`, `ST_REPLY_TOO_LARGE`, a negative status no table
-  names, or a positive status.
+  `ST_NOT_SUPPORTED`, a negative status no table names, or a positive
+  status.
 - **overflow**: the ring's overflow status, -2147483648 (section 2.5): the
   director carried out the request and its reply did not fit.
 - **truncated**: an `ST_OK` payload one byte short.
@@ -1160,8 +1160,11 @@ The calls, each the first of its kind on a handle or name:
   (it folds to another name) is not used either.
 - **start a child**: `CreateProcessW` of an image under a root with a
   backing (STAGE_EXEC, 3.4.14).
-- **registry read**: `RegQueryValueExW` and the other calls answered by
-  REG_LOOKUP and REG_KEY (section 4.4).
+- **registry read**: `NtQueryValueKey` and the other calls answered by
+  REG_LOOKUP and REG_KEY (section 4.4). A REG_KEY answered
+  `ST_REPLY_TOO_LARGE`, or with the ring's overflow, says the key's overlay
+  holds more than one reply carries: the call fails
+  `STATUS_REGISTRY_IO_FAILED` rather than serve the real key alone (4.4).
 - **registry write**: `NtSetValueKey` and the other calls answered by
   REG_SET_VALUE to REG_RENAME_KEY (section 4.4; a key create answered
   `ST_EXISTS` is asked about again, as 4.4 says).
@@ -1172,27 +1175,27 @@ registry write) is still done, though the program was told the call
 failed. Creating a directory is the exception, as its call above says: the
 shim finds the directory and answers `OBJECT_NAME_COLLISION`.
 
-| Operation | `ST_NOT_FOUND` | `ST_EXISTS` | `ST_READ_ONLY` | `ST_IS_DIR` | `ST_NO_SPACE` | `ST_BAD_REQUEST` | `ST_CROSS_ROOT` | any other status | overflow | truncated | trailing bytes | garbage | bulk reply out of place | no reply in time | the call after a late reply |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| attach (HEARTBEAT) | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | success | success | success | n/a | load fails | n/a |
-| open to read (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
-| open to write (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
-| attributes by name (GETATTR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
-| read, inline (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
-| read, bulk (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
-| section filled at creation (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
-| write, first chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
-| write, a later chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
-| set the size (SETATTR) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
-| list a directory (READDIR) | NO_MORE_FILES | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
-| rename (RENAME) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | NOT_SAME_DEVICE | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
-| delete by name (DELETE) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
-| delete through a handle (DELETE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
-| create a directory (MKDIR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | OBJECT_NAME_COLLISION | success | success | success | n/a | OBJECT_NAME_COLLISION | success |
-| final name (STORED_NAMES) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | n/a | fallback | success |
-| start a child (STAGE_EXEC) | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | n/a | refused | success |
-| registry read (REG_KEY) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | n/a | fallback | success |
-| registry write (REG_SET_VALUE) | KEY_DELETED | CANNOT_DELETE | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | INVALID_PARAMETER | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| Operation | `ST_NOT_FOUND` | `ST_EXISTS` | `ST_READ_ONLY` | `ST_IS_DIR` | `ST_NO_SPACE` | `ST_BAD_REQUEST` | `ST_CROSS_ROOT` | `ST_REPLY_TOO_LARGE` | any other status | overflow | truncated | trailing bytes | garbage | bulk reply out of place | no reply in time | the call after a late reply |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| attach (HEARTBEAT) | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | success | success | success | n/a | load fails | n/a |
+| open to read (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| open to write (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| attributes by name (GETATTR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| read, inline (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| read, bulk (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| section filled at creation (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| write, first chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| write, a later chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| set the size (SETATTR) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| list a directory (READDIR) | NO_MORE_FILES | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| rename (RENAME) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | NOT_SAME_DEVICE | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| delete by name (DELETE) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| delete through a handle (DELETE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| create a directory (MKDIR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | OBJECT_NAME_COLLISION | success | success | success | n/a | OBJECT_NAME_COLLISION | success |
+| final name (STORED_NAMES) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | n/a | fallback | success |
+| start a child (STAGE_EXEC) | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | n/a | refused | success |
+| registry read (REG_KEY) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | REGISTRY_IO_FAILED | fallback | REGISTRY_IO_FAILED | fallback | fallback | fallback | n/a | fallback | success |
+| registry write (REG_SET_VALUE) | KEY_DELETED | CANNOT_DELETE | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | INVALID_PARAMETER | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
 
 ---
 
@@ -1295,8 +1298,8 @@ children into a map keyed by `folded`, so their order is not checked and a
 duplicate `folded` key keeps the last one; send them sorted and unique.
 
 A REG_KEY reply longer than `payload_cap - 8` must be answered
-`ST_REPLY_TOO_LARGE` instead; the shim then serves
-the real key alone. A director may apply the same rule to every registry
+`ST_REPLY_TOO_LARGE` instead; the shim then fails every query of the key
+(section 4.4). A director may apply the same rule to every registry
 reply; the other replies are at most 10 bytes, so only REG_KEY's can ever
 reach it.
 
@@ -1382,8 +1385,23 @@ wire.
 Section 3.7 gives what every kind of bad reply does, registry calls among
 them.
 
-A read (REG_LOOKUP, REG_KEY) that fails for any reason is a fallback: the hook
-serves the real key alone. A write that fails is not retried against the real
+A read (REG_LOOKUP, REG_KEY) that fails is a fallback: the hook serves the
+real key alone, as if the overlay held nothing for it.
+
+The exception is a key too large to read. A REG_KEY answered
+`ST_REPLY_TOO_LARGE`, or with the ring's overflow status (section 2.5), says
+the key's overlay holds more than one reply carries: values, subkeys or
+tombstones the real key does not have, so the real key alone would answer
+with wrong values. Every query of that key (a value, several values, the
+key's information, an enumeration of its values or subkeys, a subkey's entry
+in its parent's enumeration) fails `STATUS_REGISTRY_IO_FAILED`, the status NT
+gives when the registry cannot read what backs a key. A program takes it as
+a failed read. `STATUS_BUFFER_OVERFLOW` and `STATUS_BUFFER_TOO_SMALL` would
+tell it to ask again with a larger buffer, which cannot help, and
+`STATUS_INSUFFICIENT_RESOURCES` that the system is short of memory. A write
+to the key that needs its node fails `STATUS_UNSUCCESSFUL`.
+
+A write that fails is not retried against the real
 registry. Its status becomes the NT status the caller gets:
 
 | Director status | NT status |

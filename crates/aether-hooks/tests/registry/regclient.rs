@@ -210,8 +210,8 @@ fn no_registry_layer_fails_reads_and_writes() {
     assert!(regclient::key(&k).unwrap().is_some());
 }
 
-/// A key whose `REG_KEY` answer does not fit the ring is a read failure the caller falls back
-/// on, not an error that breaks the key.
+/// A key whose `REG_KEY` answer does not fit the ring is a read failure, `ST_REPLY_TOO_LARGE`:
+/// not a fallback, since the overlay holds what the real key does not (wire.md 4.3).
 #[test]
 fn a_key_too_large_for_the_ring_is_a_read_failure() {
     isolate!();
@@ -223,7 +223,7 @@ fn a_key_too_large_for_the_ring_is_a_read_failure() {
     }
     let fallbacks = aether_hooks::reg_read_fallback_count();
     assert_eq!(regclient::key(&k), Err(Status::ReplyTooLarge));
-    assert_eq!(aether_hooks::reg_read_fallback_count() - fallbacks, 1);
+    assert_eq!(aether_hooks::reg_read_fallback_count() - fallbacks, 0);
     // The lookup is small and still answers.
     assert_eq!(
         regclient::lookup(&k),

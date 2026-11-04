@@ -595,6 +595,9 @@ pub(crate) const KEY_VALUE_PARTIAL_INFORMATION: u32 = 2;
 pub(crate) const STATUS_NO_MORE_ENTRIES: NTSTATUS = 0x8000_001Au32 as i32;
 /// `STATUS_KEY_DELETED`: a query through a handle whose key was deleted.
 pub(crate) const STATUS_KEY_DELETED: NTSTATUS = 0xC000_017Cu32 as i32;
+/// `STATUS_REGISTRY_IO_FAILED`: the registry could not read what backs a key. A query of a key
+/// whose overlay is too large for one reply (`docs/wire.md` 4.4).
+pub(crate) const STATUS_REGISTRY_IO_FAILED: NTSTATUS = 0xC000_016Bu32 as i32;
 /// `STATUS_ACCESS_VIOLATION`, for a NULL buffer the caller said was non-empty.
 pub(crate) const STATUS_ACCESS_VIOLATION: NTSTATUS = 0xC000_0005u32 as i32;
 /// `STATUS_IN_PAGE_ERROR`: the paging read behind a mapped page failed. The

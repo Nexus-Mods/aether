@@ -59,15 +59,16 @@ makes, the case is the NT calls.
   threads are not in it. A count that went down passes, and the test prints
   the command that lowers the record.
 
-The record is taken with `TMP` and `TEMP` set to `C:\vfstmp`, as CI sets
-them, because the temporary folder is part of every path the cases use and a
-longer path can cost an allocation more.
+The counts are the same on every machine. Every path a case uses starts with
+a folder in the build's scratch folder padded to one length, so a string the
+shim builds from it is as long everywhere; and what a call allocates does not
+follow how many folders lie above that one, which
+`costs::allocations_do_not_follow_the_roots_depth` checks.
 
 A change that deliberately moves a cost rewrites the record in the same
 commit:
 
 ```powershell
-$env:TMP = 'C:\vfstmp'; $env:TEMP = 'C:\vfstmp'
 $env:AETHER_COSTS_UPDATE = '1'
 cargo test -p aether-hooks --test harness costs::
 ```

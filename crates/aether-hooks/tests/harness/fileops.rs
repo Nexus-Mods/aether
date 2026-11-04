@@ -30,7 +30,11 @@ pub(crate) fn root() -> PathBuf {
 
 /// Serve `fake` on the default ring at a new root and install the hooks.
 pub(crate) fn serve(fake: Fake) -> (PathBuf, &'static Served) {
-    let root = root();
+    serve_in(root(), fake)
+}
+
+/// [`serve`] at `root`, a folder that exists.
+pub(crate) fn serve_in(root: PathBuf, fake: Fake) -> (PathBuf, &'static Served) {
     let served = fakedirector::install_with(&root, fake, Options::default());
     std::mem::forget(aether_hooks::install().expect("install"));
     (root, served)

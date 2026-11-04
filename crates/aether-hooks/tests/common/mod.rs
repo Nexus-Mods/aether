@@ -54,6 +54,17 @@ pub(crate) fn run_isolated(fn_path: &str, exit: Option<u32>) -> bool {
 /// directly rather than through `println!`.
 #[allow(dead_code)]
 pub(crate) fn run_isolated_output(fn_path: &str, exit: Option<u32>) -> Option<String> {
+    run_isolated_output_with(fn_path, exit, &[])
+}
+
+/// [`run_isolated_output`] with `env` set in the child: one test body run
+/// in two processes that differ only in those variables.
+#[allow(dead_code)]
+pub(crate) fn run_isolated_output_with(
+    fn_path: &str,
+    exit: Option<u32>,
+    env: &[(&str, &str)],
+) -> Option<String> {
     if std::env::var_os(CHILD_ENV).is_some() {
         if exit.is_some() {
             no_crash_dialog();
@@ -68,6 +79,7 @@ pub(crate) fn run_isolated_output(fn_path: &str, exit: Option<u32>) -> Option<St
         // `--include-ignored`: an ignored test run by name (`-- --ignored`) runs its body too.
         .args(["--exact", name, "--test-threads=1", "--include-ignored"])
         .env(CHILD_ENV, "1")
+        .envs(env.iter().copied())
         .output()
         .expect("spawn the isolated test");
     let stdout = String::from_utf8_lossy(&out.stdout);

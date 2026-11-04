@@ -15,8 +15,9 @@
 //! drive letter itself away, and letting the drive be popped away is a real
 //! bypass — see `dotdot_traversal_through_the_drive_root_clamps_to_the_same_file`.
 
+use crate::vpath::{pop_component, push_component};
 use crate::{normalize_vpath, PathError};
-use aether_casefold::fold;
+use aether_casefold::eq_folded;
 
 /// The object-manager tokens that name a *namespace* rather than a file, one
 /// path component each. A leading run of these — in any order, any number of
@@ -164,7 +165,9 @@ impl VolumeMap {
             let Some(candidate) = path.get(..prefix.len()) else {
                 continue;
             };
-            if fold(candidate) != fold(prefix) {
+            // Compared in place, not folded into new strings: a lookup costs
+            // nothing however long the path or the registered prefixes are.
+            if !eq_folded(candidate, prefix) {
                 continue;
             }
             let rest = &path[prefix.len()..];
@@ -377,16 +380,18 @@ fn resolve_aliases_and_strip_prefixes(path: &str, volumes: &VolumeMap) -> String
 /// alone — they are navigation, not a name Win32 would trim — so the
 /// dot-dot handling below (and `normalize_vpath`'s) still sees them intact.
 fn strip_trailing_punctuation(path: &str) -> String {
-    path.split(['/', '\\'])
-        .map(|comp| {
-            if comp == "." || comp == ".." {
-                comp
-            } else {
-                comp.trim_end_matches(['.', ' '])
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut out = String::with_capacity(path.len());
+    for (i, comp) in path.split(['/', '\\']).enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if comp == "." || comp == ".." {
+            out.push_str(comp);
+        } else {
+            out.push_str(comp.trim_end_matches(['.', ' ']));
+        }
+    }
+    out
 }
 
 /// `C:foo` — a drive letter directly followed by a non-separator character,
@@ -422,17 +427,17 @@ fn is_drive_component(s: &str) -> bool {
 /// `C:` entirely and reappear as an ordinary, non-drive-rooted path that
 /// matches no root check.
 fn clamp_dotdot(remainder: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
+    let mut out = String::with_capacity(remainder.len());
     for comp in remainder.split(['/', '\\']) {
         match comp {
             "" | "." => continue,
             ".." => {
-                out.pop();
+                pop_component(&mut out);
             }
-            other => out.push(other),
+            other => push_component(&mut out, other),
         }
     }
-    out.join("/")
+    out
 }
 
 /// Canonicalise one NT open path to a single form: strip any alternate-data-

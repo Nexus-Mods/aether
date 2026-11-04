@@ -286,35 +286,43 @@ fn log_refusal(image: &str, reason: &str) {
 /// `app` and `cmd` are null or point to NUL-terminated UTF-16.
 unsafe fn child_image(app: *const u16, cmd: *const u16) -> String {
     const CAP: usize = 4096;
-    let read = |p: *const u16| -> Vec<u16> {
-        let mut v = Vec::new();
-        if !p.is_null() {
-            // SAFETY: per the contract, read up to the NUL or the cap.
-            unsafe {
-                while v.len() < CAP && *p.add(v.len()) != 0 {
-                    v.push(*p.add(v.len()));
-                }
-            }
+    // The caller's strings are read in place, up to the NUL or the cap: one
+    // allocation for the answer, however long the path.
+    let read = |p: *const u16| -> &[u16] {
+        if p.is_null() {
+            return &[];
         }
-        v
+        // SAFETY: per the contract, readable up to the NUL; nothing past the
+        // NUL or the cap is read.
+        unsafe {
+            let len = (0..CAP).take_while(|&i| *p.add(i) != 0).count();
+            core::slice::from_raw_parts(p, len)
+        }
     };
     let mut w = read(app);
     if w.is_empty() {
         let c = read(cmd);
         w = match c.first() {
-            Some(&q) if q == u16::from(b'"') => c[1..]
-                .iter()
-                .copied()
-                .take_while(|&x| x != u16::from(b'"'))
-                .collect(),
-            _ => c
-                .iter()
-                .copied()
-                .take_while(|&x| x != u16::from(b' '))
-                .collect(),
+            Some(&q) if q == u16::from(b'"') => {
+                let rest = &c[1..];
+                &rest[..rest
+                    .iter()
+                    .position(|&x| x == u16::from(b'"'))
+                    .unwrap_or(rest.len())]
+            }
+            _ => {
+                &c[..c
+                    .iter()
+                    .position(|&x| x == u16::from(b' '))
+                    .unwrap_or(c.len())]
+            }
         };
     }
-    String::from_utf16_lossy(&w).replace(['\r', '\n'], " ")
+    let mut image = String::from_utf16_lossy(w);
+    if image.contains(['\r', '\n']) {
+        image = image.replace(['\r', '\n'], " ");
+    }
+    image
 }
 
 #[cfg(test)]

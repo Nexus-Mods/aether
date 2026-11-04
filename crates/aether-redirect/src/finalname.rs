@@ -14,13 +14,8 @@
 
 use aether_casefold::{eq_folded, fold};
 
-/// The components of a DOS path, without its NT prefix: `\??\C:\A\b` and
-/// `C:/A/b/` both give `["C:", "A", "b"]`.
-fn components(path: &str) -> Vec<&str> {
-    component_iter(path).collect()
-}
-
-/// [`components`], one at a time, without collecting them.
+/// The components of a DOS path, one at a time, without its NT prefix:
+/// `\??\C:\A\b` and `C:/A/b/` both give `C:`, `A`, `b`.
 fn component_iter(path: &str) -> impl Iterator<Item = &str> + Clone {
     path.strip_prefix(r"\??\")
         .or_else(|| path.strip_prefix(r"\\?\"))
@@ -33,14 +28,20 @@ fn component_iter(path: &str) -> impl Iterator<Item = &str> + Clone {
 /// path ends in exactly those components (case apart). A device or
 /// short-name spelling of the *root* still does; only the prefix differs.
 /// `None` when it does not — a short name somewhere under the root, say.
+///
+/// The components are walked, not collected, and compared by their folds in
+/// place (a component of `under` is already folded, and a fold is its own
+/// fold): what this allocates is the tail it returns, however many
+/// components lie above the root on the real disk.
 pub fn opened_tail<'a>(opened: &'a str, under: &[String]) -> Option<Vec<&'a str>> {
-    let asked = components(opened);
-    let at = asked.len().checked_sub(under.len())?;
-    let tail = &asked[at..];
-    tail.iter()
-        .zip(under)
-        .all(|(a, u)| fold(a) == *u)
-        .then(|| tail.to_vec())
+    let at = component_iter(opened).count().checked_sub(under.len())?;
+    let tail = component_iter(opened).skip(at);
+    if !tail.clone().zip(under).all(|(a, u)| eq_folded(a, u)) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(under.len());
+    out.extend(tail);
+    Some(out)
 }
 
 /// The final DOS path (`C:\Games\Skyrim\Data\a.esp`, no NT prefix, no
@@ -69,24 +70,28 @@ pub fn final_dos_path<S: AsRef<str>>(
 ) -> String {
     // Names compare by their folds without building them (`eq_folded`); a
     // component of `under` is already folded, and a fold is its own fold.
-    let asked = components(opened);
-    let at = asked.len().checked_sub(under.len());
-    let tail: Option<&[&str]> = at
-        .map(|at| &asked[at..])
-        .filter(|tail| tail.iter().zip(under).all(|(a, u)| eq_folded(a, u)));
-    let asked_prefix: &[&str] = match tail {
-        Some(_) => &asked[..asked.len() - under.len()],
-        None => &[],
-    };
+    // The caller's components are walked, never collected, so the answer
+    // costs the same however deep the root sits on the real disk.
+    let at = component_iter(opened)
+        .count()
+        .checked_sub(under.len())
+        .filter(|&at| {
+            component_iter(opened)
+                .skip(at)
+                .zip(under)
+                .all(|(a, u)| eq_folded(a, u))
+        });
+    let asked_prefix = || component_iter(opened).take(at.unwrap_or(0));
     let root = roots
         .iter()
         .find(|r| {
-            component_iter(r).count() == asked_prefix.len()
+            component_iter(r).count() == at.unwrap_or(0)
                 && component_iter(r)
-                    .zip(asked_prefix)
+                    .zip(asked_prefix())
                     .all(|(c, a)| eq_folded(c, a))
         })
         .or(roots.first());
+    let mut tail = at.map(|at| component_iter(opened).skip(at));
 
     // Sized for the usual answer: stored spellings as long as the folds.
     let mut out = String::with_capacity(
@@ -100,9 +105,10 @@ pub fn final_dos_path<S: AsRef<str>>(
     }
     for (i, folded) in under.iter().enumerate() {
         out.push('\\');
-        match (stored(i), tail) {
+        let asked = tail.as_mut().and_then(Iterator::next);
+        match (stored(i), asked) {
             (Some(name), _) => out.push_str(name.as_ref()),
-            (None, Some(tail)) => out.push_str(tail[i]),
+            (None, Some(asked)) => out.push_str(asked),
             (None, None) => out.push_str(folded),
         }
     }

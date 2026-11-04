@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{normalize_vpath, PathError};
-use aether_casefold::fold;
+use aether_casefold::{eq_folded, fold};
 
 use crate::cache::{cache_suppressed, OsConsultGuard, PathCache, DEFAULT_CACHE_CAPACITY};
 use crate::{canonicalise, expand_short_component, RootHit, RootId, VolumeMap};
@@ -339,25 +339,24 @@ impl RootMap {
         Some(out.join("/"))
     }
 
+    /// [`Self::under_root`]'s match: the first root (deepest first) whose
+    /// components begin `canon`'s, case apart, and the folded rest. The
+    /// root's components are compared in place (`eq_folded`), never
+    /// collected or folded into new strings: what this allocates is the
+    /// remainder it returns, so a lookup costs the same however deep the
+    /// root sits on the real disk (aether-hooks' harness,
+    /// `costs::allocations_do_not_follow_the_roots_depth`).
     fn match_canonical(&self, canon: &str) -> Option<RootHit> {
-        let comps: Vec<&str> = if canon.is_empty() {
-            Vec::new()
-        } else {
-            canon.split('/').collect()
-        };
+        let comps = || canon.split('/').filter(|_| !canon.is_empty());
         'roots: for root in &self.roots {
-            if comps.len() < root.comps.len() {
-                continue;
-            }
-            for (r, c) in root.comps.iter().zip(comps.iter()) {
-                if fold(r) != fold(c) {
-                    continue 'roots;
+            let mut given = comps();
+            for r in &root.comps {
+                match given.next() {
+                    Some(c) if eq_folded(r, c) => {}
+                    _ => continue 'roots,
                 }
             }
-            return Some((
-                root.id,
-                comps[root.comps.len()..].iter().map(|c| fold(c)).collect(),
-            ));
+            return Some((root.id, given.map(fold).collect()));
         }
         None
     }

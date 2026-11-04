@@ -170,6 +170,16 @@ pub(crate) fn setup(
     let dir = aether_testkit::tempdir().expect("temp folder");
     let base = dir.path().to_path_buf();
     std::mem::forget(dir);
+    setup_in(base, probe, given)
+}
+
+/// [`setup`] in `base`, a folder that exists: the root, the backing
+/// directory, the staged copy and the refusal log go in it.
+pub(crate) fn setup_in(
+    base: PathBuf,
+    probe: &Path,
+    given: Given,
+) -> (Setup, Option<aether_refdirector::harness::FaultId>) {
     let root = base.join("root");
     let backing = base.join("backing");
     let stage = base.join("stage");

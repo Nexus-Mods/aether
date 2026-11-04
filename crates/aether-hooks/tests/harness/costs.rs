@@ -19,11 +19,18 @@
 //! - `allocs` must be at most the record. The count is the global
 //!   allocator's on the test's own thread (`aether_testkit::alloc`), so it
 //!   leaves out the director's serve threads and any thread of the shim's
-//!   own. It can move with the machine (a longer path can take one more
-//!   reallocation), so only an increase fails. The usual cause is the
-//!   temporary folder, which is part of every path the cases use: the record
-//!   is taken with `TMP` and `TEMP` set to `C:\vfstmp`, as CI sets them. A decrease passes and prints
-//!   the command that rewrites the record, so the record follows a saving.
+//!   own. Only an increase fails. A decrease passes and prints the command
+//!   that rewrites the record, so the record follows a saving.
+//!
+//! The counts do not depend on where the cases run. Every path a case uses
+//! starts with a folder in the scratch folder whose real path is padded to
+//! one length ([`base`]), so a string the shim builds from a path is as long
+//! on every machine, and with it any reallocation that follows a string's
+//! length. How many folders lie above that one is the machine's, and the
+//! shim's cost must not follow it: resolving a path against the roots
+//! compares their components in place and allocates the vpath it sends
+//! (`docs/wire.md` 3.2), not a string per component.
+//! [`allocations_do_not_follow_the_roots_depth`] holds it to that.
 //!
 //! A count that differs fails with the recorded and the measured value. A
 //! deliberate change of a cost rewrites the record in the same commit:
@@ -82,15 +89,17 @@
 //! - `create_process`: GETATTR and STAGE_EXEC for the image. The child
 //!   starts in the root's backing directory, which the shim makes and the
 //!   host checks on disk, never through the director. The STAGE_EXEC reply
-//!   is the staged copy's real path, whose length is the machine's (its
-//!   temporary folder); that length is left out of the case's
-//!   `ring_bytes`.
+//!   is the staged copy's real path (in [`base`]); its length is left out of
+//!   the case's `ring_bytes`. Its `allocs` also count what the host loads
+//!   while it starts a process (each DLL load passes the shim's loader
+//!   hook), which differs between Windows hosts, so this row's record is an
+//!   upper bound that CI's runners stay under.
 //! - `reg_*`: the overlay key's name carries the process id, zero-padded to
 //!   ten digits so that its length is the same in every process.
 #![allow(unsafe_code)] // Win32 and ntdll calls
 
 use crate::child_start::{self, Given, IMAGE};
-use crate::common::run_isolated_output;
+use crate::common::{run_isolated_output, run_isolated_output_with};
 use crate::fakedirector::{pattern, Fake, Fault, Match, Options, ReadStyle, Served};
 use crate::fileops::{self, close, create, open_read, wide};
 use crate::reg;
@@ -429,7 +438,47 @@ fn fake() -> Fake {
 }
 
 fn serve() -> (PathBuf, &'static Served) {
-    fileops::serve(fake())
+    fileops::serve_in(root(), fake())
+}
+
+/// How long, in UTF-16 units, the real path of every case's [`base`] is.
+const BASE_LEN: usize = 120;
+/// How many folders below the scratch folder [`base`] is (default 1); the
+/// depth test sets it in its children.
+const DEPTH: &str = "AETHER_COSTS_DEPTH";
+
+/// A new folder in the scratch folder (`aether_testkit::tempdir`, unique to
+/// the case), [`DEPTH`] folders below it and padded so that its real path is
+/// [`BASE_LEN`] units long on every machine. Every path a case uses starts
+/// with it, so a string the shim builds from one is as long on CI as where
+/// the record was taken, and an allocation that follows a string's length
+/// (a growth past a capacity) happens on both or neither. Kept, like the
+/// other harness roots, for the life of the test process.
+fn base() -> PathBuf {
+    use std::os::windows::ffi::OsStrExt;
+    let depth: usize = std::env::var(DEPTH).map_or(1, |d| d.parse().expect("a depth"));
+    let dir = aether_testkit::tempdir().expect("temp folder");
+    let mut base = dir.path().to_path_buf();
+    std::mem::forget(dir);
+    for _ in 1..depth {
+        base.push("d");
+    }
+    let have = base.as_os_str().encode_wide().count() + 1;
+    assert!(
+        have < BASE_LEN,
+        "the scratch folder {} is too long for the costs' {BASE_LEN}-unit base",
+        base.display()
+    );
+    base.push("p".repeat(BASE_LEN - have));
+    std::fs::create_dir_all(&base).unwrap();
+    base
+}
+
+/// `<base>/root`, a virtual root: nothing under it is on disk.
+fn root() -> PathBuf {
+    let root = base().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    root
 }
 
 fn open_write(p: &Path) -> HANDLE {
@@ -897,6 +946,11 @@ fn list_next_entry() {
 fn move_a_file() {
     cost_case!();
     let (root, served) = serve();
+    check("move", move_in(&root, served));
+}
+
+/// `MoveFileExW` of `saves/m1.ess`, after an untimed one of `saves/m0.ess`.
+fn move_in(root: &Path, served: &Served) -> Measured {
     let at = |n: &str| wide(&root.join("saves").join(n));
     let (m0, m0b, m1, m1b) = (at("m0.ess"), at("m0b.ess"), at("m1.ess"), at("m1b.ess"));
     // SAFETY: NUL-terminated names.
@@ -904,13 +958,18 @@ fn move_a_file() {
     assert_ne!(mv(&m0, &m0b), 0, "MoveFileExW: {}", fileops::last_error());
     let (ok, m) = measure(served, || mv(&m1, &m1b));
     assert_ne!(ok, 0, "MoveFileExW: {}", fileops::last_error());
-    check("move", m);
+    m
 }
 
 #[test]
 fn delete_a_file() {
     cost_case!();
     let (root, served) = serve();
+    check("delete", delete_in(&root, served));
+}
+
+/// `DeleteFileW` of `saves/d1.ess`, after an untimed one of `saves/d0.ess`.
+fn delete_in(root: &Path, served: &Served) -> Measured {
     let (d0, d1) = (
         wide(&root.join("saves").join("d0.ess")),
         wide(&root.join("saves").join("d1.ess")),
@@ -920,7 +979,7 @@ fn delete_a_file() {
     assert_ne!(del(&d0), 0, "DeleteFileW: {}", fileops::last_error());
     let (ok, m) = measure(served, || del(&d1));
     assert_ne!(ok, 0, "DeleteFileW: {}", fileops::last_error());
-    check("delete", m);
+    m
 }
 
 /// GETATTR, then MKDIR (`docs/wire.md` 3.4.9).
@@ -928,6 +987,11 @@ fn delete_a_file() {
 fn create_directory() {
     cost_case!();
     let (root, served) = serve();
+    check("create_directory", create_directory_in(&root, served));
+}
+
+/// `CreateDirectoryW` of `saves/new1`, after an untimed one of `saves/new0`.
+fn create_directory_in(root: &Path, served: &Served) -> Measured {
     let (n0, n1) = (
         wide(&root.join("saves").join("new0")),
         wide(&root.join("saves").join("new1")),
@@ -937,7 +1001,50 @@ fn create_directory() {
     assert_ne!(mkdir(&n0), 0, "CreateDirectoryW: {}", fileops::last_error());
     let (ok, m) = measure(served, || mkdir(&n1));
     assert_ne!(ok, 0, "CreateDirectoryW: {}", fileops::last_error());
-    check("create_directory", m);
+    m
+}
+
+/// The marker before a depth child's counts.
+const DEPTH_ROW: &str = "aether-costs-depth: ";
+
+/// What a call allocates does not follow how many folders lie above the
+/// root on the real disk: `create_directory`, `delete` and `move`, each in a
+/// process of its own, under a [`base`] one folder below the scratch folder
+/// and under one twelve below, the same length either way, allocate the
+/// same. The shim resolves every path against its roots (`docs/wire.md`
+/// 3.2), and a cost that grew with each folder above the root would make
+/// the record a fact about the machine that took it.
+#[test]
+fn allocations_do_not_follow_the_roots_depth() {
+    fn f() {}
+    let name = std::any::type_name_of_val(&f);
+    let at = |depth: &str| run_isolated_output_with(name, None, &[(DEPTH, depth)]);
+    let Some(shallow) = at("1") else {
+        let (root, served) = serve();
+        let allocs = [
+            create_directory_in(&root, served),
+            delete_in(&root, served),
+            move_in(&root, served),
+        ]
+        .map(|m| m.allocs);
+        to_parent(&format!("{DEPTH_ROW}{allocs:?}"));
+        return;
+    };
+    let deep = at("12").expect("the parent runs the children");
+    let allocs = |out: &str| {
+        out.lines()
+            .find_map(|l| {
+                l.find(DEPTH_ROW)
+                    .map(|i| l[i + DEPTH_ROW.len()..].to_string())
+            })
+            .unwrap_or_else(|| panic!("no counts from the child:\n{out}"))
+    };
+    assert_eq!(
+        allocs(&shallow),
+        allocs(&deep),
+        "allocations of [create_directory, delete, move] one folder and twelve \
+         folders below the scratch folder"
+    );
 }
 
 /// The spelling `NtQueryInformationFile(FileNameInformation)` gives: `\`
@@ -966,7 +1073,7 @@ fn names_fake() -> Fake {
 #[test]
 fn final_path_name_cold() {
     cost_case!();
-    let (root, served) = fileops::serve(names_fake());
+    let (root, served) = fileops::serve_in(root(), names_fake());
     let h = open_read(&root.join("mods").join("SUB").join("f.ESP"));
     let mut buf = vec![0u8; 2048];
     let (st, m) = measure(served, || query_info(h, &mut buf, FILE_NAME_INFORMATION));
@@ -984,7 +1091,7 @@ fn final_path_name_cold() {
 #[test]
 fn final_path_name_warm() {
     cost_case!();
-    let (root, served) = fileops::serve(names_fake());
+    let (root, served) = fileops::serve_in(root(), names_fake());
     let h = open_read(&root.join("mods").join("SUB").join("f.ESP"));
     let mut buf = vec![0u8; 2048];
     assert_eq!(query_info(h, &mut buf, FILE_NAME_INFORMATION), 0);
@@ -1004,7 +1111,7 @@ fn final_path_name_warm() {
 #[test]
 fn final_path_name_not_stored() {
     cost_case!();
-    let (root, served) = fileops::serve(names_fake());
+    let (root, served) = fileops::serve_in(root(), names_fake());
     let id = served.faults.arm(
         Match {
             op: Some(Opcode::StoredNames),
@@ -1113,7 +1220,8 @@ fn create_process() {
     let Some(probe) = child_start::probe() else {
         return;
     };
-    let (s, _) = child_start::setup(
+    let (s, _) = child_start::setup_in(
+        base(),
         &probe,
         Given {
             stages: true,

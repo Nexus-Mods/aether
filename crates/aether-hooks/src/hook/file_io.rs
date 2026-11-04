@@ -231,13 +231,11 @@ pub(super) unsafe fn write_hook_body(
             if append_only || explicit.is_none() {
                 crate::synth_file::set_position(handle as isize, off + n as u64);
             }
-            // The synthetic size was set once at open and never touched
-            // since — a write that extends the file must bump it too, or
-            // `read_hook`'s EOF check and `fuse_query_information`'s
-            // `metadata().len()` keep reporting the pre-write length forever.
-            // Only reachable now that writes actually reach the director
-            // instead of falling through to a real file (whose kernel FCB
-            // would have tracked this for free).
+            // The synthetic size is set at open; a write that extends the
+            // file must bump it too, or `read_hook`'s EOF check and
+            // `fuse_query_information`'s `metadata().len()` keep reporting the
+            // pre-write length forever. A director-served file has no kernel
+            // FCB to track this.
             let end = off + n as u64;
             if end > size {
                 crate::synth_file::grow_size(handle as isize, end);

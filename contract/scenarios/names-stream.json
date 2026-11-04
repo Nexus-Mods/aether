@@ -1,6 +1,6 @@
 {
   "name": "names-stream",
-  "description": "A vpath with a named stream suffix (wire.md 3.2: \"A named stream suffix (`file.esp:stream`) is carried through, folded\") names a stream the director does not hold, never the base file: GETATTR finds nothing, OPEN refuses it, and the base file and its folder's listing are as they were (3.2: neither Cairn's read-only sources nor the reference holds streams).",
+  "description": "A vpath with a named stream suffix (wire.md 3.2: \"A named stream suffix (`file.esp:stream`) is carried through, folded\") names a stream the director does not hold, never the base file: GETATTR finds nothing, OPEN refuses it, and the base file and its folder's listing are as they were (3.2: the reference holds no streams).",
   "tree": {
     "roots": [
       {"id": 0,

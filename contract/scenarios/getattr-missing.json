@@ -1,6 +1,6 @@
 {
   "name": "getattr-missing",
-  "description": "GETATTR of a missing path is ST_OK with found=0 and the other fields zero, not an error (wire.md 3.4.1: \"A missing path is `ST_OK` with `found = 0`\"). A root the director does not serve is also found=0 (3.4.1: \"A root the director does not serve is also `found = 0` (both directors)\"; 3.5.1's table gives found=0 for both directors).",
+  "description": "GETATTR of a missing path is ST_OK with found=0 and the other fields zero, not an error (wire.md 3.4.1: \"A missing path is `ST_OK` with `found = 0`\"). A root the director does not serve is also found=0 (3.4.1: \"A root the director does not serve is also `found = 0`\"; 3.5.1's table gives found=0).",
   "tree": {
     "roots": [
       {"id": 0,

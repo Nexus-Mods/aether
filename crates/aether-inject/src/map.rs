@@ -1,6 +1,5 @@
 //! Reflective PE mapping helpers: flatten a DLL image, apply base relocations,
-//! and resolve exports by name. Used to place the zero-import payload into a
-//! suspended target without LoadLibrary.
+//! and resolve exports by name, without LoadLibrary.
 #![allow(unsafe_code)]
 
 use aether_pe::{dd_base, is_pe32_plus};

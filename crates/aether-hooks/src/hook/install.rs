@@ -391,8 +391,7 @@ pub fn registry_detours_installed() -> usize {
     REG_DETOURS_INSTALLED.load(Ordering::Relaxed)
 }
 
-/// The registry overlay's detours (spec section 3.1: open, create, duplicate; `NtClose` and
-/// `NtQueryObject` are the file hooks'). Installed only when the host turned the overlay on
+/// The registry overlay's detours. Installed only when the host turned the overlay on
 /// (`VFS_REGISTRY`, see `install_all_detours`); each still checks `regclient::enabled()` first
 /// and goes straight to its trampoline when it is off (a missing detour turns it off).
 /// `Optional` in the style of `NtQueryObject`, so a host without one still gets the file VFS.

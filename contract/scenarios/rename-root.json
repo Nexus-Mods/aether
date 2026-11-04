@@ -1,6 +1,6 @@
 {
   "name": "rename-root",
-  "description": "RENAME with the root itself at either end is ST_BAD_REQUEST from a layer provider and the reference, ST_IO_ERROR from a disk-backed upper (wire.md 3.4.7: \"The root itself at either end, or a `to` inside `from`, is `ST_BAD_REQUEST` from a writable layer provider and the reference director, `ST_IO_ERROR` from a disk-backed upper\"), said for a name the writable provider holds, so the root is writable as a whole here; nothing moves.",
+  "description": "RENAME with the root itself at either end is ST_BAD_REQUEST or ST_IO_ERROR (wire.md 3.4.7: \"The root itself at either end, or a `to` inside `from`, is `ST_BAD_REQUEST` (as the reference director answers) or `ST_IO_ERROR`\"), said for a name the writable provider holds, so the root is writable as a whole here; nothing moves.",
   "tree": {
     "roots": [
       {"id": 0,

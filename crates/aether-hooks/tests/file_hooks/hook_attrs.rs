@@ -4,12 +4,9 @@
 //! `NtQueryFullAttributesFile`, which under a managed root are answered by the director's
 //! `getattr` alone (`hook/file_attr.rs::stat_by_path`).
 //!
-//! Before task C8 this binary installed the shim with no director, so the assertions had been
-//! flipped to "nothing answers" (a virtual file invisible, a hidden real file visible). Through
-//! the fake director it makes the original claims again: a served file and directory are
-//! visible with the director's size and kind, a real file under the root that the director
-//! does not serve is invisible (the sealed root's answer, where a snapshot tombstone used to
-//! be), and a real file outside every root passes through.
+//! Through the fake director: a served file and directory are visible with the director's size
+//! and kind, a real file under the root that the director does not serve is invisible (the
+//! sealed root's answer), and a real file outside every root passes through.
 use crate::fakedirector;
 
 use aether_hooks::install;

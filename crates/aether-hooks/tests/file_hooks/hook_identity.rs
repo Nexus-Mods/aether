@@ -2,10 +2,8 @@
 //!
 //! The file is served by the (fake) director, so its handle is synthetic and
 //! `GetFinalPathNameByHandleW` is answered by the shim (`NtQueryObject` on Wine,
-//! `NtQueryInformationFile` on Windows) from the path it was opened as. Before
-//! task C8 this was a snapshot redirect to a real backing file, and the claim was
-//! that the backing file's name did not leak; the claim that survives is that the
-//! name reported is the virtual one.
+//! `NtQueryInformationFile` on Windows) from the path it was opened as: the name
+//! reported is the virtual one.
 use crate::fakedirector;
 
 use aether_hooks::install;

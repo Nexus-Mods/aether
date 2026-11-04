@@ -7,7 +7,7 @@
 //! [`Reply`] (which decode borrowing from a payload and encode into any
 //! [`Buf`]), with [`Status`], [`OpenFlags`] and [`RequestFlags`] beside them
 //! in `status.rs`. Code elsewhere names opcodes and statuses by these types,
-//! never by number; only the tests that pin the historical numbers write them.
+//! never by number; only the tests that pin the fixed numbers write them.
 #![forbid(unsafe_code)]
 
 mod buf;
@@ -92,8 +92,7 @@ mod tests {
         assert_eq!(dreq(Opcode::Open, &req(r)), Some(r));
     }
 
-    /// Stage 2b task 5, step 1: the same relative path carried for two
-    /// different roots must produce two distinguishable payloads, and each
+    /// The same relative path carried for two different roots must produce two distinguishable payloads, and each
     /// must decode back to its own root. Without this the shim can classify a
     /// path as belonging to root 1 and has no field in which to say so.
     #[test]
@@ -181,8 +180,8 @@ mod tests {
         );
     }
 
-    /// A reply from a director that predates the flags byte has zeros there:
-    /// it must decode as mutable, generation 0 — never as cacheable.
+    /// A reply with zeros in the flags byte and `mount_gen` must decode as
+    /// mutable, generation 0, never as cacheable.
     #[test]
     fn an_open_reply_with_zero_padding_is_mutable() {
         let mut b = Vec::new();
@@ -257,10 +256,9 @@ mod tests {
         assert_eq!(dreq(Opcode::SetAttr, &req(r)), Some(r));
     }
 
-    /// The wire numbers as literals, taken from the retired protocol
-    /// descriptor (75db467). A change here is a wire break.
+    /// The wire numbers as literals. A change here is a wire break.
     #[test]
-    fn wire_numbers_are_the_historical_ones() {
+    fn wire_numbers_are_fixed() {
         let want: &[(&str, u32)] = &[
             ("getattr", 1),
             ("readdir", 2),

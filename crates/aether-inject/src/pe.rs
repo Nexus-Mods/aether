@@ -1,11 +1,9 @@
 //! PE image helpers.
 //!
-//! Extracted from the old `ghostly` module when the hollow launch path was
-//! removed. Staging still has to reason about a PE *before* any
-//! process exists — is this really an image, which DLLs must be staged beside
-//! it, which of those are system DLLs the loader will find on its own — and the
-//! shim still maps zip-resident PEs locally to serve them. Only the parsing is
-//! needed for either.
+//! Staging has to reason about a PE *before* any process exists (is this
+//! really an image, which DLLs must be staged beside it, which of those are
+//! system DLLs the loader will find on its own), and the shim maps PEs locally
+//! to serve them. Only the parsing is needed for either.
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;

@@ -47,7 +47,7 @@ For every scenario, and for each generated case and the malformed part:
   slot_count`"); and when `VFS_ARENA_OFFSET` is given the arena lies inside
   the mapping (2.6: "Every arena byte must lie inside the first
   `VFS_RING_BYTES` bytes of the mapping").
-- **What the environment says of the tree** (`attach::against_tree`), which
+- **What the environment says of the tree**, which
   fails the scenario (its `error` begins "the mount's environment"):
   `VFS_REGISTRY` is affirmative exactly when the tree has a registry layer
   (5.3: "Set to `1` only while a registry layer is attached; otherwise
@@ -95,18 +95,17 @@ Conformance checks only what the contract guarantees.
 canonical paths: `/` between components, none empty, `.` or `..`, no `\`,
 and `"."` for the root, and paths that leave the root (first component `..`),
 which wire.md 3.2 and 3.5.1 say how to answer. wire.md 3.2 says of any other
-syntax that "Directors have differed on anything else, so a client must not
+syntax that "Directors may differ on anything else, so a client must not
 rely on it", so the suite never sends it and a director may answer it however
 it likes.
 
 **Fields the contract leaves to the director.** The rule is equality; these
-are the only exceptions, and each is allowed by the wire.md text quoted
-(`crates/aether-conform/src/compare.rs` applies them):
+are the only exceptions, and each is allowed by the wire.md text quoted:
 
 | What | Rule | wire.md |
 |---|---|---|
 | OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. Never 0. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles"; the shim keeps 0 for a directory it made. |
-| OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and the directors start it differently. |
+| OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and where a director starts it is its own. |
 | OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). The reply's other flag bits and bytes 18-19 must be zero. | 3.4.3: "Never set it for a write open or a directory"; "other bits zero"; 7. |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared, but below 2^40 (the year 36812): a time in milliseconds is past it. | 3.2: "Which time a director reports for a path, if any, is the director's to choose"; "`mtime` is seconds since the Unix epoch". |
@@ -147,7 +146,7 @@ one scenario per file, named by its file. Each `description` names the
 wire.md section it checks. Where the contract lets directors answer
 differently, the step lists the answers it allows (`one_of`) and cites the
 section. The reference passes all of it over a file ring and, on Windows,
-over a section (`cargo test -p aether-conform` and CI run both).
+over a section (the tests and CI run both).
 
 | Files | Covers |
 |---|---|
@@ -176,7 +175,7 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `registry-create-key`, `-delete-key`, `-rename-key` | key create, delete, rename, children (4.3) |
 | `registry-changed` | REG_CHANGED, with `since` in the director's numbering, and the shim's `u64::MAX` probe (4.3) |
 | `registry-current-user` | keys under `\Registry\User\<CurrentUser>` and `<CurrentUser>_Classes`, apart from HKLM and from each other (4.2, 4.3) |
-| `registry-limits`, `-key-too-large` | name, depth and reply limits; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
+| `registry-limits`, `-key-too-large`, `-write-depth` | name, depth and reply limits, checked by every write; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
 | `multi-handle-shared` | a handle opened by one process read, written and closed by another; closed for all once one closes it; a bulk READ from slot 1 in bank 1 (2.6, 2.8.1, 3.4.3) |
 | `multi-handles-unique` | three processes' handles, all open at once, unique across them (2.8.1, 3.4.3) |
 | `multi-write-visible` | one process's writes, truncation and new file seen by another in GETATTR, READDIR, OPEN and READ (2.8.1, 3.4.1 to 3.4.5) |
@@ -189,7 +188,7 @@ DELETE or RENAME of a missing path outside every writable provider; a create
 whose parent directory is missing; WRITE or SETATTR on a handle opened
 read-only; `ST_NO_SPACE`. (What a write past the end, or a SETATTR, puts in
 the gap is zeros, and a handle opened for writing alone serves READ: wire.md
-3.4.4 to 3.4.6 now say so, and `write-growth` and `write-only-read` check
+3.4.4 to 3.4.6 say so, and `write-growth` and `write-only-read` check
 them.)
 
 **Left out because a scenario cannot send or receive it.** A scenario names
@@ -225,7 +224,7 @@ Still left out of every part of a run:
 A step may carry `"client": n` (default 0, `contract/scenarios/README.md`).
 The run attaches one client per number a scenario names. Client 0 is the
 run itself. Every other client is a process of its own, `aether-conform
-client-worker` (`crates/aether-conform/src/clients.rs`):
+client-worker`:
 
 - it starts with the mount's handshake variables as its environment (any
   `VFS_*` variable of the run's own removed first);
@@ -248,9 +247,8 @@ start, attach or send its HEARTBEAT fails the scenario, as a failed attach
 does.
 
 A scenario cannot say that a process is killed (2.8.1: it "never sends
-CLOSE for its open handles"), so a test does it
-(`crates/aether-conform/tests/run.rs`, `a_killed_client`), on a file ring
-and on a section. It kills a client process holding open handles, then
+CLOSE for its open handles"), so a test of `aether-conform` does it, on a
+file ring and on a section. It kills a client process holding open handles, then
 checks:
 
 - the director goes on answering this process and a new client process;
@@ -261,7 +259,7 @@ checks:
 ## Concurrent clients
 
 `run --concurrent N` plays `--concurrent-cases C` rounds (default 64) of N
-clients at once (`crates/aether-conform/src/concurrent.rs`). The rounds come
+clients at once. The rounds come
 from `--seed` (as `--generate`'s cases do, and the same seed if both are
 given) and have at most `--steps` operations per client.
 
@@ -282,8 +280,8 @@ and bytes.
 its own HEARTBEAT, its own comparison session and its own registry
 generation rules. Each sends its steps one at a time, claiming from the next
 slot of a cursor the clients share. Data requests (READ, WRITE, SETATTR and
-write OPENs) stay below 2.8's limit, `data_limit(worker_hint, slot_count)`,
-as the shim keeps them. A case's steps that present a closed handle, or a
+write OPENs) stay below 2.8's limit for the ring's `worker_hint` and slot
+count, as the shim keeps them. A case's steps that present a closed handle, or a
 number never issued, are left out of its round (the generated cases send
 them): a client knows only its own handles, and a director may issue any
 u64 (3.4.3), so any number one client sent for a handle it does not have
@@ -329,7 +327,7 @@ scenarios and the killed-client test cover, over both kinds of ring.
 
 ## Requests sized from the ring
 
-`run --limits` (`crates/aether-conform/src/limits.rs`) mounts an empty tree
+`run --limits` mounts an empty tree
 to learn the ring's `payload_cap`, slot count and `VFS_ARENA_LEN`, then a
 tree sized from them: a file of eight of the shim's read chunks and a bit,
 a directory whose READDIR reply is exactly `payload_cap` bytes and one whose
@@ -345,7 +343,7 @@ comparison rule applies), then the checks a step cannot say.
 | Two WRITEs of `payload_cap - 24` bytes (requests of exactly `payload_cap`), then GETATTR and READs back | `written` = the length; the size and bytes of both | 3.4.5 |
 | READDIR of a listing of exactly `payload_cap` bytes | the whole listing | 3.4.2 |
 | READDIR of a listing a byte longer | status `i32::MIN`, payload length 0 | 3.4.2, 2.5 step 3 |
-| 4 and then up to 8 bulk READs of one handle (one slot kept free), and 4 inline READs of 65 535 bytes, each set published at once at offsets out of order, held until all are `COMPLETED`, another READ answered meanwhile, and only then copied out, as `read_fragmented` does | each its own offset's bytes, in its own slot's bank | 2.5, "Order of service" (a pipelined read publishes up to 4 requests at once, 8 for reads of 4 MiB or more); 2.6: the bank is the client's while the slot is `COMPLETED` |
+| 4 and then up to 8 bulk READs of one handle (one slot kept free), and 4 inline READs of 65 535 bytes, each set published at once at offsets out of order, held until all are `COMPLETED`, another READ answered meanwhile, and only then copied out, as the shim's pipelined read does | each its own offset's bytes, in its own slot's bank | 2.5, "Order of service" (a pipelined read publishes up to 4 requests at once, 8 for reads of 4 MiB or more); 2.6: the bank is the client's while the slot is `COMPLETED` |
 | A bulk READ given up (`abandon`) the moment the director takes it, tried up to 100 times until it is caught `PROCESSING` | the slot ends `FREE`, never `COMPLETED`; then a HEARTBEAT from every slot is answered. A director never caught processing is not failed: the step says the rule was not exercised | 2.5: "a director must never store `COMPLETED` over `ABANDONED`" |
 | 300 REG_SET_VALUEs of one value from one client while another reads it with REG_KEY, reading `reg_gen` before each read | a read made at a generation a write's reply had already published sees that write (the writer reads `reg_gen` after each reply, which is at least the generation its write published) | 4.5: it moves "before the write's reply is published", and the shim caches an answer under the generation it read before asking. A director with no registry layer skips it |
 | `worker_hint` | a warning, never a failure, when it is 0 or above the slot count | 2.8 |
@@ -354,14 +352,14 @@ comparison rule applies), then the checks a step cannot say.
 ## Malformed requests
 
 `run --malformed` mounts two built-in trees in turn. The file cases go to
-`aether_conform::malformed::file_tree` (root 0 with `data/a.txt` = `abc` and
+the file tree (root 0 with `data/a.txt` = `abc` and
 the writable entry `saves` holding `saves/s.txt`, root 1 with `r.txt`), which
 has no registry layer, since a director need not have one (wire.md 4); for
 them `data/a.txt` is opened for reading and `saves/s.txt` for writing. The
-registry cases go to `registry_tree`, the same roots and a registry layer
+registry cases go to the registry tree, the same roots and a registry layer
 with `\Registry\Machine\Software\Conform` and its value `v`. Each case is
-sent as raw slot fields, through the ring client's held-slot call (or, for the header
-case, a header written by hand). Each case's payload is a valid request with
+sent as raw slot fields in a slot the run holds (or, for the header case,
+a header written by hand). Each case's payload is a valid request with
 one thing wrong, so the defect named is the only one. An error status must
 come with an empty payload (3.1, 3.3). After every case a HEARTBEAT must be
 answered `ST_OK`: the director must keep serving. At the end a GETATTR of
@@ -373,22 +371,22 @@ answered `ST_OK`: the director must keep serving. At the end a GETATTR of
 | Opcodes 0, 4, 12, 25, 26, 100, `0x7fffffff`, `0xffffffff`, with no payload and with a path request | `ST_BAD_REQUEST` | 3.3: "Any other opcode (including 0, 4, 12 and 25 and up) is answered `ST_BAD_REQUEST` with an empty payload" |
 | GETATTR, READDIR, HEARTBEAT, STORED_NAMES with other slot flags set; READ with `0xfffffffe` and `0xffffffff` | As with flags 0 (READ inline or bulk, compared by data) | 3.6: "The slot `flags` word is ignored for every opcode but READ, and bits other than bit 0 are ignored for READ" |
 | READ of 20 bytes (no pad), twice | The data | 3.4.4: "24 bytes (a director must accept 20)" |
-| GETATTR cut to 0 to 3 bytes | `ST_BAD_REQUEST`, or OK with `found = 0` | 3.5.1's table (old Rust director; Cairn) |
+| GETATTR cut to 0 to 3 bytes | `ST_BAD_REQUEST`, or OK with `found = 0` | 3.5.1's table |
 | READDIR cut to 0 to 3 bytes | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | 3.5.1 |
 | OPEN cut to 0 to 7 bytes | `ST_BAD_REQUEST` | 3.5.1 |
-| READ cut to 0 to 19, WRITE to 0 to 23, SETATTR to 0 to 15, CLOSE to 0 to 7 bytes | `ST_BAD_REQUEST` | 3.5.1 ("READ, WRITE, SETATTR, CLOSE: short"); 3.2 for WRITE's pad |
+| READ cut to 0 to 19, WRITE to 0 to 23, SETATTR to 0 to 15, CLOSE to 0 to 7 bytes | `ST_BAD_REQUEST` | 3.5.1 (READ, WRITE, SETATTR, CLOSE, short: `ST_BAD_REQUEST`); 3.2 for WRITE's pad |
 | RENAME cut to 0 to 7, RENAME_X to 0 to 11 bytes; either with a `from_len` past the payload | `ST_BAD_REQUEST` | 3.5.1 |
 | DELETE cut to 0 to 3, MKDIR to 0 to 7, STORED_NAMES to 0 to 7 bytes | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | 3.5.1 |
 | WRITE whose `len` is 10 with 3 data bytes | `ST_BAD_REQUEST` | 3.4.5: "A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`" |
-| GETATTR, OPEN, RENAME (`from`) of a missing path that is not UTF-8 | `ST_BAD_REQUEST`, or the missing-path answer (found = 0, `ST_NOT_FOUND`) | 3.5.1: "`ST_BAD_REQUEST` in the Rust decoders; Cairn decodes it with replacement characters and carries on" |
-| REG_LOOKUP of a key path that is not UTF-8 | `ST_BAD_REQUEST`, or the reference's answer for the path with replacement characters | 3.5.1: "Invalid UTF-8 in a path is `ST_BAD_REQUEST` in the Rust decoders; Cairn decodes it with replacement characters and carries on" (its registry reader too, `registry.clj`, `get-str`) |
+| GETATTR, OPEN, RENAME (`from`) of a missing path that is not UTF-8 | `ST_BAD_REQUEST`, or the missing-path answer (found = 0, `ST_NOT_FOUND`) | 3.5.1: "`ST_BAD_REQUEST`, or a director may instead decode it with replacement characters and carry on" |
+| REG_LOOKUP of a key path that is not UTF-8 | `ST_BAD_REQUEST`, or the reference's answer for the path with replacement characters | 3.5.1: "Invalid UTF-8 in a path is `ST_BAD_REQUEST`, or a director may instead decode it with replacement characters and carry on", key paths included |
 | REG_CREATE_KEY with `volatile` 2 and 255; REG_CHANGED with `subtree` 2 | `ST_BAD_REQUEST` | 4.1: "Booleans are one byte, exactly 0 or 1" |
 | Each of the eight registry requests with a trailing byte | `ST_BAD_REQUEST` | 4.1: "Every registry decoder consumes its input exactly; trailing bytes are `ST_BAD_REQUEST`" |
 | Each registry request cut by a byte; a REG_LOOKUP whose `len` runs past the payload | `ST_BAD_REQUEST` | 3.2 (truncation), 3.5 ("The payload did not decode") |
 | GETATTR whose slot header claims `payload_cap + 1` and `0xffffffff` bytes | `ST_BAD_REQUEST`, payload length 0 | 2.5: "A slot whose `payload_len > payload_cap` MUST be completed with `ST_BAD_REQUEST` and payload length 0" |
 
 Not sent: a short STAGE_EXEC (3.5.1 names no answer for it), trailing bytes
-after a file request's fixed fields (3.2 describes the Rust decoders, which
+after a file request's fixed fields (3.2 describes the file-op decoders, which
 ignore them, not a rule for directors), a HEARTBEAT with a payload, and
 registry cases to a tree without a registry layer.
 
@@ -400,13 +398,13 @@ and up to `--steps M` operations (default 32), all made from one seed
 stderr, in the TAP report (`# seed S`) and in the JSON report's `seed`, and the
 same seed gives the same cases, so `--seed S` replays a run.
 
-**How a case is made** (`crates/aether-conform/src/model.rs`). proptest
+**How a case is made.** proptest
 generates a tree spec (up to three roots, files and directories with names
 from a fixed list in varied case, writable entries or roots writable as a
 whole, an optional registry layer) and a list of operations, each a kind and
 four numbers. The generator builds the tree, mounts it in the reference
-director held in this process (behind a ring in memory, served by
-`aether_rpc::serve_one_with_arena` as a Rust director is), and reads the
+director held in this process (behind a ring in memory, served as a
+director serves a ring), and reads the
 operations one at a time: each one's numbers pick its target among what
 exists at that point (an open handle, an existing file, a missing name under
 an existing directory, a key) and its arguments. An operation with nothing to
@@ -455,12 +453,12 @@ shrunk case valid and plays each through the adapter's own mount.
 | CLOSE | open handles, also ones whose file changed under them | `ST_OK` (3.4.10) |
 | READ, WRITE, SETATTR, CLOSE | closed handles and numbers never issued | `ST_BAD_FH` (3.5) |
 | RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers, the root at an end and a `to` inside `from` as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR`; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
-| RENAME_X across roots | files to a missing name (the caller's spelling) or onto a file (its stored spelling: 3.4.13 does not say whose spelling a replaced file keeps, and Cairn keeps the stored one); directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
+| RENAME_X across roots | files to a missing name (the caller's spelling) or onto a file (its stored spelling: 3.4.13 does not say whose spelling a replaced file keeps, and a director may keep the stored one); directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
 | DELETE | files, empty and non-empty directories the writable provider holds; missing names; read-only names; the root (writable as a whole); unserved roots | 3.4.8's answers, the root as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR` |
 | MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
 | STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
 | STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` (a stager that does not stage it), a path (3.4.14) |
-| The eight registry requests | keys of the tree and below them in any spelling below the hive, under a base key in each of `\Registry\Machine`, `\Registry\User\<CurrentUser>` and `\Registry\User\<CurrentUser>_Classes` (4.2), values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
+| The eight registry requests | keys of the tree and below them in any spelling below the hive, under a base key in each of `\Registry\Machine`, `\Registry\User\<CurrentUser>` and `\Registry\User\<CurrentUser>_Classes` (4.2), values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
 
 **What is not generated, and why:**
 
@@ -474,11 +472,11 @@ shrunk case valid and plays each through the adapter's own mount.
   path or a file; a path below a file; a write open of a directory.
 - Growth: a WRITE starts at most at the end of the bytes that are fixed, and
   after a SETATTR extends a file only the bytes before the old end are read.
-  wire.md 3.4.5 and 3.4.6 now fix the gap as zeros (`write-growth` checks
-  it); the generator has not been taught it yet.
+  wire.md 3.4.5 and 3.4.6 fix the gap as zeros; `write-growth` checks it,
+  the generator does not.
 - WRITE and SETATTR on a handle opened without `write`: wire.md says nothing
-  of them. READ on one opened without `read`, which wire.md 3.4.4 now says a
-  handle serves (`write-only-read` checks it), is not generated yet.
+  of them. READ on one opened without `read`, which wire.md 3.4.4 says a
+  handle serves, is not generated (`write-only-read` checks it).
 - A handle whose file changed through another handle or a path (a WRITE or
   SETATTR through another handle, a truncating open, a RENAME, RENAME_X or
   DELETE of it or of a directory above it) is only closed afterwards: what it
@@ -497,8 +495,7 @@ shrunk case valid and plays each through the adapter's own mount.
   the wire's fold (no final sigma, no dotted capital I), so a director that
   stores names on disk is not failed for its file system.
 
-Three rules the generator relies on are wire.md sentences, each checked
-against Cairn's providers: a director writes every byte of a WRITE or fails
+Three rules the generator relies on are wire.md sentences: a director writes every byte of a WRITE or fails
 it (3.4.5); GETATTR, READDIR and OPEN report a file's size as it is now,
 writes through handles still open included (3.4.1); a file with open handles
 is deleted or renamed like any other (3.4.7, 3.4.8). What a handle reads after
@@ -541,8 +538,7 @@ its stdout, never two requests at once.
   scenario and the run goes on.
 - The run starts the adapter with a stale session's TRANSPORT variables in
   its environment (every name of 5.2's table but `VFS_REGISTRY`, with values
-  like `aether-conform-stale-VFS_RING_SECTION` and `7`,
-  `aether_conform::adapter::stale`). A mount answer that holds one passed it
+  like `aether-conform-stale-VFS_RING_SECTION` and `7`). A mount answer that holds one passed it
   on, as a launch built on the director's own environment would.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
@@ -550,7 +546,7 @@ its stdout, never two requests at once.
   if it has not exited within the timeout.
 - Whenever the run kills the adapter (a timeout, an error, the end of the
   run), it kills every process the adapter started too, so an adapter may be
-  a launcher (a `.cmd` file, a shell script, `clojure`) that starts the real
+  a launcher (a `.cmd` file, a shell script, `java`) that starts the real
   director. On Windows the adapter runs in a Job Object that kills its
   members when closed; on Unix it leads a process group, which is sent
   `SIGKILL` while the adapter is still unreaped, so the number cannot
@@ -573,7 +569,7 @@ gives the host path here, since `aether-conform` runs natively.
 
 ### Attaching
 
-The run attaches the way the shim does (`crates/aether-hooks/src/director.rs`):
+The run attaches the way the shim does:
 a non-empty `VFS_RING_PATH` wins over `VFS_RING_SECTION` (2.10); a file is
 mapped whole, a section (Windows only) by name at `VFS_RING_BYTES`; numbers
 the shim cannot parse take the shim's defaults. On a file ring nothing is
@@ -656,16 +652,13 @@ pinned to two cores, 512 take 8.4 s and 3.5 s. At two to three times slower
 on CI's 2-vCPU runners that is about one minute for the Windows step.
 
 `aether-conform reference-adapter [--ring file|section] [--no-arena]` is an
-adapter for the reference director (`aether_refdirector::Reference`, built
-with `Reference::from_tree`), served with the same loop a Rust director runs
-(`aether_rpc::serve_with_arena`) on four threads, each with its own handle
-on the reference (`Reference::share`), with `worker_hint` 4. Its ring has a
+adapter for the reference director, served on four threads that share one
+reference, with `worker_hint` 4. Its ring has a
 bulk arena of 1 MiB per slot, or, with `--no-arena`, none (`VFS_ARENA_LEN`
 unset, every READ answered inline). It is what a run is
 checked against in this repository's tests, and an example of what an
 adapter does. Its hidden `--break <rule>` switch, for this repository's tests
-only, makes it break one rule on purpose (`aether_conform::adapters::Break`),
-so the tests can show that generation and the malformed part find it; the
+only, makes it break one rule on purpose, so the tests can show that generation and the malformed part find it; the
 hidden `test-adapter --misbehave stale-immutable` (every read open of a file
 `immutable`, under one `mount_gen`) and `--misbehave frozen-reg-gen` (the
 registry generation never moved by a write) do the same for the checks

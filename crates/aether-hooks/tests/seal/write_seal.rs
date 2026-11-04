@@ -1,14 +1,8 @@
-//! **The write seal** (gate 4, Task 5): under a managed root, the director's
-//! answer to a write open *is* the caller's answer. There is no second chance.
-//!
-//! Until this task, a write open the director would not serve returned `None`
-//! from `try_fuse_create`, which sent `create_hook`/`open_hook` on to
-//! the shim-local engine (since removed) — its own write overlay where one was
-//! configured, and the real filesystem under the managed root where one was
-//! not. Either way the
-//! bytes ended up somewhere the provider graph never agreed to and cannot
-//! account for. This binary drives real `NtCreateFile`/`NtOpenFile` detours
-//! against a real ring and asserts the four answers the boundary now gives, by
+//! **The write seal**: under a managed root, the director's answer to a write
+//! open *is* the caller's answer. There is no second chance: a write that went
+//! anywhere else would put bytes somewhere the provider graph never agreed to
+//! and cannot account for. This binary drives real `NtCreateFile`/`NtOpenFile`
+//! detours against a real ring and asserts the four answers the boundary gives, by
 //! their exact Win32 error codes rather than by `io::ErrorKind` (Rust folds
 //! `ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND` into the same `NotFound`,
 //! which is precisely the distinction under test).
@@ -83,7 +77,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     }
 
     // --- 2. …and is visible to a later read through the director -----------
-    // (spec §8 criterion 4, first two clauses; the third is asserted after the
+    // (the real tree under the root staying untouched is asserted after the
     // detours come down, at the end.)
     let read_back = std::fs::read(&served).expect("read back through the director");
 
@@ -134,7 +128,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     assert_eq!(
         read_back, SERVED,
         "a write through the director must be visible to a subsequent read through the \
-         director (spec §8 criterion 4)"
+         director"
     );
     assert_eq!(
         fake.contents("write/served.bin").as_deref(),
@@ -150,7 +144,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     );
     assert!(
         !served.exists(),
-        "spec §8 criterion 4, third clause: {served:?} must NOT exist on the real \
+        "{served:?} must NOT exist on the real \
          filesystem under the managed root — the provider graph's storage is elsewhere and \
          the root's real tree stays untouched"
     );
@@ -190,10 +184,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
 
     // Nothing anywhere on the real tree under the root: not the served write
     // (it crossed the ring), and not one of the three refusals (they were
-    // refused, not diverted). This is the bypass the gate closes, so an empty
-    // tree here is the headline claim. (It used to be checked on the shim-local
-    // overlay too, the other place a write could be diverted to, until task C8
-    // removed it.)
+    // refused, not diverted). An empty tree here is the headline claim.
     let mut stray: Vec<std::path::PathBuf> = Vec::new();
     collect_files(&root, &mut stray);
     assert!(

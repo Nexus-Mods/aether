@@ -1,6 +1,6 @@
 {
   "name": "rename-unknown-root",
-  "description": "RENAME in a root the director does not serve is an error: ST_NOT_FOUND (Cairn) or ST_BAD_REQUEST (the old Rust director), wire.md 3.5.1's table; a new director should answer ST_NOT_FOUND.",
+  "description": "RENAME in a root the director does not serve is an error: ST_NOT_FOUND or ST_BAD_REQUEST, wire.md 3.5.1's table; a new director should answer ST_NOT_FOUND.",
   "tree": {
     "roots": [
       {"id": 0,

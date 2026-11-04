@@ -1,30 +1,30 @@
 {
   "name": "registry-rename-key",
-  "description": "REG_RENAME_KEY renames a key under its parent, taking its subtree and values; the old name is tombstoned, the new key is created in the overlay; a missing key is ST_NOT_FOUND, an existing target ST_EXISTS, a `new_leaf` of `.` or `..` ST_BAD_REQUEST (wire.md 4.3, overlay.rs `rename_key`). A change of case alone respells the key.",
+  "description": "REG_RENAME_KEY renames a key under its parent, taking its subtree and values; the old name is tombstoned, the new key is created in the overlay; a missing key is ST_NOT_FOUND, an existing target ST_EXISTS, a `new_leaf` of `.` or `..` ST_BAD_REQUEST (wire.md 4.3). A change of case alone respells the key.",
   "tree": {
     "roots": [
       {"id": 0,
        "files": [{"path": "a.txt", "contents": "a"}]}
     ],
     "registry": {"keys": [
-      {"path": "\\Registry\\Machine\\Software\\Cairn\\Old", "values": [{"name": "v", "ty": 4, "data": {"hex": "05000000"}}]},
-      {"path": "\\Registry\\Machine\\Software\\Cairn\\Old\\Kid"},
-      {"path": "\\Registry\\Machine\\Software\\Cairn\\Other"}
+      {"path": "\\Registry\\Machine\\Software\\Cabin\\Old", "values": [{"name": "v", "ty": 4, "data": {"hex": "05000000"}}]},
+      {"path": "\\Registry\\Machine\\Software\\Cabin\\Old\\Kid"},
+      {"path": "\\Registry\\Machine\\Software\\Cabin\\Other"}
     ]}
   },
   "steps": [
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Old", "new_leaf": "New", "op": "reg-rename-key"}, "expect": {"reply": {"version": 5}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Old"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\New"}, "expect": {"reply": {"version": 5, "state": "created", "below": true}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\New\\Kid"}, "expect": {"reply": {"version": 5, "state": "created", "below": false}}},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\New"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 4, "data": {"hex": "05000000"}}], "value_tombstones": [], "children": [{"folded": "kid", "spelling": "Kid", "state": "present"}]}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Old", "new_leaf": "Again", "op": "reg-rename-key"}, "expect": {"status": "not-found"}, "note": "the old name is gone"},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Missing", "new_leaf": "X", "op": "reg-rename-key"}, "expect": {"status": "not-found"}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\New", "new_leaf": "other", "op": "reg-rename-key"}, "expect": {"status": "exists"}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\New", "new_leaf": ".", "op": "reg-rename-key"}, "expect": {"status": "bad-request"}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\New", "new_leaf": "..", "op": "reg-rename-key"}, "expect": {"status": "bad-request"}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\New", "new_leaf": "NEW", "op": "reg-rename-key"}, "expect": {"reply": {"version": 6}}, "note": "case only"},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 6, "node": {"created": false, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": [{"folded": "new", "spelling": "NEW", "state": "present"}, {"folded": "old", "spelling": "Old", "state": "tombstone"}, {"folded": "other", "spelling": "Other", "state": "present"}]}}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\new"}, "expect": {"reply": {"version": 6, "state": "created", "below": true}}}
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Old", "new_leaf": "New", "op": "reg-rename-key"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Old"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\New"}, "expect": {"reply": {"version": 5, "state": "created", "below": true}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\New\\Kid"}, "expect": {"reply": {"version": 5, "state": "created", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin\\New"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 4, "data": {"hex": "05000000"}}], "value_tombstones": [], "children": [{"folded": "kid", "spelling": "Kid", "state": "present"}]}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Old", "new_leaf": "Again", "op": "reg-rename-key"}, "expect": {"status": "not-found"}, "note": "the old name is gone"},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Missing", "new_leaf": "X", "op": "reg-rename-key"}, "expect": {"status": "not-found"}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\New", "new_leaf": "other", "op": "reg-rename-key"}, "expect": {"status": "exists"}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\New", "new_leaf": ".", "op": "reg-rename-key"}, "expect": {"status": "bad-request"}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\New", "new_leaf": "..", "op": "reg-rename-key"}, "expect": {"status": "bad-request"}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\New", "new_leaf": "NEW", "op": "reg-rename-key"}, "expect": {"reply": {"version": 6}}, "note": "case only"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 6, "node": {"created": false, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": [{"folded": "new", "spelling": "NEW", "state": "present"}, {"folded": "old", "spelling": "Old", "state": "tombstone"}, {"folded": "other", "spelling": "Other", "state": "present"}]}}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\new"}, "expect": {"reply": {"version": 6, "state": "created", "below": true}}}
   ]
 }

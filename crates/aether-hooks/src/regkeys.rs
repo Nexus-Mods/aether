@@ -1,5 +1,4 @@
-//! Registry key handles, path resolution, and the open/create decision (registry overlay spec,
-//! sections 2.2, 3.1, 3.2 and 6).
+//! Registry key handles, path resolution, and the open/create decision.
 //!
 //! **Two handle tables.**
 //! - *Synthetic* key handles are `REG_TAG | slot << 2` with [`REG_TAG`] = `0x6000_0000`: below
@@ -7,9 +6,9 @@
 //!   [`REG_TAG`]), and never kernel objects. Each holds the key's
 //!   canonical path, the access the caller was granted, and the shim's own private handle to the
 //!   real key (opened read-only through the unhooked `NtOpenKeyEx`) when one exists. Queries on
-//!   them merge that real key with the overlay node (Task 10).
+//!   them merge that real key with the overlay node.
 //! - *Pass-through* handles are the real handles the caller got back, recorded with their
-//!   canonical path and requested access so writes through them can be caught later (Task 11).
+//!   canonical path and requested access so writes through them can be caught later.
 //!
 //! Both tables hold exactly the live handles: `NtClose` drops the record (and closes a synthetic
 //! handle's private real handle), `NtDuplicateObject` with `DUPLICATE_CLOSE_SOURCE` drops the
@@ -84,7 +83,7 @@ pub(crate) const KEY_ALL_ACCESS: u32 = 0x000F_003F;
 /// A synthetic key handle's record.
 #[derive(Clone, Debug)]
 pub(crate) struct SynthKey {
-    /// Canonical path (spec 2.2).
+    /// Canonical path.
     pub path: String,
     /// The access the caller was granted, generic rights mapped to key rights
     /// ([`map_generic`]); WOW64 flags are not access and are dropped.
@@ -111,7 +110,7 @@ pub(crate) const OBJ_INHERIT: u32 = 0x2;
 /// A pass-through (real) key handle's record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KeyRec {
-    /// Canonical path (spec 2.2).
+    /// Canonical path.
     pub path: String,
     /// Requested access, generic rights mapped ([`map_generic`]). For `MAXIMUM_ALLOWED` this is
     /// [`KEY_ALL_ACCESS`], an upper bound on what the kernel granted.
@@ -322,7 +321,7 @@ pub(crate) fn map_generic(access: u32) -> u32 {
     a
 }
 
-/// The access includes a right that changes the key (spec 3.2 "Desired access").
+/// The access includes a right that changes the key.
 pub(crate) fn wants_write(access: u32) -> bool {
     map_generic(access)
         & (KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_CREATE_LINK | DELETE | WRITE_DAC | WRITE_OWNER)
@@ -535,7 +534,7 @@ pub(crate) enum Resolution {
     NotOurs,
     /// The real key's name could not be read for another reason: the handle may be
     /// one the overlay serves. Not remembered. Writes through it fail closed
-    /// (`STATUS_UNSUCCESSFUL`, spec section 6); reads pass through as a counted fallback.
+    /// (`STATUS_UNSUCCESSFUL`); reads pass through as a counted fallback.
     Unresolvable,
 }
 
@@ -591,10 +590,9 @@ pub(crate) unsafe fn resolve(real: &Real, h: isize) -> Resolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     /// A read: an unresolvable handle reads as not ours (the real call), counted as a read
-    /// fallback (spec section 6). A pass-through handle merges through itself.
+    /// fallback. A pass-through handle merges through itself.
     Read,
-    /// A write: an unresolvable handle fails closed, counted as a refused write (spec
-    /// section 6). A pass-through handle that was renamed has no real key to read.
+    /// A write: an unresolvable handle fails closed, counted as a refused write. A pass-through handle that was renamed has no real key to read.
     Write,
     /// Only whether the overlay serves it: an unresolvable handle is reported, not counted (the
     /// caller counts the refusal it makes).
@@ -606,7 +604,7 @@ pub(crate) enum Mode {
 pub(crate) struct KeyRef {
     /// The caller's handle.
     pub handle: isize,
-    /// Canonical path (spec 2.2).
+    /// Canonical path.
     pub path: String,
     /// The access the handle was granted (generic rights mapped; for a handle opened before the
     /// hooks, what the kernel reports).
@@ -634,7 +632,7 @@ pub(crate) enum KeyHandle {
     Invalid,
     /// The real key's name could not be read ([`Mode::Write`] and [`Mode::Probe`] only): the
     /// handle may be one the overlay serves, and a call that would change the real key through
-    /// it fails closed with `STATUS_UNSUCCESSFUL` (spec section 6).
+    /// it fails closed with `STATUS_UNSUCCESSFUL`.
     Unresolvable,
 }
 
@@ -895,7 +893,7 @@ impl Outcome {
 ///
 /// `pass` makes the real open the caller asked for (the hook's own trampoline for an open; for
 /// a create, the open trampoline with the create's open options), with the
-/// `OBJECT_ATTRIBUTES` it is given. The decision (spec 3.2):
+/// `OBJECT_ATTRIBUTES` it is given. The decision:
 /// - the path is not under `\Registry\Machine` or `\Registry\User`, or its root cannot be
 ///   named: pass through (an unnamed root is counted);
 /// - the overlay has nothing at or below it: the real handle, recorded as pass-through. A real
@@ -1047,7 +1045,7 @@ impl Key<'_> {
         }
     }
 
-    /// The real open, with the write-access fallback of spec 3.2: refused for write access, the
+    /// The real open, with the write-access fallback: refused for write access, the
     /// key is opened read-only and the caller gets a synthetic handle with the access it asked
     /// for (its writes go to the overlay).
     unsafe fn pass_or_write_fallback(
@@ -1519,7 +1517,7 @@ unsafe fn open_real_rights(
     }
 }
 
-/// `NtQuerySecurityObject` on a synthetic key handle (spec 3.6): the descriptor of the real key,
+/// `NtQuerySecurityObject` on a synthetic key handle: the descriptor of the real key,
 /// or, for a key with no real counterpart (created here, renamed, or gone), of its nearest real
 /// ancestor, read through a private handle opened with just the rights the query needs. The
 /// caller's handle must hold those rights itself.
@@ -1569,7 +1567,7 @@ pub(crate) unsafe fn query_security(
     STATUS_UNSUCCESSFUL
 }
 
-/// `NtSetSecurityObject` on a key the overlay serves (spec 3.6 and section 6): checked as the
+/// `NtSetSecurityObject` on a key the overlay serves: checked as the
 /// real call checks it (the descriptor, then the rights the parts written need), then accepted
 /// and ignored, because changing it would be a write to the real registry. That holds for a
 /// pass-through handle on a virtualised path too. `None`: not a key the overlay serves (the real
@@ -1634,7 +1632,7 @@ pub(crate) enum Serves {
     /// Not a key the overlay serves.
     No,
     /// It could not be told (the handle, or the name's root handle, is unresolvable): a call
-    /// that would change the real key is refused with `STATUS_UNSUCCESSFUL` (spec section 6).
+    /// that would change the real key is refused with `STATUS_UNSUCCESSFUL`.
     Unresolvable,
     /// The name is one NT itself refuses (`ntbuf::us_units`); the call gets this status and
     /// never reaches the real registry.
@@ -1642,7 +1640,7 @@ pub(crate) enum Serves {
 }
 
 /// Whether a key handle is one the overlay serves: synthetic, or a real key on a virtualised
-/// path (spec 3.6: the calls that would change the real registry are refused on both).
+/// path(the calls that would change the real registry are refused on both).
 ///
 /// # Safety
 /// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.

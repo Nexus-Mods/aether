@@ -1,27 +1,27 @@
 {
   "name": "registry-values",
-  "description": "REG_SET_VALUE stores a value (name, REG_* type, raw bytes) and returns the new version; REG_KEY lists the values in insertion order with their types and data; setting an existing name replaces it in place (wire.md 4.3, overlay.rs). Binary data with zero bytes, an empty value and the default (empty) name are kept.",
+  "description": "REG_SET_VALUE stores a value (name, REG_* type, raw bytes) and returns the new version; REG_KEY lists the values in insertion order with their types and data; setting an existing name replaces it in place (wire.md 4.3). Binary data with zero bytes, an empty value and the default (empty) name are kept.",
   "tree": {
     "roots": [
       {"id": 0,
        "files": [{"path": "a.txt", "contents": "a"}]}
     ],
     "registry": {"keys": [
-      {"path": "\\Registry\\Machine\\Software\\Cairn"}
+      {"path": "\\Registry\\Machine\\Software\\Cabin"}
     ]}
   },
   "steps": [
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 1, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Dword", "ty": 4, "data": {"hex": "2a000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 2}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Text", "ty": 1, "data": {"hex": "480069000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 4}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Empty", "ty": 3, "data": "", "op": "reg-set-value"}, "expect": {"reply": {"version": 5}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "", "ty": 1, "data": {"hex": "6400"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 6}}, "note": "the default value"},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Dword", "ty": 4, "data": {"hex": "2a000000"}}, {"name": "Text", "ty": 1, "data": {"hex": "480069000000"}}, {"name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}}, {"name": "Empty", "ty": 3, "data": {"hex": ""}}, {"name": "", "ty": 1, "data": {"hex": "6400"}}], "value_tombstones": [], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Dword", "ty": 11, "data": {"hex": "0100000000000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 7}}, "note": "replaced: new type and data, same place"},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 7, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Dword", "ty": 11, "data": {"hex": "0100000000000000"}}, {"name": "Text", "ty": 1, "data": {"hex": "480069000000"}}, {"name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}}, {"name": "Empty", "ty": 3, "data": {"hex": ""}}, {"name": "", "ty": 1, "data": {"hex": "6400"}}], "value_tombstones": [], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Big", "ty": 3, "data": {"size": 4000, "seed": 5}, "op": "reg-set-value"}, "expect": {"reply": {"version": 8}}},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 8, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Dword", "ty": 11, "data": {"hex": "0100000000000000"}}, {"name": "Text", "ty": 1, "data": {"hex": "480069000000"}}, {"name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}}, {"name": "Empty", "ty": 3, "data": {"hex": ""}}, {"name": "", "ty": 1, "data": {"hex": "6400"}}, {"name": "Big", "ty": 3, "data": {"size": 4000, "seed": 5}}], "value_tombstones": [], "children": []}}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 8, "state": "created", "below": false}}}
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 1, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Dword", "ty": 4, "data": {"hex": "2a000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 2}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Text", "ty": 1, "data": {"hex": "480069000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Empty", "ty": 3, "data": "", "op": "reg-set-value"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "", "ty": 1, "data": {"hex": "6400"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 6}}, "note": "the default value"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Dword", "ty": 4, "data": {"hex": "2a000000"}}, {"name": "Text", "ty": 1, "data": {"hex": "480069000000"}}, {"name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}}, {"name": "Empty", "ty": 3, "data": {"hex": ""}}, {"name": "", "ty": 1, "data": {"hex": "6400"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Dword", "ty": 11, "data": {"hex": "0100000000000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 7}}, "note": "replaced: new type and data, same place"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 7, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Dword", "ty": 11, "data": {"hex": "0100000000000000"}}, {"name": "Text", "ty": 1, "data": {"hex": "480069000000"}}, {"name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}}, {"name": "Empty", "ty": 3, "data": {"hex": ""}}, {"name": "", "ty": 1, "data": {"hex": "6400"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Big", "ty": 3, "data": {"size": 4000, "seed": 5}, "op": "reg-set-value"}, "expect": {"reply": {"version": 8}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 8, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Dword", "ty": 11, "data": {"hex": "0100000000000000"}}, {"name": "Text", "ty": 1, "data": {"hex": "480069000000"}}, {"name": "Bin", "ty": 3, "data": {"hex": "00ff00ff"}}, {"name": "Empty", "ty": 3, "data": {"hex": ""}}, {"name": "", "ty": 1, "data": {"hex": "6400"}}, {"name": "Big", "ty": 3, "data": {"size": 4000, "seed": 5}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 8, "state": "created", "below": false}}}
   ]
 }

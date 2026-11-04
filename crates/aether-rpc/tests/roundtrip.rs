@@ -582,7 +582,7 @@ fn a_file_reply_larger_than_the_slot_is_the_overflow_status() {
             skip: 3,
             path: &path,
         };
-        // READDIR: what wire.md 3.4.2 says both directors answer.
+        // READDIR: what wire.md 3.4.2 says a director answers.
         let wide = format!("wide{path}");
         let listing = Request::ReadDir {
             root: R1,

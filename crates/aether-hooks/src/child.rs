@@ -185,7 +185,7 @@ pub(crate) fn signal_ready() {
 }
 
 /// Called once this process's shim has finished writing its own ready state:
-/// drops `VFS_SHIM_READY`, the ready file the top-level launch used to talk to
+/// drops `VFS_SHIM_READY`, the ready file the top-level launch uses to talk to
 /// *this* process, so descendants do not inherit it. A child that did would
 /// write its own "ready" or failure into the top-level ready file and its boot
 /// log. Children signal their spawner by named event, and refusals are logged

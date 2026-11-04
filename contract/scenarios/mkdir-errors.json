@@ -1,6 +1,6 @@
 {
   "name": "mkdir-errors",
-  "description": "MKDIR refusals: a root with no writable provider is ST_READ_ONLY (wire.md 3.5, 3.4.3); an unknown root is ST_NOT_FOUND (3.5.1: both directors).",
+  "description": "MKDIR refusals: a root with no writable provider is ST_READ_ONLY (wire.md 3.5, 3.4.3); an unknown root is ST_NOT_FOUND (3.5.1).",
   "tree": {
     "roots": [
       {"id": 0,

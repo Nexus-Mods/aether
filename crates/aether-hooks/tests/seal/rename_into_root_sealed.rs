@@ -1,20 +1,13 @@
 //! **A rename whose *target* lands under a managed root, from a source
-//! outside every root** (gate 5, Task 5).
+//! outside every root**, is refused.
 //!
-//! Three predicates had to line up for this to be an escape, and they did:
-//!
-//! 1. `record_path` inserts into `PATH_TABLE` only when `path_is_ours(path)`,
-//!    so a handle on a file outside every root is never recorded.
-//! 2. `setinfo_hook`'s non-synthetic branch consulted the shim-local engine's
-//!    `rename` (since removed) only for a handle that *is* in `PATH_TABLE`, so
-//!    the engine was never asked.
-//! 3. That `rename` answered `CrossRoot` only when **both** sides resolved
-//!    under managed roots, so even if it had been asked it would have declined.
-//!
-//! The call therefore reached `tramp`, and the real `NtSetInformationFile`
-//! physically created a file under the destination root — where it then reads
-//! back as missing, because the root seals every path the provider graph does
-//! not serve. Content crossing *into* the VFS by a route the director never saw
+//! `record_path` records a handle as under a root only when
+//! `path_is_ours(path)`, so a handle on a file outside every root is never
+//! recorded, and no source-keyed check looks at it. Without a check keyed on
+//! the target, the call would reach `tramp`, and the real
+//! `NtSetInformationFile` would physically create a file under the
+//! destination root, where it then reads back as missing, because the root
+//! seals every path the provider graph does not serve. Content crossing *into* the VFS by a route the director never saw
 //! is the same containment failure as content crossing out of it; the
 //! destination is what decides containment, not the source.
 //!

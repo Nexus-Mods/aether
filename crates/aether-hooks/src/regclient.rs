@@ -1,7 +1,7 @@
 //! The shim's registry client: the registry hooks' one way to the director's registry overlay
-//! (ring opcodes 15-22, spec section 4).
+//! (ring opcodes 15-22, `docs/wire.md` section 4).
 //!
-//! **Caching (spec section 3.5).** `REG_LOOKUP` and `REG_KEY` answers are cached per path. The
+//! **Caching.** `REG_LOOKUP` and `REG_KEY` answers are cached per path. The
 //! director publishes a registry *generation* in the ring header that every injected process of
 //! the session maps, and moves it on every registry write (before the writer gets its reply)
 //! and whenever a layer is attached or detached.
@@ -14,7 +14,7 @@
 //! read of the generation and the director's answer). That is harmless: the write moves the
 //! generation, so the entry is never used past it.
 //!
-//! **Errors (spec section 6).** Every call returns the director's status as `Err`: a request
+//! **Errors.** Every call returns the director's status as `Err`: a request
 //! that could not be sent or was never answered is `Status::IoError`, a director with no
 //! registry attached `Status::NotSupported`, a `REG_KEY` answer too large for the ring
 //! `Status::ReplyTooLarge`. A failed read is counted as a fallback in the shim stats; the caller
@@ -338,7 +338,7 @@ impl<'a> RegClient<'a> {
 
     /// Send one request. One that cannot fit the ring's payload is refused here with
     /// `Status::BadRequest` and never submitted (the hooks answer `STATUS_INVALID_PARAMETER`,
-    /// as for anything over the spec's limits).
+    /// as for anything over the registry limits, `docs/wire.md` 4.1).
     fn request<T>(
         &self,
         req: &Request<'_>,
@@ -464,7 +464,7 @@ mod tests {
         assert!(fits(0, 4096));
         assert!(fits(4096, 4096));
         assert!(!fits(4097, 4096));
-        // The set-value request for a value of exactly the spec's 1 MiB limit does not fit
+        // The set-value request for a value of exactly the 1 MiB data limit does not fit
         // a 1 MiB payload: its path and name come on top.
         let data = vec![0; 1 << 20];
         let req = Request::RegSetValue {

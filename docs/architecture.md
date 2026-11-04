@@ -10,33 +10,22 @@ director implements, byte by byte), [`shim-invariants.md`](shim-invariants.md)
 [`escape-matrix.md`](escape-matrix.md). The crates it describes are this
 repository's; its README says what is built and how.
 
-This was written before Aether had a repository of its own: first in
-aether-vfs, then in Cairn's `rust/` (copied here on 2026-11-03, the crates
-renamed `vfs-*` to `aether-*`). Crates named below that this repository does
-not hold (`aether-storage`, `aether-block-store`, `vfs-bench`, the other
-add-ons), and the benchmark write-ups, design specs and `tools/gamectl.ps1` it
-points at, are history.
-
-**The director, its host and the runner are not here.** `vfs-embed`
-(`Session`) and `vfs-proton`, which sections 3.8, 3.10, 3.11 and 6 describe,
-were deleted; their jobs (staging a launch, the Proton and CrossOver paths,
-storage) are a director's, and Cairn's Clojure director does them
-([Nexus-Mods/cairn](https://github.com/Nexus-Mods/cairn), `src/aether/director/`,
-and its `docs/aether-vfs/director.md`). The old Rust director and its provider
-crates are gone too; the shim's tests run against their own fake director.
-Those sections, and the ones on providers, the director and staging, stay as
-the design they recorded.
+**The director is not here.** It is whatever program speaks the wire
+contract. The sections on content, providers, the director, staging and the
+Linux host describe what a director does, as the design the shim and the
+injector are built against; the shim's tests run against their own fake
+director.
 
 ---
 
 ## 1. What the system does
 
-aether-vfs makes a Windows game see a filesystem that does not exist on disk.
+Aether makes a Windows game see a filesystem that does not exist on disk.
 
 A game is installed as a 15 GB zip archive plus a set of mod folders. Instead of
-extracting and merging those onto disk, aether-vfs composes them into a single
-virtual tree and serves that tree to one process, live, by intercepting the
-Windows NT file API inside it. Every other process on the machine sees the
+extracting and merging those onto disk, a director composes them into a single
+virtual tree and Aether serves that tree to one process, live, by intercepting
+the Windows NT file API inside it. Every other process on the machine sees the
 original, untouched directory.
 
 The proof point is Skyrim Special Edition: it boots, loads its world, and plays
@@ -61,7 +50,7 @@ rather than a mutation, and confines failure to one process.
 ```text
 ┌─ Host process (a launcher, a binding, or a harness) ──────────────────────┐
 │                                                                           │
-│  Session          (once vfs-embed; now aether.director.launch)            │
+│  Session          roots, mounts, the ring, the launch                     │
 │  Director         userspace FUSE kernel: resolve, overlay, handle table   │
 │  Providers        zip · disk · cache · compose · the host's own           │
 │                                                                           │
@@ -107,19 +96,16 @@ tree and answers `resolve(vpath)`. It knows about:
 Keeping this layer pure makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Providers and composition: a director's providers (and the `aether-storage` add-on)
+### 3.2 Providers and composition (a director's)
 
-Everything that can supply bytes implements a provider contract (the old Rust
-director's `Provider` trait, removed with it), addressed by `(RootId, relative
-path)` rather than a bare string; `RootId` is the wire's (`aether-protocol`). The root id lets one provider instance serve
-several virtualized locations at once and still tell `[1, "a"]` from
-`[0, "a"]` apart. A provider declares its `Capabilities` once, at
-construction; a read-only provider implements a five-method floor
-(`capabilities`, `getattr`, `readdir`, `open`, `close`, plus `read_at` or
-`read_next`), and everything past that defaults to `ST_NOT_SUPPORTED`. One
-conformance suite ran the case subset implied by a provider's declared
-capabilities against every implementation, so none could drift from the
-others. Full detail: the pluggable-providers design spec's §5 (not imported).
+Everything that can supply bytes implements a provider contract, addressed by
+`(RootId, relative path)` rather than a bare string; `RootId` is the wire's
+(`aether-protocol`). The root id lets one provider instance serve several
+virtualized locations at once and still tell `[1, "a"]` from `[0, "a"]`
+apart. A provider declares its capabilities once, at construction; a
+read-only provider implements a small floor (capabilities, getattr, readdir,
+open, close, and a positional or sequential read), and everything past that
+answers `ST_NOT_SUPPORTED`.
 
 #### Why `immutable` and `slow` are separate flags
 
@@ -139,35 +125,21 @@ correctness bug (stale bytes served from a disk cache for content that turns
 out to be mutable) or a silent performance bug (content that never changes,
 never cached).
 
-- **A zip provider** (a director's) parses the ZIP64 central directory and serves
+- **A zip provider** parses the ZIP64 central directory and serves
   **Stored** (uncompressed) entries as byte windows into the container.
   Stored-only is a deliberate constraint: a Stored entry is a contiguous
   range, so a read at an arbitrary offset is a seek, not a
   decompress-from-the-start. That is what makes random access into a 15 GB
   archive viable.
-- **Combinators** (a director's) build providers out of other providers: `layered`
-  (top-wins; `readdir` unions), `router` (glob-pattern dispatch:
-  `getattr`/`open` take the first matching route; `readdir` is currently
-  single-dispatch rather than the cross-route union the design calls for),
-  `overlay` (a writable upper over a base provider: reads fall through to the
-  base, the first write to a base-only file **copies it up** into the upper
-  (staged as `.cu.<n>.<name>`, then renamed into place), and removing a
-  base-visible path writes a `.wh.<name>` whiteout; the base is never
-  mutated), `subdir` (rewrite addressing to expose a subtree as a root),
-  `seekable` and `readonly` (wrappers that add positional reads or demote
-  write access), `disk` (a directory, served read-write), `memory` and
-  `inline` (in-memory trees, the second read-only), and `MountGraph` (mounts
-  providers at paths and resolves a path to the mount that serves it).
-- **`aether-storage`** (an add-on in the old repository, not in `rust/`; the
-  Clojure director's `aether.director.storage` replaces it) owned one `aether-block-store` block store (deduplicated,
-  compressed packs), a redb catalog beside it and a RAM tier of decompressed
-  blocks, and serves two things from it: `Storage::cached` wraps an
-  immutable, slow source (a remote one) as a pull-through cache keyed by a
-  stable `SourceKey`, and `Storage::layer` hands out a named, persistent
-  read-write layer: a session's write layer that survives the session. A
-  host opens one `Storage` per storage directory. What is
-  durable when is in `director.md`'s Storage section; the original design was the
-  vfs-storage design spec (not imported).
+- **Combinators** build providers out of other providers: layered
+  (top-wins; listings union), a router (glob-pattern dispatch), an overlay (a
+  writable upper over a base provider: reads fall through to the base, the
+  first write to a base-only file **copies it up** into the upper, and
+  removing a base-visible path writes a whiteout; the base is never mutated),
+  a subdirectory view (a subtree exposed as a root), wrappers that add
+  positional reads or demote write access, a disk directory served
+  read-write, in-memory trees, and a mount graph (providers mounted at paths,
+  a path resolved to the mount that serves it).
 
 ### 3.3 The director (not in this repository)
 
@@ -175,10 +147,8 @@ The userspace FUSE kernel. Holds the mount table, resolves a virtual path
 through it, owns the global file-handle table, and serves ring requests. It is
 the only component that touches archive containers.
 
-It is a kernel, not the API a host embeds. `Session` (configure roots and
-mounts, `serve()` to stand up the ring, `launch()` to start the target) lives in
-`vfs-embed` (§3.11, deleted), which sat above the director; the Clojure
-director's `aether.director.launch` is its successor.
+It is a kernel, not the API a host embeds. A host's session (configure roots
+and mounts, stand up the ring, start the target) sits above it.
 
 ### 3.4 IPC: `aether-ipc`, `aether-win`
 
@@ -239,15 +209,14 @@ FREE → CLAIMED → SUBMITTED → PROCESSING → COMPLETED → FREE
   echoes the request id it answered into the slot header, and the client checks
   it.
 
-The ring's wire version (`aether_ipc::layout::VERSION`, now 4) covers this state
+The ring's wire version (`aether_ipc::layout::VERSION`, 4) covers this state
 machine as well as the payload layouts: a shim and a director built from
 different versions refuse each other at attach. (The shim's bootstrap config
 carries its own version first: §3.5.)
 
-On Linux the ring file is named `state_dir/ring.bin`, but when
+On Linux a director can keep the ring's pages off disk: when
 `$XDG_RUNTIME_DIR` is a tmpfs owned by the user and closed to everyone else,
-that name is a symlink to a file there (mode 0600, in a 0700 directory), so the
-ring's pages are never written to disk.
+the ring file can live there (mode 0600, in a 0700 directory).
 
 ### 3.5 The shim: `aether-shim`, `aether-hooks`, `aether-redirect`, `aether-ntlayout`
 
@@ -285,8 +254,8 @@ A game makes huge numbers of tiny reads (one launch of a 3,472-mod list read
 `Skyrim.esm` 838,643 times in 4 KiB pieces, and `plugins.txt` a byte per
 call), and over the ring each is a round trip. So the shim keeps a block
 cache in front of the director for **small reads of immutable files**
-(`aether_ipc::readcache`, OS-free so native tests and `ring-bench` run the same
-code; wired in by `aether-hooks`'s `read_cache.rs`):
+(`aether_ipc::readcache`, OS-free so native tests run the same code; wired in
+by `aether-hooks`'s `read_cache.rs`):
 
 - A synchronous `NtReadFile` shorter than 64 KiB is served from aligned
   64 KiB units; a miss fetches one unit with one bulk read through the same
@@ -295,8 +264,7 @@ code; wired in by `aether-hooks`'s `read_cache.rs`):
   run doubles, up to 1 MiB in one request. A unit never extends past the
   end of its file. Bytes are what a miss costs (a provider reading a
   compressed store spends about a millisecond a MiB, a hundred small round
-  trips' worth), and the first design's fixed 1 MiB blocks fetched 3.3 GiB
-  for a launch whose small reads were 2 GiB. Larger reads,
+  trips' worth), so units stay small. Larger reads,
   and reads asking for completion by APC or event, take the uncached path
   unchanged. Anything the cache does not serve falls back to that path, so
   the bytes, the `IO_STATUS_BLOCK` and the file position are always what it
@@ -308,38 +276,35 @@ code; wired in by `aether-hooks`'s `read_cache.rs`):
   held across a fetch, one fetch per block however many threads miss it,
   and bytes reserved before a fetch starts, so memory stays bounded.
 - **Coherence rule: only what cannot change is cached.** The director's
-  open reply says whether the handle is immutable (`Provider::is_immutable`,
-  which an overlay answers for the child holding the handle: a base file of
-  an immutable base is, anything in the write layer is not). Only such
-  handles are served. A write open, an open reported mutable, a write, a
-  truncate, or a delete or rename (source and target, everything under them)
-  through this process drops the file for the rest of the process. Because
-  writable files are excluded rather than invalidated, another process
-  writing the same write layer cannot make the cache stale: what it writes
-  is never cached, and a file it copies up is reported mutable at its next
-  open here.
+  open reply says whether the handle is immutable (an overlay answers for the
+  child holding the handle: a base file of an immutable base is, anything in
+  the write layer is not). Only such handles are served. A write open, an
+  open reported mutable, a write, a truncate, or a delete or rename (source
+  and target, everything under them) through this process drops the file for
+  the rest of the process. Because writable files are excluded rather than
+  invalidated, another process writing the same write layer cannot make the
+  cache stale: what it writes is never cached, and a file it copies up is
+  reported mutable at its next open here.
 - A file read at random across more units than it may hold goes *cold*:
   after 16 re-fetches of units its own LRU dropped, averaging under 8 hits
   each, it is read uncached for a while instead of turning every small read
   into a fetch. A file's first fetch of a unit, and a miss on a unit the
   process-wide cap evicted, are not held against it.
 
-The policy was tuned by replaying the provider-side traces of real launches
-(every handle's reads, in order) through the cache: against no cache and
-the first design, the launch above needs 52,811 small round trips (vs
-475,274 and 52,886) and fetches 2.13 GiB (vs 2.03 GiB read and 3.55 GiB).
+Replayed through the provider-side traces of real launches (every handle's
+reads, in order), the launch above needs 52,811 small round trips with the
+cache against 475,274 without it, and fetches 2.13 GiB where the program
+reads 2.03 GiB.
 
 A provider that traces its reads sees the cache's unit fetches, not
-the program's own read pattern: capture an access trace (Haskill's replay
-numbers, for one) with the cache off.
+the program's own read pattern: capture an access trace with the cache off.
 
 `VFS_SHIM_READ_CACHE=0` turns it off, and the `VFS_SHIM_STATS_LOG` report has
 a section for it (hits, misses, declined, fetches and bytes, evictions,
 invalidations, misses the cap caused) with the twenty busiest files: their
 small reads, hits, misses, bytes fetched, and whether they went cold and
-why. The open reply's `immutable` flag and generation sit in what
-was padding, so the wire version did not change: an older director's reply
-reads as mutable and is never cached.
+why. A director that leaves the open reply's `immutable` flag clear is never
+cached.
 
 ### 3.6 Process creation: `aether-pe`, `aether-inject`, a director's staging
 
@@ -361,52 +326,45 @@ launch that errors, never an unvirtualised game that writes to the real disk.
 Almost all configuration crosses a process boundary: the host sets environment
 variables, `CreateProcessW` inherits them, and the shim reads them inside the
 game. That is the right mechanism for a boundary we do not otherwise control,
-but spelling the names as literals at both ends made drift free and silent: a
-rename at the writer that misses the reader produces no error, just a feature
-that quietly stops working.
+but spelling the names as literals at both ends would make drift free and
+silent: a rename at the writer that misses the reader produces no error, just
+a feature that quietly stops working.
 
 `aether-env` holds one constant per name, a table describing all of them, and a
 test that fails if any crate reads a `VFS_*` name absent from that table. It has
 no dependencies, so even the shim can use it.
 
-Two boolean forms, because the tree already had both spelled inconsistently:
-`opt_in` is off unless explicitly enabled (used for anything that relaxes a
-guarantee: `ALLOW_DISK_FALLTHROUGH` un-seals the managed root, and must not be
-enableable by accident), and `opt_out` is on unless explicitly disabled.
+Two boolean forms: `opt_in` is off unless explicitly enabled (used for
+anything that relaxes a guarantee: `ALLOW_DISK_FALLTHROUGH` un-seals the
+managed root, and must not be enableable by accident), and `opt_out` is on
+unless explicitly disabled.
 
 `aether_env::describe()` prints the whole surface; the rustdoc on each constant is
 the reference.
 
-### 3.8 Hosting: `vfs-embed` (deleted; now the Clojure director)
+### 3.8 Hosting
 
-There is no control plane: a host embedded `vfs-embed` (§3.11) and composed each
-session in code; Cairn now does the same with `aether.director.*`. A host that learns its sources one at a time records them in a
-`RootSources` per root and installs them with `Session::set_root_mounts`, which
-keeps the root's write layer composed. The daemon (`vfs-directord`,
-`vfs-control`, `vfs-source`) was removed on 2026-10-08: no host used it. Its
-end-to-end tests (the escape matrix, enumeration, the launch scenarios) moved
-to `vfs-embed/tests/`, and from there to `test/aether/director/e2e/`.
+There is no control plane: a host composes each session in code, with the
+roots, the providers each root serves and the ring, and starts launches from
+it. A host that learns its sources one at a time installs them per root and
+keeps the root's write layer composed above them.
 
 ### 3.9 Registry overlay: `aether-registry`, a director's registry host, the shim's `reg*` modules
 
 Injected processes see the real registry, but none of their registry writes
 reach it: they go to a per-profile **registry layer** that persists between
-runs (spec: `docs/superpowers/specs/2026-10-05-registry-overlay-design.md`).
+runs.
 
-- **Switch.** A host attaches a layer with `Session::set_registry_layer`;
-  while one is attached, launches set `VFS_REGISTRY=1`. Without it the shim
-  installs **no** registry detours at all, so a process with the overlay off
-  carries none of them.
-- **Director.** `RegistryHost` holds the session's overlay tree
+- **Switch.** A host attaches a layer to its session; while one is attached,
+  launches set `VFS_REGISTRY=1`. Without it the shim installs **no** registry
+  detours at all, so a process with the overlay off carries none of them.
+- **Director.** The director holds the session's overlay tree
   (`aether-registry::Overlay`: values, value tombstones, present or tombstoned
-  child entries, created-here or overlaying-real origin) and saves it whole as
-  `overlay.reg` in the layer (write `overlay.reg.tmp`, rename), at most once a
-  second while dirty and at every flush.
-- **Durable point.** A save is an ordinary layer write, so under a deferred
-  store it is not durable by itself. The host passes its store's sync as the
-  layer's `RegistrySync` hook (`registry_sync_for(&storage)` for a `Storage`);
-  the session calls it after the final save at stop and at detach, and the
-  saver calls it at most every five minutes while a save is not yet durable.
+  child entries, created-here or overlaying-real origin) and saves it in the
+  layer (written beside and renamed into place) while dirty and at every
+  flush. A save is an ordinary layer write, so under a deferred store it is
+  durable only once the store syncs: at stop, at detach, and periodically
+  while a save is not yet durable.
 - **Ring.** Opcodes 15–22: `REG_LOOKUP`, `REG_KEY`, `REG_SET_VALUE`,
   `REG_DELETE_VALUE`, `REG_CREATE_KEY`, `REG_DELETE_KEY`, `REG_RENAME_KEY`,
   `REG_CHANGED`. The director publishes a registry generation in the ring
@@ -429,78 +387,48 @@ runs (spec: `docs/superpowers/specs/2026-10-05-registry-overlay-design.md`).
   made while the hook is bypassed returns `STATUS_UNSUCCESSFUL`. Reads fall
   back to the real registry, counted in the shim stats.
 
-### 3.10 The Proton host path: `aether.director.proton`
-
-This section was written for the Rust `vfs-proton` and `vfs-embed` crates, now
-deleted; the Clojure director's `aether.director.proton.*` ports them. Where the
-text names a Rust item, read it as the design the Clojure code follows.
+### 3.10 The Linux host path (a director's)
 
 Linux is a supported host. The game is still a Windows program and so is the
 shim: both run inside GE-Proton's Wine, while the director, the providers and
 the host are native Linux. Only the transport and the launch differ from the
 Windows path.
 
-- **Ring.** `Session::serve` creates a file-backed ring (`state_dir/ring.bin`,
-  mapped by the director natively and by the shim through Wine), tmpfs-backed when
-  `$XDG_RUNTIME_DIR` is private (§3.4). The wire protocol and the version are
-  the same as on Windows.
-- **Runtime.** `aether.director.proton.{release,fetch,install,runtime}` find,
-  download, verify and extract GE-Proton (Rust: `vfs-proton install`); they
-  refuse anything that is not GE, because an unset or wrong `PROTONPATH`
-  silently falls back to stock Proton. Their logic is portable, so the unit
-  suite tests it on both CI hosts.
+- **Ring.** The director creates a file-backed ring, mapped by the director
+  natively and by the shim through Wine, tmpfs-backed when `$XDG_RUNTIME_DIR`
+  is private (§3.4). The wire protocol and the version are the same as on
+  Windows.
+- **Runtime.** The director finds, downloads, verifies and extracts GE-Proton,
+  and refuses anything that is not GE, because an unset or wrong `PROTONPATH`
+  silently falls back to stock Proton.
 - **Prefix.** A launch runs in a Wine prefix: an anonymous one deleted with the
-  session, or a named one that persists (`$VFS_HOME/sessions/<name>/prefix`).
-  `Session::prepare_prefix` brings one up without serving anything. A root's
-  location (`C:\...`) is a symlink into the prefix's `drive_c`, created at the
-  first launch and removed with the session. The managed root is always empty on
-  disk; content only ever arrives through the ring.
-- **Windows half.** The injector (`aether-injector.exe`), the shim and payload
-  DLLs, and the test probes are Windows binaries cross-built by
-  `bin/build-windows`, whose `ARTIFACTS` array is the one list of them.
-- **Launch.** The injector argv and the environment the shim reads are pure
-  functions (`aether.director.proton.launch`), so they are unit-tested without Wine. A
-  launch lasts as long as anything runs in the prefix (`wineserver -w`), not
-  only the program it started (a mod loader that starts the game and exits
-  keeps it alive), and `LaunchHandle` lets the host poll or stop it. The
-  Windows path gives the same answer with a Job Object (§3.11, §4.3); the
-  injector itself uses no job under Wine, because the prefix watch already
-  covers the tree.
+  session, or a named one that persists. A root's location (`C:\...`) is a
+  symlink into the prefix's `drive_c`, created at the first launch and removed
+  with the session. The managed root is always empty on disk; content only
+  ever arrives through the ring.
+- **Windows half.** The injector (`aether-injector.exe`), the shim and the
+  test probes are Windows binaries cross-built by `bin/build-windows`, whose
+  `ARTIFACTS` array is the one list of the natives it stages.
+- **Launch.** A launch lasts as long as anything runs in the prefix
+  (`wineserver -w`), not only the program it started (a mod loader that
+  starts the game and exits keeps it alive). The Windows path gives the same
+  answer with a Job Object (§4.3); the injector itself uses no job under
+  Wine, because the prefix watch already covers the tree.
 
-### 3.11 Embedding: `vfs-embed` (deleted; `aether.director.launch` is its successor)
+### 3.11 Launch lifetime
 
-`vfs-embed` was the one crate a host named. It owns a `Session`: the roots, the
-provider graph each root serves, the ring the injected shim talks over, and the
-launch (Windows or Proton). Every host goes through it;
-if a host has to reach past `vfs-embed`, the fix belongs in `vfs-embed`. It
-re-exports what a host needs (the provider and composition types, the storage
-types, and a `proton` module for runtime, prefix and GPU probes). Its Proton
-code is `session/proton/`; Windows launch and staging are `session/windows/`
-and `session/stage.rs`.
-
-**Launch lifetime is the same on both targets.** A launch runs until every
-process it started has exited; the exit code reported is the first process's
-(the program `LaunchOpts::image` named); `stop` ends the whole tree and the
-launch reports `LaunchExit::Stopped` (`Session::launch` returns
-`STOPPED_EXIT_CODE`). Both targets have `Session::launch` (blocks),
-`Session::launch_detached` (returns a `LaunchHandle` with `pid`, `notes`,
-`stopper`, `is_running`, `try_wait`, `wait`, `stop`), `Session::stop_launch`
-and `LaunchStopper`. Dropping a running `LaunchHandle` stops it, and dropping
-the session stops the launches it holds or that are still live before the ring
-goes. A session runs **one launch at a time** on both targets: while one runs,
-`launch` and `launch_detached` are refused ("a launch is already running in
-this session — stop_launch() first"), before anything is resolved or staged.
-On Proton "the tree" is the session's Wine prefix (`wineserver -w`). On Windows
-it is a Job Object per launch (`aether_inject::spawn_target_with_shim`,
-`ProcessTree`) that no process can leave (§4.3). `LaunchHandle::pid` is the launched program's pid on Windows and
-the `wine` process's on Proton; the Steam helper accessors are Proton-only.
+**A launch lifetime is the same on both targets.** A launch runs until every
+process it started has exited; the exit code reported is the first
+process's; stopping a launch ends the whole tree. A session runs one launch at
+a time. On Linux "the tree" is the session's Wine prefix (`wineserver -w`). On
+Windows it is a Job Object per launch (`aether_inject::spawn_target_with_shim`,
+`ProcessTree`) that no process can leave (§4.3).
 
 ---
 
 ## 4. The hard parts, and how they are solved
 
-Several of these were understood only after a failure that produced no error
-at all.
+Several of these show no error at all when they go wrong.
 
 ### 4.1 Bootstrapping: the process must be hooked before it can run
 
@@ -524,68 +452,24 @@ Two mechanisms:
    remote thread (which first runs process initialisation, then the shim's
    bootstrap), wait for that thread, and resume once the ready file says
    "ready". The primary thread never runs before the hooks are live. Nothing
-   of the EXE, on disk or in memory, is edited.
-
-Until 2026-11 the shim could also arrive as the EXE's first static import,
-written into the staged file or into the suspended image's headers in memory.
-Editing the PE headers is what a Steam DRM wrapper (SteamStub) that verifies
-itself refuses: Journals of Jyggalag's downgraded 1.6.1170 `SkyrimSE.exe` put
-up a "Steam Error" dialog instead of starting. Injection edits nothing of the
-EXE, so the import patch was removed.
-
-Until 2026-10 a third mechanism ran first: a `no_std` early payload, reflectively
-mapped and entered by redirecting the primary thread's start address, hooked the
-path stubs before the loader ran and held the thread at a spin gate while the
-full shim loaded. It existed to serve static imports from the virtual root;
-staging made it redundant, and it was removed.
+   of the EXE, on disk or in memory, is edited, so a Steam DRM wrapper
+   (SteamStub) that verifies its own headers starts as it would without the
+   VFS.
 
 ### 4.2 `CreateProcess` needs a real file on disk
 
-Windows will not create a process from a buffer, and for a long time the answer
-here was **process hollowing**: create the process from some unrelated on-disk
-host image, then overwrite that image in memory with the PE we actually wanted.
-It preserved a strict "no game PE ever touches disk" invariant.
+Windows will not create a process from a buffer. Staging writes the real EXE
+and its import closure to a scratch directory, so there *is* a real file to
+`CreateProcess`, and the loader maps, relocates and binds it properly. The
+launch path is: stage → `CreateProcess` suspended → inject → resume.
 
-Making a hollowed MSVC CRT executable *run* cost a great deal:
-security cookie initialisation, remote TLS plus the TEB slot,
-`RtlAddFunctionTable` for x64 unwind data, LDR `SizeOfImage`/`EntryPoint`
-fixups, an entry trampoline so exception registration ran on the primary
-thread. Every one of those was a hand-written re-implementation of
-something the Windows loader already does correctly.
+The primary thread's stack is grown to 16 MiB on that path, because the
+shim's extra frames overflow the stock 1 MiB stack (`0xC00000FD`).
 
-That invariant no longer holds, so the mechanism is gone. Staging writes the
-real EXE and its import closure to a scratch directory, which means there *is* a
-real file to `CreateProcess`, and the loader maps, relocates and binds it
-properly. The launch path is now: stage → `CreateProcess` suspended →
-inject → resume.
-
-The measurements that settled it (three runs each, 2026-08-13) show
-that the redundancy was not free:
-
-| | time to window | VFS bytes read |
-|---|---:|---:|
-| with hollow | 5.07 / 5.13 / 5.12 s | 532 MiB |
-| without | **2.82 / 2.81 / 2.81 s** | **69.5 MiB** |
-
-The hollow had become a no-op that still did all the work: `VFS_HOLLOW_HOST`
-pointed at the staged EXE, so the code re-read that PE from the VFS, re-applied
-the same relocations, and wrote it back over the loader's own correct mapping at
-the same base. `host_is_target` was true, which already caused the TLS setup to
-be skipped: an explicit admission that the loader had done it right.
-
-Removing it deleted ~3,800 lines (`ghostly.rs`), the purpose-built neutral host
-crate, three diagnostic binaries, a `hollow_pe` flag threaded through the gRPC
-contract and every launch API, and a hardcoded `contains("skyrimse")` special
-case. One consequence had to be carried across deliberately rather than deleted:
-the hollow path also grew the primary thread's stack to 16 MiB, because the
-shim's extra frames overflow the stock 1 MiB stack (`0xC00000FD`). That is not
-hollow-specific and now happens on the single launch path.
-
-**The one capability lost** is launching a child EXE that exists *only*
-inside an archive, with no path to `CreateProcess` from. Staging the whole launch
-closure (including a child that a loader will spawn) covers the real cases (see
-§4.3), and keeping a second launch mechanism alive for a hypothetical one was
-judged not worth its weight.
+**What this does not cover** is launching a child EXE that exists *only*
+inside an archive, with no path to `CreateProcess` from. Staging the whole
+launch closure (including a child that a loader will spawn) covers the real
+cases (see §4.3).
 
 ### 4.3 Following the game across process creation
 
@@ -616,13 +500,13 @@ terminated and its `CreateProcess` call returns `FALSE` (`ERROR_PROCESS_ABORTED`
 A child is never released without the shim, so the failure mode is a launch that
 errors, not an unvirtualised game that writes to the real disk. The refusal
 reaches the launcher: the shim lists the children it killed beside the ready
-file, and the host reports them. The wait is the
-launch's own (`LaunchOpts::ready_timeout`, else 180 s), which the injector passes
-down in `VFS_READY_TIMEOUT_SECS`; every child is injected, none is skipped. The
+file, and the host reports them. The wait is the launch's own ready timeout
+(180 s by default), which the injector passes down in
+`VFS_READY_TIMEOUT_SECS`; every child is injected, none is skipped. The
 child's image identity is scoped so the parent's does not leak into it.
 
 **Wait for the tree, not the loader.** The handover also decides when the
-launch is over: the loader exits while the game is still running. On Proton
+launch is over: the loader exits while the game is still running. Under Wine
 the launch watches the Wine prefix (§3.10). On Windows,
 `aether_inject::spawn_target_with_shim` creates an unnamed Job Object per launch
 and assigns the target to it while it is still suspended, before the remote
@@ -641,15 +525,8 @@ drops `CREATE_BREAKAWAY_FROM_JOB` from every child it creates
 instead of failing with `ERROR_ACCESS_DENIED`. A child the shim refuses dies at once
 and never holds the launch open. If the target cannot be put in a job (a host
 job that forbids nesting), the launch falls back to tracking the first process
-alone and says so as the first `LaunchHandle::notes()` line. The injector's
-`run_target_with_shim`, used under Wine, keeps first-process tracking. (Design:
-`docs/superpowers/specs/2026-10-13-windows-process-tree-wait-design.md`; §9
-records the owner's decisions: children are tracked, one launch per session,
-kill-on-close stays.)
-
-Verified 2026-08-13: launched via SKSE, the hook-stats file is written by the
-*child* pid, `getskseversion` reports `2.2.6` in-game, and `coc riverwood` loads
-the world, with no hollow anywhere in the path.
+alone and says so. The injector's `run_target_with_shim`, used under Wine,
+keeps first-process tracking.
 
 ### 4.4 Multi-gigabyte memory-mapped archives
 
@@ -667,11 +544,11 @@ The lifetime rule matters as much as the paging. The reservation belongs to the
 it: a BSA reader slides views across one archive, so unmapping one window must
 leave every other window, and any later remap of the still-open section,
 valid. The VA is released only once the section handle is closed **and** the last
-view is gone. Getting this wrong produced crashes far away from the cause.
+view is gone. Getting this wrong produces crashes far away from the cause.
 
 ### 4.5 A file has more than one name
 
-This is the defect class that cost the most:
+This is the defect class that costs the most:
 **NT lets a caller name a file as (directory handle + relative name)**, not only
 as an absolute path. `CreateFileW("Data\\X")` reaches ntdll as the process's
 current-directory *handle* plus the relative string.
@@ -679,8 +556,8 @@ current-directory *handle* plus the relative string.
 A hook that only understands absolute names does not fail on these. It decodes
 nothing, declines to act, and the call proceeds to whatever is really on disk
 behind the mount. No error, no log line, no counter: the file appears
-not to exist. Skyrim reached its main menu with an empty load order for exactly
-this reason: every plugin lookup took the relative form.
+not to exist. Skyrim reaches its main menu with an empty load order for exactly
+this reason: every plugin lookup takes the relative form.
 
 The resolution is one shared `parent_dir_of_handle` consulted by every hook that
 decodes a name, covering three kinds of parent:
@@ -692,8 +569,8 @@ decodes a name, covering three kinds of parent:
    `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory`; there is no API that returns
    it, so it is read from the PEB.
 
-The same defect appeared independently in three hooks. It is now structurally
-impossible for one to know about a parent the others cannot.
+Because every hook uses that one implementation, no hook can know about a
+parent the others cannot.
 
 ### 4.6 The same question has several APIs
 
@@ -707,34 +584,30 @@ different ones in different code paths.
 
 Any hook that answers differently from its siblings produces a program that
 believes a file both exists and does not. Both failure directions are real: a
-false negative makes content silently invisible (this is what suppressed
-Skyrim's intro video), and a false positive leaks a file the sealed
-view deliberately hides.
+false negative makes content silently invisible (Skyrim's intro video does not
+play), and a false positive leaks a file the sealed view deliberately hides.
 
 Every one of these entry points is hooked, they share one implementation body
 where the shapes allow, and cross-API agreement is a test rather than a
 convention (§6).
 
-### 4.7 Performance was never where it looked
+### 4.7 Wake latency, not work, is the cost
 
-Early measurement showed the VFS adding ~9.3 s to a game launch, roughly a 10×
-slowdown. The natural assumption (too many reads, or reads that are too small)
-was wrong. Swapping the content source (zip vs plain disk) changed nothing, and
-only ~800 director operations were involved.
+The VFS's cost in a launch is not the number or size of reads: swapping the
+content source (zip vs plain disk) changes nothing, and a launch involves only
+hundreds of director operations. It is **wake latency**. Per-hook
+instrumentation with max and `>1 ms` stall counts shows it: a stat hook can
+average 819 µs/call while almost every call is fast and a few take up to
+15.2 ms, the Windows timer quantum. Such an average describes no call that
+ever happened.
 
-The cost was **wake latency**, not work. Per-hook instrumentation with max and
-`>1 ms` stall counts made this visible: `NtQueryFullAttributesFile` averaged
-819 µs/call, but 215 of 231 calls were fast and sixteen took up to 15.2 ms,
-the Windows timer quantum. The average described no call that ever happened.
-
-Two fixes, both about who is awake:
+Two mechanisms keep both ends awake:
 
 - **Server-side spin-then-wait**: the director spins while the ring is hot
-  instead of sleeping between bursts. 10.34 s → 2.74 s.
+  instead of sleeping between bursts.
 - **The client wakes the server**: the shim signals an event on submit and then
   spins for the reply, which arrives in 20–209 µs, far less than the cost of
-  sleeping for it. Time inside hooks fell 0.536 s → 0.180 s, and every
-  quantum-scale stall outside `NtReadFile` disappeared.
+  sleeping for it.
 
 The lesson encoded in the tooling: report max and stall counts, never a bare
 mean, because the two shapes of "slow" want opposite fixes.
@@ -746,15 +619,14 @@ and remain stable across the restart-scan and single-entry-at-a-time protocols
 NT allows. It is also stateful: a directory handle carries a cursor, so the
 listing is built once per scan and served in slices.
 
-It must **not** show the union of real and virtual entries. An earlier version
-of the shim merged them, and was wrong for the same reason §4.9 gives. A
-directory listing is a spelling of the paths it names, so the sealed root applies
-to it in full: under a managed root the director's `readdir` is the whole
-answer, never merged with the real directory behind the mount. If the director
-cannot be asked, the listing is empty rather than drained from disk. See
-`serve_dir_query` in `aether-hooks/src/hook/dirquery.rs`, and
-[`escape-matrix.md`](./escape-matrix.md) for the fall-through this replaced and
-the test that holds it closed.
+It must **not** show the union of real and virtual entries, for the reason
+§4.9 gives. A directory listing is a spelling of the paths it names, so the
+sealed root applies to it in full: under a managed root the director's
+`readdir` is the whole answer, never merged with the real directory behind the
+mount. If the director cannot be asked, the listing is empty rather than
+drained from disk. See `serve_dir_query` in
+`aether-hooks/src/hook/dirquery.rs`, and
+[`escape-matrix.md`](./escape-matrix.md) for the test that holds it closed.
 
 ### 4.9 Isolation
 
@@ -775,29 +647,16 @@ file's.
 
 ## 5. Performance
 
-Time-to-window for Skyrim SE, three clean runs each
-(the load-debug-vs-release and hollow-removal write-ups, not imported):
+Time-to-window for Skyrim SE, three clean runs each:
 
-| configuration | mean | measured |
-|---|---:|---|
-| native, no VFS | 1.0 s | 2026-08-12 |
-| VFS, before wake fixes | 10.34 s | 2026-08-12 |
-| VFS, after wake fixes (hollow still in) | 2.74 s | 2026-08-12 |
-| **VFS, staged launch (current)** | **2.81 s** | 2026-08-13 |
+| configuration | mean |
+|---|---:|
+| native, no VFS | 1.0 s |
+| VFS, staged launch | 2.81 s |
 
-The current figure is roughly 1.8 s over native. About 0.72 s of that is work
-native never does at all (staging, injection), and the rest is hook time.
-
-Two cautions about reading this table. The rows are not a clean progression:
-each was measured on the build of its day, and the 2026-08-12 rows predate the
-relative-name fixes (§4.5), which broadened what resolves through the VFS. On
-2026-08-13 the *same* benchmark put the hollow path at 5.1 s, so that path had
-regressed since its 2.74 s was recorded; removing it restored the profile
-(69.5 MiB read at the window, 164 KiB/read, an exact match for the historical
-table) rather than beating it.
-
-Content source is not a factor: zip and disk providers measure the same
-(10.34 vs 10.38 s pre-fix), which is what identified wake latency as the cost.
+That is roughly 1.8 s over native. About 0.72 s of that is work native never
+does at all (staging, injection), and the rest is hook time. Content source
+is not a factor: zip and disk providers measure the same.
 
 ---
 
@@ -816,14 +675,10 @@ than work that errors. Tests are shaped around that.
   against the fake director in `tests/fakedirector`.
   One install per process, so every `#[test]` in `aether-hooks/tests/`
   re-executes itself in a fresh process (`tests/common`), and the scenarios are
-  grouped into a few binaries by concern. These are Windows executables: on
-  Linux they run under Wine (`bin/wine-shim-tests`, not imported; the Wine tests come with the port of these tests to the Clojure director).
-- **The Proton path is tested end to end** by the `^:proton` tests
-  (`clojure -M:test:proton`, `test/aether/director/e2e/`; the Rust `#[ignore]`d
-  `vfs-embed` tests they replace are in `e2e-port.md`) that launch Windows
-  fixtures under GE-Proton against a native director. A test
-  whose prerequisite is missing prints `SKIP` and passes; `VFS_TEST_REQUIRE_ALL=1`
-  makes a skip a failure (see the root README's Tests section).
+  grouped into a few binaries by concern. These are Windows executables. A
+  test whose prerequisite is missing prints `SKIP` and passes;
+  `VFS_TEST_REQUIRE_ALL=1` makes a skip a failure (see the root README's Test
+  section).
 - **Every naming form is covered, not just the convenient one.** The
   relative-name battery exercises each decoding hook through a real directory
   handle, because Win32 decides on its own whether a relative path becomes an
@@ -837,21 +692,18 @@ than work that errors. Tests are shaped around that.
 
 Two habits to keep:
 
-*Test the wiring, not only the unit.* The staging-alias predicate was unit-tested
-and correct; what drifted was which callers consulted it. A test of a predicate
-cannot catch a caller that does not call it; only a single shared implementation
-can.
+*Test the wiring, not only the unit.* A predicate can be unit-tested and
+correct while a caller fails to consult it. A test of a predicate cannot catch
+a caller that does not call it; only a single shared implementation can.
 
-*Verify a regression test fails.* The enumeration-parity test was confirmed to
-fail with the classic detour disabled, which is the exact defect that once
-shipped.
+*Verify a regression test fails.* The enumeration-parity test fails with the
+classic detour disabled, which is the defect it guards against.
 
-Beyond the suite, behavioural changes are verified against the running game. The
-window was driven headlessly with `tools/gamectl.ps1` (not imported),
-which screenshots it and injects scancode-level input via
-`SendInput`/`KEYEVENTF_SCANCODE` (the game ignores `SendKeys` and posted
-messages): `key GRAVE` opens the console, `type "coc riverwood"` spells a command
-out key by key, `shot out.png` captures a frame, and runs end with `qqq` so the
+Beyond the suite, behavioural changes are verified against the running game:
+the window is driven headlessly with scancode-level input
+(`SendInput`/`KEYEVENTF_SCANCODE`; the game ignores `SendKeys` and posted
+messages), the console opened with the grave key, a command such as
+`coc riverwood` typed key by key, a frame captured, and the run ended so the
 game exits on its own path.
 
 ---
@@ -893,6 +745,7 @@ observer before concluding the process is idle.
 | `aether-ipc` | control ring + bulk arena + read cache, OS-free |
 | `aether-rpc` | typed ring ends over `aether-protocol`: the `Client` the shim calls the director with (compiled into the shim DLL) and the `Director` trait a director in Rust implements |
 | `aether-refdirector` | the reference director (answers every file and registry opcode from memory, the server the shim's tests run against) and a null one for measuring the ring; not shipped |
+| `aether-conform` | the conformance tool: scenarios, malformed requests, generated cases and concurrent clients played against a director (`docs/conformance.md`) |
 | `aether-filering` | a ring in a memory-mapped file on any OS (`FileRing`), the Linux-under-Wine backing of wire.md 2.10 for a native tool |
 | `aether-win` | Windows shared memory, events and volume lookups |
 | `aether-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
@@ -905,23 +758,16 @@ observer before concluding the process is idle.
 | `aether-fixtures` | the test fixtures: Windows probe programs the tests run under the shim (`aether-fixture-read`, `-writepath`, `-escape`, `-prefs`, `-registry`, `-steam`, `-nvapi`) and the library they share |
 | `aether-fixture-vproxy` / `aether-fixture-staticimp` | a proxy DLL (`vproxy.dll`) and a program that imports it statically, for injection before static imports initialise; built in that order, in two cargo invocations (cargo#6313) |
 | `aether-testkit` | dev-only helpers shared by integration tests |
-| `vfs-bench` | (not imported) `ring-bench` and `skyrim-live`, the benchmark and live-launch harnesses |
 
 Dependency direction is enforced by the split: pure crates never learn about the
-OS, and the zip provider never learns about the host.
+OS.
 
 ---
 
 ## 9. Known limitations
 
-- **Windows x64 guests only.** The game and the shim are Windows x64 code. A
-  Linux host runs them under GE-Proton's Wine (§3.10); there is no native Linux
-  game support, and no macOS host.
-- **Stored zip entries only.** Deflate would defeat random access. Archives are
-  expected to be repacked Stored.
-- **Router `readdir` is single-dispatch**, not the cross-route union the
-  provider design calls for.
+- **Windows guests only.** The game and the shim are Windows code (x64 and
+  x86). A Linux host runs them under GE-Proton's Wine (§3.10); there is no
+  native Linux game support, and no macOS host.
 - **Anti-cheat.** The techniques here are indistinguishable from those an
   anti-cheat system exists to detect. This is a single-player modding tool.
-- **Per-child staging recursion** for sub-processes is designed but not
-  implemented.

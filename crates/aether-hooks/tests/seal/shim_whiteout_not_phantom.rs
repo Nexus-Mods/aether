@@ -1,36 +1,28 @@
-//! Gate 5, Task 7: a shim-written whiteout marker must not survive a
-//! **director** listing — neither as an entry of its own, nor as a marker that
-//! fails to hide the file it names.
+//! A shim-spelled whiteout marker must not survive a **director** listing:
+//! neither as an entry of its own, nor as a marker that fails to hide the file
+//! it names.
 //!
 //! ## Why the fixture looks like this
 //!
-//! The shim and the director shared one physical directory and spell whiteouts
-//! differently: the shim-local overlay (removed by task C8) appended
-//! `aether_redirect::WHITEOUT_SUFFIX` (`<name>.__vfs_wh__`);
-//! a director's overlay prefixes `.wh.<name>`. Live,
-//! `skyrim-live` and the daemon hand the director a write layer rooted at
-//! `overlay_layer_dir(overlay, RootId::DEFAULT)` — the *same* directory the
-//! shim-local overlay wrote into. So a marker an older shim wrote is, to the
-//! director, a zero-byte file with an odd name, and `client.readdir` hands it
-//! back like any other entry. The shim writes no more of them, but write layers
-//! already on disk still hold them.
+//! A shim spells a whiteout `aether_redirect::WHITEOUT_SUFFIX`
+//! (`<name>.__vfs_wh__`); a director's overlay prefixes `.wh.<name>`. A write
+//! layer can hold shim-spelled markers, and to the director such a marker is a
+//! zero-byte file with an odd name, so `client.readdir` hands it back like any
+//! other entry.
 //!
 //! That is why the fake serves the marker as an ordinary file rather than
 //! filtering it: filtering it in the fixture would test a director that does
-//! not exist. The two halves that follow are both consequences of that one
-//! fact, and before this task both were wrong:
+//! not exist. Two things must not happen:
 //!
-//! 1. the marker itself surfaced to the game as a real file, and
-//! 2. the file it names stayed listed, so the delete that wrote it came back.
+//! 1. the marker itself surfacing to the game as a real file, and
+//! 2. the file it names staying listed, so the delete that wrote it comes back.
 //!
 //! ## What this does *not* claim
 //!
 //! Only enumeration. A stale marker still does not hide its target from an
-//! `open` through the director: `OverlayProvider::hidden_by_whiteout` looks for
-//! its own `.wh.` spelling, and the shim has no per-open hook that could ask
-//! without a `stat` on every read. (The route that minted such a marker while a
-//! director was live, `setinfo_hook`'s engine branch, asks the director since
-//! task C8.)
+//! `open` through the director: a director's overlay looks for its own `.wh.`
+//! spelling, and the shim has no per-open hook that could ask
+//! without a `stat` on every read.
 
 use crate::fakedirector;
 use crate::ntapi;
@@ -39,8 +31,7 @@ use aether_hooks::install;
 use aether_redirect::RootId;
 
 /// The physical directory an overlay rooted at `overlay_root` uses for
-/// `root`'s writes: `root-<n>`, the naming the shim-local overlay and a
-/// director's write layer shared.
+/// `root`'s writes: `root-<n>`, a director write layer's naming.
 fn overlay_layer_dir(overlay_root: &std::path::Path, root: RootId) -> std::path::PathBuf {
     overlay_root.join(format!("root-{}", root.0))
 }
@@ -77,10 +68,9 @@ fn setup() -> std::path::PathBuf {
     let layer = overlay_layer_dir(&overlay, RootId::DEFAULT);
     std::fs::create_dir_all(layer.join("data")).unwrap();
 
-    // The marker physically present in the shared directory, the way an older
-    // shim's overlay wrote it. The director's write layer is a
-    // `DiskProvider` over exactly this directory, so it reads it back as a
-    // file — which is what the fake below reproduces.
+    // The marker physically present in the write layer's directory. A
+    // director that serves the layer from disk reads it back as a file,
+    // which is what the fake below reproduces.
     std::fs::write(
         layer
             .join("data")

@@ -5,21 +5,16 @@
 //! Configuration reaches this system almost entirely through the environment:
 //! the host sets variables, `CreateProcessW` inherits them, and the shim reads
 //! them inside the game. That is the right mechanism — it survives a process
-//! boundary we do not otherwise control — but spelling the names as string
-//! literals at both ends made two failure modes routine, and neither produces
+//! boundary we do not otherwise control, but spelling the names as string
+//! literals at both ends makes two failure modes routine, and neither produces
 //! an error:
 //!
 //! 1. **Silent drift.** A name renamed at the writer is not renamed at the
-//!    reader. Measured 2026-08-13: the hollow refactor renamed
-//!    `VFS_HOLLOW_HOST` to `VFS_LAUNCH_IMAGE` at the writer, and the shim's
-//!    `stage_root_from_env` kept reading the old name — so the staging-directory
-//!    alias silently stopped resolving. Nothing failed; it just stopped working,
-//!    and only did not bite because a separate change had made that alias
-//!    redundant.
+//!    reader, and the feature behind it silently stops working: nothing
+//!    fails.
 //! 2. **An unreviewable surface.** Switches accumulate one inline
-//!    `env::var("…")` at a time. Before this module there were 47, of which 25
-//!    appeared in no document, several of them able to disable a serving path or
-//!    un-seal the managed root.
+//!    `env::var("…")` at a time, undocumented, some of them able to disable a
+//!    serving path or un-seal the managed root.
 //!
 //! So: one constant per name, one table describing all of them, and a test in
 //! this crate that fails if any crate reads a `VFS_*` name that is not in the
@@ -29,8 +24,7 @@
 //!
 //! It does not own defaults for values that belong to a caller (paths, sizes a
 //! host computes). It owns the *name*, the *meaning*, and the parsing of the
-//! handful of switches that are booleans, because "is `0` false?" was answered
-//! three different ways before this.
+//! handful of switches that are booleans, so "is `0` false?" has one answer.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -75,22 +69,21 @@ pub const RING_SPIN_US: &str = "VFS_RING_SPIN_US";
 
 /// The managed virtual root. Everything under it resolves through the director.
 ///
-/// **Required.** There is no good default — it names *which tree is being
-/// virtualised* — and the one that used to exist pointed at a layout that no
-/// longer exists, so an unset root connected the client to a path nothing
-/// matched and the failure surfaced later as missing content.
+/// **Required.** There is no good default: it names *which tree is being
+/// virtualised*, and a default would connect the client to a path nothing
+/// matches, with the failure surfacing later as missing content.
 pub const VIRTUAL_DIR: &str = "VFS_VIRTUAL_DIR";
 /// The session's *additional* managed roots, beyond root `0`
 /// ([`VIRTUAL_DIR`]): `id=path` entries separated by `;`, e.g.
 /// `1=C:\Users\me\Documents\My Games\Skyrim`.
 ///
-/// A session virtualizes several real filesystem locations, one provider each
-/// (stage 2b). The shim must know every one of them, because the root id is
-/// what its ring requests now carry — a root the shim has never heard of is a
+/// A session virtualizes several real filesystem locations, one provider each.
+/// The shim must know every one of them, because the root id is what its ring
+/// requests carry: a root the shim has never heard of is a
 /// root whose paths it classifies as "not ours" and lets fall to real disk.
 ///
-/// Optional and additive: unset means the single-root session every caller
-/// before stage 2b had, and [`VIRTUAL_DIR`] alone still defines root `0`. A
+/// Optional and additive: unset means a single-root session, and
+/// [`VIRTUAL_DIR`] alone defines root `0`. A
 /// malformed entry is skipped rather than failing the launch — the same shape
 /// as an unparseable numeric switch elsewhere here — but an entry naming id
 /// `0` overrides [`VIRTUAL_DIR`]'s path for that root rather than being
@@ -105,7 +98,7 @@ pub const VIRTUAL_ROOTS: &str = "VFS_VIRTUAL_ROOTS";
 pub const ROOT_BACKINGS: &str = "VFS_ROOT_BACKINGS";
 /// Directory for session state (ready flag, configs, logs).
 pub const STATE_DIR: &str = "VFS_STATE_DIR";
-/// Base directory aether-vfs owns: downloaded Proton runtimes, per-session
+/// Base directory Aether owns: downloaded Proton runtimes, per-session
 /// prefixes, overlays. Defaults to `$XDG_DATA_HOME/aether-vfs`, then
 /// `$HOME/.local/share/aether-vfs`, and `%LOCALAPPDATA%\aether-vfs` on Windows.
 ///
@@ -113,14 +106,15 @@ pub const STATE_DIR: &str = "VFS_STATE_DIR";
 /// into `~/.local/share/Steam/compatibilitytools.d`, and not touching that is
 /// the point of acquiring runtimes ourselves.
 pub const HOME: &str = "VFS_HOME";
-/// Directory of the daemon's persistent storage (write layers and the block
+/// Directory of a director's persistent storage (write layers and the block
 /// cache). Defaults to `$VFS_HOME/storage`.
 pub const STORAGE_DIR: &str = "VFS_STORAGE_DIR";
 /// Absolute path of the image to launch, normally the staged EXE. The shim also
 /// derives the staging directory from this, and serves that directory as an
 /// alias for the virtual root.
 pub const LAUNCH_IMAGE: &str = "VFS_LAUNCH_IMAGE";
-/// Where the daemon publishes its endpoint for clients to discover.
+/// Where a director publishes its endpoint for clients to discover. Neither
+/// the shim nor the injector reads it.
 pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
 /// Directory holding the Windows artefacts a Proton launch needs
 /// (`aether-injector.exe`, `aether_shim.dll`), used instead of
@@ -137,10 +131,9 @@ pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
 /// cold start therefore gets the same allowance the launch did. Unset or
 /// unparsable: [`DEFAULT_READY_TIMEOUT_SECS`].
 pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
-/// The ready wait when [`READY_TIMEOUT_SECS`] is unset: what a Windows
-/// `Session::launch` has always defaulted to. A cold first launch in a fresh
-/// Wine prefix can take well over the 20 s this used to be. The one place the
-/// number is written; the injector and the shim both use it.
+/// The ready wait when [`READY_TIMEOUT_SECS`] is unset. A cold first launch in
+/// a fresh Wine prefix can take well over 20 s. The one place the number is
+/// written; the injector and the shim both use it.
 pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 180;
 
 /// The ready wait in seconds, as the environment says it: [`READY_TIMEOUT_SECS`]
@@ -179,10 +172,10 @@ pub const SHIM_READY: &str = "VFS_SHIM_READY";
 pub const CHILD_REFUSED_LOG: &str = "VFS_CHILD_REFUSED_LOG";
 /// Appended to the ready file's path to name [`CHILD_REFUSED_LOG`]'s file.
 pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
-/// Accepted and ignored. A host may still set it (Cairn sets `1`), and every
-/// descendant inherits it, but remote-thread injection is the only way the
-/// shim gets into a process, so nothing reads it. The name stays in the
-/// handshake tables because hosts set it.
+/// Accepted and ignored. A host may set it, and every descendant inherits
+/// it, but remote-thread injection is the only way the shim gets into a
+/// process, so nothing reads it. The name is in the handshake tables
+/// because a host may set it.
 pub const FORCE_INJECTION: &str = "VFS_FORCE_INJECTION";
 /// Test-only: force `aether_hooks::director::try_init_from_env` to report a
 /// connect failure, regardless of ring configuration. Exists to exercise a
@@ -192,12 +185,11 @@ pub const TEST_FUSE_INIT_FAIL: &str = "VFS_TEST_FUSE_INIT_FAIL";
 
 // ─── shim-ready handshake payload ────────────────────────────────────────────
 // Not `VFS_*` switch names — these are the two contents [`SHIM_READY`] can
-// hold once written. The file's mere existence used to be the whole protocol:
-// the launcher polled for the path and released the process the moment it
-// appeared. That could not distinguish "hooks are live and virtualising" from
-// "hooks are live but the FUSE client never attached" — exactly the silent,
-// total bypass this pair of constants exists to close. The launcher now reads
-// the content and refuses to release the process on the failure spelling.
+// hold once written. The file's existence alone cannot distinguish "hooks are
+// live and virtualising" from "hooks are live but the FUSE client never
+// attached", the silent, total bypass this pair of constants exists to close,
+// so the launcher reads the content and refuses to release the process on the
+// failure spelling.
 
 /// Written when hooks are live and, if a director was configured, its FUSE
 /// client attached. The launcher may release the process.
@@ -241,8 +233,7 @@ pub const INJECTOR_FAILED_PREFIX: &str = "inject:";
 // ─── Steam helper report ─────────────────────────────────────────────────────
 // Also not switch names: what `aether-injector` did with [`INJECT_STEAM_HELPER`],
 // one line in `<ready file>` + [`STEAM_HELPER_REPORT_SUFFIX`], written before
-// the target is created. Its absence once the target is running means an
-// injector that predates the helper.
+// the target is created.
 
 /// Appended to the ready file's path to name the injector's helper report.
 pub const STEAM_HELPER_REPORT_SUFFIX: &str = ".steam-helper";
@@ -261,16 +252,11 @@ pub const STEAM_HELPER_FAILED_PREFIX: &str = "failed:";
 /// Allow an under-root miss to fall through to whatever is really on disk.
 ///
 /// **This is the isolation invariant.** With it set, the game can read content
-/// the VFS did not give it. Default off, and `skyrim-live` clears it defensively
-/// at startup.
+/// the VFS did not give it. Default off, and a launch harness should clear it
+/// defensively at startup.
 pub const ALLOW_DISK_FALLTHROUGH: &str = "VFS_ALLOW_DISK_FALLTHROUGH";
 /// Serve the managed root from real disk only, bypassing the director.
 pub const DISK_ONLY_ROOT: &str = "VFS_DISK_ONLY_ROOT";
-// `VFS_KEEP_HOST_STEAM_API`, `VFS_FUSE_SKYRIM_EXE` and the temporary
-// `VFS_CLOSE_DRM_EXCEPTIONS` probe switch were deleted by gate 5, Task 4 along
-// with the four DRM/identity exceptions they configured. Nothing under a
-// managed root reaches the host tree any more, so there is nothing left for
-// them to select between.
 /// Start managed children in the virtual root rather than the launcher's cwd.
 pub const CHILD_CWD_ROOT: &str = "VFS_CHILD_CWD_ROOT";
 /// Refuse `SEC_IMAGE` sections on VFS-backed handles.
@@ -322,8 +308,8 @@ pub const SHIM_PANIC_LOG: &str = "VFS_SHIM_PANIC_LOG";
 /// immune to `TerminateProcess`. It must be a shared *file* rather than heap
 /// state, because such a process cannot be attached to — an outside reader
 /// samples the file while the target is wedged. Two relaxed stores per hook, no
-/// clock and no thread, unlike [`SHIM_STATS_LOG`], whose reporter thread has
-/// been measured to suppress the very race it would be used to find.
+/// clock and no thread, unlike [`SHIM_STATS_LOG`], whose reporter thread is
+/// measured to suppress the very race it would be used to find.
 pub const SHIM_BREADCRUMB: &str = "VFS_SHIM_BREADCRUMB";
 /// Path the shim appends a record to for every fatal-class exception raised in
 /// the process (code, faulting module and offset, thread, unwound stack), from a
@@ -333,7 +319,7 @@ pub const SHIM_EXCEPTION_LOG: &str = "VFS_SHIM_EXCEPTION_LOG";
 /// Label for the benchmark row emitted under [`BENCH`].
 pub const BENCH_LABEL: &str = "VFS_BENCH_LABEL";
 
-// ─── skyrim-live harness ─────────────────────────────────────────────────────
+// ─── live-launch harness ─────────────────────────────────────────────────────
 
 /// Source archive.
 pub const SKYRIM_ZIP: &str = "VFS_SKYRIM_ZIP";
@@ -347,7 +333,7 @@ pub const SKYRIM_MODS: &str = "VFS_SKYRIM_MODS";
 pub const SKYRIM_LAUNCH: &str = "VFS_SKYRIM_LAUNCH";
 /// Serve from an extracted tree instead of the archive, for differential runs.
 pub const SKYRIM_DISK: &str = "VFS_SKYRIM_DISK";
-/// Skip the harness's `SkyrimPrefs.ini` seeding (gate 4, Task 9).
+/// Skip the harness's `SkyrimPrefs.ini` seeding.
 ///
 /// The seeding turns off the Bethesda.net platform and the missing-content
 /// startup check so a main-menu dialog cannot hold an unattended session. Set
@@ -437,15 +423,10 @@ pub const FIXTURE_NAME_LISTS: &str = "VFS_FIXTURE_NAME_LISTS";
 pub const FIXTURE_NAME_CREATES: &str = "VFS_FIXTURE_NAME_CREATES";
 /// `aether-fixture-read` names phase: `from|to` renames.
 pub const FIXTURE_NAME_RENAMES: &str = "VFS_FIXTURE_NAME_RENAMES";
-// `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` lived here for `vfs-fixture-write`
-// and `vfs-fixture-writeset`. Both fixture crates were deleted in gate 4 task
-// 8 — no test harness had ever invoked either — so the switches went with
-// them rather than staying as a surface nothing reads.
 /// A path `aether-fixture-writepath` edits **in place** before its other steps:
 /// read-write open with no create and no truncate, so only the director's
-/// copy-up can answer it (gate 4, Task 6b). Unset, that step does not run and
-/// the fixture behaves as it did before the step existed — which is what
-/// keeps the two pre-existing write-path scenarios unchanged.
+/// copy-up can answer it. Unset, that step does not run, so the write-path
+/// scenarios that do not set it are unaffected.
 pub const FIXTURE_COW_PATH: &str = "VFS_FIXTURE_COW_PATH";
 /// Restrict `aether-fixture-escape` to constructing and attempting exactly one
 /// of its fourteen vectors, skipping every other one entirely rather than
@@ -466,7 +447,7 @@ pub const ESCAPE_ACCESS: &str = "VFS_ESCAPE_ACCESS";
 /// all — not by the fixture itself. Set, `vector7_junction` opens
 /// `<this>\<target's own filename>` directly and skips its own `mklink /J`
 /// construction step entirely; unset, it falls back to constructing (and
-/// cleaning up) its own junction exactly as before, for a standalone
+/// cleaning up) its own junction, for a standalone
 /// (uninjected) reproduction where no such pre-existing junction is set up.
 ///
 /// Needed because `aether-redirect`'s `RootMap` volume/junction table is
@@ -518,7 +499,7 @@ pub enum Kind {
     Behaviour,
     /// Names a file; setting it enables a diagnostic.
     Diagnostic,
-    /// Input to the `skyrim-live` harness.
+    /// Input to a live-launch harness.
     Harness,
     /// Input to a test fixture binary.
     Fixture,
@@ -1317,9 +1298,8 @@ mod tests {
         assert!(opt_out(n), "unset means on");
     }
 
-    /// `off` used to read as *true* under the denylist form and `on` as *false*
-    /// under the allowlist form. Both are now recognised by the side that means
-    /// them, which is the one behaviour change this module makes deliberately.
+    /// `off` and `on` are recognised by both forms: `off` is false and `on`
+    /// is true, whichever side a switch defaults to.
     #[test]
     fn on_and_off_are_understood_by_both_forms() {
         let n = "VFS_TEST_ON_OFF";
@@ -1343,9 +1323,8 @@ mod tests {
     /// The guard that makes this module worth having: every `VFS_*` name the
     /// workspace mentions must be in [`ALL`].
     ///
-    /// This is what a rename like `VFS_HOLLOW_HOST` → `VFS_LAUNCH_IMAGE` needs.
-    /// That one changed the writer and not the reader, and nothing failed —
-    /// the staging alias just stopped resolving.
+    /// A rename that changes the writer and not the reader fails nothing: the
+    /// feature behind the name just stops working. This test makes it fail.
     #[test]
     fn no_crate_reads_a_switch_that_is_not_registered() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

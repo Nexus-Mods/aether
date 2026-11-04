@@ -16,10 +16,7 @@
 //! cannot leave it open in another.
 //!
 //! Every relative name below resolves against `Data`, a directory the (fake) director serves,
-//! so each open, stat and listing through it is the director's answer. Before task C8 this
-//! binary ran with no director: `Data` had to be overlay-backed just to be openable, and the
-//! name-based attribute queries and the CWD-relative listing had been flipped to "nothing
-//! answers". Through the director they make the original claims again: a relative stat finds
+//! so each open, stat and listing through it is the director's answer: a relative stat finds
 //! the served file, and a relative listing includes it.
 //!
 //! Multi-component relative decoding (`r"Sub\added2.esm"`, a name with its own interior

@@ -2,11 +2,12 @@
 
 This is the byte-level contract between the Aether shim (the DLL injected into
 a game) and a **director** (the process that serves it). It is written so that
-a director can be implemented in any language from this file alone. Every
-number here was read from the source; each table names the file it comes from,
-relative to the repository root.
+a director can be implemented in any language from this file alone, together
+with the machine-readable contract files that ship beside it
+(`contract/protocol.json`, `contract/env.json`, `contract/artifacts.json`) and
+the golden vectors (section 8).
 
-Wire version: 4 (`crates/aether-ipc/src/layout.rs`, `VERSION`).
+Wire version: 4.
 
 Conventions used throughout:
 
@@ -18,23 +19,14 @@ Conventions used throughout:
 - `u8`/`u32`/`u64` are unsigned, `i32`/`i64` two's-complement signed.
 - `utf8…` means "the rest of the payload, as UTF-8, no length, no
   terminator". `str` means `len:u32 | utf8[len]` (no terminator).
-- For the bytes, the code and the golden vectors are normative; for what a
-  director must answer, this document is (section 8).
+- For the bytes, the golden vectors are normative; for what a director must
+  answer, this document is (section 8).
 
-The three crates that define the wire are `aether-ipc` (shared memory, ring,
-arena), `aether-protocol` (opcodes, statuses, payload codecs, `shim.cfg`) and
-`aether-env` (environment names). An older Rust director lived in this
-repository as the shim's test counterpart; it is removed, and the shim's tests
-run against their own fake director (`crates/aether-hooks/tests/fakedirector`).
-Where it is mentioned below as "the old Rust director (removed)", and where
-"both directors" means it and Cairn's, it shows how a director has answered,
-not a rule. Cairn's Clojure director (`aether.director.*` in the Cairn repository)
-is the production director; its wire code is `src/aether/director/proto.clj`,
-`ring.clj`, `ring/backing.clj`, `registry.clj`, `env.clj`, `launch.clj` and
-`java/src/aether/director/Native.java` (the atomics on the mapping, VarHandle
-`cas`/`getAcquire`/`setRelease`/`fetchMaxLong`, and `createSection`/
-`createEvent`, which refuse a name that already exists,
-`ERROR_ALREADY_EXISTS`).
+The reference director, which `aether-conform reference-adapter` serves,
+follows this document and is the oracle conformance compares a director with
+(section 8). Where this document says what "the reference" answers, it
+describes that director, not a rule; where directors may differ, it says so
+and names each answer allowed.
 
 ---
 
@@ -76,16 +68,16 @@ environment, files beside the ready file, and the injector's exit code.
 
 The director trusts nothing in a request: every length is checked against the
 payload, every path is normalised and must stay under its root, every handle is
-looked up. A request that fails these checks gets a non-OK status; which one is
-not uniform across the existing directors (section 3.5.1), the shim treats
-every non-OK status as a failure, and a new director should answer
-`ST_BAD_REQUEST`. The shim trusts the director's answers as content but bounds-checks
-every reply (`crates/aether-ipc/src/ring.rs`, `take_response`; the decoders in
-`crates/aether-protocol/src/lib.rs` return `None` on anything short or
-malformed). The shim fails closed: a shim that cannot attach to its director
-fails its own load, and the injector kills the target before it runs
-(sections 5 and 6). There is no mode in which a launched program runs
-un-virtualised because the director was unreachable.
+looked up. A request that fails these checks gets a non-OK status; which one
+may differ from director to director (section 3.5.1), the shim treats every
+non-OK status as a failure, and a new director should answer `ST_BAD_REQUEST`.
+The shim trusts the director's answers as content but bounds-checks every
+reply: a reply whose `ack`, length or fields do not check out is refused, and
+a payload that is short or malformed for its opcode does not decode. The shim
+fails closed: a shim that cannot attach to its director fails its own load,
+and the injector kills the target before it runs (sections 5 and 6). There is
+no mode in which a launched program runs un-virtualised because the director
+was unreachable.
 
 ---
 
@@ -102,22 +94,16 @@ offset 0                  48                         48 + slot_count*slot_stride
                           rounded up to a multiple of 8
 ```
 
-Source: `crates/aether-ipc/src/layout.rs`, `crates/aether-ipc/src/ring.rs`
-(`Geom::slot_off`, `init`).
-
 - `slot_stride = align8(32 + payload_cap)` where `align8(n) = (n + 7) & !7`.
 - `slot_off(s) = 48 + s * slot_stride`; the slot's payload starts at
   `slot_off(s) + 32`.
-- The arena, if any, starts at `VFS_ARENA_OFFSET` (the old Rust director and
-  Cairn's both put it at `48 + slot_count * slot_stride`, directly after the
-  last slot) and is `VFS_ARENA_LEN` bytes long.
-- The mapping must be 8-byte aligned (`crates/aether-ipc/src/seg.rs`,
-  `SharedSeg::from_raw`); section views and `mmap` are page-aligned.
+- The arena, if any, starts at `VFS_ARENA_OFFSET` (usually `48 + slot_count *
+  slot_stride`, directly after the last slot) and is `VFS_ARENA_LEN` bytes
+  long.
+- The mapping must be 8-byte aligned; section views and `mmap` are
+  page-aligned.
 
 ### 2.2 Ring header (48 bytes)
-
-Source: `crates/aether-ipc/src/layout.rs` (`RingHeader`, `RH_*`, the
-`layout_numbers_are_the_historical_ones` test).
 
 | Offset | Size | Type | Field | Written by | Meaning |
 |---:|---:|---|---|---|---|
@@ -128,17 +114,15 @@ Source: `crates/aether-ipc/src/layout.rs` (`RingHeader`, `RH_*`, the
 | 16 | 4 | u32 | `payload_cap` | director | Largest request or reply payload a slot carries. |
 | 20 | 4 | u32 | `worker_hint` | director | How many threads serve this ring; 0 = not stated. Written after init, before any client attaches. |
 | 24 | 8 | u64 | `req_seq` | clients | Request id counter: each client does an atomic fetch-add of 1 to take a `req_id`. Starts at 0. |
-| 32 | 4 | u32 | `submit_seq` | clients | Count of published requests (atomic fetch-add after each publish). Diagnostic; neither director reads it. |
+| 32 | 4 | u32 | `submit_seq` | clients | Count of published requests (atomic fetch-add after each publish). Diagnostic; a director need not read it. |
 | 36 | 4 | u32 | `_pad2` | — | Zero. |
 | 40 | 8 | u64 | `reg_gen` | director | Registry generation (section 4.5). 0 = none published. Only ever moved upward (atomic fetch-max). |
 
-`ring::init` writes magic, version, slot_count, slot_stride, payload_cap,
-`worker_hint = 0`, `req_seq = 0`, `submit_seq = 0`, `reg_gen = 0`, and sets
-every slot's `state` to `FREE`. It does not zero payloads.
+Initialising a ring writes magic, version, slot_count, slot_stride,
+payload_cap, `worker_hint = 0`, `req_seq = 0`, `submit_seq = 0`, `reg_gen =
+0`, and sets every slot's `state` to `FREE`. It need not zero payloads.
 
 ### 2.3 Slot header (32 bytes)
-
-Source: `crates/aether-ipc/src/layout.rs` (`SlotHeader`, `SH_*`).
 
 | Offset in slot | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
@@ -153,8 +137,7 @@ Source: `crates/aether-ipc/src/layout.rs` (`SlotHeader`, `SH_*`).
 
 ### 2.4 Attaching: what a client checks
 
-`crates/aether-ipc/src/ring.rs`, `open`. The shim refuses the ring (and so
-fails its load) unless all of these hold:
+The shim refuses the ring (and so fails its load) unless all of these hold:
 
 1. The mapping is at least 48 bytes.
 2. `magic == 0x56464950` and `version == 4`.
@@ -166,7 +149,7 @@ else in the header is validated.
 
 ### 2.5 Slot states and transitions
 
-States (`crates/aether-ipc/src/layout.rs`):
+States:
 
 | Value | Name | Owner of payload (and arena bank) |
 |---:|---|---|
@@ -177,9 +160,7 @@ States (`crates/aether-ipc/src/layout.rs`):
 | 4 | `COMPLETED` | the client (reads the reply, and the bank for a bulk read) |
 | 5 | `ABANDONED` | still the director thread; the client has stopped waiting |
 
-Transitions (`crates/aether-ipc/src/ring.rs`: `claim_free_from`,
-`publish_request`, `server_take_from`, `server_complete`, `drain`,
-`take_response`, `free_slot`, `abandon`):
+Transitions:
 
 | From | To | Who | How | When |
 |---|---|---|---|---|
@@ -189,19 +170,19 @@ Transitions (`crates/aether-ipc/src/ring.rs`: `claim_free_from`,
 | PROCESSING | COMPLETED | director | CAS (release) | After writing the reply payload, `status`, `payload_len`, `ack`. |
 | COMPLETED | FREE | client | store (release) | After reading the reply (and, for a bulk read, copying the arena bank). |
 | CLAIMED | FREE | client | store or CAS | Gives up before publishing. |
-| SUBMITTED | FREE | client | CAS | Gives up on a request no director took (`abandon`). |
-| COMPLETED | FREE | client | CAS | Gives up on a request answered a moment ago (`abandon`). |
-| PROCESSING | ABANDONED | client | CAS | Gives up on a request a director is still processing (`abandon`). The slot stays the director's. |
-| ABANDONED | FREE | director | CAS (release) | The director finishes an abandoned request: drops its reply, frees the slot (`drain`). |
+| SUBMITTED | FREE | client | CAS | Gives up on a request no director took. |
+| COMPLETED | FREE | client | CAS | Gives up on a request answered a moment ago. |
+| PROCESSING | ABANDONED | client | CAS | Gives up on a request a director is still processing. The slot stays the director's. |
+| ABANDONED | FREE | director | CAS (release) | The director finishes an abandoned request: drops its reply, frees the slot. |
 
 No other transition is legal. In particular **a client must never free a slot
 in `PROCESSING`**, and **a director must never store `COMPLETED` over
 `ABANDONED`**: the first would let the next request in that slot (and its arena
 bank) be overwritten by a late reply; the second would leave the slot unusable
-for ever. Version 3 introduced `ABANDONED`; that is why a version-2 peer is
-refused (`layout.rs`, the `VERSION` doc).
+for ever. A peer of a wire version without `ABANDONED` is refused like any
+other version (section 2.4).
 
-**The director's completion, step by step** (`ring::server_complete`):
+**The director's completion, step by step:**
 
 1. Read `req_id` from the slot. If it is no longer the id it took, write
    nothing (a non-conforming client recycled the slot).
@@ -213,36 +194,30 @@ refused (`layout.rs`, the `VERSION` doc).
 5. CAS `PROCESSING -> COMPLETED`. If that fails because the client moved the
    slot to `ABANDONED` meanwhile, CAS `ABANDONED -> FREE`.
 
-Cairn's `serve-slot` (`ring.clj`) checks neither `req_id` nor `ABANDONED`
-first: its handlers write the reply payload in place while the slot is
-`PROCESSING` (or `ABANDONED`, which is still the director's), then it stores
-`status`, `payload_len` and `ack`, CASes `PROCESSING -> COMPLETED`, and if that
-CAS fails, CASes `ABANDONED -> FREE`. Both are correct against a conforming
-client, because an `ABANDONED` slot and its bank stay the director's.
+A director may instead check neither `req_id` nor `ABANDONED` first: write
+the reply payload in place while the slot is `PROCESSING` (or `ABANDONED`,
+which is still the director's), then store `status`, `payload_len` and
+`ack`, CAS `PROCESSING -> COMPLETED`, and if that CAS fails, CAS `ABANDONED
+-> FREE`. Both orders are correct against a conforming client, because an
+`ABANDONED` slot and its bank stay the director's.
 
 **Every taken slot MUST be completed.** A director that has moved a slot to
 `PROCESSING` must eventually run step 3-5 (or 2) for it, whatever happens:
 
 - A slot whose `payload_len > payload_cap` MUST be completed with
-  `ST_BAD_REQUEST` and payload length 0 (Cairn's `dispatch` does this). The
-  old Rust director (removed) did not: `read_request` returns `None`,
-  `RingServer::serve_one` returns `Err(BadResponse)`
-  (`crates/aether-ipc/src/endpoint.rs`), and its worker loop exited on it,
-  leaving the slot `PROCESSING` for ever and the director one thread short.
-  That was a defect, not behaviour to copy.
+  `ST_BAD_REQUEST` and payload length 0. A worker that stops on such a slot
+  leaves it `PROCESSING` for ever and the director one thread short.
 - A handler that fails (throws, panics) MUST still complete its slot, with
-  `ST_IO_ERROR` (Cairn: `Guard/call ... (reply p/io-error 0)`).
+  `ST_IO_ERROR`.
 
 A slot left in `PROCESSING` is lost to the ring, and when its client gives up
-it goes `ABANDONED` and stays there; the client's data-gate permit for it is
-retired until the slot drains, so it never comes back either
-(`crates/aether-ipc/src/concurrent.rs`, `DataGate`, `Permits::retire`,
-`DataGate::reclaim`). Enough of them and the process can no longer read.
+it goes `ABANDONED` and stays there; the client's data-gate permit for it
+(section 2.8) is retired until the slot drains, so it never comes back
+either. Enough of them and the process can no longer read.
 
-**The client's read** (`ring::take_response`): load `state` with acquire; if it
-is `COMPLETED`, check `ack == low32(req_id)` (else the reply is refused as
-`BadResponse`), read `status`, read `payload_len` (refused if `> payload_cap`),
-copy the payload.
+**The client's read:** load `state` with acquire; if it is `COMPLETED`, check
+`ack == low32(req_id)` (else the reply is refused), read `status`, read
+`payload_len` (refused if `> payload_cap`), copy the payload.
 
 **Memory ordering.** The state word is the synchronisation point: every
 non-atomic write to a slot happens before the release store or CAS that
@@ -253,28 +228,22 @@ the 4-byte `state` field (it is 4-aligned, since slots start at 48 and strides
 are multiples of 8) and an atomic 8-byte fetch-max on `reg_gen` (offset 40,
 8-aligned).
 
-**Deadlines** (`crates/aether-ipc/src/lib.rs`, `endpoint.rs`):
-`RESPONSE_DEADLINE` is 60 s. A client that gets no free slot, or no reply,
-within it abandons its slots and reports `ST_IO_ERROR` to the hooked call. A
-client spins for `CLIENT_SPIN_BUDGET` (1 ms) before it starts yielding; the
-shim then calls `SwitchToThread` until 20 ms have passed and `Sleep(1)` after
-(`crates/aether-hooks/src/director.rs`, `IDLE_YIELD`).
+**Deadlines.** A client that gets no free slot, or no reply, within 60 s
+abandons its slots and reports `ST_IO_ERROR` to the hooked call. A client
+spins for 1 ms before it starts yielding; the shim then calls `SwitchToThread`
+until 20 ms have passed and `Sleep(1)` after.
 
 **Order of service.** Slots are independent: a director may take and answer
 them in any order and from any number of threads. Requests from one shim
 thread are issued one at a time, except a pipelined read, which publishes up
-to 4 requests at once (8 for reads of 4 MiB or more) and waits for all of them
-(`crates/aether-hooks/src/director.rs`, `PIPELINE_DEPTH`,
-`PIPELINE_DEPTH_STREAM`, `STREAM_BYTES`).
+to 4 requests at once (8 for reads of 4 MiB or more) and waits for all of
+them.
 
 ### 2.6 The bulk arena and its banks
 
-Source: `crates/aether-ipc/src/arena.rs`, `crates/aether-ipc/src/concurrent.rs`
-(`read_fragmented`).
-
 The arena is cut into banks, one per slot:
 
-- `banks = slot_count` (Cairn uses `slot-count`).
+- `banks = slot_count`.
 - `bank_size = max(arena_len / banks, 4096)`.
 - Slot `s` owns bank `s % banks`, at mapping offset
   `arena_offset + (s % banks) * bank_size`.
@@ -283,17 +252,17 @@ A bulk `READ` reply carries the mapping offset of the data (section 3.4.4),
 not a bank number, so a client never computes bank positions itself. The bank
 follows the slot's ownership (section 2.5): the director writes it while the
 slot is `PROCESSING`, the client reads it while the slot is `COMPLETED`, and
-the client frees the slot only after copying it out (`submit_many_held` /
-`release_slots`).
+the client frees the slot only after copying it out. A pipelined read holds
+all of its slots until every reply is in, then copies each bank out and frees
+each slot.
 
 Sizing rules a director must meet, from what the shim sends:
 
 - The shim's bulk chunk is `clamp(VFS_ARENA_LEN / slot_count, 256 KiB,
-  1 MiB)` bytes (`FuseClient::bulk_bank_bytes`). A director answers at most
-  `min(len, bank_size)` bytes, and the shim reads a short answer as end of
-  file. So **each bank must be at least the shim's chunk**: with
-  `bank_size = arena_len / slot_count`, that means
-  `arena_len >= 256 KiB * slot_count`.
+  1 MiB)` bytes. A director answers at most `min(len, bank_size)` bytes, and
+  the shim reads a short answer as end of file. So **each bank must be at
+  least the shim's chunk**: with `bank_size = arena_len / slot_count`, that
+  means `arena_len >= 256 KiB * slot_count`.
 - Every arena byte must lie inside the first `VFS_RING_BYTES` bytes of the
   mapping: the shim bounds-checks the copy and fails the read with
   `ST_IO_ERROR` otherwise.
@@ -304,31 +273,28 @@ Sizing rules a director must meet, from what the shim sends:
 
 ### 2.7 Default geometry
 
-Both directors use these numbers (`crates/aether-ipc/src/arena.rs`
-`DEFAULT_PAYLOAD_CAP`, `DEFAULT_ARENA_BYTES`, `DEFAULT_WORKER_COUNT`; Cairn
-`proto.clj` `geometry`).
-Nothing in the shim requires them; it reads the geometry from the header and
-the environment.
+A director may choose any geometry that meets sections 2.4 and 2.6; the shim
+reads it from the header and the environment. The table is one consistent
+geometry: the payload cap, arena and worker count are the defaults of
+Aether's Rust ring code, and the slot count is an example:
 
 | Quantity | Formula | Default |
 |---|---|---:|
-| `slot_count` | — | 32 |
+| `slot_count` | — (example) | 32 |
 | `payload_cap` | — | 1 048 576 |
 | `slot_stride` | `align8(32 + payload_cap)` | 1 048 608 |
 | ring bytes = `arena_offset` | `48 + slot_count * slot_stride` | 33 555 504 |
 | `arena_len` | — | 33 554 432 (32 MiB) |
 | `bank_size` | `max(arena_len / slot_count, 4096)` | 1 048 576 |
 | map size (`VFS_RING_BYTES`) | `max(round_up(ring + arena, 65536), 2 MiB)` | 67 174 400 |
-| workers | old Rust director 4 (`DEFAULT_WORKER_COUNT`), clamped to `1..=slot_count`; Cairn default 16 | — |
+| workers | `worker_hint`; the shim caps it at `slot_count` (2.8) | 4 |
 
 ### 2.8 Client concurrency and `worker_hint`
-
-Source: `crates/aether-ipc/src/concurrent.rs` (`data_limit`, `DataGate`).
 
 A director thread runs one request to completion, so a slow read holds a
 thread. The shim keeps its *data* requests (READ, WRITE, SETATTR and write
 OPENs) in flight below the director's thread count, so that some thread is
-always free for a stat or a listing:
+always free for a stat or a listing. Its data gate allows:
 
 ```
 workers = (worker_hint == 0 ? 4 : worker_hint), capped at slot_count
@@ -338,9 +304,9 @@ limit   = max(workers - reserve, 1)
 
 A director should therefore publish its real thread count in `worker_hint`
 before the shim attaches, and run at least that many threads. Each shim reads
-`worker_hint` once, when it attaches (`DataGate::for_ring`, called from
-`FuseClient::connect_source`); a later change is not seen by processes already
-attached. The gate is process-local; nothing about it crosses the ring.
+`worker_hint` once, when it attaches; a later change is not seen by processes
+already attached. The gate is process-local; nothing about it crosses the
+ring.
 
 ### 2.8.1 One ring per session
 
@@ -359,28 +325,20 @@ in a request says which process sent it, so:
 
 ### 2.9 Windows backing: a named section and two events
 
-Source: `crates/aether-win/src/mapping.rs`, `crates/aether-win/src/event_notifier.rs`,
-`crates/aether-hooks/src/director.rs` (`connect_source`).
-
 | Object | Director creates with | Shim opens with | Named by |
 |---|---|---|---|
 | Section | `CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, size_hi, size_lo, name)`; an existing section of that name is an error | `OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name)` then `MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, VFS_RING_BYTES)` | `VFS_RING_SECTION` |
 | Server event | `CreateEventW(NULL, FALSE /*auto-reset*/, FALSE, name)`; existing is an error | `OpenEventW(EVENT_MODIFY_STATE = 0x0002, FALSE, name)`; failure is tolerated (no wake) | `VFS_SERVER_EV` |
 | Client event | as the server event | not opened by the shim | `VFS_CLIENT_EV` |
 
-Names are free-form. The old Rust director (removed) used `<section>_srv` and
-`<section>_cli`; Cairn names its section
-`Local\vfs_ring_clj_<pid>_<ms>_<counter>` and its events the same plus `_srv`
-and `_cli` (`ring.clj`, `ring-name`; `ring/backing.clj`). A name must be unique
-to the session: both directors refuse to open a pre-existing one.
+Names are free-form; `<section>_srv` and `<section>_cli` for the events is
+one convention. A name must be unique to the session: a director creates each
+object new and refuses a pre-existing one.
 
 A director may also serve a Windows shim from a file (section 2.10): the shim
 honours `VFS_RING_PATH` on Windows too.
 
 ### 2.10 Linux under Wine: a file both sides map
-
-Source: `crates/aether-filering/src/lib.rs` (`FileRing`), `crates/aether-win/src/mapping.rs`
-(`open_file_backed`), `crates/aether-hooks/src/director.rs` (`ring_source`).
 
 A page-file section has no identity outside one Windows (or Wine) session, so a
 native Linux director and a shim under Wine share a file:
@@ -389,8 +347,7 @@ native Linux director and a shim under Wine share a file:
   mapping it (an `mmap` past end of file faults on touch), never truncates an
   existing file in place, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`.
   An existing file is removed and a new one created in its place, so a stale
-  reader keeps the old file's pages: the Rust `FileRing::create` and Cairn
-  (`ring/backing.clj`) both do this.
+  reader keeps the old file's pages.
 - The shim opens `VFS_RING_PATH` with `CreateFileW(FILE_GENERIC_READ |
   FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)`, refuses
   a file shorter than `VFS_RING_BYTES`, and maps it with an unnamed
@@ -403,23 +360,21 @@ native Linux director and a shim under Wine share a file:
 ### 2.11 Waking
 
 Waking is advisory. Correctness rests on the state word alone, and both ends
-re-check it in a loop; a lost wake costs latency, never a request
-(`crates/aether-ipc/src/notifier.rs`, `Notifier`).
+re-check it in a loop; a lost wake costs latency, never a request.
 
 | Mode | Shim (client) | Director (server) |
 |---|---|---|
-| Section | `SetEvent(server_ev)` after publishing and after freeing a slot; spins for its reply (`crates/aether-hooks/src/director.rs`, `WakeServerSpinClient`) | `EventNotifier`: after serving a request, spins for `VFS_RING_SPIN_US` µs (default 400); otherwise `WaitForSingleObject(server_ev, 1)`. Sets `client_ev` after completing (the shim does not wait on it). |
-| File | no event; spins | `AdaptiveNotifier`: spins for `VFS_RING_SPIN_US` µs (default 400) after the last completed request, then sleeps 100 µs, 500 µs once quiet for more than 5 ms, 2000 µs once quiet for more than 50 ms. |
+| Section | `SetEvent(server_ev)` after publishing and after freeing a slot; spins for its reply (2.5, "Deadlines") | After serving a request, spins for `VFS_RING_SPIN_US` µs (default 400); otherwise `WaitForSingleObject(server_ev, 1)`. Sets `client_ev` after completing (the shim does not wait on it). |
+| File | no event; spins | Spins for `VFS_RING_SPIN_US` µs (default 400) after the last completed request, then sleeps 100 µs, 500 µs once quiet for more than 5 ms, 2000 µs once quiet for more than 50 ms. |
 
-Sources: `crates/aether-win/src/event_notifier.rs` (`spin_budget`,
-`wait_server`), `crates/aether-ipc/src/notifier.rs` (`spin_window`,
-`idle_sleep`). Cairn's `EventWaker` and `ParkWaker` follow the same scheme
-(`ring.clj` docstring; park values `[100 500 2000]` µs in `ring/backing.clj`).
 `VFS_RING_SPIN_US` is read by the director side only; `0` disables the spin.
+These numbers are the reference's; a director may wake on any schedule, since
+only latency depends on it.
 
 ### 2.12 Worked example: an initialised header
 
-Golden vector `ring-header-slots4-cap256` (`ring::init(seg, 4, 256)`):
+Golden vector `ring-header-slots4-cap256` (a ring initialised with 4 slots
+and `payload_cap` 256):
 
 ```
 50494656 04000000 04000000 20010000 00010000 00000000
@@ -450,44 +405,37 @@ A request is the slot header's `opcode`, `flags`, `payload_len`, `req_id` and
 the reply payload, written over the request payload in the same slot. There is
 no other framing, no per-message version and no checksum.
 
-A reply's payload is meaningful only when `status == ST_OK (0)`. Every
-director error path in both directors replies with an empty payload. The shim
-decodes a reply payload only after checking `status == ST_OK`; a reply that
-then fails to decode is treated as `ST_BAD_REQUEST`
-(`crates/aether-hooks/src/director.rs`).
+A reply's payload is meaningful only when `status == ST_OK (0)`. A director
+answers every error with an empty payload. The shim decodes a reply payload
+only after checking `status == ST_OK`; a reply that then fails to decode is
+treated as `ST_BAD_REQUEST`.
 
 ### 3.2 Shared encodings
-
-Source: `crates/aether-protocol/src/field.rs`, `crates/aether-protocol/src/wire.rs`.
 
 **Root ids.** A session has several managed roots, each a `u32` id. Root 0 is
 `VFS_VIRTUAL_DIR`; others come from `VFS_VIRTUAL_ROOTS` (section 5.3). Every
 path-carrying file request starts with the root it addresses. Handle-keyed
 requests (READ, WRITE, SETATTR, CLOSE) carry no root: the handle implies it.
 
-**Path request** (`Request`'s `root` and `path`), used by GETATTR, READDIR, DELETE,
-STAGE_EXEC:
+**Path request**, used by GETATTR, READDIR, DELETE, STAGE_EXEC:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
 | 0 | 4 | u32 | `root` |
 | 4 | rest | utf8… | `vpath` |
 
-**vpaths** as the shim sends them (`crates/aether-hooks/src/director.rs`,
-`vpath_under_root`, `vpath_as_spelled`, `wire_vpath`):
+**vpaths** as the shim sends them:
 
 - Relative to the root, components joined by `/`, no leading or trailing `/`.
 - The root itself is `"."`.
-- Folded (lowercased by `aether_casefold::fold`: ASCII lowercase for ASCII
-  strings, else `char::to_lowercase` of every character,
-  `crates/aether-casefold/src/lib.rs`) except in a request that creates a
-  name (a write OPEN, MKDIR, RENAME targets), which keeps the caller's
-  spelling so that the name is stored as created.
+- Folded (below, "Case folding") except in a request that creates a name (a
+  write OPEN, MKDIR, RENAME targets), which keeps the caller's spelling so
+  that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
-  Neither Cairn's read-only sources nor the reference holds named streams:
-  to both, `file.esp:stream` is a name they do not have (GETATTR `found =
-  0`, OPEN `ST_NOT_FOUND`), and a director that holds no stream of that
-  name must never answer it with the base file's attributes or bytes.
+  The reference holds no named streams: to it, `file.esp:stream` is a name
+  it does not have (GETATTR `found = 0`, OPEN `ST_NOT_FOUND`), and a
+  director that holds no stream of that name must never answer it with the
+  base file's attributes or bytes.
 
 A director must look paths up case-insensitively under the same fold, and must
 treat a path that would leave its root (`..` above the root) as an error.
@@ -497,20 +445,20 @@ treat a path that would leave its root (`..` above the root) as an error.
 The fold is part of the wire: the shim sends folded paths, and a director has
 to agree with it about which names are the same name.
 
-**The function.** `fold(s)` replaces every character of `s` with its Rust
-`char::to_lowercase` (the Unicode lowercase mapping, including the
+**The function.** `fold(s)` replaces every character of `s` with its Unicode
+lowercase mapping (the `Lowercase_Mapping` property, including the
 unconditional multi-character mappings of `SpecialCasing.txt`), character by
-character. An all-ASCII string is lowercased byte by byte, which gives the same
-result. There is no locale, no context and no normalisation:
+character. An all-ASCII string is lowercased byte by byte, which gives the
+same result. There is no locale, no context and no normalisation:
 
-- `Σ` always folds to `σ`; the final-sigma rule of `str::to_lowercase` is not
-  applied, because the fold works one character at a time.
+- `Σ` always folds to `σ`; the final-sigma rule is not applied, because the
+  fold works one character at a time.
 - Composed and decomposed forms stay different names: `é` (U+00E9) and `e`
   plus U+0301 do not fold to the same string.
-- The mapping is the one of the Unicode version in the Rust standard library
-  the release was built with (`rust-toolchain.toml`).
-
-Source: `crates/aether-casefold/src/lib.rs`.
+- The mapping is Unicode 17.0.0's. This is the full lowercase mapping, not
+  case folding (`CaseFolding.txt`) and not the simple one-character mapping:
+  `İ` folds to two characters, and `ẞ` (U+1E9E) to `ß`, not `ss`. A change
+  of Unicode version is a change of the fold (below).
 
 **Two properties it does not have:**
 
@@ -546,48 +494,42 @@ disagrees with a shim built against another about which names are equal. Any
 change to it is a wire version bump (section 7).
 
 **Path syntax a director should accept:** `/`-separated, no leading slash,
-`"."` for the root; that is the only form the shim sends. Directors have
-differed on anything else, so a client must not rely on it:
+`"."` for the root; that is the only form the shim sends. Directors may
+differ on anything else, so a client must not rely on it. A director may
+normalise every path (`\` to `/`, strip `/` at both ends, drop empty and `.`
+components, resolve `..`, error if `..` leaves the root), and its OPEN may
+refuse, with `ST_BAD_REQUEST`, a path that starts with `/` or `\` or contains
+`\` at all.
 
-- The old Rust director (removed) normalised every path (`\` to `/`, strip
-  `/` at both ends, drop empty and `.` components, resolve `..`, error if `..`
-  leaves the root).
-- Cairn normalises the same way (`src/aether/director/path.clj`, `normalize`)
-  except that its OPEN refuses, with `ST_BAD_REQUEST`, a path that starts
-  with `/` or `\` or contains `\` at all (`ring.clj`, `wellformed?`).
-
-**Booleans.** In file-op replies a flag byte is read as `!= 0` (`Flag` in
-`field.rs`). In registry messages a boolean must be exactly 0 or 1 (`Bool`).
+**Booleans.** In file-op replies a flag byte is read as `!= 0`. In registry
+messages a boolean must be exactly 0 or 1.
 
 **Lenient vs strict.** The file-op decoders ignore trailing bytes after the
 fields they read. Separately, the final `pad:u32` of a READ request is
-optional: `Request::decode` stops after READ's `len`, so a 20-byte READ decodes
-(`PadAfter` in `crates/aether-protocol/src/field.rs`). WRITE's pad is **not**
-optional: WRITE's `LenPadBytes` reads it before the data, so a WRITE must have its 24-byte
-header. The registry decoders reject trailing bytes, truncation, bad UTF-8
-and out-of-range values.
+optional: a decoder stops after READ's `len`, so a 20-byte READ decodes.
+WRITE's pad is **not** optional: it is read before the data, so a WRITE must
+have its 24-byte header. The registry decoders reject trailing bytes,
+truncation, bad UTF-8 and out-of-range values.
 
 **Timestamps.** `mtime` is seconds since the Unix epoch, signed; 0 or less
-means "no time" and the shim substitutes 2024-01-01T00:00:00Z
-(`crates/aether-ntlayout/src/dirinfo.rs`, `filetime_of`, `SYNTH_FILETIME`).
-Which time a director reports for a path, if any, is the director's to choose:
-the shim checks no time it is sent.
+means "no time" and the shim substitutes 2024-01-01T00:00:00Z. Which time a
+director reports for a path, if any, is the director's to choose: the shim
+checks no time it is sent.
 
 ### 3.3 Opcode table
 
-Source: the protocol table in `crates/aether-protocol/src/table.rs` (`Opcode`,
-`Opcode::ALL`). Numbers are never renumbered. The table is also published as data,
+Opcode numbers are never renumbered. The table is also published as data,
 `contract/protocol.json`: every opcode with its request and reply fields in
 wire order (padding included, as `pad` entries), strictness, the statuses and
-the flag bits, generated from the table by `aether_protocol::contract_json()`
-and checked equal by `crates/aether-protocol/tests/contract.rs`
-(`UPDATE_CONTRACT=1` rewrites it). It is the machine-readable form of the
-layouts below, for building a director's tables in another language.
+the flag bits. It is generated from the same table the Rust code encodes and
+decodes with, and Aether's tests check the two equal. It is the
+machine-readable form of the layouts below, for
+building a director's tables in another language.
 
 The file defines its own field types, so it can be read without this
 document. Its `"types"` section gives each field type's wire form, and
-`"attributes"` the keys a field may carry besides `name` and `type`; both are
-generated from the code, and the types are:
+`"attributes"` the keys a field may carry besides `name` and `type`; the
+types are:
 
 | Type | Wire form |
 |---|---|
@@ -621,7 +563,7 @@ index.
 | 1 | GETATTR | path request | 18 bytes, 3.4.1 | 0 |
 | 2 | READDIR | path request | listing, 3.4.2 | 0 |
 | 3 | OPEN | `root \| oflags \| vpath` | 24 bytes, 3.4.3 | 0 |
-| 4 | *reserved* (was `materialize`) | — | `ST_BAD_REQUEST` | never sent |
+| 4 | *reserved* | — | `ST_BAD_REQUEST` | never sent |
 | 5 | READ | 24 bytes | inline or bulk, 3.4.4 | 0 or `FLAG_READ_BULK` |
 | 6 | WRITE | 24 + data | 8 bytes, 3.4.5 | 0 |
 | 7 | SETATTR | 16 bytes | empty | 0 |
@@ -629,7 +571,7 @@ index.
 | 9 | DELETE | path request | empty | 0 |
 | 10 | MKDIR | `root \| mode \| vpath` | empty | 0 |
 | 11 | CLOSE | 8 bytes | empty | 0 |
-| 12 | *reserved* (was `register-process`) | — | `ST_BAD_REQUEST` | never sent |
+| 12 | *reserved* | — | `ST_BAD_REQUEST` | never sent |
 | 13 | HEARTBEAT | empty | empty | 0 |
 | 14 | STORED_NAMES | `root \| skip \| vpath` | names joined by `/` | 0 |
 | 15 | REG_LOOKUP | section 4 | section 4 | 0 |
@@ -644,14 +586,13 @@ index.
 | 24 | STAGE_EXEC | path request | real path, utf8… | 0 |
 
 **Any other opcode** (including 0, 4, 12 and 25 and up) is answered
-`ST_BAD_REQUEST` with an empty payload by both directors (Cairn `ring.clj`,
-`dispatch`).
+`ST_BAD_REQUEST` with an empty payload.
 
 ### 3.4 Each opcode
 
 #### 3.4.1 GETATTR (1)
 
-Request: path request. Reply (`Reply::GetAttr`), 18 bytes:
+Request: path request. Reply, 18 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -661,22 +602,17 @@ Request: path request. Reply (`Reply::GetAttr`), 18 bytes:
 | 10 | 8 | i64 | `mtime` |
 
 A missing path is **`ST_OK` with `found = 0`** and the other fields zero, not
-an error status. A root the director does not serve is also `found = 0` (both
-directors). The shim treats `ST_NOT_FOUND` the same as `found = 0`; any other
-non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
-(`crates/aether-hooks/src/hook/file_attr.rs`).
+an error status. A root the director does not serve is also `found = 0`. The
+shim treats `ST_NOT_FOUND` the same as `found = 0`; any other non-OK status
+fails the hooked call with `STATUS_UNSUCCESSFUL`.
 
 The `size` of a directory is 0, as in a READDIR entry (3.4.2). A file's
 `size` is its length now, WRITEs and SETATTRs through handles still open
-included (Cairn and the reference: Cairn's write layer reports the live
-length, `provider/layer.clj`, `stat-of`; its disk provider reads the file's
-attributes, `provider/disk.clj`, `attrs`). The same holds for READDIR entries
-and OPEN replies.
+included. The same holds for READDIR entries and OPEN replies.
 
 #### 3.4.2 READDIR (2)
 
-Request: path request (the directory; `"."` for the root). Reply
-(`Reply::ReadDir`):
+Request: path request (the directory; `"."` for the root). Reply:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -693,24 +629,21 @@ Entry:
 | 8 | u64 | `size` |
 | 8 | i64 | `mtime` |
 
-The shim presents the listing to the program whole and unaltered (the cursor
-over it is `EnumState`, `crates/aether-hooks/src/hook/dirquery.rs`), apart from
-dropping old `<name>.__vfs_wh__` whiteout markers. It adds no `.` or `..`
+The shim presents the listing to the program whole and unaltered, apart from
+dropping `<name>.__vfs_wh__` whiteout markers. It adds no `.` or `..`
 entries, so a director should not include them either; it does not sort or
 otherwise interpret the order, so the program sees entries in the order sent.
-A director may send the entries in any order.
-`size` is copied into both `EndOfFile` and `AllocationSize` of the NT
-directory record for every entry, directories included
-(`crates/aether-ntlayout/src/dirinfo.rs`, `write_dir_info`); send 0 for a
-directory (as the golden vector does).
+A director may send the entries in any order. `size` is copied into both
+`EndOfFile` and `AllocationSize` of the NT directory record for every entry,
+directories included; send 0 for a directory (as the golden vector does).
 
 The whole listing is one reply and must fit `payload_cap`. Unknown root:
-`ST_NOT_FOUND`. Both directors reply to an oversized listing with the
-overflow status `i32::MIN` (section 2.5, step 3; Cairn `p/overflow`).
+`ST_NOT_FOUND`. An oversized listing is answered with the overflow status
+`i32::MIN` (section 2.5, step 3).
 
 #### 3.4.3 OPEN (3)
 
-Request (`Request::Open`):
+Request:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -718,7 +651,7 @@ Request (`Request::Open`):
 | 4 | 4 | u32 | `oflags` (table below) |
 | 8 | rest | utf8… | `vpath` |
 
-Open flags (`crates/aether-protocol/src/status.rs`):
+Open flags:
 
 | Bit | Value | Name | Meaning |
 |---:|---:|---|---|
@@ -729,15 +662,14 @@ Open flags (`crates/aether-protocol/src/status.rs`):
 | 4 | 16 | `OPEN_TRUNC` | truncate on open |
 | 5 | 32 | `OPEN_APPEND` | writes go to end of file; the director ignores WRITE offsets |
 
-`oflags == 0` is read as `OPEN_READ` by both directors. The shim sends
-`OPEN_READ` for a read open, with a folded path; and for a write open
-`OPEN_WRITE` plus the create bits for the NT disposition
-(`crates/aether-ntlayout/src/disposition.rs`, `open_create_flags`):
-`FILE_SUPERSEDE`/`FILE_OVERWRITE_IF` = `CREATE|TRUNC`, `FILE_CREATE` =
-`CREATE|EXCL`, `FILE_OPEN_IF` = `CREATE`, `FILE_OVERWRITE` = `TRUNC`,
-`FILE_OPEN` = none. The current shim never sends `OPEN_APPEND`.
+`oflags == 0` is read as `OPEN_READ`. The shim sends `OPEN_READ` for a read
+open, with a folded path; and for a write open `OPEN_WRITE` plus the create
+bits for the NT disposition: `FILE_SUPERSEDE`/`FILE_OVERWRITE_IF` =
+`CREATE|TRUNC`, `FILE_CREATE` = `CREATE|EXCL`, `FILE_OPEN_IF` = `CREATE`,
+`FILE_OVERWRITE` = `TRUNC`, `FILE_OPEN` = none. The shim never sends
+`OPEN_APPEND`.
 
-Reply (`Reply::Open`), 24 bytes:
+Reply, 24 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -748,20 +680,18 @@ Reply (`Reply::Open`), 24 bytes:
 | 18 | 2 | — | zero |
 | 20 | 4 | u32 | `mount_gen` |
 
-- `fh` is any u64 the director chooses, unique among open handles. Both
-  directors start at 1 and count up. Neither issues 0, and a director must
-  not: the shim keeps 0 for a directory it created with MKDIR, which it holds
-  no director handle for, and sends `CLOSE(0)` when the program closes it
-  (`crates/aether-hooks/src/hook/file_open.rs`, `try_fuse_mkdir`).
+- `fh` is any u64 the director chooses, unique among open handles. The
+  reference starts at 1 and counts up. A director must never issue 0: the
+  shim keeps 0 for a directory it created with MKDIR, which it holds no
+  director handle for, and sends `CLOSE(0)` when the program closes it.
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
-  read cache (`crates/aether-ipc/src/readcache/mod.rs`) caches small reads only
-  through read-only, immutable handles. Never set it for a write open or a
-  directory (the old Rust director cleared it for both).
+  read cache caches small reads only through read-only, immutable handles.
+  Never set it for a write open or a directory.
 - `mount_gen`: a generation the director bumps whenever a root's content is
   replaced. The cache keys a file's blocks by (root, folded path, size,
   `mount_gen`), so two immutable opens of one path with equal size and
-  `mount_gen` must have identical content. The old Rust director (removed)
-  started at 1 and bumped on every mount/unmount; Cairn always sends 1.
+  `mount_gen` must have identical content. A director that never replaces a
+  root's content may send the same value for every open.
 - The `size` of a directory is 0, as in GETATTR (3.4.1).
 - Errors: unknown root `ST_NOT_FOUND`; `OPEN_WRITE` on a root with no writable
   provider `ST_READ_ONLY`; `OPEN_EXCL` on an existing path `ST_EXISTS`;
@@ -769,7 +699,7 @@ Reply (`Reply::Open`), 24 bytes:
 
 #### 3.4.4 READ (5)
 
-Request (`Request::Read`), 24 bytes (a director must accept 20):
+Request, 24 bytes (a director must accept 20):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -778,10 +708,10 @@ Request (`Request::Read`), 24 bytes (a director must accept 20):
 | 16 | 4 | u32 | `len` |
 | 20 | 4 | — | zero |
 
-The director answers in bulk when (`flags & FLAG_READ_BULK`) or `len >= 65536`
-(`BULK_THRESHOLD`, both directors), and it has an arena; otherwise inline.
+The director answers in bulk when (`flags & FLAG_READ_BULK`) or `len >=
+65536`, and it has an arena; otherwise inline.
 
-Inline reply (`ReadReply::Inline`), `8 + n` bytes, `n <= min(len, payload_cap - 8)`:
+Inline reply, `8 + n` bytes, `n <= min(len, payload_cap - 8)`:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -789,7 +719,7 @@ Inline reply (`ReadReply::Inline`), `8 + n` bytes, `n <= min(len, payload_cap - 
 | 4 | 4 | — | zero |
 | 8 | `n` | bytes | data |
 
-Bulk reply (`ReadReply::Bulk`), 16 bytes, `n <= min(len, bank_size)`:
+Bulk reply, 16 bytes, `n <= min(len, bank_size)`:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -798,32 +728,27 @@ Bulk reply (`ReadReply::Bulk`), 16 bytes, `n <= min(len, bank_size)`:
 | 8 | 8 | u64 | `arena_offset`: mapping offset of the data (the slot's bank) |
 
 A handle serves READ whatever access it was opened with: the shim's write
-opens send `OPEN_WRITE` and the create bits but never `OPEN_READ`
-(`FuseClient::open_write`), and a program reads its save back through the
-handle that wrote it. Cairn opens every file it serves for reading
-(`provider/disk.clj`, `options`; its write layer's handles read whatever
-their access), and the reference does not look at the access.
+opens send `OPEN_WRITE` and the create bits but never `OPEN_READ`, and a
+program reads its save back through the handle that wrote it. The reference
+does not look at the access.
 
-The client tells the forms apart by bit 31 of the first word
-(`ReadReply`'s decoder), so it must accept either whatever flag it sent. `n <
-len` means end of file; the shim stops there. Errors: unknown `fh`
-`ST_BAD_FH`; a directory handle `ST_IS_DIR`.
+The client tells the forms apart by bit 31 of the first word, so it must
+accept either whatever flag it sent. `n < len` means end of file; the shim
+stops there. Errors: unknown `fh` `ST_BAD_FH`; a directory handle
+`ST_IS_DIR`.
 
 So a READ comes back whole, `n = min(len, size - offset)`, whenever its form
-can hold that many bytes; a shorter answer is a truncated file to the shim
-(Cairn and the reference: Cairn's `read-into` is "short only at end of file",
-`provider.clj`). Both answer a READ that sets `FLAG_READ_BULK` in bulk when
-they have an arena, so a director that gives an arena (`VFS_ARENA_LEN`) must
-answer such a READ of more than `payload_cap - 8` bytes in bulk: an inline
+can hold that many bytes; a shorter answer is a truncated file to the shim.
+A director that gives an arena (`VFS_ARENA_LEN`) must answer a READ that sets
+`FLAG_READ_BULK` of more than `payload_cap - 8` bytes in bulk: an inline
 reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
 remainders of 64 KiB up to it, with the flag, and inline READs of at most
-65 535 bytes, or of at most `payload_cap - 8` with no arena
-(`aether_ipc::read_fragmented`); its read cache fetches runs of up to 16
-blocks of 64 KiB the same way.
+65 535 bytes, or of at most `payload_cap - 8` with no arena; its read cache
+fetches runs of up to 16 blocks of 64 KiB the same way.
 
 #### 3.4.5 WRITE (6)
 
-Request (`Request::Write`):
+Request:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -836,37 +761,29 @@ Request (`Request::Write`):
 A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`. The
 shim sends at most `VFS_RING_PAYLOAD_CAP - 24` bytes per WRITE and repeats
 until done or a short write. A director writes every byte of a WRITE or
-fails it: on `ST_OK`, `written` is `len` (Cairn and the reference: Cairn's
-write layer and disk provider loop to the end, `provider/layer.clj` and
-`provider/disk.clj`, `write-from`).
+fails it: on `ST_OK`, `written` is `len`.
 
 A WRITE past the end of the file grows it, and the bytes between the old end
-and the WRITE's offset read as zeros, as NTFS fills them (Cairn's write layer
-reads a grown block it holds no data for as zeros, `provider/layer.clj`,
-`read-into`; its disk provider's file system fills the gap; the reference
-fills it with zeros). The same holds for SETATTR (3.4.6).
+and the WRITE's offset read as zeros, as NTFS fills them. The same holds for
+SETATTR (3.4.6).
 
-Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
-only the first 4 bytes.
+Reply, 8 bytes: `written:u32 | zero:u32`. The shim reads only the first 4
+bytes.
 
 A WRITE on a directory handle the writable provider holds is `ST_IS_DIR`,
-whatever access the directory was opened with; SETATTR (3.4.6) on one is too
-(Cairn's writable providers and the reference). A directory no writable
-provider holds may answer `ST_READ_ONLY` instead, as Cairn's read-only tree
-does (`source/tree.clj`, `DirHandle`).
+whatever access the directory was opened with; SETATTR (3.4.6) on one is too.
+A directory no writable provider holds may answer `ST_READ_ONLY` instead.
 
 #### 3.4.6 SETATTR (7)
 
-Request (`Request::SetAttr`), 16 bytes: `fh:u64 | size:u64`. Sets the file's
-length (truncate or extend) on an open handle; there is no path-keyed form.
-Reply: status only. Unknown `fh` `ST_BAD_FH`. An extension reads as zeros,
-bytes a truncation cut off included when the file grows again (Cairn's
-write layer zeroes them, `provider/layer.clj`, `truncate!`; its disk provider
-truncates the file; the reference resizes with zeros).
+Request, 16 bytes: `fh:u64 | size:u64`. Sets the file's length (truncate or
+extend) on an open handle; there is no path-keyed form. Reply: status only.
+Unknown `fh` `ST_BAD_FH`. An extension reads as zeros, bytes a truncation cut
+off included when the file grows again.
 
 #### 3.4.7 RENAME (8)
 
-Request (`Request::Rename`):
+Request:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -884,13 +801,11 @@ that changes only the case respells the name. A file or a directory moves; a
 directory moves with everything under it. A file or an empty directory at
 `to` is replaced; a directory at `to` with anything under it is
 `ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
-inside `from`, is `ST_BAD_REQUEST` from a writable layer provider and the
-reference director, `ST_IO_ERROR` from Cairn's overlay (`provider/compose.clj`,
-`rename!`, which never moves a directory that only its lower layer holds, as
-it holds the root). A missing `from` is
-`ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`.
-(Cairn's writable layer, `provider/layer.clj`, `rename!`; the reference
-director.) A file with open handles is renamed like any other.
+inside `from`, is `ST_BAD_REQUEST` (as the reference director answers) or
+`ST_IO_ERROR` (as an overlay answers that never moves a directory only its
+lower layer holds, the root included), and nothing moves. A missing `from` is
+`ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`. A
+file with open handles is renamed like any other.
 
 #### 3.4.8 DELETE (9)
 
@@ -900,44 +815,35 @@ For a name the writable provider holds (for names that exist only in a
 read-only layer beneath it, see "Names only in a read-only lower" after
 3.4.9): a file, or a directory with nothing under it, is deleted. A directory
 with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
-is `ST_BAD_REQUEST` (a writable layer provider, the reference director) or
-`ST_IO_ERROR`, and is never deleted. Cairn's overlay answers `ST_OK` today and
-hides the root behind a whiteout (`provider/compose.clj`, `delete!`): a bug,
-which conformance reports. A missing path is `ST_NOT_FOUND`; a path outside
-every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
-`provider/layer.clj`, `delete!`; the reference director.) A file with open
-handles is deleted like any other: Cairn's write layer drops its data at the
-last close (`release!`), and its disk provider's files are opened with
-`FILE_SHARE_DELETE` (Java NIO's default share mode), so the delete or rename
-of an open file succeeds there too. What a handle reads after its file was
-deleted or renamed is the director's.
+is `ST_BAD_REQUEST` (as the reference director answers) or `ST_IO_ERROR`,
+and is never deleted. A missing path is `ST_NOT_FOUND`; a path outside every
+writable provider `ST_READ_ONLY`. A file with open handles is deleted like
+any other: a director that keeps files on disk should open them with
+`FILE_SHARE_DELETE`, so the delete or rename of an open file succeeds. What a
+handle reads after its file was deleted or renamed is the director's.
 
 #### 3.4.9 MKDIR (10)
 
-Request (`Request::Mkdir`): `root:u32 | mode:u32 | vpath utf8…`. The shim
-sends `mode = 0o755` (493); both directors ignore it. Reply: status only.
+Request: `root:u32 | mode:u32 | vpath utf8…`. The shim sends `mode = 0o755`
+(493); a director ignores it. Reply: status only.
 
 The directory is stored with the caller's spelling (section 3.2). On an
-existing path the writable provider holds, the directors differ (for a path
+existing path the writable provider holds, directors may differ (for a path
 that exists only in a read-only layer beneath it, see below):
 
 - An existing directory: a director may answer `ST_OK` or `ST_EXISTS`, and a
-  client must accept either. Cairn's writable providers answer `ST_OK`
-  (`provider/layer.clj` and `provider/disk.clj`, `mkdir!`), its read-only ones
-  and the reference director `ST_EXISTS`. The shim, on any failure, asks
-  GETATTR whether a directory is there, so either answer gives the program
-  the same result for `FILE_OPEN_IF`; for `FILE_CREATE` only `ST_EXISTS` reports the
-  name collision.
-- An existing file: `ST_IO_ERROR` where a writable provider serves the path
-  (Cairn's writable providers), `ST_EXISTS` where none does (Cairn's
-  read-only providers). The reference director answers the same.
+  client must accept either. The reference director answers `ST_EXISTS`. The
+  shim, on any failure, asks GETATTR whether a directory is there, so either
+  answer gives the program the same result for `FILE_OPEN_IF`; for
+  `FILE_CREATE` only `ST_EXISTS` reports the name collision.
+- An existing file: `ST_IO_ERROR` where a writable provider serves the path,
+  `ST_EXISTS` where none does. The reference director answers the same.
 
 **Names only in a read-only lower.** A director may serve a writable root as
-an overlay: a writable upper over a read-only lower, as Cairn serves every
-writable root (`provider/compose.clj`, the `Overlay` provider). For a name
-that exists only in the lower, not in the upper, such a director may answer
-DELETE, RENAME and MKDIR as Cairn's overlay does, where the rules above
-(written for names the writable provider holds) say otherwise:
+an overlay: a writable upper over a read-only lower. For a name that exists
+only in the lower, not in the upper, such a director may answer DELETE,
+RENAME and MKDIR as follows, where the rules above (written for names the
+writable provider holds) say otherwise:
 
 - DELETE of a lower-only name, a directory with children included, hides it
   (a whiteout in the upper) and answers `ST_OK`.
@@ -952,18 +858,16 @@ The reference director has no layers, so it never gives these answers.
 
 #### 3.4.10 CLOSE (11)
 
-Request (`Request::Close`), 8 bytes: `fh:u64`. Reply: status only. Unknown
-`fh` `ST_BAD_FH`.
+Request, 8 bytes: `fh:u64`. Reply: status only. Unknown `fh` `ST_BAD_FH`.
 
 #### 3.4.11 HEARTBEAT (13)
 
 Request: empty payload, flags 0. Reply: `ST_OK`, empty. The shim sends exactly
-one, right after attaching, and fails its load unless it gets `ST_OK`
-(`crates/aether-hooks/src/director.rs`, `try_init_from_env`).
+one, right after attaching, and fails its load unless it gets `ST_OK`.
 
 #### 3.4.12 STORED_NAMES (14)
 
-Request (`Request::StoredNames`):
+Request:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -971,22 +875,21 @@ Request (`Request::StoredNames`):
 | 4 | 4 | u32 | `skip`: components the client already knows |
 | 8 | rest | utf8… | `vpath` (folded) |
 
-Reply (`Reply::StoredNames`): the stored spelling of each component of `vpath`
-from index `skip` on, joined by `/`, no length prefix, exactly
-`components - skip` names. A component the director has no entry for SHOULD
-come back as it was sent, as the old Rust director's did. A director MAY
-instead answer `ST_NOT_FOUND` for a path it does not have (Cairn does, `ring.clj`, `op-stored-names`). The shim
-discards a reply with the wrong number of names, and on any non-OK status or
-discarded reply uses the caller's own spelling (`FuseClient::stored_names`).
-Used for `GetFinalPathNameByHandle`.
+Reply: the stored spelling of each component of `vpath` from index `skip` on,
+joined by `/`, no length prefix, exactly `components - skip` names. A
+component the director has no entry for SHOULD come back as it was sent. A
+director MAY instead answer `ST_NOT_FOUND` for a path it does not have. The
+shim discards a reply with the wrong number of names, and on any non-OK
+status or discarded reply uses the caller's own spelling. Used for
+`GetFinalPathNameByHandle`.
 
-An empty reply payload is one empty name (the shim splits `Reply::StoredNames`
-with `str::split`). The shim never asks for zero names: when it already
-knows every component it sends no request.
+An empty reply payload is one empty name (the shim splits the reply on
+every `/`). The shim never asks for zero names: when it already knows every
+component it sends no request.
 
 #### 3.4.13 RENAME_X (23)
 
-Request (`Request::RenameX`):
+Request:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -998,9 +901,8 @@ Request (`Request::RenameX`):
 
 A rename between two roots. A file is copied to `to_root` (replacing what is
 there) and removed from `from_root`; a directory is refused with
-`ST_CROSS_ROOT`, which the shim reports as `STATUS_NOT_SAME_DEVICE`
-(`crates/aether-protocol/src/status.rs`). Equal roots behave as RENAME. Reply:
-status only.
+`ST_CROSS_ROOT`, which the shim reports as `STATUS_NOT_SAME_DEVICE`. Equal
+roots behave as RENAME. Reply: status only.
 
 #### 3.4.14 STAGE_EXEC (24)
 
@@ -1009,23 +911,19 @@ on-disk Windows path to start it from, UTF-8, the whole payload. The director
 puts the program on real disk first (a child's image is opened by the kernel
 before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
 a director with a stager may answer `ST_NOT_FOUND` for a file it does not
-stage (Cairn, `ring.clj`, `op-stage-exec`).
+stage.
 
-How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): only
-when `VFS_ROOT_BACKINGS` names at least one backing (`plan` returns early
-otherwise, and the child starts as it would without the VFS). Then, for each
-candidate image path that routes under a root it first sends GETATTR, and
-sends STAGE_EXEC only for the first candidate that is a file (`found`, not
-`is_dir`). On success the child is started from the returned path. If no
+How the shim uses it: only when `VFS_ROOT_BACKINGS` names at least one
+backing (otherwise the child starts as it would without the VFS). Then, for
+each candidate image path that routes under a root it first sends GETATTR,
+and sends STAGE_EXEC only for the first candidate that is a file (`found`,
+not `is_dir`). On success the child is started from the returned path. If no
 candidate was staged, every candidate path is absolute, and at least one was
-under a root, the child is refused (`out.refuse`), not started from
-whatever is really on disk at that path. Otherwise (a relative name the
-loader may resolve elsewhere) the image path is left as it was.
+under a root, the child is refused, not started from whatever is really on
+disk at that path. Otherwise (a relative name the loader may resolve
+elsewhere) the image path is left as it was.
 
 ### 3.5 Status values
-
-Source: `crates/aether-protocol/src/status.rs` (`Status`, `Status::ALL`),
-`crates/aether-ipc/src/ring.rs` (overflow).
 
 | Value | Name | Meaning |
 |---:|---|---|
@@ -1042,55 +940,57 @@ Source: `crates/aether-protocol/src/status.rs` (`Status`, `Status::ALL`),
 | -10 | `ST_EXISTS` | `OPEN_EXCL` on an existing path; registry key already exists. |
 | -11 | `ST_REPLY_TOO_LARGE` | A registry answer larger than `payload_cap - 8` (in practice only REG_KEY's can be; section 4.3). |
 | -12 | `ST_CROSS_ROOT` | RENAME_X of a directory. |
-| `i32::MIN` (`-2147483648`) | overflow | Written by the ring layer when a reply exceeds `payload_cap`; payload length 0. Not in `Status::ALL`. |
+| `i32::MIN` (`-2147483648`) | overflow | Written by the ring layer when a reply exceeds `payload_cap`; payload length 0. Not one of the statuses `contract/protocol.json` lists. |
 
 Values 0 to -11 are fixed by the shim, which matches statuses by number. New
 statuses take the next free negative number.
 
-The `ST_*` names are this document's names for the wire values. In Rust
-each is a `Status` variant (`ST_NOT_FOUND` is `Status::NotFound`), and in
-`contract/protocol.json` its lowercase, hyphenated name (`"not-found"`). The
-`OPEN_*` flags of 3.4.3 map the same way: `OPEN_CREATE` is
-`OpenFlags::CREATE` in Rust and `"create"` in the JSON's `open_flags`, whose
-`"mask"` is the value in the table (`OPEN_APPEND` is 32).
+The `ST_*` names are this document's names for the wire values. In
+`contract/protocol.json` each has its lowercase, hyphenated name
+(`ST_NOT_FOUND` is `"not-found"`). The `OPEN_*` flags of 3.4.3 map the same
+way: `OPEN_CREATE` is `"create"` in the JSON's `open_flags`, whose `"mask"` is
+the value in the table (`OPEN_APPEND` is 32).
 
-#### 3.5.1 Malformed requests: what each director answers
+#### 3.5.1 Malformed requests: what a director may answer
 
 The status for a payload too short for its fixed fields, a path that escapes
-its root (`..` above it), or a root the director does not serve is not
-uniform across the existing directors. The shim treats every non-OK status
-as a failure of the call (only `ST_NOT_FOUND`, `ST_EXISTS`, `ST_READ_ONLY`,
+its root (`..` above it), or a root the director does not serve may differ
+from director to director. The shim treats every non-OK status as a failure
+of the call (only `ST_NOT_FOUND`, `ST_EXISTS`, `ST_READ_ONLY`,
 `ST_CROSS_ROOT` and the like get specific NT statuses), so none of these
 differences changes what a well-formed shim request gets. A new director
 should answer `ST_BAD_REQUEST` for a short payload or an escaping path, and
-`ST_NOT_FOUND` for an unknown root.
+`ST_NOT_FOUND` for an unknown root. A director may answer:
 
-| Op | Old Rust director (removed) | Cairn (`ring.clj`) |
+| Op | Short or escaping | Unknown root |
 |---|---|---|
-| GETATTR | short or escaping: `ST_BAD_REQUEST`; unknown root: OK, `found = 0` | short, escaping or unknown root: OK, `found = 0` |
-| READDIR | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` | all three: `ST_NOT_FOUND` |
-| OPEN | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` | short, escaping, or not `wellformed?`: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` |
-| READ, WRITE, SETATTR, CLOSE | short: `ST_BAD_REQUEST` | short: `ST_BAD_REQUEST` |
-| DELETE, MKDIR | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` | all three: `ST_NOT_FOUND` |
-| RENAME | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_BAD_REQUEST` | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` |
-| RENAME_X | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` | as RENAME |
-| STORED_NAMES | short or escaping: `ST_BAD_REQUEST`; unknown root: `ST_NOT_FOUND` | all three: `ST_NOT_FOUND` |
-| STAGE_EXEC | escaping: `ST_BAD_REQUEST`; no stager: `ST_NOT_SUPPORTED` | no stager: `ST_NOT_SUPPORTED` (checked first); escaping or unknown root: `ST_NOT_FOUND` |
+| GETATTR | `ST_BAD_REQUEST`, or OK with `found = 0` | OK, `found = 0` |
+| READDIR | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | `ST_NOT_FOUND` |
+| OPEN | `ST_BAD_REQUEST` | `ST_NOT_FOUND` |
+| READ, WRITE, SETATTR, CLOSE | short: `ST_BAD_REQUEST` | (no root) |
+| DELETE, MKDIR | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | `ST_NOT_FOUND` |
+| RENAME | `ST_BAD_REQUEST` | `ST_BAD_REQUEST` or `ST_NOT_FOUND` |
+| RENAME_X | `ST_BAD_REQUEST` | `ST_BAD_REQUEST` or `ST_NOT_FOUND`, as RENAME |
+| STORED_NAMES | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | `ST_NOT_FOUND` |
+| STAGE_EXEC | escaping: `ST_BAD_REQUEST` or `ST_NOT_FOUND` | `ST_NOT_FOUND` |
 
-Invalid UTF-8 in a path is `ST_BAD_REQUEST` in the Rust decoders; Cairn
-decodes it with replacement characters and carries on.
+A director with no stager answers STAGE_EXEC `ST_NOT_SUPPORTED` whatever its
+path, and may do so before it looks at the path.
+
+Invalid UTF-8 in a path is `ST_BAD_REQUEST`, or a director may instead decode
+it with replacement characters and carry on.
 
 ### 3.6 Flags
 
-| Where | Bit | Value | Name | Source |
-|---|---:|---:|---|---|
-| slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply | `RequestFlags::READ_BULK` in `crates/aether-protocol/src/status.rs` |
-| READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk | `READ_RESP_BULK_BIT` in `crates/aether-protocol/src/table.rs` |
-| OPEN reply byte 17 | 0 | `0x01` | `immutable` | `OpenResp::immutable` in `crates/aether-protocol/src/table.rs` |
-| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `OpenFlags` in `crates/aether-protocol/src/status.rs` |
+| Where | Bit | Value | Name |
+|---|---:|---:|---|
+| slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply (`"read_bulk"` in `contract/protocol.json`'s `request_flags`) |
+| READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk |
+| OPEN reply byte 17 | 0 | `0x01` | `immutable` |
+| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) |
 
 The slot `flags` word is ignored for every opcode but READ, and bits other
-than bit 0 are ignored for READ, by both directors.
+than bit 0 are ignored for READ.
 
 ---
 
@@ -1098,38 +998,30 @@ than bit 0 are ignored for READ, by both directors.
 
 Opcodes 15-22 virtualise the registry through an overlay the director keeps.
 The shim sends them only when `VFS_REGISTRY` is affirmative (section 5.3) and
-every registry detour installed (`crates/aether-hooks/src/regclient.rs`,
-`enabled`). A director without a registry layer answers all eight
-`ST_NOT_SUPPORTED`.
+every registry detour installed. A director without a registry layer answers
+all eight `ST_NOT_SUPPORTED`.
 
 ### 4.1 Field encodings and limits
 
-Source: `crates/aether-protocol/src/table.rs` (registry messages),
-`crates/aether-protocol/src/wire.rs`, `crates/aether-registry/src/overlay.rs`.
-
-- `str` = `len:u32 | utf8[len]`. Limits count UTF-16 code units
-  (`utf16_len`), the registry's own unit.
+- `str` = `len:u32 | utf8[len]`. Limits count UTF-16 code units (the length
+  of the string once converted to UTF-16), the registry's own unit.
 - Booleans are one byte, exactly 0 or 1.
 - Every registry decoder consumes its input exactly; trailing bytes are
   `ST_BAD_REQUEST`.
 
 | Limit | Value | Applies to |
 |---|---:|---|
-| `MAX_KEY_NAME` | 255 UTF-16 units | a key name component; `new_leaf`; child names in a REG_KEY reply |
-| `MAX_VALUE_NAME` | 16 383 UTF-16 units | value names |
-| `MAX_DATA` | 1 048 576 bytes (`1 << 20`) | value data |
-| `MAX_WRITE_DEPTH` | 512 components below `\Registry` | keys a write may create |
+| Key name | 255 UTF-16 units | a key name component; `new_leaf`; child names in a REG_KEY reply |
+| Value name | 16 383 UTF-16 units | value names |
+| Value data | 1 048 576 bytes (`1 << 20`) | value data |
+| Write depth | 512 components below `\Registry` | keys a write may create or move |
 
-The shim never sends a registry request larger than `payload_cap`:
-`RegClient::request` refuses it locally with `ST_BAD_REQUEST`
-(`crates/aether-hooks/src/regclient.rs`). For a write that becomes
-`STATUS_INVALID_PARAMETER` (section 4.4); for REG_LOOKUP or REG_KEY it goes
-through `read_failed`, and the hook falls back to the real key.
+The shim never sends a registry request larger than `payload_cap`: it refuses
+it locally with `ST_BAD_REQUEST`. For a write that becomes
+`STATUS_INVALID_PARAMETER` (section 4.4); for REG_LOOKUP or REG_KEY it is a
+failed read, and the hook falls back to the real key.
 
 ### 4.2 Key paths
-
-Source: `crates/aether-registry/src/path.rs` (`canonical`, `to_nt`),
-`crates/aether-registry/src/overlay.rs` (`valid_path`).
 
 A key path is the canonical NT form: `\Registry` then non-empty components,
 single `\` separators, no trailing `\`, no `.` or `..` components. `Registry`,
@@ -1138,27 +1030,26 @@ Under `\Registry\User`, the current user's SID becomes the literal
 `<CurrentUser>` and `<SID>_Classes` becomes `<CurrentUser>_Classes`, so a layer
 written under one account reads back under another. Keys compare
 case-insensitively by `fold`, and that includes the `Registry`, `Machine` and
-`User` components: both directors accept `\REGISTRY\MACHINE\...` as readily as
-`\Registry\Machine\...` (Rust `valid_path` compares `fold(canonical(p))` with
-`fold(p)`; Cairn `overlay-path?` folds the `Registry` component and compares
-everything else through `fold`). The shim sends the canonical spelling. A
-director must answer `ST_BAD_REQUEST` for a path that is not canonical (the
-codec checks only length and UTF-8).
+`User` components: a director accepts `\REGISTRY\MACHINE\...` as readily as
+`\Registry\Machine\...`. A path is valid when its fold equals the fold of its
+canonical form. The shim sends the canonical spelling. A director must answer
+`ST_BAD_REQUEST` for a path that is not canonical (the codec checks only
+length and UTF-8).
 
 Value names arrive as UTF-8 converted from the caller's UTF-16; value `ty` is
 the Windows `REG_*` type number; value data is the raw bytes the caller passed
 to `NtSetValueKey` (for `REG_SZ`, UTF-16LE with whatever terminator the caller
-included) (`crates/aether-hooks/src/regwrite.rs`).
+included).
 
 ### 4.3 Requests and replies
 
 Every reply starts with `version:u64`, the overlay's version after (or at) the
 operation.
 The number a director's overlay starts from when it mounts a layer is the
-director's (part of the persisted layer, `Overlay::set_version`), so two
-directors serving one layer may number its versions apart by a constant, and a
-REG_CHANGED `since` is in the numbering of the director it is sent to; how the
-version moves from one operation to the next is the overlay's (below).
+director's (part of the persisted layer), so two directors serving one layer
+may number its versions apart by a constant, and a REG_CHANGED `since` is in
+the numbering of the director it is sent to; how the version moves from one
+operation to the next is the overlay's (below).
 
 | # | Op | Request | Reply |
 |---:|---|---|---|
@@ -1171,7 +1062,7 @@ version moves from one operation to the next is the overlay's (below).
 | 21 | REG_RENAME_KEY | `path:str \| new_leaf:str` | `version:u64` |
 | 22 | REG_CHANGED | `path:str \| subtree:u8 \| since:u64` | `version:u64 \| changed:u8` |
 
-REG_LOOKUP `state` (`LookupReply`):
+REG_LOOKUP `state`:
 
 | Value | Meaning |
 |---:|---|
@@ -1183,7 +1074,7 @@ REG_LOOKUP `state` (`LookupReply`):
 A decoder rejects `state > 3`. `below` is 1 when the overlay has anything
 strictly under the key.
 
-REG_KEY `node`, present when `has_node == 1` (`KeyReply`):
+REG_KEY `node`, present when `has_node == 1`:
 
 | Size | Type | Field |
 |---:|---|---|
@@ -1197,34 +1088,98 @@ REG_KEY `node`, present when `has_node == 1` (`KeyReply`):
 | 4 | u32 | `nchildren` |
 | … | child x `nchildren` | `folded:str \| spelling:str \| state:u8` (0 present, 1 tombstone), sorted by `folded` in byte order |
 
-With `has_node == 0` the reply is exactly 9 bytes. The decoder inserts the
-children into a map keyed by `folded` (`Reply::decode` for REG_KEY), so their
-order is not checked and a duplicate `folded` key keeps the last one; send them
-sorted and unique, as both encoders do.
+With `has_node == 0` the reply is exactly 9 bytes. The shim reads the
+children into a map keyed by `folded`, so their order is not checked and a
+duplicate `folded` key keeps the last one; send them sorted and unique.
 
 A REG_KEY reply longer than `payload_cap - 8` must be answered
 `ST_REPLY_TOO_LARGE` instead; the shim then serves
-the real key alone. A director may apply the same rule to every registry reply
-(Cairn does, `op-registry`); the other replies are at most 10 bytes, so only
-REG_KEY's can ever reach it.
+the real key alone. A director may apply the same rule to every registry
+reply; the other replies are at most 10 bytes, so only REG_KEY's can ever
+reach it.
 
 Errors: name too
 long, data too large, invalid path, too deep: `ST_BAD_REQUEST`; not found:
 `ST_NOT_FOUND`; already exists: `ST_EXISTS`. REG_RENAME_KEY with a `new_leaf`
 of `.` or `..` is `ST_BAD_REQUEST`.
 
-The overlay's semantics (what a create over a real key records, how tombstones
-and `changed_since` behave) are those of `crates/aether-registry/src/overlay.rs`,
-which is normative for them; Cairn's `aether.director.registry` reimplements
-it. The persisted file format (`crates/aether-registry/src/format.rs`,
-`AEREG`) is the director's own business and is not on the wire.
+**The overlay.** The overlay is a tree of nodes keyed by folded canonical
+path, each remembering its own spelling, its values (in insertion order,
+matched by folded name), the folded names of values deleted at it (value
+tombstones), its children (folded name to stored spelling and present or
+tombstone), `created`, `volatile` and `last_write`. A deleted key leaves a
+tombstone child in its parent and no node of its own, and everything below it
+is dropped. Its semantics:
+
+- **Version.** The overlay keeps one counter. Every successful write
+  (REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY,
+  REG_RENAME_KEY) adds 1 to it before it changes anything and answers the new
+  value; a refused write leaves it alone; a read answers the current value.
+- **Making a path exist.** A write to a key first makes every key on the way
+  to it a node, keeping the spelling of nodes that already exist. A new node
+  is `created` when its parent is `created`, or when it or its name in the
+  parent was tombstoned (the chain is revived); otherwise it is a plain
+  presence over the real key. A new node is listed as a present child of its
+  parent.
+- **REG_LOOKUP.** A node is present (`created` decides state 1 or 2); a key
+  with no node that is tombstoned itself, or lies below a tombstoned
+  ancestor, is state 3; anything else is absent. `below` is whether a node or
+  a tombstone lies strictly under the path; it is 0 for a tombstoned key.
+- **REG_KEY.** The node at the path, or none (`has_node = 0`).
+- **Limits.** Every write but REG_RENAME_KEY checks, in this order, before
+  anything else: the path is a valid key path (4.2); every key-name component
+  of the path is at most 255 UTF-16 units; the path is at most 512
+  components below `\Registry`; then the write's own limits below. Any of them failing is
+  `ST_BAD_REQUEST` and changes nothing. No write limits how many keys,
+  values or children a node holds.
+- **`last_write`.** A write stamps the director's clock (a FILETIME) on: every
+  node that making a path exist creates; a node whose child list it changes;
+  the key of REG_SET_VALUE and REG_DELETE_VALUE; the parent of REG_DELETE_KEY;
+  and the moved key and its parent of REG_RENAME_KEY. Nothing else changes
+  it.
+- **REG_SET_VALUE.** Also checks the value name (at most 16 383 units) and the
+  data (at most 1 048 576 bytes). Makes the path exist, drops a value
+  tombstone of that name, and replaces the value of that folded name
+  (keeping its stored name) or appends it.
+- **REG_DELETE_VALUE.** Also checks the value name. `ST_NOT_FOUND` if the key
+  is tombstoned (itself or under a tombstoned ancestor). Otherwise makes the
+  path exist, removes the value of that name and records a value tombstone,
+  which also hides a real value of that name.
+- **REG_CREATE_KEY.** `ST_EXISTS` if the overlay already holds a node there.
+  Otherwise makes the path exist, the key itself `created` (it then needs no
+  real counterpart, and none shows through), with the request's `volatile`.
+- **REG_DELETE_KEY.** `ST_BAD_REQUEST` for `\Registry` itself;
+  `ST_NOT_FOUND` if the key is tombstoned (itself or under a tombstoned
+  ancestor). Otherwise makes the parent exist, drops the key's node and
+  everything below it, tombstones the key and lists it as a tombstone child
+  of its parent.
+- **REG_RENAME_KEY.** Checks, in this order: the path is valid; `new_leaf`
+  is non-empty, holds no `\` and is at most 255 units; every key-name
+  component of the path is at most 255 units; the path is not `\Registry`
+  (each `ST_BAD_REQUEST`). The key must have a node in the overlay (`ST_NOT_FOUND` otherwise). Another
+  node at the new name is `ST_EXISTS`, unless the new name differs only in
+  case. Every key it moves is created at its own depth under the new name, so
+  a moved key deeper than 512 components is `ST_BAD_REQUEST`. The key and its
+  subtree move to the new name under the same parent, every moved key
+  `created` (the new name has no real counterpart), tombstones below it
+  moving with it; the old name is tombstoned in the parent (not for a change
+  of case only), and the new name is listed as present.
+- **REG_CHANGED.** For a key with a node: whether its own values, existence
+  or child list changed at a version after `since` (with `subtree` 1, or
+  anything below it did). For a key with no node: whether it, or any
+  ancestor, was deleted or renamed away at a version after `since`. A
+  director may forget old deletions to bound its memory, as long as a
+  forgotten one then reads as changed for any older `since`: a spurious
+  change, never a missed one.
+
+The persisted layer format is the director's own business and is not on the
+wire.
 
 ### 4.4 Shim handling of registry replies
 
-`crates/aether-hooks/src/regclient.rs`: a read (REG_LOOKUP, REG_KEY) that fails
-for any reason is a fallback: the hook serves the real key alone. A write that
-fails is not retried against the real registry. Its status becomes the NT
-status the caller gets (`crates/aether-hooks/src/regwrite.rs`, `write_status`):
+A read (REG_LOOKUP, REG_KEY) that fails for any reason is a fallback: the hook
+serves the real key alone. A write that fails is not retried against the real
+registry. Its status becomes the NT status the caller gets:
 
 | Director status | NT status |
 |---|---|
@@ -1233,12 +1188,11 @@ status the caller gets (`crates/aether-hooks/src/regwrite.rs`, `write_status`):
 | `ST_EXISTS` (rename, create) | `STATUS_CANNOT_DELETE` |
 | anything else | `STATUS_UNSUCCESSFUL` |
 
-The exception is a key create (`crates/aether-hooks/src/regkeys.rs`): a
-REG_CREATE_KEY answered `ST_EXISTS` (another thread or process created the key
-first) is followed by a fresh REG_LOOKUP, and if that says present the key is
-opened; otherwise the create fails `STATUS_UNSUCCESSFUL`. There
-`ST_BAD_REQUEST` is `STATUS_INVALID_PARAMETER` and anything else
-`STATUS_UNSUCCESSFUL`.
+The exception is a key create: a REG_CREATE_KEY answered `ST_EXISTS` (another
+thread or process created the key first) is followed by a fresh REG_LOOKUP,
+and if that says present the key is opened; otherwise the create fails
+`STATUS_UNSUCCESSFUL`. There `ST_BAD_REQUEST` is `STATUS_INVALID_PARAMETER`
+and anything else `STATUS_UNSUCCESSFUL`.
 
 A write reply that is not exactly 8 bytes counts as a failed write
 (`ST_IO_ERROR`).
@@ -1246,26 +1200,22 @@ A write reply that is not exactly 8 bytes counts as a failed write
 ### 4.5 Registry generation (`reg_gen`)
 
 Distinct from the overlay `version` in replies. The director keeps one
-generation per session (the old Rust director's `RegistryGeneration` and
-Cairn's both start at 1) and publishes it into every ring header it serves (offset 40, atomic
-fetch-max, never backward). It moves on **every successful registry write,
-before the write's reply is published**, and whenever a registry layer is
-attached or detached.
+generation per session and publishes it into every ring header it serves
+(offset 40, atomic fetch-max, never backward). It moves on **every successful
+registry write, before the write's reply is published**, and whenever a
+registry layer is attached or detached.
 
 The shim caches REG_LOOKUP and REG_KEY answers per folded path under the
 generation it read before asking, and uses a cached answer only while the
 header still holds that generation. Generation 0 means "nothing published":
-the shim then caches nothing and asks the director every time
-(`RegClient::cached`). So a director that serves the registry must publish a
-non-zero generation before the shim attaches, and must bump it before
-replying to any write, or other processes will keep serving stale answers.
+the shim then caches nothing and asks the director every time. So a director
+that serves the registry must publish a non-zero generation before the shim
+attaches, and must bump it before replying to any write, or other processes
+will keep serving stale answers.
 
-Directors have differed when no registry is served. The old Rust director
-(removed) registered every ring with its `RegistryGeneration` at start, which
-published the current generation, 1, at once, registry or not. Cairn publishes only
-when it has a registry (`ring.clj`, `start`), so its header keeps `reg_gen =
-0`. Neither matters to the shim without `VFS_REGISTRY`, which then sends no
-registry request at all.
+A director that serves no registry may leave `reg_gen = 0` or publish a
+generation anyway. Neither matters to the shim without `VFS_REGISTRY`, which
+then sends no registry request at all.
 
 ---
 
@@ -1273,9 +1223,8 @@ registry request at all.
 
 ### 5.1 `shim.cfg` (VFSC, version 2)
 
-Source: `crates/aether-protocol/src/shimcfg.rs`. The director writes it; its
-path reaches the shim as the injector's `<config>` argument, which the
-injector puts in `VFS_SHIM_CONFIG`.
+The director writes it; its path reaches the shim as the injector's
+`<config>` argument, which the injector puts in `VFS_SHIM_CONFIG`.
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -1290,38 +1239,35 @@ Nothing may follow the table; trailing bytes are an error. `dll_name` is a
 final path component (`d3d11.dll`); `backing_path` is an absolute Win32 path
 (`\??\` form accepted).
 
-Decoding outcomes (`decode_config`): fewer than 4 bytes or truncated/over-long
-or bad UTF-8: `Malformed`; first 4 bytes not `VFSC`: `Unversioned` (a version-1
-config began with a `u32` root length); version not 2: `Version { found,
-expected }`. Any of these fails the shim's load with ready-file content
+The shim refuses a config that is shorter than 4 bytes, truncated, over-long
+or not UTF-8 where text is due, whose first 4 bytes are not `VFSC`, or whose
+version is not 2. Any of these fails the shim's load with ready-file content
 `bootstrap-failed:<message>`.
 
-What the current shim does with it: it decodes it (as a version and shape
-check) and uses neither field. The client's roots come from the environment
-(`crates/aether-hooks/src/bootstrap.rs`). Write `root` as root 0 and the static
-imports the launch needs; both directors write it with no static imports.
+What the shim does with it: it decodes it (as a version and shape check) and
+uses neither field. The client's roots come from the environment. Write
+`root` as root 0 and the static imports the launch needs; a director may
+write it with no static imports.
 
 ### 5.2 The handshake tables
 
-Source: `crates/aether-env/src/lib.rs` (`handshake` module); the same tables
-are shipped as `contract/env.json`.
+The handshake names fall into three tables, shipped as `contract/env.json`
+(its keys `transport`, `inject` and `config`):
 
 | Table | Names | Rule |
 |---|---|---|
-| `TRANSPORT` | `VFS_RING_PATH`, `VFS_RING_SECTION`, `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_OFFSET`, `VFS_ARENA_LEN`, `VFS_SERVER_EV`, `VFS_CLIENT_EV`, `VFS_FUSE_CFG`, `VFS_VIRTUAL_DIR`, `VFS_VIRTUAL_ROOTS`, `VFS_ROOT_BACKINGS`, `VFS_REGISTRY` | A launch sets **or removes** every one of these, so nothing inherited from an earlier session reaches the child. |
-| `INJECT` | `VFS_INJECT_CWD`, `VFS_INJECT_STEAM_HELPER` | Read only by the injector. A Wine launch sets or removes them like `TRANSPORT`. |
-| `CONFIG` | `VFS_STATE_DIR`, `VFS_HOME`, `VFS_LAUNCH_IMAGE`, `VFS_DISCOVERY_PATH`, `VFS_SHIM_CONFIG`, `VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG`, `VFS_FORCE_INJECTION` | Other handshake configuration; not cleared by a launch. |
+| transport | `VFS_RING_PATH`, `VFS_RING_SECTION`, `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_OFFSET`, `VFS_ARENA_LEN`, `VFS_SERVER_EV`, `VFS_CLIENT_EV`, `VFS_FUSE_CFG`, `VFS_VIRTUAL_DIR`, `VFS_VIRTUAL_ROOTS`, `VFS_ROOT_BACKINGS`, `VFS_REGISTRY` | A launch sets **or removes** every one of these, so nothing inherited from an earlier session reaches the child. |
+| inject | `VFS_INJECT_CWD`, `VFS_INJECT_STEAM_HELPER` | Read only by the injector. A Wine launch sets or removes them like the transport names. |
+| config | `VFS_STATE_DIR`, `VFS_HOME`, `VFS_LAUNCH_IMAGE`, `VFS_DISCOVERY_PATH`, `VFS_SHIM_CONFIG`, `VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG`, `VFS_FORCE_INJECTION` | Other handshake configuration; not cleared by a launch. |
 
 Names compare without ASCII case on the Windows side (Wine included), so a
-removal must remove every spelling (`is_handshake`).
+removal must remove every spelling.
 
 ### 5.3 Each name's value
 
-Sources: `crates/aether-env/src/lib.rs` (constants and `ALL`), readers in
-`crates/aether-hooks/src/director.rs`, `crates/aether-shim/src/lib.rs`,
-`crates/aether-inject/src/`. Booleans: an **opt-in** switch is on only for
-`1`, `true`, `yes`, `on` (ASCII case-insensitive); an **opt-out** switch is
-off only for `0`, `false`, `no`, `off` (`opt_in`, `opt_out`).
+Booleans: an **opt-in** switch is on only for `1`, `true`, `yes`, `on` (ASCII
+case-insensitive); an **opt-out** switch is off only for `0`, `false`, `no`,
+`off`.
 
 | Name | Set by | Read by | Value |
 |---|---|---|---|
@@ -1335,7 +1281,7 @@ off only for `0`, `false`, `no`, `off` (`opt_in`, `opt_out`).
 | `VFS_CLIENT_EV` | director | nobody | Client event name. The shim does not open it. |
 | `VFS_FUSE_CFG` | director | nobody | Path of a `key=value` text file describing the ring, for tools (5.4). |
 | `VFS_VIRTUAL_DIR` | director (or the injector, from `VFS_INJECT_CWD`) | shim | Root 0's path as the program sees it. **Required** whenever a ring is named: unset fails the load. |
-| `VFS_VIRTUAL_ROOTS` | director | shim | Roots beyond 0: `id=path` entries joined by `;`, e.g. `1=C:\Users\me\Documents\My Games\Skyrim`. Whitespace around id and path is trimmed; an entry that does not parse, or has an empty path, is skipped; an entry for id 0 replaces `VFS_VIRTUAL_DIR`. Unset and `""` mean the same: root 0 only (Rust's `encode_roots` leaves it unset; Cairn sets `""`). |
+| `VFS_VIRTUAL_ROOTS` | director | shim | Roots beyond 0: `id=path` entries joined by `;`, e.g. `1=C:\Users\me\Documents\My Games\Skyrim`. Whitespace around id and path is trimmed; an entry that does not parse, or has an empty path, is skipped; an entry for id 0 replaces `VFS_VIRTUAL_DIR`. Unset and `""` mean the same: root 0 only. |
 | `VFS_ROOT_BACKINGS` | director | shim | Each root's real backing directory where it differs from its location, same `id=path;…` syntax. The shim treats a backing directory as a second spelling of its root for routing, never for naming. |
 | `VFS_REGISTRY` | director | shim | Opt-in. Set to `1` only while a registry layer is attached; otherwise remove it. |
 | `VFS_INJECT_CWD` | director | injector | The target's working directory as the target sees it. Unset or empty: the injector's own. |
@@ -1343,28 +1289,26 @@ off only for `0`, `false`, `no`, `off` (`opt_in`, `opt_out`).
 | `VFS_STATE_DIR` | director | shim | Session state directory (the shim's panic log goes to `<dir>\shim-panic.log`). |
 | `VFS_HOME` | director | director side | Aether's own data directory. |
 | `VFS_LAUNCH_IMAGE` | director | shim | Absolute path of the staged EXE; its parent directory is another spelling of root 0. |
-| `VFS_DISCOVERY_PATH` | — | — | Registered, no reader in this repository. |
+| `VFS_DISCOVERY_PATH` | — | — | Registered; neither the shim nor the injector reads it. |
 | `VFS_SHIM_CONFIG` | injector | shim | Path of `shim.cfg`. Unset: the shim fails its load. |
 | `VFS_SHIM_READY` | injector | shim | Path of the ready file (section 6.2). The shim removes it from its own environment after writing, so children do not inherit it. |
 | `VFS_CHILD_REFUSED_LOG` | injector | shim | `<ready>.child-refused`: the shim appends `<image> <reason>\n` for each child it had to kill. |
-| `VFS_FORCE_INJECTION` | director | — | Accepted and ignored: remote-thread `LoadLibrary` is the only activation (Cairn still sets `1`). |
+| `VFS_FORCE_INJECTION` | director | — | Accepted and ignored: remote-thread `LoadLibrary` is the only activation. |
 
 Also read, outside the tables: `VFS_READY_TIMEOUT_SECS` (decimal seconds,
 default 180, minimum 1) bounds the injector's wait for the shim and the shim's
-wait for each child; the injector sets it in the target's environment
-(`crates/aether-env/src/lib.rs`, `ready_timeout_secs`). `VFS_RING_SPIN_US`
-(director side, 2.11). The remaining `VFS_*` names in `aether-env` are
-behaviour, diagnostic, harness and fixture switches and are not part of the
-handshake.
+wait for each child; the injector sets it in the target's environment.
+`VFS_RING_SPIN_US` (director side, 2.11). Other `VFS_*` names the shim and
+injector read are behaviour, diagnostic and test switches and are not part of
+the handshake.
 
 ### 5.4 `fuse.cfg` (informational)
 
-Written by both directors and named by `VFS_FUSE_CFG`; nothing in the shim or
-the injector reads it. Lines of `key=value`, `\n`-terminated
-(Cairn `launch.clj`, `fuse-cfg`):
+Written by the director and named by `VFS_FUSE_CFG`; nothing in the shim or
+the injector reads it. Lines of `key=value`, `\n`-terminated:
 
 ```
-section=<name>          (file mode, Cairn only: ring_path=<path>)
+section=<name>          (file mode: ring_path=<path>)
 root=<root 0>
 payload_cap=<n>
 ring_bytes=<map size>
@@ -1379,8 +1323,6 @@ client_ev=<name>        (section mode only)
 ## 6. The injector
 
 ### 6.1 Command line
-
-Source: `crates/aether-inject/src/cli.rs`, `crates/aether-inject/src/bin/aether-injector.rs`.
 
 ```
 aether-injector <target> <shim_dll> <config> <ready> [-- args...]
@@ -1397,11 +1339,10 @@ aether-injector <target> <shim_dll> <config> <ready> [-- args...]
 Fewer than four arguments: the usage line on stderr, exit 2.
 
 The target's command line is `"<target>"` followed by ` "<arg>"` for each
-argument, with no escaping (`crates/aether-inject/src/inject.rs`,
-`command_line_for`). An argument that contains `"` or ends in `\` is mangled
-by the target's command-line parser (a trailing `\` escapes the closing
-quote). A director must not pass such arguments, or must accept that they
-arrive changed.
+argument, with no escaping. An argument that contains `"` or ends in `\` is
+mangled by the target's command-line parser (a trailing `\` escapes the
+closing quote). A director must not pass such arguments, or must accept that
+they arrive changed.
 
 Under Wine, every injector argument (target, shim DLL, config, ready file)
 and every path in a `VFS_*` variable is in the Windows form the target
@@ -1410,30 +1351,28 @@ file and its siblings by the corresponding host path.
 
 **The shim's own DLL dependencies must resolve in the target.** The shim is
 loaded by full path, but the loader finds its imports through the target's
-DLL search path. The release natives are built with `+crt-static`
-(`bin/build-natives.ps1`, `RUSTFLAGS`), so they need no C runtime DLL; a build
-without it does. Cairn puts the natives folder first on the target's `PATH`
-(`src/aether/director/launch.clj`, `launch-env`).
+DLL search path. The release natives are built with the C runtime linked in
+statically, so they need no C runtime DLL; a build without it does, and a
+director that launches one must put the folder that holds the natives first
+on the target's `PATH`.
 
-The injector adds to the target's environment (`crates/aether-inject/src/inject.rs`,
-`launch_env_block`): `VFS_SHIM_CONFIG`, `VFS_SHIM_READY`,
-`VFS_CHILD_REFUSED_LOG = <ready>.child-refused`, `VFS_READY_TIMEOUT_SECS`, and
-`VFS_VIRTUAL_DIR = VFS_INJECT_CWD` when a working directory is given and
-`VFS_VIRTUAL_DIR` is not already set. Everything else the target sees is
-inherited from the injector, so the director sets the transport names in the
-injector's environment. Before starting it deletes `<ready>`,
-`<ready>.child-refused`, `<ready>.injector-error` and `<ready>.steam-helper`.
+The injector adds to the target's environment: `VFS_SHIM_CONFIG`,
+`VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG = <ready>.child-refused`,
+`VFS_READY_TIMEOUT_SECS`, and `VFS_VIRTUAL_DIR = VFS_INJECT_CWD` when a
+working directory is given and `VFS_VIRTUAL_DIR` is not already set.
+Everything else the target sees is inherited from the injector, so the
+director sets the transport names in the injector's environment. Before
+starting it deletes `<ready>`, `<ready>.child-refused`,
+`<ready>.injector-error` and `<ready>.steam-helper`.
 
 ### 6.2 The ready file
 
-Written by the shim to `VFS_SHIM_READY` before its `DllMain` returns
-(`crates/aether-shim/src/lib.rs`); classified by the injector
-(`crates/aether-inject/src/inject.rs`, `classify_ready`). Contents are the
-whole file, no newline:
+Written by the shim to `VFS_SHIM_READY` before its `DllMain` returns, and
+read by the injector. Contents are the whole file, no newline:
 
 | Content | Meaning | Injector |
 |---|---|---|
-| `ready` (`READY_OK`) | Hooks live, director attached. | Releases the target. |
+| `ready` | Hooks live, director attached. | Releases the target. |
 | `fuse-failed:<reason>` | A ring was named (or none was) and the client could not attach, or the heartbeat failed. | Kills the target. |
 | `bootstrap-failed:<reason>` | Config unreadable or from another build, or a hook would not install. | Kills the target. |
 | anything else, or missing | Not decided yet. | Keeps waiting until the timeout. With remote-thread injection the verdict is read once the shim's `LoadLibrary` has returned; if there is still none, the injector kills the target and reports `bootstrap-failed:the shim loaded but never wrote its ready file` (or `target-exited:` if the target is already gone). |
@@ -1443,8 +1382,7 @@ The shim also writes a one-line diagnostic to `<ready>.boot.log` on failure.
 ### 6.3 The error report and exit codes
 
 On any injection failure the injector writes one line to
-`<ready>.injector-error` and exits 3 (`aether-injector.rs`; prefixes in
-`crates/aether-env/src/lib.rs`):
+`<ready>.injector-error` and exits 3:
 
 | Line | Cause |
 |---|---|
@@ -1452,40 +1390,37 @@ On any injection failure the injector writes one line to
 | `ready-timeout:<seconds>` | No verdict within `VFS_READY_TIMEOUT_SECS`. |
 | `fuse-failed:<reason>` | The shim reported `fuse-failed:`. |
 | `bootstrap-failed:<reason>` | The shim reported `bootstrap-failed:`. |
-| `inject:<error>` | Any other `InjectError`, in Rust debug form (`CreateProcessFailed(…)`, `RemoteThread`, `Wait`, …). |
+| `inject:<error>` | Any other failure, described in free text (for example `CreateProcessFailed(…)`). |
 
 | Exit code | Meaning |
 |---:|---|
 | 2 | Usage error. |
 | 3 | Injection failed; see `<ready>.injector-error`. |
-| other | The first target process's exit code, after **every** process in its job has exited (`ProcessTree::wait`). |
+| other | The first target process's exit code, after **every** process in its job has exited. |
 
 A target exit code of 2 or 3 is indistinguishable from the injector's own by
 the code alone. What distinguishes them is `<ready>.injector-error`: the
 injector deletes it at start and writes it only for its own exit 3 (exit 2,
 a usage error, writes none). A director should treat 2 or 3 as the injector's
-own failure only when that file exists. Cairn's Linux path does not: it
-treats any 2 or 3 as the injector's (`src/aether/director/proton/launch.clj`,
-`finish`), and only uses the file for the reason.
+own failure only when that file exists.
 
 `<ready>.steam-helper`, written before the target starts when
 `VFS_INJECT_STEAM_HELPER` is set: `started:<pid>:<milliseconds>`, `cleared`,
-`disabled:<why>` or `failed:<why>` (`crates/aether-env/src/lib.rs`).
+`disabled:<why>` or `failed:<why>`.
 
 ### 6.4 Child processes: the ready and failed events
 
-Source: `crates/aether-hooks/src/child.rs`. When the target starts a child, the
-shim in the parent injects the shim into it and waits. The child's shim
-signals with two named events. Both sides create them with
-`CreateEventW(NULL, TRUE /*manual reset*/, FALSE, name)`: the parent creates
-both before it waits (`wait_ready`), the child creates the one it sets
-(`signal_ready`, `signal_bootstrap_failed`). Either side may be first;
-`CreateEventW` opens the existing event for the second.
+When the target starts a child, the shim in the parent injects the shim into
+it and waits. The child's shim signals with two named events. Both sides
+create them with `CreateEventW(NULL, TRUE /*manual reset*/, FALSE, name)`:
+the parent creates both before it waits, the child creates the one it sets.
+Either side may be first; `CreateEventW` opens the existing event for the
+second.
 
 | Event | Set when |
 |---|---|
-| `Local\vfs_shim_ready_<pid>` | The child's hooks are installed (`signal_ready`). |
-| `Local\vfs_shim_failed_<pid>` | The child's bootstrap failed (`signal_bootstrap_failed`). |
+| `Local\vfs_shim_ready_<pid>` | The child's hooks are installed. |
+| `Local\vfs_shim_failed_<pid>` | The child's bootstrap failed. |
 
 `<pid>` is the child's process id in decimal. The parent waits up to
 `VFS_READY_TIMEOUT_SECS` and kills the child on failure, timeout, or exit.
@@ -1496,27 +1431,25 @@ tool that starts processes under the shim itself may wait on them.
 
 ## 7. Versions
 
-**Aether's release version** is semver (`Cargo.toml` workspace `version`;
-releases are tags `v<semver>`, README "Releases"). It is separate from the
-**wire version**, which is the ring header's `version` field, now 4
-(`crates/aether-ipc/src/layout.rs`), also published as `wire_version` in
-`contract/artifacts.json` (checked equal by `crates/aether-env/tests/contract.rs`).
-`shim.cfg` has its own version, 2 (`CONFIG_VERSION`).
+**Aether's release version** is semver; releases are tags `v<semver>`. It is
+separate from the **wire version**, which is the ring header's `version`
+field, now 4, also published as `wire_version` in `contract/artifacts.json`
+and `contract/protocol.json` (Aether's tests check both against the code). `shim.cfg` has its own version, 2.
 
 Rules:
 
 - **A wire-version bump is always an Aether major version.** The shim refuses
-  a ring of any other version at attach, so an old director and a new shim (or
-  the reverse) cannot run together. `layout.rs` bumps it whenever a
-  payload layout or the slot state machine changes.
+  a ring of any other version at attach, so a director and a shim of
+  different wire versions cannot run together. The wire version is bumped
+  whenever a payload layout or the slot state machine changes.
 - **A minor version may add an opcode or a flag only where an old director's
-  answer to it is safe.** An old director answers an unknown opcode
-  `ST_BAD_REQUEST` with an empty payload (both directors), ignores unknown
-  slot flag bits and READ flag bits other than bit 0, and writes zero in the
-  OPEN reply's flag bits 1-7 and padding. So a new opcode is minor only if the
-  shim treats `ST_BAD_REQUEST` from it as "not available" and falls back; a new
-  OPEN reply flag is minor only if zero means the old behaviour (as
-  `immutable` and `mount_gen` were added: an old director's zeros decode as
+  answer to it is safe.** A director answers an unknown opcode
+  `ST_BAD_REQUEST` with an empty payload, ignores unknown slot flag bits and
+  READ flag bits other than bit 0, and writes zero in the OPEN reply's flag
+  bits 1-7 and padding. So a new opcode is minor only if the shim treats
+  `ST_BAD_REQUEST` from it as "not available" and falls back; a new OPEN reply
+  flag is minor only if zero means the behaviour without it (as for
+  `immutable` and `mount_gen`: a director that writes zeros there is read as
   mutable, generation 0). Opcode numbers are never reused (4 and 12 stay
   reserved).
 - **A patch changes no byte on the wire**: no opcode, status, flag, layout,
@@ -1526,27 +1459,26 @@ Rules:
 
 ## 8. Conformance
 
-**For the bytes** (layouts, codecs, the handshake), the code in
-`crates/aether-ipc`, `crates/aether-protocol` and `crates/aether-env` and the
-golden vectors below are normative: where this document disagrees with them,
-this document is wrong.
+**For the bytes** (layouts, codecs, the handshake), the golden vectors below
+are normative: where this document disagrees with them, this document is
+wrong.
 
 **For what a director must answer**, this document is normative.
 `contract/scenarios/` and `aether-conform` (`docs/conformance.md`) check it,
-and the reference director (`crates/aether-refdirector`) follows it; where
-they disagree with this text, they are fixed. Where this document says
-directors may differ, conformance accepts each answer it names.
+and the reference director follows it; where they disagree with this text,
+they are fixed. Where this document says directors may differ, conformance
+accepts each answer it names.
 
 `contract/protocol.json` is the machine-readable form of the protocol table
-(3.3): a director in another language builds its opcode, status and field
+(3.3), and is normative for the layouts as the golden vectors are for the
+bytes: a director in another language builds its opcode, status and field
 tables from it instead of from the prose.
 
-The executable part of the contract is
-`crates/aether-protocol/tests/golden/vectors.txt`: one `name hex` line per
-vector, produced by the encoders in `crates/aether-protocol/tests/golden.rs`
-and checked in CI. A changed existing line is a wire break. A director in
-another language should encode the same inputs and compare bytes, and decode
-the vectors and compare fields.
+The executable part of the contract is the golden vectors, `vectors.txt` in
+each release's `contract.zip`: one `name hex` line per vector, each the bytes
+of the message it names. A changed existing line is a wire break. A director
+in another language should encode the same inputs and compare bytes, and
+decode the vectors and compare fields.
 
 | Vector | Encodes |
 |---|---|
@@ -1573,8 +1505,8 @@ the vectors and compare fields.
 
 ### 8.1 Worked example: `readdir-resp-two`
 
-Inputs (`golden.rs`): entries `{name "a.esp", is_dir false, size 10, mtime 1}`
-and `{name "sub", is_dir true, size 0, mtime 0}`. The line is 54 bytes:
+Inputs: entries `{name "a.esp", is_dir false, size 10, mtime 1}` and `{name
+"sub", is_dir true, size 0, mtime 0}`. The line is 54 bytes:
 
 ```
 02000000 05000000 612e657370 00 0a00000000000000 0100000000000000

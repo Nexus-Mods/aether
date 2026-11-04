@@ -1,31 +1,34 @@
 //! Case folding — single source of truth for case-insensitive comparison.
 #![forbid(unsafe_code)]
 
-/// Lowercase simple case fold. MVP uses `char::to_lowercase` (Unicode simple
-/// folding). This is the single source of truth for case-insensitive matching.
+/// The Unicode version the fold's mapping comes from: the standard library's
+/// of the pinned toolchain. Part of the wire (`docs/wire.md` 3.2).
+pub const UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
+
+/// The case fold: every character replaced by its full Unicode lowercase
+/// mapping (`char::to_lowercase`, which includes the unconditional
+/// multi-character mappings of `SpecialCasing.txt`), one character at a time,
+/// from Unicode 17.0.0, the version of the pinned toolchain's standard library
+/// ([`UNICODE_VERSION`]). This is the single source of truth for
+/// case-insensitive matching.
 ///
 /// It is load-bearing across the ring, not merely a convention. The shim folds
 /// every vpath component with this function before the vpath is sent
 /// (`aether-redirect`'s `RootMap::match_canonical`), so everything that keys,
-/// compares, or orders a name on the other side — a director's archive indexes,
+/// compares, or orders a name on the other side (a director's archive indexes,
 /// mount-prefix matching, directory merges, layered/overlay merges and glob
-/// routes — has to fold with this same function. `to_ascii_lowercase` was used below the ring until the final
-/// review of `feat/real-roots` found the split: `Data/ÜBER/a.esp` crossed as
-/// `data/über/a.esp` and every index below was keyed `data/ÜBER/a.esp`, so the
-/// file resolved to not-found. `DiskProvider` hid it, because Windows folds
-/// Unicode itself.
+/// routes) has to fold with this same function. An ASCII-only lowercase below
+/// the ring would key `Data/ÜBER/a.esp` apart from the `data/über/a.esp` the
+/// shim sends, and the file would resolve to not-found.
 ///
 /// If this function's definition ever changes, both sides move together; a
-/// change here is a wire-visible change.
+/// change here is a wire-visible change (`docs/wire.md` 3.2).
 ///
-/// Two properties it does **not** have, both of which have already produced
-/// bugs here:
+/// Two properties it does **not** have:
 ///
 /// 1. **Not length-preserving.** `İ` (U+0130) is two bytes and folds to three
 ///    (`i` + U+0307). Never slice a folded string by an offset measured on the
-///    unfolded one — walk components instead. `strip_prefix` and
-///    `mount_child_name` both did exactly that before the `feat/real-roots`
-///    final review.
+///    unfolded one; walk components instead.
 /// 2. **Not NTFS-case-equivalent.** That same `İ` folds to a genuinely
 ///    different name, not a case variant of the input. So "NTFS is
 ///    case-insensitive, therefore the folded spelling names the same file" is
@@ -61,6 +64,14 @@ pub fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering {
 mod tests {
     use super::*;
     use std::cmp::Ordering;
+
+    /// The fold is the standard library's lowercase mapping, so its Unicode
+    /// version is the toolchain's. A toolchain with another one changes the
+    /// wire: this fails until `UNICODE_VERSION` and `docs/wire.md` 3.2 say so.
+    #[test]
+    fn the_fold_is_unicode_17() {
+        assert_eq!(char::UNICODE_VERSION, UNICODE_VERSION);
+    }
 
     #[test]
     fn folds_ascii_and_unicode() {

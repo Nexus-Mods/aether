@@ -1059,8 +1059,7 @@ impl Gen {
     /// What a WRITE or SETATTR on directory handle `h` answers (3.4.5):
     /// `ST_IS_DIR` for a directory the writable provider holds, else
     /// `ST_IS_DIR` or `ST_READ_ONLY` (a read-only provider's directory
-    /// handle may refuse the write as read-only, as Cairn's
-    /// `source/tree.clj` does).
+    /// handle may refuse the write as read-only).
     fn dir_handle_want(&self, h: &Handle) -> Want {
         if self.held(h.root, &h.folded) {
             Want::Status(Status::IsDir)
@@ -1782,9 +1781,9 @@ impl Gen {
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
                 self.missing_held(to_root, b >> 4, d)?,
             ),
-            // Onto an existing file the stored spelling is sent: Cairn
-            // opens the destination for writing (`copy-across!`) and keeps
-            // its name, and 3.4.13 does not say whose spelling wins.
+            // Onto an existing file the stored spelling is sent: a director
+            // may open the destination for writing and keep its name, and
+            // 3.4.13 does not say whose spelling wins.
             1 => (
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
                 self.existing(to_root, b >> 4, 0, |n| {
@@ -2447,8 +2446,8 @@ mod tests {
         }
     }
 
-    /// Cairn's RENAME_X opens an existing destination write|create|trunc and
-    /// keeps its stored name, and wire.md 3.4.13 does not say whose spelling
+    /// A director's RENAME_X may open an existing destination
+    /// write|create|trunc and keep its stored name, and wire.md 3.4.13 does not say whose spelling
     /// wins, so onto an existing file the stored spelling is sent.
     #[test]
     fn a_rename_x_onto_a_file_sends_its_stored_spelling() {
@@ -2477,7 +2476,7 @@ mod tests {
     }
 
     /// A director with a stager answers ST_NOT_FOUND for a file it does not
-    /// stage (Cairn, wire.md 3.4.14).
+    /// stage (wire.md 3.4.14).
     #[test]
     fn stage_exec_allows_not_found() {
         let mut checked = 0;
@@ -2498,7 +2497,7 @@ mod tests {
 
     /// A WRITE or SETATTR on a directory handle is ST_IS_DIR where the
     /// writable provider holds the directory, and ST_IS_DIR or ST_READ_ONLY
-    /// elsewhere (wire.md 3.4.5; Cairn's `source/tree.clj`).
+    /// elsewhere (wire.md 3.4.5).
     #[test]
     fn a_directory_handle_write_outside_the_writable_provider_may_be_read_only() {
         let (mut strict, mut either) = (0, 0);
@@ -2537,8 +2536,7 @@ mod tests {
     }
 
     /// DELETE or RENAME of the root itself, and a RENAME `to` inside `from`,
-    /// is ST_BAD_REQUEST or ST_IO_ERROR (wire.md 3.4.7, 3.4.8: Cairn's
-    /// disk-backed upper answers the second).
+    /// is ST_BAD_REQUEST or ST_IO_ERROR (wire.md 3.4.7, 3.4.8).
     #[test]
     fn the_root_and_a_rename_into_itself_may_be_io_errors() {
         let mut seen = 0;

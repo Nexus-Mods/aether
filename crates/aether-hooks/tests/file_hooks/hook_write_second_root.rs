@@ -1,16 +1,13 @@
 //! Runs in its own process: the same write path as `hook_write.rs`, one root over.
 //!
 //! `hook_write.rs` proves writes reach the director for root 0. This proves the *root* survives
-//! the trip, which is a different claim (gate 4 Task 3): every request a hook sends carries the
+//! the trip, which is a different claim: every request a hook sends carries the
 //! `RootId` the path resolved under, rather than `RootId::DEFAULT`. A defaulted root is
 //! invisible to anything that only ever declares one root.
 //!
-//! The test used to assert this against the shim-local overlay's per-root subtrees (task C8
-//! removed that overlay). The fake director keys a second root's files apart from root 0's
-//! (`fakedirector::key`), so the same claims are now made about the director's table: a root
-//! that got lost anywhere in the chain shows up as one root reading, modifying, deleting or
-//! renaming the other's file. The delete and rename half never ran before C8: the test stopped
-//! at the overlay's whiteout-marker assertion.
+//! The fake director keys a second root's files apart from root 0's (`fakedirector::key`), so
+//! the claims are made about the director's table: a root that got lost anywhere in the chain
+//! shows up as one root reading, modifying, deleting or renaming the other's file.
 //!
 //! The load-bearing shape throughout is *the same relative path under both roots*:
 //! `shared.txt` is served under both, with different bytes.
@@ -27,8 +24,8 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
     let base = std::env::temp_dir().join(format!("aether-shim-write-2root-{pid}"));
     let _ = std::fs::remove_dir_all(&base);
     let root0 = base.join("root0");
-    // A separate location, not nested under root 0 — the `Documents\My Games\…` shape
-    // `skyrim-live` declares as root 1.
+    // A separate location, not nested under root 0: the `Documents\My Games\…` shape
+    // a session declares as root 1.
     let root1 = base.join("root1");
     std::fs::create_dir_all(&root0).unwrap();
     std::fs::create_dir_all(&root1).unwrap();

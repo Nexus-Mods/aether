@@ -39,8 +39,8 @@ fn derived_root() -> PathBuf {
 }
 
 /// A path under [`scratch_root`] that is unique to this process and `name`.
-/// Not created, not cleared, not removed: the drop-in for the old
-/// `temp_dir().join(format!("<name>-{}", process::id()))` idiom, for tests that
+/// Not created, not cleared, not removed: the drop-in for
+/// `temp_dir().join(format!("<name>-{}", process::id()))`, for tests that
 /// manage the directory themselves.
 pub fn scratch_path(name: &str) -> PathBuf {
     scratch_root().join(format!("{name}-{}", std::process::id()))

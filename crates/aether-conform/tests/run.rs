@@ -829,17 +829,22 @@ fn a_director_writing_every_bulk_reply_into_bank_zero_fails_on_other_slots() {
 fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients() {
     let (entries, all) = committed_with("swap-replies", "20");
     assert_eq!(failed(&entries), ["concurrent"], "{all}");
-    // Failed for a reply in the wrong slot: a client's comparison (another
-    // client's answer), or the sweep's GETATTR or READ wave, not a timeout.
+    // Failed for a reply in the wrong slot, not a timeout. Which mismatch
+    // shows first depends on which two requests were swapped: another
+    // client's answer, a status meant for another request, or a payload of
+    // another opcode's shape that does not decode.
     let concurrent = entry(&entries, "concurrent");
     let error = concurrent.2.as_deref().unwrap_or("");
     assert!(!error.contains("no answer within"), "{concurrent:?}");
+    let mismatch = |s: &str| {
+        s.contains("wire.md 2.5")
+            || s.starts_with("a different")
+            || s.starts_with("none of the allowed")
+            || s.contains("does not decode")
+            || s.contains(" got Got(")
+    };
     assert!(
-        error.contains("wire.md 2.5")
-            || concurrent
-                .3
-                .iter()
-                .any(|n| n.starts_with("a different") || n.starts_with("none of the allowed")),
+        mismatch(error) || concurrent.3.iter().any(|n| mismatch(n)),
         "{concurrent:?}"
     );
 }

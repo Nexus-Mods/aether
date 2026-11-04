@@ -2,13 +2,8 @@
 //! a preserving write keeps the provider's bytes, and the real file under the root is never
 //! read from or written to.
 //!
-//! The name is historical (it tracked a documented flakiness allowance in several task
-//! reports). The test used to drive the shim-local overlay with no director attached: a create
-//! landed in the overlay directory, a delete wrote a `<name>.__vfs_wh__` marker beside it and a
-//! rename moved the overlay copy. Task C8 removed that overlay, and every one of those
-//! operations is now the director's, so the same four claims are made about the director's
-//! table instead. The delete and rename half never ran before C8: the test stopped at the
-//! whiteout-marker assertion, which is what the overlay's handle-based delete got wrong.
+//! A create, a write, a delete and a rename are each the director's, and the claims are made
+//! about the director's table.
 //!
 //! Every claim is checked on both sides. The real file under the root holds bytes the director
 //! does not (`HOST_MOD`), so a write that reached it, or a read that came from it, is visible.

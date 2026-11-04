@@ -1,14 +1,12 @@
-//! Gate 5, Task 8 — **a reproduction harness and a set of measurements, not a
-//! passing test.** Both tests are `#[ignore]`d; nothing here runs in
-//! `cargo test --workspace`.
+//! **A reproduction harness for the `DllMain` shutdown stall, and a set of
+//! measurements, not a passing test.** Both tests are `#[ignore]`d; nothing
+//! here runs in `cargo test --workspace`.
 //!
-//! Task 8 asked for a fix to the `DllMain` shutdown stall, with Step 1 being
-//! "get a reliable trigger, because a fix for an intermittent hang verified by
-//! *it didn't hang this time* is not verified". This file is where that step
-//! got to. **The fix was not delivered**: the trigger work produced evidence
-//! that contradicts the mechanism the task was written around, and shipping a
-//! fix against a mechanism the measurements do not support would be the exact
-//! failure the instruction exists to prevent.
+//! A fix for an intermittent hang verified by *it didn't hang this time* is
+//! not verified, so a fix needs a reliable trigger first. This file is the
+//! search for one. The stall is not fixed: the measurements contradict the
+//! obvious mechanism (the reporter thread), and a fix against a mechanism the
+//! measurements do not support would not be one.
 //!
 //! Everything below was measured on this machine. Nothing is inferred.
 //!
@@ -26,12 +24,12 @@
 //! - `RtlAllocateHeap` frames and a long run of `aether_shim` frames on the
 //!   stack.
 //!
-//! So the *class* of failure in the task description is right: a thread was
-//! killed holding a lock, and the survivor waits on it forever.
+//! So the *class* of failure is: a thread was killed holding a lock, and the
+//! survivor waits on it forever.
 //!
 //! # 2. Three shapes that do **not** reproduce it — 60 runs, 0 hangs
 //!
-//! The task's suggested mechanism is the reporter thread: it does nothing but
+//! The obvious mechanism is the reporter thread: it does nothing but
 //! render (allocate) and write, forever, and was never stopped or joined, so
 //! it is the likeliest thread to be inside the heap when it is killed. Turning
 //! its duty cycle up to the maximum — `VFS_SHIM_STATS_INTERVAL_MS=0`, so it
@@ -48,7 +46,7 @@
 //! `ExitProcess`, while the whole point of the defect is teardown running
 //! *after* the thread kill. Only a real DLL has that ordering.
 //!
-//! # 3. The shape that does hang — and why it is not yet proof
+//! # 3. The shape that does hang, and why it is not proof
 //!
 //! [`child`] loads the real `aether_shim.dll`, lets its own `DllMain` →
 //! bootstrap attach to a real ring (a `fakedirector` served from the parent),
@@ -70,34 +68,28 @@
 //!   *test-binary* frames, not `aether_shim` frames.
 //!
 //! Same instruction, different caller. It is a real hang and the closest lead
-//! anyone has produced, which is why it is committed instead of discarded —
-//! but calling it "the trigger" would be the same unearned claim this gate
-//! keeps catching.
+//! there is, which is why it is kept, but calling it "the trigger" would be
+//! an unearned claim.
 //!
 //! # 4. The decisive negative result
 //!
-//! The suggested fix — make the reporter stoppable and join it before the
-//! threads are killed — was **built and measured**, hung off a new
-//! `NtTerminateProcess` detour (the one point where "every thread is alive and
-//! the process is about to end" is knowable; `ZwTerminateProcess` shares its
-//! RVA, so internal ntdll callers are covered too), with the reporter's sleep
-//! replaced by a `Condvar` so the join returns promptly.
-//!
-//! It did not help: **16 of 20 still hung.** A breadcrumb written from the top
-//! of that hook never appeared on any run, hung or clean — **the process
-//! wedges before it ever reaches `NtTerminateProcess`.**
+//! Making the reporter stoppable and joining it before the threads are killed,
+//! from an `NtTerminateProcess` detour (the one point where "every thread is
+//! alive and the process is about to end" is knowable; `ZwTerminateProcess`
+//! shares its RVA, so internal ntdll callers are covered too), with the
+//! reporter's sleep a `Condvar` so the join returns promptly, **does not
+//! help: 16 of 20 still hang.** A breadcrumb written from the top of that
+//! hook never appears on any run, hung or clean: **the process wedges before
+//! it ever reaches `NtTerminateProcess`.**
 //!
 //! That is the load-bearing finding. Any fix attached to process termination
 //! is dead code for this failure, because the stall begins earlier, inside
-//! `exit()`'s own teardown, while every thread is still running. The task's
-//! suggested direction cannot work as written, and the production changes for
-//! it were reverted rather than shipped unverified.
+//! `exit()`'s own teardown, while every thread is still running.
 //!
-//! # 5. Where the next session should start
+//! # 5. The open question
 //!
 //! Un-`#[ignore]` [`a_process_carrying_the_shim_still_exits`], confirm it still
-//! hangs, and then answer the one question this stopped at: **which Rust lock
-//! is the main thread blocked on**, given the frames are in the test binary
+//! hangs, and then answer: **which Rust lock is the main thread blocked on**, given the frames are in the test binary
 //! rather than in the shim. Resolve the test binary's own frames against its
 //! PDB — the addresses are stable within a build — rather than sampling
 //! further. Until that name is known, no fix can be aimed.
@@ -128,7 +120,7 @@ use std::time::Duration;
 /// name the workspace reads to be declared in `aether_env::ALL`, and these three
 /// are harness plumbing for one ignored test — registering them would put
 /// them in `describe`'s user-facing switch list, which is worse than a prefix.
-const CHILD_ENV: &str = "AETHER_TASK8_STALL_CHILD";
+const CHILD_ENV: &str = "AETHER_EXIT_STALL_CHILD";
 
 /// A healthy child does a few tens of milliseconds of work. Past this it is
 /// hung, not slow.
@@ -152,7 +144,7 @@ fn child() {
     if std::env::var_os(CHILD_ENV).is_none() {
         return;
     }
-    let root = std::path::PathBuf::from(std::env::var_os("AETHER_TASK8_ROOT").expect("root"));
+    let root = std::path::PathBuf::from(std::env::var_os("AETHER_EXIT_STALL_ROOT").expect("root"));
 
     // The real shim DLL, mapped and bootstrapped. Deliberately *not*
     // `aether_hooks::install` in this image: the shim's teardown has to run at
@@ -161,7 +153,7 @@ fn child() {
     // reproduce anything for exactly that reason (module docs §2).
     let dll: Vec<u16> = {
         use std::os::windows::ffi::OsStrExt;
-        std::env::var_os("AETHER_TASK8_DLL")
+        std::env::var_os("AETHER_EXIT_STALL_DLL")
             .expect("dll")
             .encode_wide()
             .chain(std::iter::once(0))
@@ -246,7 +238,7 @@ fn dll_path() -> std::path::PathBuf {
 fn a_process_carrying_the_shim_still_exits() {
     let exe = std::env::current_exe().expect("current exe");
     let dll = dll_path();
-    let base = std::env::temp_dir().join(format!("vfs-task8-stall-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("vfs-exit-stall-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let vroot = base.join("root");
     std::fs::create_dir_all(&vroot).unwrap();
@@ -274,8 +266,8 @@ fn a_process_carrying_the_shim_still_exits() {
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
-            .env("AETHER_TASK8_ROOT", &dir)
-            .env("AETHER_TASK8_DLL", &dll)
+            .env("AETHER_EXIT_STALL_ROOT", &dir)
+            .env("AETHER_EXIT_STALL_DLL", &dll)
             .env(aether_env::SHIM_CONFIG, &cfg)
             .env(aether_env::SHIM_READY, dir.join("ready"))
             .env(aether_env::SHIM_STATS_LOG, dir.join("stats.txt"))

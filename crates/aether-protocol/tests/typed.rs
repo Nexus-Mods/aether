@@ -1,5 +1,5 @@
 //! The typed codec: round trips over generated messages, the opcode and
-//! status tables against the historical numbers, and malformed input (every
+//! status tables against the fixed numbers, and malformed input (every
 //! cut and every extra byte of every golden vector, garbage of any length).
 
 mod common;
@@ -11,8 +11,8 @@ use aether_protocol::{
 use common::Msg;
 use proptest::prelude::*;
 
-/// The wire numbers as literals (the same as `wire_numbers_are_the_historical_ones`).
-const HISTORICAL_OPCODES: &[(&str, u32)] = &[
+/// The wire numbers as literals (the same as `wire_numbers_are_fixed`).
+const FIXED_OPCODES: &[(&str, u32)] = &[
     ("getattr", 1),
     ("readdir", 2),
     ("open", 3),
@@ -37,7 +37,7 @@ const HISTORICAL_OPCODES: &[(&str, u32)] = &[
     ("stage-exec", 24),
 ];
 
-const HISTORICAL_STATUSES: &[(&str, i32)] = &[
+const FIXED_STATUSES: &[(&str, i32)] = &[
     ("ok", 0),
     ("not-found", -1),
     ("not-a-directory", -2),
@@ -54,27 +54,27 @@ const HISTORICAL_STATUSES: &[(&str, i32)] = &[
 ];
 
 #[test]
-fn opcodes_are_the_historical_table() {
+fn opcodes_are_the_fixed_table() {
     let typed: Vec<(&str, u32)> = Opcode::ALL
         .iter()
         .map(|&op| (op.name(), op as u32))
         .collect();
-    assert_eq!(typed, HISTORICAL_OPCODES);
+    assert_eq!(typed, FIXED_OPCODES);
 }
 
 #[test]
-fn statuses_are_the_historical_table() {
+fn statuses_are_the_fixed_table() {
     let typed: Vec<(&str, i32)> = Status::ALL
         .iter()
         .map(|&st| (st.name(), st.code()))
         .collect();
-    assert_eq!(typed, HISTORICAL_STATUSES);
+    assert_eq!(typed, FIXED_STATUSES);
 }
 
 #[test]
 fn only_the_live_opcode_numbers_convert() {
     for n in 0..=64u32 {
-        let live = HISTORICAL_OPCODES.iter().find(|(_, num)| *num == n);
+        let live = FIXED_OPCODES.iter().find(|(_, num)| *num == n);
         match (Opcode::try_from(n), live) {
             (Ok(op), Some((name, _))) => {
                 assert_eq!(op as u32, n);
@@ -92,7 +92,7 @@ fn only_the_live_opcode_numbers_convert() {
 #[test]
 fn only_the_known_status_numbers_convert() {
     for n in -64..=64i32 {
-        let known = HISTORICAL_STATUSES.iter().any(|(_, num)| *num == n);
+        let known = FIXED_STATUSES.iter().any(|(_, num)| *num == n);
         assert_eq!(Status::try_from(n).is_ok(), known, "status {n}");
     }
     assert!(

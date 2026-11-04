@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 
 pub const MAGIC: &[u8; 8] = b"AEREG\0\0\x01";
 
-/// Deepest key nesting `decode` accepts (bounds recursion). Above the 512 write cap so files
-/// from the old, uncapped writer still load.
+/// Deepest key nesting `decode` accepts (bounds recursion). Above the 512 write cap so a layer
+/// with deeper keys loads.
 const MAX_DEPTH: usize = MAX_DECODE_DEPTH;
 const FLAG_CREATED: u8 = 1;
 
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(back.node(&deepest), o.node(&deepest));
         assert_eq!(back.node(&deepest).unwrap().values.len(), 1);
 
-        // A file the old, uncapped writer could have made: `depth` nested "k" keys.
+        // A file deeper than a write may create: `depth` nested "k" keys.
         let file = |depth: usize| {
             let mut b = vec![1u8];
             b.extend(node(&s("Registry"), 0, 0, 0, 0, 1));

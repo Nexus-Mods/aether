@@ -7,21 +7,21 @@
        "files": [{"path": "a.txt", "contents": "a"}]}
     ],
     "registry": {"keys": [
-      {"path": "\\Registry\\Machine\\Software\\Cairn\\Sub\\Deep", "values": [{"name": "v", "ty": 4, "data": {"hex": "07000000"}}]}
+      {"path": "\\Registry\\Machine\\Software\\Cabin\\Sub\\Deep", "values": [{"name": "v", "ty": 4, "data": {"hex": "07000000"}}]}
     ]}
   },
   "steps": [
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}, "note": "a parent made on the way to a created key is a plain presence (overlay.rs `ensure_chain`)"},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub\\Deep"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Nothing"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}, "note": "a parent made on the way to a created key is a plain presence (wire.md 4.3, \"Making a path exist\")"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Sub\\Deep"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Sub"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Nothing"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Elsewhere"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Real", "name": "x", "ty": 1, "data": {"hex": "6100"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}, "note": "a value written into a key the overlay lacks makes it a plain presence over the real key"},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Real"}, "expect": {"reply": {"version": 3, "state": "present", "below": false}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Made", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 4}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Made"}, "expect": {"reply": {"version": 4, "state": "created", "below": false}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Sub", "op": "reg-delete-key"}, "expect": {"reply": {"version": 5}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub\\Deep"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}, "note": "below a tombstoned ancestor"}
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Real", "name": "x", "ty": 1, "data": {"hex": "6100"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}, "note": "a value written into a key the overlay lacks makes it a plain presence over the real key"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Real"}, "expect": {"reply": {"version": 3, "state": "present", "below": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Made", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Made"}, "expect": {"reply": {"version": 4, "state": "created", "below": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Sub", "op": "reg-delete-key"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Sub"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Sub\\Deep"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}, "note": "below a tombstoned ancestor"}
   ]
 }

@@ -1,11 +1,9 @@
-//! Task 2 (gate 3): when the shim's FUSE client fails to attach to a
-//! configured director, the launch must abort loudly — not log the failure
-//! and let the game run fully un-virtualized, which is what the shim's `director` module
-//! returning `None` used to mean and nothing reported.
+//! When the shim's FUSE client fails to attach to a configured director, the
+//! launch must abort loudly, not log the failure and let the game run fully
+//! un-virtualized.
 //!
-//! `run_target_with_shim` is the exact function the deleted
-//! `vfs_embed::Session::launch` called (it only wraps the error into a `String`), so exercising it here
-//! proves the production launch path aborts, not just some lower-level detail.
+//! `run_target_with_shim` is the injector's launch path, so exercising it here
+//! proves the production launch aborts, not just some lower-level detail.
 #![allow(unsafe_code)]
 mod common;
 
@@ -18,11 +16,9 @@ use std::time::Duration;
 /// process must never have run: it is killed while its primary thread is
 /// still suspended, before a single byte of game code executes.
 ///
-/// Before this task, the shim's bootstrap discarded this
-/// exact error (`let _ = director::try_init_from_env();`), hooks installed
-/// anyway over an empty local snapshot, the ready file was written "ready"
-/// regardless, and the launch returned `Ok` with the process running fully
-/// un-virtualized. Nothing anywhere reported it.
+/// A bootstrap that discarded this error would install hooks anyway, write
+/// "ready" regardless, and return `Ok` with the process running fully
+/// un-virtualized, with nothing anywhere reporting it.
 #[test]
 fn fuse_init_failure_aborts_the_launch() {
     let pid = std::process::id();

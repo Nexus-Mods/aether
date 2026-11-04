@@ -7,8 +7,8 @@ use crate::seg::SharedSeg;
 /// `aether-win`'s `SharedMapping` (a named page-file section) implements it, and so
 /// does a Unix director's file mapping (an `mmap` over a real file, so a shim inside
 /// Wine and a native Linux director can share one ring). The host picks one by
-/// target and writes everything above that choice once; this trait is the
-/// meaning of "identical" that the two types used to share only by convention.
+/// target and writes everything above that choice once; this trait is what the
+/// two types have in common.
 pub trait RingBacking: Send + Sync {
     /// The mapped region as a `SharedSeg`.
     fn seg(&self) -> &SharedSeg;

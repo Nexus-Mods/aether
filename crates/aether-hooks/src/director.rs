@@ -28,38 +28,28 @@ pub fn global() -> Option<&'static FuseClient> {
     FUSE.get()
 }
 
-// `pub enum LargeStackError` and `pub fn on_large_stack` used to sit here: a
-// helper that ran ring I/O on an 8 MiB worker thread, because SkyrimSE's
-// primary thread ships with a 1 MiB PE stack and pipelined submit + bulk arena
-// copies overflowed it (`0xC0000409`). Its doc said “callers on game threads
-// must use this for open/read/getattr paths” — and it had **zero callers**,
-// workspace-wide, which made that sentence a standing instruction to use
-// machinery nobody uses.
-//
-// The stack problem is real and is solved elsewhere: `aether-inject` expands the
-// primary stack to 16 MiB before the game runs (see the note in `hook/file_open.rs` on
-// try_fuse_create), so ring ops run on the calling thread by design. The
-// helper is also not free to reintroduce casually: it would serialise every
-// op behind a thread spawn+join, and the worker would not inherit the
-// caller's `ShimIoGuard`, so its own I/O would be re-decided by our hooks.
-// Deleted rather than left standing as an instruction nothing follows.
+// Ring I/O runs on the calling thread. SkyrimSE's primary thread ships with a
+// 1 MiB PE stack, which pipelined submit + bulk arena copies overflow
+// (`0xC0000409`); `aether-inject` expands the primary stack to 16 MiB before
+// the game runs (see the note in `hook/file_open.rs` on try_fuse_create).
+// Running ring ops on a worker thread instead would serialise every op behind
+// a thread spawn+join, and the worker would not inherit the caller's
+// `ShimIoGuard`, so its own I/O would be re-decided by our hooks.
 
 /// Why [`try_init_from_env`] did not leave a live [`FuseClient`] installed.
 ///
 /// Both variants are fatal to the caller (`bootstrap.rs` aborts the launch on
-/// either). Standalone shim launches — no ring named at all, the shim
-/// composing the tree itself — used to be treated as a legitimate deployment, and plenty of this crate's own tests used to run
-/// exactly that way. That mode is retired: it is precisely the one in which a
-/// game runs completely un-virtualised while looking like a normal launch —
-/// the bypass this type exists to make impossible to ignore. The two cases
-/// are still kept distinct because their messages differ (a name for one, a
+/// either). A launch with no ring named at all is not a deployment: it is
+/// precisely the one in which a game runs completely un-virtualised while
+/// looking like a normal launch, the bypass this type exists to make
+/// impossible to ignore. The two cases are kept distinct because their messages differ (a name for one, a
 /// connection failure reason for the other), not because either is safe to
 /// swallow.
 #[derive(Debug)]
 pub enum FuseInitError {
     /// No ring was named — neither [`aether_env::RING_PATH`] nor
     /// [`aether_env::RING_SECTION`] is set. The process was not launched to talk
-    /// to a director — no longer a supported deployment.
+    /// to a director, which is not a supported deployment.
     NotConfigured,
     /// A ring was named but the client could not attach, or the post-connect
     /// heartbeat failed. The caller intended virtualisation and it silently
@@ -95,9 +85,8 @@ enum RingSource {
 ///
 /// An empty `VFS_RING_PATH` is treated as absent. Believing it would map `""`
 /// and fail with a confusing io error while a perfectly good section was
-/// named — the same trap as an empty `VFS_RING_SECTION` (see the Task 2 ruling
-/// in this increment's ledger). Neither set stays `None`, which the caller
-/// turns into [`FuseInitError::NotConfigured`] exactly as before.
+/// named, the same trap as an empty `VFS_RING_SECTION`. Neither set stays
+/// `None`, which the caller turns into [`FuseInitError::NotConfigured`].
 ///
 /// Split from [`ring_source_from_env`] so the precedence is testable without
 /// writing to the process environment — global mutable state every other test
@@ -140,9 +129,8 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     // Required, not defaulted: this names *which tree is being virtualised*, and
-    // there is no sensible guess. The default it used to carry pointed at a
-    // layout that no longer exists, so an unset root connected the client to a
-    // path nothing matched — surfacing much later as content simply missing.
+    // there is no sensible guess. A default would connect the client to a path
+    // nothing matches, surfacing much later as content simply missing.
     //
     // Reachable only once `source` above is `Some` — i.e. a director launch
     // was intended — so this is a `ConnectFailed`, not `NotConfigured`.
@@ -186,18 +174,17 @@ const IDLE_YIELD: core::time::Duration = core::time::Duration::from_millis(20);
 
 /// Wakes the director on submit, then spins for the response.
 ///
-/// The client used to be a plain `SpinNotifier`, whose `notify_server` is a
-/// no-op — so `server_ev` was never signalled and a director that had gone to
-/// sleep only noticed the request when its timed wait expired at the 15.6 ms
-/// timer tick. Measured 2026-08-12: 16 of 231 `NtQueryFullAttributesFile` calls
-/// stalled that way and owned ~93% of that hook's total time, with a 15.2 ms
-/// worst case.
+/// Without the wake (a `SpinNotifier`, whose `notify_server` is a no-op),
+/// `server_ev` is never signalled and a director that has gone to sleep only
+/// notices the request when its timed wait expires at the 15.6 ms timer tick.
+/// Measured: 16 of 231 `NtQueryFullAttributesFile` calls stalled that way and
+/// owned ~93% of that hook's total time, with a 15.2 ms worst case.
 ///
 /// Spinning for the *response* stays right: it arrives in microseconds, far
 /// below the cost of sleeping for it. Only a response that has **not** come
 /// within `aether_ipc::CLIENT_SPIN_BUDGET` stops spinning (`idle_client` below):
-/// by then the request is waiting on its provider, and since `ring_lock` went
-/// there can be one such waiter per game thread rather than one per process.
+/// by then the request is waiting on its provider, and there can be one such
+/// waiter per game thread (no lock serialises them, see `gate` below).
 ///
 /// **A null `server_ev` makes both notifications no-ops**, and that is the
 /// whole of [`RingSource::File`] mode. Under Wine a `SetEvent` targets a *Wine*
@@ -265,16 +252,13 @@ pub struct FuseClient {
     /// directory as an alias for root 0 — and the *only* under-root predicate
     /// the shim has.
     ///
-    /// **This used to be a pair of lowercased strings** (`root_lower` plus an
-    /// optional `stage_root_lower`) tested with `strip_prefix`. That was the
-    /// second of two under-root predicates in this tree, and it disagreed with
-    /// the first: `RootMap` canonicalises (device paths, volume GUIDs,
-    /// `GLOBALROOT`, UNC admin shares, junction aliases, 8.3 short names) and
-    /// the string test did none of it, so five alternate spellings of an
-    /// in-root path were classified by `RootMap::decide` but never *routed* by
-    /// this client — and a name-based attribute query on one of them reached
-    /// real disk. Stage 2b task 5 replaced the strings with the real thing, so
-    /// there is now one predicate rather than two that can drift.
+    /// **It is a `RootMap`, not a string prefix.** `RootMap` canonicalises
+    /// (device paths, volume GUIDs, `GLOBALROOT`, UNC admin shares, junction
+    /// aliases, 8.3 short names); a lowercased `strip_prefix` would do none of
+    /// it, so five alternate spellings of an in-root path would be recognised
+    /// as under a root but never *routed* by this client, and a name-based
+    /// attribute query on one of them would reach real disk. One predicate
+    /// answers both questions, so the two cannot drift.
     roots: RootMap,
     /// Every root's path as it was declared, aliases included, root first:
     /// the spelling a handle under that root is finally named with
@@ -294,8 +278,8 @@ pub struct FuseClient {
     /// What the cache's clock counts from.
     started: std::time::Instant,
     arena_len: usize,
-    /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
-    /// the ring still works, just with the old timer-tick latency — and null
+    /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened
+    /// (the ring still works, just with timer-tick latency) and null
     /// *by design* for a [`RingSource::File`] ring, where the director is a
     /// native Linux process no Wine event can reach.
     server_ev: HANDLE,
@@ -303,15 +287,14 @@ pub struct FuseClient {
     /// director's worker count, so that a worker is always left for an open,
     /// a stat or a listing — see `aether_ipc::concurrent`.
     ///
-    /// **There is no lock around a round trip.** There used to be
-    /// (`ring_lock`, held from claim to release by every method here), on the
-    /// belief that the ring was not safe for concurrent clients. It is: a slot
-    /// is claimed by compare-and-swap, its response is awaited on that slot
-    /// alone, and each slot has its own arena bank. What the lock actually did
-    /// was make every file operation of every game thread wait behind
-    /// whichever one was in flight — so one read stalled on the network froze
-    /// all the game's file I/O, and the director's workers sat idle. Each
-    /// thread now has its own requests in flight; only data requests (reads,
+    /// **There is no lock around a round trip.** The ring is safe for
+    /// concurrent clients: a slot is claimed by compare-and-swap, its response
+    /// is awaited on that slot alone, and each slot has its own arena bank. A
+    /// lock held from claim to release would make every file operation of
+    /// every game thread wait behind whichever one was in flight, so one read
+    /// stalled on the network would freeze all the game's file I/O while the
+    /// director's workers sat idle. Each thread has its own requests in
+    /// flight; only data requests (reads,
     /// writes, truncates and write-opens) are counted, and only against this
     /// gate.
     gate: DataGate,
@@ -395,7 +378,7 @@ impl FuseClient {
         // root of its own: a staged game resolves `Data\` relative to its own
         // executable, so those opens must reach the same provider as the
         // managed-root spelling. Expressed as an alias entry rather than as a
-        // separate prefix test, which is what it used to be.
+        // separate prefix test.
         let mut decls: Vec<(RootId, String)> = roots.to_vec();
         if let Some(stage) = stage_root_from_env() {
             decls.push((RootId::DEFAULT, stage));
@@ -582,8 +565,8 @@ impl FuseClient {
     /// Open a virtual path for WRITE. `create_flags` carries the
     /// `OpenFlags::CREATE`/`EXCL`/`TRUNC` bits derived from the caller's NT
     /// create-disposition (see `hook::open_create_flags`), folded in here
-    /// rather than sending `OpenFlags::WRITE` alone, which is what used to make
-    /// every brand-new file report `Status::NotFound` regardless of disposition.
+    /// rather than sending `OpenFlags::WRITE` alone, which would make every
+    /// brand-new file report `Status::NotFound` regardless of disposition.
     pub fn open_write(
         &self,
         root: RootId,
@@ -643,9 +626,8 @@ impl FuseClient {
             return self.payload_cap.saturating_sub(8) as usize;
         }
         let slots = self.geom.slot_count.max(1) as usize;
-        // Cap at 1 MiB per RTT — full bank (4–16 MiB) was used during the
-        // 0xC0000409 regression window; large copies + deep pipelines on the
-        // game thread (or long join windows) are not worth the risk yet.
+        // Cap at 1 MiB per round trip: large copies and deep pipelines on a
+        // game thread (or long join windows) are not worth the risk.
         (self.arena_len / slots).clamp(256 * 1024, 1024 * 1024)
     }
 
@@ -657,7 +639,7 @@ impl FuseClient {
     ///
     /// The chunking, the pipeline and the arena copy are
     /// `aether_ipc::read_fragmented` — there rather than here so the code a game
-    /// thread runs is the code the native tests and `ring-bench` run. This
+    /// thread runs is the code the native tests run. This
     /// only says how this ring is to be cut up.
     pub fn read_fragmented(&self, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let plan = ReadPlan {
@@ -913,11 +895,11 @@ impl FuseClient {
     /// the root, worked fine. It also fixes tools that resolve beside the
     /// executable — SKSE looks for `Data\SKSE\Plugins\` there.
     ///
-    /// This is now `RootMap`'s canonicalising answer rather than a lowercased
+    /// This is `RootMap`'s canonicalising answer rather than a lowercased
     /// `strip_prefix`, so a device-path, volume-GUID, `GLOBALROOT`, UNC
     /// admin-share, junction-alias or 8.3 short-name spelling of an in-root
-    /// path routes here exactly as `RootMap::decide` already classified it.
-    /// See the `roots` field for what that asymmetry cost.
+    /// path routes here exactly as `RootMap::decide` classifies it. See the
+    /// `roots` field.
     /// An alternate-data-stream suffix (`f.esp:s`) is carried through into the
     /// vpath, because `canonicalise` — correctly, for its own purpose —
     /// discards it: `f.esp:s` and `f.esp` are spellings of the same *file*,
@@ -985,8 +967,7 @@ fn wire_vpath(vpath: String) -> String {
 /// [`aether_env::VIRTUAL_DIR`] (root 0).
 ///
 /// Root 0 is seeded from `VIRTUAL_DIR` first so a session that declares no
-/// extra roots — every session before stage 2b — is byte-for-byte the old
-/// single-root case. An entry whose id will not parse is skipped rather than
+/// extra roots is the plain single-root case. An entry whose id will not parse is skipped rather than
 /// failing the launch; an entry naming id 0 replaces `VIRTUAL_DIR`'s path,
 /// because a caller that spelled root 0 explicitly meant it.
 pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
@@ -1050,10 +1031,8 @@ fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
 /// The staged EXE and its imports live there physically; everything else the
 /// game asks for beside it must come from the VFS.
 ///
-/// This read used the pre-rename name until 2026-08-13, so the alias silently
-/// resolved to nothing after the hollow removal renamed the writer. It did not
-/// bite because the same change moved the child's cwd to the managed root — but
-/// nothing reported it, which is why the name now comes from `aether-env`.
+/// The name comes from `aether-env`, so the reader and the writer cannot spell
+/// it differently.
 fn stage_root_from_env() -> Option<String> {
     let host = aether_env::text(aether_env::LAUNCH_IMAGE)?;
     let dir = std::path::Path::new(&host).parent()?;
@@ -1081,9 +1060,9 @@ mod tests {
 
     /// The unified predicate, exercised the way `FuseClient::vpath_under_root`
     /// exercises it (`RootMap::resolve` then join), without needing a live
-    /// ring. `vpath_under_root_norm` — the lowercased `strip_prefix` this
-    /// replaced — is gone; these are its cases, re-asserted against the
-    /// canonicalising predicate so nothing it used to answer regressed.
+    /// ring. These are the plain prefix cases, asserted against the
+    /// canonicalising predicate so it answers each of them as a prefix test
+    /// would.
     fn resolve(map: &RootMap, path: &str) -> Option<(RootId, String)> {
         let (_, stream) = aether_redirect::split_stream_suffix(path);
         map.resolve(path).map(|(r, c)| {
@@ -1142,8 +1121,8 @@ mod tests {
     /// root mapped, those fell through to bare disk, the plugin set came back
     /// empty, and world load hung while the main menu worked.
     ///
-    /// It is now an alias *entry* sharing root 0's id rather than a second
-    /// prefix test, so it must still resolve — and still answer with root 0,
+    /// It is an alias *entry* sharing root 0's id rather than a second prefix
+    /// test, so it must resolve, and answer with root 0,
     /// which is what routes the request to the same provider.
     #[test]
     fn stage_dir_aliases_the_virtual_root() {
@@ -1180,10 +1159,10 @@ mod tests {
         assert_eq!(resolve(&m, r"\??\C:\Windows\x.dll"), None);
     }
 
-    /// Stage 2b task 5: the client predicate answers with a root id, and a
-    /// second root routes to itself rather than to root 0. Before this the
-    /// client held one root path and one alias, so a path under a second root
-    /// was simply "not ours" and fell through to real disk.
+    /// The client predicate answers with a root id, and a second root routes
+    /// to itself rather than to root 0: a client holding one root path and one
+    /// alias would call a path under a second root "not ours" and send it to
+    /// real disk.
     #[test]
     fn a_second_root_routes_to_its_own_id() {
         let m = FuseClient::roots_only(&[
@@ -1239,15 +1218,15 @@ mod tests {
         assert_eq!(wire_vpath("data".to_string()), "data");
     }
 
-    /// **This is the unification, stated as a test.** The five alternate
-    /// spellings `RootMap` recognises and the old string predicate did not
-    /// must now route, not merely classify. A device-path spelling is the
+    /// **One predicate, stated as a test.** The five alternate spellings
+    /// `RootMap` recognises and a string prefix would not must route, not
+    /// merely classify. A device-path spelling is the
     /// cheapest of the five to build without touching the filesystem (the 8.3
     /// and junction cases need real on-disk state and are covered in
     /// `aether-redirect`'s own tests), so it stands in for the family here.
     ///
-    /// If the unification were reverted — the client going back to a
-    /// lowercased `strip_prefix` — this assertion fails: `strip_prefix` has no
+    /// If the client used a lowercased `strip_prefix` instead, this assertion
+    /// would fail: `strip_prefix` has no
     /// device table and would answer `None`.
     #[test]
     fn the_client_predicate_recognises_the_spellings_only_rootmap_used_to() {
@@ -1318,10 +1297,9 @@ mod tests {
 
     /// Serializes the one test below that writes `VFS_RING_PATH` /
     /// `VFS_RING_SECTION`. Process environment is global mutable state every
-    /// other test in this binary shares — the same hazard, and the same
-    /// remedy, as `vfs-embed`'s `LAUNCH_ENV_LOCK` (a `static` cannot be shared
-    /// across test binaries, so this is that established pattern applied here
-    /// rather than a second convention).
+    /// other test in this binary shares (a `static` cannot be shared across
+    /// test binaries, so each binary that writes the environment has its own
+    /// lock).
     static RING_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// **The precedence, as a test.** With both variables set the client must
@@ -1414,7 +1392,7 @@ mod tests {
             "the named-section path is unchanged when no path is given"
         );
         // Neither set stays `None`, which `try_init_from_env` turns into
-        // `NotConfigured` exactly as before.
+        // `NotConfigured`.
         assert_eq!(ring_source(None, None), None);
         // An empty `VFS_RING_PATH` is absent, not a path. Believing it would
         // map `""` and fail with a confusing io error while a perfectly good

@@ -1,13 +1,9 @@
-//! The write seal against a provider graph with **no writable mount at all** (gate 4, Task 5).
+//! The write seal against a provider graph with **no writable mount at all**.
 //!
-//! The name is historical: this was the write seal with no shim-local overlay
-//! configured, the configuration in which a fall-through was not a misplacement
-//! but a genuine escape — the shim-local engine answered `PassThrough` for a
-//! write with no overlay, so the create was carried out by the real
-//! `NtCreateFile` and a real file appeared **physically under the managed
-//! root**. The shim-local overlay is gone (task C8), so there is one
-//! configuration left, and the claim is unchanged: a write the director refuses
-//! creates nothing on the real filesystem under the root.
+//! A write the director refuses creates nothing on the real filesystem under
+//! the root: a fall-through here would have the real `NtCreateFile` carry out
+//! the create, and a real file would appear **physically under the managed
+//! root**.
 
 use crate::fakedirector;
 

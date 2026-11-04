@@ -1,6 +1,8 @@
 # An exact version, not "stable": the toolchain is part of what the natives
-# are built from, and this file is under rust/, so a toolchain bump changes
-# the natives key (bin/natives-key.ps1) and rebuilds them. Bump it on purpose.
+# are built from, and this file is an input of the natives key
+# (bin/natives-key.ps1), so a toolchain bump changes the key and rebuilds
+# them. Its standard library's Unicode version is the case fold's
+# (aether-casefold, docs/wire.md 3.2). Bump it on purpose.
 [toolchain]
 channel = "1.99.1"
 targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]

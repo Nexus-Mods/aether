@@ -9,10 +9,10 @@ The wire is unchanged: the wire version (4), the golden vectors,
 `contract/env.json` and `contract/artifacts.json` are as in 1.0.0. The shim
 sends a director that follows `docs/wire.md` the same requests, except where
 an entry below says otherwise (a `CreateDirectoryW` is a GETATTR then a
-MKDIR, and starting a managed child process is two requests). What the shim does when
-a director answers outside the contract is written down (`docs/wire.md`
-3.7), and the fixes below are what a program sees when one does. The shim's code changed, so the natives key changes and the
-next release signs new natives.
+MKDIR, and starting a managed child process is two requests). What the shim
+does when a director answers outside the contract is written down
+(`docs/wire.md` 3.7), and several of the fixes below are what a program sees
+when one does.
 
 ### Fixed
 
@@ -54,17 +54,23 @@ next release signs new natives.
     succeeds (the shim hooks `NtUnmapViewOfSectionEx`).
   - A page fill that fails or comes back short is asked again, up to three
     more times, and then raises `STATUS_IN_PAGE_ERROR`; it is never filled
-    with zeros. An eager section or a `SEC_IMAGE` section whose read fails or
-    comes back short fails `STATUS_UNSUCCESSFUL`. A demand-paged chunk is
+    with zeros. An eager section whose read fails or comes back short fails
+    `STATUS_UNSUCCESSFUL`; a `SEC_IMAGE` section's read is asked again, up to
+    three more times, before it does. A demand-paged chunk is
     readable only once its fill is in place, and a region whose own
     reservation cannot be had takes private memory (`docs/wire.md` 3.4.4).
   - A mapping larger than the address space of a 32-bit process fails
     `STATUS_SECTION_TOO_BIG`; sizes are 64-bit there.
+- The ring: a header whose `payload_cap` is within 32 bytes of `2^32` is
+  refused by a 32-bit client too (`docs/wire.md` 2.4). Its stride wrapped in
+  32-bit arithmetic, so such a ring was opened with slots too small for the
+  cap it stated.
 - The shim, reads:
   - A bulk READ reply is copied only from its own slot's bank, found from
-    `VFS_ARENA_OFFSET`, and only as many bytes as were asked; a reply that
-    names other memory, or more bytes than the request, is a failed read and
-    not file data.
+    `VFS_ARENA_OFFSET` (which the shim now reads, so it must be accurate
+    when set: `docs/wire.md` 5.3), and only as many bytes as were asked; a
+    reply that names other memory, or more bytes than the request, is a
+    failed read and not file data.
   - An arena smaller than `docs/wire.md` 2.6 allows (256 KiB times the slot
     count) is not used: reads are inline and answered in full.
   - Nothing under a path the process deleted or renamed is cached again,
@@ -118,7 +124,8 @@ next release signs new natives.
   storm, random small reads, large listings, saves, sequential bulk reads)
   through the same adapter as `run`, and reports each opcode's latency over
   the ring's floor, measured on `aether-conform null-adapter`, a director
-  that answers every request with the smallest valid reply. `--clients`,
+  that answers every request with the smallest valid reply and each READ
+  with the bytes the director's reply gave, in the same form. `--clients`,
   `--quick`, `--out`, `--baseline` and `--fail-over` are described in
   `docs/conformance.md` and `docs/benchmarks.md`.
 - `aether-shimbench`, which times eight kinds of Win32 call natively and under
@@ -130,10 +137,10 @@ next release signs new natives.
   allocations of each hooked call, checked on every push;
   `AETHER_COSTS_UPDATE=1` rewrites it.
 - `aether-fuzz` and `fuzz/`: cargo-fuzz targets for the reply and request
-  decoders, the shim's config, the ring's response slot, directory records and
-  the `VFS_*` environment, replayed on stable Rust on every push and fuzzed
-  weekly by `fuzz.yml`. `bench.yml` compares a base commit with the head on
-  one runner, by hand.
+  decoders, the shim's config, the ring's header and response slot, directory
+  records and the `VFS_*` environment, replayed on stable Rust on every push
+  and fuzzed weekly by `fuzz.yml`. `bench.yml` compares a base commit with
+  the head on one runner, by hand.
 - `aether_rpc::Tap`, `TapAction`, `serve_tapped` and `serve_one_tapped`: a
   hook on the serve loop that sees each request and may answer it or change
   its reply before it is sent.

@@ -4,17 +4,16 @@ members = [
   # The case fold every name crosses the ring in, shared by file paths
   # (aether-redirect) and registry keys (aether-registry). No dependencies.
   "crates/aether-casefold",
-  # Pure PE byte parsing, extracted from aether-inject so the director can stage
-  # Windows executables on any host OS. No OS API and no dependencies: a PE is
-  # a file format, not a platform. See
-  # docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
+  # Pure PE byte parsing, so a director can stage Windows executables on any
+  # host OS. No OS API and no dependencies: a PE is a file format, not a
+  # platform.
   "crates/aether-pe",
   "crates/aether-env",
   "crates/aether-protocol",
   # Dev-only helpers shared by integration tests (stored-zip writer, artefact locator).
   "crates/aether-testkit",
   # Registry overlay model (paths, copy-on-write tree). Portable: depends only on
-  # aether-casefold. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
+  # aether-casefold.
   "crates/aether-registry",
   "crates/aether-ipc",
   # A ring in a memory-mapped file (aether_ipc::RingBacking), for native tools on any OS.

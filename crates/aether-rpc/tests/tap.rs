@@ -306,6 +306,45 @@ fn a_payload_past_the_cap_becomes_the_overflow_status() {
     });
 }
 
+/// What `on_sent` saw: the status and payload length the ring sent.
+#[derive(Clone, Default)]
+struct Sent(Arc<Mutex<Vec<(i32, usize)>>>);
+
+impl Tap for Sent {
+    fn on_sent(&mut self, _: &RequestView<'_>, status: i32, payload: &[u8]) {
+        self.0.lock().unwrap().push((status, payload.len()));
+    }
+}
+
+#[test]
+fn on_sent_sees_what_the_client_gets_overflow_included() {
+    let sent = Sent::default();
+    let tap = (sent.clone(), Replace(0, vec![0xAB; CAP as usize + 1]));
+    with_tap(tap, |c, _| {
+        let (status, reply) = call(c, &getattr("x"));
+        assert_eq!((status, reply.len()), (i32::MIN, 0));
+    });
+    let sent2 = Sent::default();
+    with_tap(sent2.clone(), |c, _| {
+        call(c, &getattr("abc"));
+    });
+    assert_eq!(*sent.0.lock().unwrap(), [(i32::MIN, 0)]);
+    assert_eq!(*sent2.0.lock().unwrap(), [(0, 18)]);
+}
+
+#[test]
+fn the_ring_s_sent_rule_is_one_function() {
+    // What `server_complete` sends for a reply of each length.
+    assert_eq!(
+        aether_ipc::ring::sent(CAP, 5, CAP as usize),
+        (5, CAP as usize)
+    );
+    assert_eq!(
+        aether_ipc::ring::sent(CAP, 5, CAP as usize + 1),
+        (i32::MIN, 0)
+    );
+}
+
 /// Appends its name to a shared log in each hook.
 struct Named(&'static str, Arc<Mutex<Vec<String>>>);
 

@@ -238,7 +238,8 @@ pub fn serve_one_tapped<N: Notifier, D: Director + ?Sized, T: Tap + ?Sized>(
     tap: &mut T,
     scratch: &mut Scratch,
 ) -> Result<bool, IpcError> {
-    let registry_cap = (server.geom().payload_cap as usize).saturating_sub(8);
+    let payload_cap = server.geom().payload_cap;
+    let registry_cap = (payload_cap as usize).saturating_sub(8);
     let Scratch {
         req,
         reply,
@@ -256,6 +257,9 @@ pub fn serve_one_tapped<N: Notifier, D: Director + ?Sized, T: Tap + ?Sized>(
             TapAction::Answer { status } => status,
         };
         tap.on_reply(view, &mut status, out);
+        // What `server_complete` is about to send, by the ring's own rule.
+        let (sent, len) = aether_ipc::ring::sent(payload_cap, status, out.len());
+        tap.on_sent(view, sent, &out[..len]);
         status
     })
 }
@@ -317,6 +321,16 @@ pub trait Tap {
     fn on_reply(&mut self, view: &RequestView<'_>, status: &mut i32, payload: &mut Vec<u8>) {
         let _ = (view, status, payload);
     }
+
+    /// Sees what the ring sends, after every tap's [`Tap::on_reply`]: the
+    /// status and payload as `aether_ipc::ring::sent` decides them, so a
+    /// reply past `payload_cap` is the overflow `i32::MIN` with no payload
+    /// (`docs/wire.md` 2.5), as the client gets it. Not called for a request
+    /// whose director or tap panicked (the ring answers it
+    /// `Status::IoError`).
+    fn on_sent(&mut self, view: &RequestView<'_>, status: i32, payload: &[u8]) {
+        let _ = (view, status, payload);
+    }
 }
 
 /// What a [`Tap`] does with a request.
@@ -346,6 +360,11 @@ impl<A: Tap, B: Tap> Tap for (A, B) {
     fn on_reply(&mut self, view: &RequestView<'_>, status: &mut i32, payload: &mut Vec<u8>) {
         self.1.on_reply(view, status, payload);
         self.0.on_reply(view, status, payload);
+    }
+
+    fn on_sent(&mut self, view: &RequestView<'_>, status: i32, payload: &[u8]) {
+        self.1.on_sent(view, status, payload);
+        self.0.on_sent(view, status, payload);
     }
 }
 

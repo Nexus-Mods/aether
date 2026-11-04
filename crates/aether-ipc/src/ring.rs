@@ -392,12 +392,10 @@ pub fn server_complete(
         ST_ABANDONED => return Ok(drain(st)),
         _ => return Ok(Completion::Stale),
     }
-    let (status, len) = if resp.len() > geom.payload_cap as usize {
-        (i32::MIN, 0usize) // overflow sentinel; bulk arena deferred
-    } else {
-        seg.write_bytes(geom.payload_off(slot), resp);
-        (status, resp.len())
-    };
+    let (status, len) = sent(geom.payload_cap, status, resp.len());
+    if len > 0 {
+        seg.write_bytes(geom.payload_off(slot), &resp[..len]);
+    }
     seg.write_i32(base + SH_STATUS, status);
     seg.write_u32(base + SH_PAYLOAD_LEN, len as u32);
     seg.write_u32(base + SH_ACK, req_id as u32);
@@ -411,6 +409,18 @@ pub fn server_complete(
         // The client gave up while the response was being written.
         Err(ST_ABANDONED) => Ok(drain(st)),
         Err(_) => Ok(Completion::Stale),
+    }
+}
+
+/// The status and payload length [`server_complete`] sends for a reply of
+/// `len` bytes with `status`: as given, or the overflow sentinel `i32::MIN`
+/// with no payload when `len` is past `payload_cap` (`docs/wire.md` 2.5).
+/// Public so a tap that records what the client got applies the same rule.
+pub fn sent(payload_cap: u32, status: i32, len: usize) -> (i32, usize) {
+    if len > payload_cap as usize {
+        (i32::MIN, 0) // overflow sentinel; bulk arena deferred
+    } else {
+        (status, len)
     }
 }
 

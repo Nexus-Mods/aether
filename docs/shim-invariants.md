@@ -31,11 +31,10 @@ hangs the process permanently.
 A thread terminated while holding a `std::sync::Mutex` leaves it locked forever, and not
 poisoned, so every `if let Ok(..)` in this crate is no defence against it. At process exit
 Windows terminates every thread but one before `DLL_PROCESS_DETACH`, and the surviving thread
-then closes handles on its way out. A blocking `lock` in the close path then waits on a dead
-frame: traced with `VFS_SHIM_BREADCRUMB`, the shape is one thread, `current=NtClose`, the
-close hook recorded as the holder, zero CPU, and immune to `TerminateProcess`. `aether_shim`'s
-own `DllMain` records the same hazard for a different lock: "one killed mid-write leaves a lock
-the flush waits on forever".
+then closes handles on its way out. A blocking `lock` in the close path would then wait on a
+dead frame for ever: one thread, zero CPU, immune to `TerminateProcess`. `aether_shim`'s own
+`DllMain` keeps the same rule for a different lock: "one killed mid-write leaves a lock the
+flush waits on forever".
 
 `try_lock` cannot deadlock. Losing a reclamation is harmless: the entry is keyed by a handle
 value that is about to become invalid, `opened_as` is bounded by `HANDLE_PATHS_MAX` against
@@ -117,9 +116,7 @@ kernel is never called for them. The open either gets a synthetic handle from th
 sealed.
 
 What needs the on-disk EXE is outside this hook: `CreateProcess` of the host image (the staged
-copy), and Steam's own path association from a separate, un-injected process. Steam does not
-compare the in-memory image against the on-disk PE (measured: the whole loaded image overwritten
-with zip PE bytes at a relocated base, and DRM still verified).
+copy).
 
 That these names are served by the director is asserted by
 `director_overlay/drm_names_route_to_director.rs` (each name is `Routed`, and the bytes come from
@@ -242,8 +239,8 @@ opinion about every delete in the process would break the rest of it.
 
 From `hook/close.rs` and `hook/file_open.rs`.
 
-**A third delete route.** Wine's `DeleteFileW` (kernelbase) is not a disposition set-info: it is
-`NtCreateFile` with `FILE_DELETE_ON_CLOSE` followed by `NtClose`. The director has no
+**A third delete route.** A delete can be an `NtCreateFile` with `FILE_DELETE_ON_CLOSE` followed
+by `NtClose` rather than a disposition set-info. The director has no
 delete-on-close of its own, so the shim keeps it: `route_open` records the flag on the synthetic
 handle it returns (`synth_file::set_delete_on_close`), and `close_hook_body` sends
 `Opcode::Delete` for the handle's path (the path it is named by when it closes, so after a rename
@@ -450,8 +447,7 @@ to parse, which is worse than an abort: a crash at least stops at the fault.
 It is `STATUS_UNSUCCESSFUL` and not something more specific for the opposite reason. A panic
 means the shim does not know what happened, and every *specific* status is a claim it is not
 entitled to make: returning `STATUS_OBJECT_NAME_NOT_FOUND` tells the game the file does not exist,
-and Skyrim will bake that into a load order and carry on without the plugin;
-`STATUS_ACCESS_DENIED` invites a retry loop; `STATUS_NO_MORE_FILES` from an enumeration hook
+and it may carry on without it; `STATUS_ACCESS_DENIED` invites a retry loop; `STATUS_NO_MORE_FILES` from an enumeration hook
 silently truncates a directory listing. Generic failure is the only answer that says "this
 operation did not happen" without also asserting why.
 
@@ -473,7 +469,7 @@ From `hook/entry.rs`.
 Run one hook body with its panic contained at the `extern "system"` boundary, and report
 `on_panic`'s value to the caller if it faults.
 
-**What this changes, and what it does not.** Measured with `panic = "unwind"`: a panic inside an
+**What this changes, and what it does not.** With `panic = "unwind"`, a panic inside an
 `extern "system"` fn runs the `Drop` impls of every Rust frame below the boundary, in order, and
 *then* hits rustc's forced `core::panicking::panic_cannot_unwind` and takes the process down with
 `0xC0000409`. The wrapper does not change which destructors run (the same unwind runs the same
@@ -564,14 +560,12 @@ file:
 3. `NtQueryInformationFile(FileNormalizedNameInformation)` (class 48), appended to the drive
    letter that prefix maps to.
 
-Spoof any one of those alone and the subtraction in (2) slices at the wrong offset. Measured with
-class 1 spoofed and class 9 left truthful: ObjectName `\Device\HarddiskVolume3\vfstmp\vfs-diag\mod.esp`
-(53 chars) minus the backing file's class 9 `\vfstmp\vfs-diag-backing\backing_blob.dat` (47 chars)
-gives a 6-character "device" of `\Devic`, which maps to no drive, so the call fails with
-`ERROR_FILE_NOT_FOUND`.
+Spoof any one of those alone and the subtraction in (2) slices at the wrong offset, leaving a
+"device" that maps to no drive, so the call fails with `ERROR_FILE_NOT_FOUND`.
 
 The rule is therefore all three or none: classes 1, 9 and 48 describe the same path, and the
 subtraction lands on the real device prefix because both operands move by the same amount.
+`file_hooks/hook_identity.rs` holds `GetFinalPathNameByHandleW` to the virtual path.
 
 ### `qobj_hook_body`: the prefix convention, discovered
 
@@ -582,16 +576,9 @@ the VIRTUAL path, in the prefix convention this host uses. Every other class, an
 do not track, passes through untouched: this API answers about events, mutexes, sections and
 registry keys too, and inventing a name for one of those would break unrelated Windows APIs.
 
-Why the convention is discovered rather than assumed: Windows returns
-`\Device\HarddiskVolume3\...` while Wine returns `\??\C:\...`, and `QueryDosDeviceW("C:")` reports
-`\Device\HarddiskVolume1` on Wine, disagreeing with Wine's own `NtQueryObject`. So building a
-device path from it would emit a form Wine never produces. Instead the trampoline runs first and
-its answer's prefix is reused.
-
-This matters on Windows too, not only on Wine. `GetFinalPathNameByHandleW` routes through
-`NtQueryInformationFile(FileNormalizedNameInformation)` on Windows (hooked by [`qif_hook_body`]),
-but any caller reaching `NtQueryObject` directly would get the backing path; Wine routes
-`GetFinalPathNameByHandleW` through this entry point itself.
+The prefix convention is the host's, not assumed: the trampoline runs first and its answer's
+prefix is reused, so the virtual name is in whatever form the host gives a real file's.
+`file_hooks/identity_objectname.rs` holds the virtual name and the host's size-probe contract.
 
 ## Child processes fail closed
 
@@ -625,11 +612,9 @@ reporting a bootstrap failure, and no ready signal once `LoadLibrary` has return
 
 **Remote injection is the only activation.** The target and each child are created suspended, get
 the shim by remote `LoadLibrary`, and only then run (or, for a child its caller created suspended,
-are left suspended for the caller to resume). Native Windows and Wine run the same activation. This
-is what `skse64_loader.exe` and the `SkyrimSE.exe` it creates suspended need: SKSE injects its own
-DLL into the suspended child after the shim is in. No image is edited, on disk or in memory:
-SkyrimSE's Steam DRM rejects an image whose import table was patched ("Application load error
-3:0000065432"). `VFS_FORCE_INJECTION` is accepted and has no effect.
+are left suspended for the caller to resume). A caller that asked for a suspended child gets it
+suspended, with the shim already in. No image is edited, on disk or in memory.
+`VFS_FORCE_INJECTION` is accepted and has no effect.
 
 **Nothing is skipped on purpose.** The hook does not exempt system processes, helpers or anything
 else; `VFS_INJECT_*` switches (`INJECT_CWD`, `INJECT_STEAM_HELPER`) belong to the top-level
@@ -643,8 +628,7 @@ like that needs to run, it needs an explicit, named exemption, not a silent resu
 launch's Job Object even when it asked to leave, and the launch waits for it and stops it like any
 other. A child that escaped would keep doing file I/O through the VFS after the host saw the launch
 end. The job allows no breakaway, so the flag would otherwise make the `CreateProcess` fail with
-`ERROR_ACCESS_DENIED`; stripped, it cannot. Under Wine, or for a launch with no job, the child
-stays in its parent's job, if any.
+`ERROR_ACCESS_DENIED`; stripped, it cannot.
 
 **What the child inherits.** After a shim has written its own ready state it drops
 `VFS_SHIM_READY` from its environment (`finish_ready_handshake`), so descendants do not overwrite
@@ -659,9 +643,8 @@ never answers is refused at the timeout.
 **The timeout.** The parent waits as long as the top-level launch did, for each of its two waits
 (sentinel, ready). `run_target_with_shim` writes `RunConfig::ready_timeout` into
 `VFS_READY_TIMEOUT_SECS` in the target's environment; the shim reads it back with
-`aether_env::ready_timeout_secs()` (default `DEFAULT_READY_TIMEOUT_SECS`, 180). A launch's own
-timeout therefore applies to SkyrimSE.exe launched by `skse64_loader.exe`, which a cold Wine
-prefix can need. A launcher that creates a child with an explicit environment block lacking the
+`aether_env::ready_timeout_secs()` (default `DEFAULT_READY_TIMEOUT_SECS`, 180), so a launch's own
+timeout applies to every child it starts. A launcher that creates a child with an explicit environment block lacking the
 variable gets the default (the same launcher would also lose `VFS_SHIM_CONFIG`).
 
 **Tests.** `aether-hooks/tests/diagnostics/child_inject_fails_closed.rs`: the spawn fails, no child
@@ -669,8 +652,7 @@ remains, the child never ran.
 
 ## Lock semantics
 
-`NtLockFile` on a synthetic handle is granted without being held. This is a known gap, accepted
-because the alternative is unreadable INI files.
+`NtLockFile` on a synthetic handle is granted without being held. This is a known gap.
 
 ### `lock_hook_body`: a lock that is granted but not held
 
@@ -680,12 +662,8 @@ From `hook/file_io.rs`.
 
 **Why this exists.** A synthetic handle is a tagged value in `synth_file`'s table, not a kernel
 file object, so any NT call without a detour hands that value to the real kernel and gets
-`STATUS_INVALID_HANDLE` back. `GetPrivateProfileStringW` (how Skyrim loads `SkyrimPrefs.ini`)
-issues `NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile → NtUnlockFile → NtClose`,
-and with `NtLockFile` unhooked the sequence stops dead at step 2. The API then returns the
-*caller's default* for every key, so the game receives no INI data at all: not stale data, not
-real-disk data. `WritePrivateProfileStringW` fails the same way one operation earlier. Neither
-shows up as a read or write at the director; both show up as an open and nothing else.
+`STATUS_INVALID_HANDLE` back. A caller that locks a range before reading or writing it would fail
+at the lock, and never read or write at all.
 
 **The deliberate semantic gap.** This grants a lock that does not exist. Nothing is recorded,
 nothing conflicts, and two callers asking for the same exclusive byte range both get
@@ -694,18 +672,17 @@ nothing conflicts, and two callers asking for the same exclusive byte range both
 - Inside a sealed managed root the director is the only route to the bytes, and there is no
   cross-process byte-range locking anywhere in the design, so there is no lock table for a real
   answer to consult.
-- Refusing instead (`STATUS_LOCK_NOT_GRANTED`) would leave the profile APIs exactly as broken as an
+- Refusing instead (`STATUS_LOCK_NOT_GRANTED`) would leave such a caller exactly as broken as an
   unhooked call does; it swaps a wrong status for a different wrong status.
 
 **Do not read that as "there is only one writer".** There is not, by design: `cpiw_hook` propagates
 injection into child processes, so a launcher and a game (or a game and a mod manager's helper) are
-routinely in one session. And the API that needs this is the worst case for a fake lock:
-`WritePrivateProfileString` is a read-modify-write, and the lock it takes here is exactly what stops
-two of those from losing each other's updates. Two injected writers on one INI will both be granted
-the same exclusive range and one update will disappear.
+routinely in one session. A read-modify-write takes its lock to stop two writers losing each
+other's updates; two injected writers on one file are both granted the same exclusive range, and
+one update can disappear.
 
-That is a real hole, not a theoretical one; it is accepted because the alternative is every INI
-staying unreadable, not because it is harmless. Closing it needs a byte-range table in the
+That is a real hole; it is accepted because the alternative is a file the caller cannot read at
+all, not because it is harmless. Closing it needs a byte-range table in the
 director, the only component both processes share. Meanwhile `hookstats::note_synthetic_lock`
 counts every grant by path, so the contention shows up in a report instead of only in corrupted
 settings.

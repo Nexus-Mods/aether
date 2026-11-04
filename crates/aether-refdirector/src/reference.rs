@@ -79,7 +79,7 @@
 //! registry and [`Tally`]. Each handle has its own reply buffer.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -306,6 +306,9 @@ struct Graph {
     /// The table keys held only in a read-only lower
     /// ([`Reference::with_lower`]). Locked after `dirs` and `files`.
     lower: Mutex<HashSet<String>>,
+    /// [`Reference::reissue_fh`]: the closed handles to issue again, lowest
+    /// first; `None` when off.
+    reissue: Option<Mutex<BTreeSet<u64>>>,
 }
 
 impl Graph {
@@ -379,7 +382,11 @@ impl Graph {
     }
 
     fn issue(&self, vpath: String, append: bool, tally: &Tally) -> u64 {
-        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+        let reused = self
+            .reissue
+            .as_ref()
+            .and_then(|r| r.lock().unwrap().pop_first());
+        let fh = reused.unwrap_or_else(|| self.next_fh.fetch_add(1, Ordering::Relaxed));
         Tally::bump(&tally.opened, &vpath);
         self.handles
             .lock()
@@ -527,6 +534,7 @@ impl Reference {
                 staging: HashMap::new(),
                 mtimes: HashMap::new(),
                 lower: Mutex::new(HashSet::new()),
+                reissue: None,
             }),
             tally: Arc::new(Tally::default()),
             read_buf: Vec::new(),
@@ -698,6 +706,16 @@ impl Reference {
         self
     }
 
+    /// An answer other directors give: a closed handle is issued again, the
+    /// lowest first, before a new one is counted up. An `fh` need only be
+    /// unique among open handles (`docs/wire.md` 3.4.3), so a client must
+    /// not carry anything over from a handle closed before. Off by default
+    /// (handles only count up); conformance never sets it.
+    pub fn reissue_fh(mut self) -> Reference {
+        self.building().reissue = Some(Mutex::new(BTreeSet::new()));
+        self
+    }
+
     /// An answer other directors give: MKDIR of a directory that exists
     /// under a writable prefix is `Status::Ok`, as Cairn's writable providers
     /// answer, instead of `Status::Exists` (`docs/wire.md` 3.4.9 allows
@@ -821,7 +839,6 @@ impl Reference {
             if !is_file {
                 return Err(Status::IoError);
             }
-            g.lower.lock().unwrap().remove(&from);
         }
         // A root is a directory too, though `dirs` does not hold it: within a
         // root it was refused above, across roots it is `IsDir` here.
@@ -837,6 +854,8 @@ impl Reference {
         if to_key != from {
             files.remove(&to_key);
         }
+        // Nothing below fails: the source, if lower-only, is copied up now.
+        g.lower.lock().unwrap().remove(&from);
         g.copy_up(&to_key);
         if is_file {
             let mut e = files.remove(&from).expect("just checked");
@@ -1327,6 +1346,9 @@ impl Director for Reference {
         let Some(h) = self.graph.handles.lock().unwrap().remove(&fh) else {
             return Err(Status::BadFh);
         };
+        if let Some(r) = &self.graph.reissue {
+            r.lock().unwrap().insert(fh);
+        }
         Tally::bump(&self.tally.closed, &h.vpath);
         Ok(())
     }

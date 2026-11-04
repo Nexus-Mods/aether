@@ -30,6 +30,6 @@ mod null;
 mod reference;
 pub mod tree;
 
-pub use harness::{Fault, Faults, Match, OpenEdit, Override, Recorded, Recorder};
+pub use harness::{serve_threads, Fault, Faults, Match, OpenEdit, Override, Recorded, Recorder};
 pub use null::Null;
 pub use reference::{key, pattern, ReadStyle, Reference, Tally, BULK_THRESHOLD, MAX_FILE_LEN};

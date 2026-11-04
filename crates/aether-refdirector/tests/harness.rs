@@ -3,19 +3,19 @@
 //! in an OPEN reply, and the reference's test knobs. The tap chain is the one
 //! the shim's fake director uses: `(recorder, (overrides, faults))`.
 
-use aether_ipc::{ring, DataArena, OwnedSeg, RingClient, RingServer, SpinNotifier};
+use aether_ipc::{ring, IpcError, OwnedSeg, RingClient, SharedSeg, SpinNotifier};
 use aether_protocol::{
     Opcode, OpenFlags, OpenResp, ReadReply, Reply, Request, RequestFlags, RootId, Status,
 };
 use aether_refdirector::harness::{
-    drop_last_name, set_reserved_open_flag_bits, ArenaShape, BulkLie, Fault, Faults, Match,
-    OpenEdit, Override, Recorder,
+    drop_last_name, serve_threads, set_reserved_open_flag_bits, ArenaShape, BulkLie, Fault, Faults,
+    Match, OpenEdit, Override, Recorder, MAX_DELAY,
 };
 use aether_refdirector::{pattern, ReadStyle, Reference, BULK_THRESHOLD};
-use aether_rpc::{serve_tapped, CallError, Client};
+use aether_rpc::{CallError, Client};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const SLOTS: u32 = 4;
 const CAP: u32 = 4096;
@@ -49,36 +49,50 @@ type C<'a> = Client<'a, SpinNotifier>;
 /// Serves `d` behind `(recorder, (overrides, faults))` on a fresh ring with
 /// an arena, and runs `f` with a typed client on it.
 fn served<R>(d: Reference, f: impl FnOnce(&C<'_>, &Rig) -> R) -> R {
+    served_on(1, Recorder::new(), d, |c, rig, _| f(c, rig))
+}
+
+/// [`served`] on `threads` serve threads ([`serve_threads`]), recording with
+/// `recorder`; `f` also gets the segment, for clients of its own.
+fn served_on<R>(
+    threads: usize,
+    recorder: Recorder,
+    d: Reference,
+    f: impl FnOnce(&C<'_>, &Rig, &SharedSeg) -> R,
+) -> R {
     let owned = Arc::new(OwnedSeg::new(ring_len() + SLOTS as usize * BANK));
     ring::init(owned.seg(), SLOTS, CAP).unwrap();
     let seg = owned.clone();
     d.publish_generation(move |g| ring::publish_reg_generation(seg.seg(), g));
     let rig = Rig {
-        recorder: Recorder::new(),
+        recorder,
         faults: Faults::new(CAP).with_arena(arena_shape()),
         overrides: Override::new(),
     };
-    let mut tap = (
+    let tap = (
         rig.recorder.clone(),
         (rig.overrides.clone(), rig.faults.clone()),
     );
     let stop = AtomicBool::new(false);
+    let spin = || SpinNotifier;
     std::thread::scope(|s| {
-        let served = s.spawn(|| {
-            let server = RingServer::new(owned.seg(), SpinNotifier).unwrap();
-            let arena = DataArena::new(
-                owned.seg(),
-                ring_len(),
-                SLOTS as usize * BANK,
-                SLOTS as usize,
-            );
-            let mut d = d;
-            serve_tapped(&server, Some(&arena), &mut d, &mut tap, &stop)
-        });
-        struct Stop<'s>(&'s AtomicBool);
+        let servers = serve_threads(
+            s,
+            threads,
+            owned.seg(),
+            Some(arena_shape()),
+            &spin,
+            &d,
+            &tap,
+            &stop,
+        );
+        // Stops the servers however `f` ends, and lets a held delay go, so
+        // a failed assertion fails the test instead of hanging the scope.
+        struct Stop<'s>(&'s AtomicBool, &'s Faults);
         impl Drop for Stop<'_> {
             fn drop(&mut self) {
                 self.0.store(true, Ordering::Release);
+                self.1.clear();
             }
         }
         let client = Client::new(
@@ -87,10 +101,12 @@ fn served<R>(d: Reference, f: impl FnOnce(&C<'_>, &Rig) -> R) -> R {
                 .with_deadline(Duration::from_secs(10)),
         );
         let out = {
-            let _stop = Stop(&stop);
-            f(&client, &rig)
+            let _stop = Stop(&stop, &rig.faults);
+            f(&client, &rig, owned.seg())
         };
-        served.join().unwrap().unwrap();
+        for t in servers {
+            t.join().unwrap().unwrap();
+        }
         out
     })
 }
@@ -459,11 +475,145 @@ fn open_req(path: &str) -> Vec<u8> {
 fn oversize_becomes_overflow() {
     served(small(), |c, rig| {
         let id = rig.faults.arm(on(Opcode::GetAttr), Fault::Oversize);
+        let m = rig.recorder.mark();
         assert_eq!(
             getattr(c, "data/a.esp"),
             Err(CallError::UnknownStatus(i32::MIN))
         );
         assert_eq!(rig.faults.applied(id), 1);
+        // Recorded as the client got it: the overflow, no payload.
+        let r = &rig.recorder.since(m)[0];
+        assert_eq!((r.status, r.reply.len(), r.reply_len), (i32::MIN, 0, 0));
+        let request = path_req("data/a.esp").len() as u64;
+        assert_eq!(rig.recorder.ring_bytes_since(m), request);
+    });
+}
+
+#[test]
+fn a_reply_too_large_is_recorded_as_sent() {
+    let d = small().with_registry();
+    served(d, |c, rig| {
+        let k = "\\Registry\\Machine\\Big";
+        let mut s = Vec::new();
+        for name in ["a", "b"] {
+            let data = vec![0x5A; 3000];
+            let set = Request::RegSetValue {
+                path: k,
+                name,
+                ty: 3,
+                data: &data,
+            };
+            c.call(&set, &mut s).unwrap();
+        }
+        let m = rig.recorder.mark();
+        assert_eq!(
+            c.call(&Request::RegKey { path: k }, &mut s).map(|_| ()),
+            Err(CallError::Status(Status::ReplyTooLarge))
+        );
+        let r = &rig.recorder.since(m)[0];
+        assert_eq!((r.status, r.reply_len), (Status::ReplyTooLarge.code(), 0));
+    });
+}
+
+#[test]
+fn a_request_the_faults_answered_is_recorded_with_the_fault_s_status() {
+    served(small(), |c, rig| {
+        rig.faults.arm(on(Opcode::GetAttr), Fault::RawStatus(-99));
+        let m = rig.recorder.mark();
+        assert!(getattr(c, "data/a.esp").is_err());
+        let got = rig.recorder.since(m);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].op(), got[0].status), (Some(Opcode::GetAttr), -99));
+    });
+}
+
+#[test]
+fn a_headers_only_recorder_keeps_sizes_not_bytes() {
+    let d = Reference::new()
+        .with("big", pattern(300 * 1024), ReadStyle::Whole)
+        .with("small", pattern(100), ReadStyle::Whole);
+    served_on(1, Recorder::headers_only(), d, |c, rig, _| {
+        let fh = open(c, "big").fh;
+        let m = rig.recorder.mark();
+        read(c, fh, 0, BULK_THRESHOLD).unwrap();
+        read(c, fh, 0, 100).unwrap();
+        let got = rig.recorder.since(m);
+        assert_eq!(rig.recorder.ops_since(m), [Some(Opcode::Read); 2]);
+        assert!(got
+            .iter()
+            .all(|r| r.payload.is_empty() && r.reply.is_empty()));
+        assert_eq!(
+            got.iter()
+                .map(|r| (r.request_len, r.reply_len, r.bulk_len))
+                .collect::<Vec<_>>(),
+            [(24, 16, BULK_THRESHOLD), (24, 108, 0)]
+        );
+        assert_eq!(
+            rig.recorder.ring_bytes_since(m),
+            24 + 16 + u64::from(BULK_THRESHOLD) + 24 + 108
+        );
+        assert!(got[0].request().is_none(), "no bytes to decode");
+    });
+}
+
+#[test]
+fn several_serve_threads_hold_requests_in_flight_at_once() {
+    served_on(4, Recorder::new(), small(), |_, rig, seg| {
+        let id = rig.faults.arm(on(Opcode::GetAttr), Fault::Delay(MAX_DELAY));
+        let m = rig.recorder.mark();
+        std::thread::scope(|s| {
+            let calls: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(move || {
+                        let c = Client::new(
+                            RingClient::new(seg, SpinNotifier)
+                                .unwrap()
+                                .with_deadline(Duration::from_secs(30)),
+                        );
+                        getattr(&c, "data/a.esp").is_ok()
+                    })
+                })
+                .collect();
+            // Four requests held and none answered: four threads serving.
+            assert!(rig.faults.wait_applied(id, 4, Duration::from_secs(10)));
+            assert_eq!(rig.recorder.in_flight(), 4);
+            assert_eq!(rig.recorder.total_since(m), 0);
+            rig.faults.release();
+            assert!(calls.into_iter().all(|t| t.join().unwrap()));
+        });
+        assert_eq!(rig.recorder.max_in_flight(), 4);
+        assert_eq!(rig.recorder.in_flight(), 0);
+        assert!(rig.recorder.wait_for(m, 4, Duration::from_secs(10)));
+    });
+}
+
+#[test]
+fn a_delay_past_the_deadline_is_waited_out_on_the_recorder() {
+    // The pattern for a fault case past the client's deadline: the call
+    // times out, the test waits for the recorder to show the late reply
+    // sent, and the next call is answered.
+    served(small(), |c, rig| {
+        let impatient = Client::new(
+            RingClient::new(c.ring().seg(), SpinNotifier)
+                .unwrap()
+                .with_deadline(Duration::from_millis(100)),
+        );
+        rig.faults.arm(
+            Match {
+                times: Some(1),
+                ..on(Opcode::GetAttr)
+            },
+            Fault::Delay(Duration::from_millis(400)),
+        );
+        let m = rig.recorder.mark();
+        assert!(matches!(
+            getattr(&impatient, "data/a.esp"),
+            Err(CallError::Ipc(IpcError::Timeout))
+        ));
+        // The late reply went to an abandoned slot; wait for it, not for
+        // a guessed time.
+        assert!(rig.recorder.wait_for(m, 1, Duration::from_secs(10)));
+        assert!(getattr(&impatient, "data/a.esp").is_ok());
     });
 }
 
@@ -523,11 +673,31 @@ fn each_bulk_lie_names_an_offset_the_arena_does_not_hold() {
 #[test]
 fn a_delay_holds_the_reply() {
     served(small(), |c, rig| {
-        let delay = Duration::from_millis(250);
-        let id = rig.faults.arm(on(Opcode::GetAttr), Fault::Delay(delay));
-        let t = Instant::now();
+        let id = rig.faults.arm(on(Opcode::GetAttr), Fault::Delay(MAX_DELAY));
+        let m = rig.recorder.mark();
+        std::thread::scope(|s| {
+            let call = s.spawn(|| getattr(c, "data/a.esp"));
+            // Taken, held, not answered: and the faults' lock is free while
+            // it sleeps, so the test reads and arms.
+            assert!(rig.faults.wait_applied(id, 1, Duration::from_secs(10)));
+            assert_eq!(rig.recorder.in_flight(), 1);
+            assert_eq!(rig.recorder.total_since(m), 0);
+            let other = rig.faults.arm(on(Opcode::Open), Fault::Truncate(0));
+            assert_eq!(rig.faults.applied(other), 0);
+            rig.faults.release();
+            assert!(call.join().unwrap().is_ok());
+        });
+        assert_eq!(rig.recorder.total_since(m), 1);
+    });
+}
+
+#[test]
+fn a_short_delay_ends_by_itself() {
+    served(small(), |c, rig| {
+        let id = rig
+            .faults
+            .arm(on(Opcode::GetAttr), Fault::Delay(Duration::from_millis(20)));
         assert!(getattr(c, "data/a.esp").is_ok());
-        assert!(t.elapsed() >= delay, "{:?}", t.elapsed());
         assert_eq!(rig.faults.applied(id), 1);
     });
 }
@@ -594,7 +764,7 @@ fn an_override_sets_open_fields_and_leaves_the_rest() {
             OpenEdit {
                 immutable: Some(false),
                 mount_gen: Some(7),
-                size: None,
+                ..OpenEdit::default()
             },
         );
         let after = open(c, "Data/A.esp");
@@ -664,11 +834,68 @@ fn replace_content_serves_new_bytes_at_a_new_size() {
             Ok(b"remounted".to_vec())
         );
         assert_eq!(getattr(c, "data/a.esp").unwrap().size, 9);
+        // A handle opened before the remount reads the new bytes too.
+        assert_eq!(
+            read(c, old.fh, 0, 100).map(inline),
+            Ok(b"remounted".to_vec())
+        );
         // The stored spelling is the one the file had.
         assert_eq!(stored_names(c, "data/a.esp"), "Data/a.esp");
         // A vpath the graph did not hold is added.
         knob.replace_content("Data/New.esp", vec![7; 3]);
         assert_eq!(open(c, "data/new.esp").size, 3);
+    });
+}
+
+#[test]
+fn reissue_fh_gives_the_lowest_closed_handle_again() {
+    served(small().reissue_fh(), |c, _| {
+        let a = open(c, "data/a.esp").fh;
+        let b = open(c, "other.txt").fh;
+        assert_eq!((a, b), (1, 2));
+        empty(c, Request::Close { fh: b }).unwrap();
+        empty(c, Request::Close { fh: a }).unwrap();
+        // Unique among open handles (wire.md 3.4.3), and reused.
+        let again = open(c, "other.txt").fh;
+        assert_eq!(again, a);
+        assert_eq!(read(c, again, 0, 5).map(inline), Ok(b"other".to_vec()));
+        assert_eq!(open(c, "data/a.esp").fh, b);
+        assert_eq!(open(c, "data/a.esp").fh, 3);
+    });
+    // Without it a closed handle is never issued again.
+    served(small(), |c, _| {
+        let a = open(c, "data/a.esp").fh;
+        empty(c, Request::Close { fh: a }).unwrap();
+        assert_eq!(open(c, "data/a.esp").fh, a + 1);
+    });
+}
+
+#[test]
+fn an_override_can_set_the_reserved_open_flag_bits() {
+    served(small(), |c, rig| {
+        rig.overrides.open(
+            "data/",
+            OpenEdit {
+                reserved_flags: Some(0xFE),
+                ..OpenEdit::default()
+            },
+        );
+        let m = rig.recorder.mark();
+        let o = open(c, "data/a.esp");
+        assert!(o.immutable, "bit 0 as the director sent it");
+        assert_eq!(rig.recorder.since(m)[0].reply[17], 0xFF);
+        rig.overrides.clear();
+        rig.overrides.open(
+            "data/",
+            OpenEdit {
+                immutable: Some(false),
+                reserved_flags: Some(0x0E),
+                ..OpenEdit::default()
+            },
+        );
+        let m = rig.recorder.mark();
+        assert!(!open(c, "data/a.esp").immutable);
+        assert_eq!(rig.recorder.since(m)[0].reply[17], 0x0E);
     });
 }
 
@@ -830,6 +1057,16 @@ fn a_lower_only_name_is_answered_as_wire_md_3_4_9_says() {
             Err(CallError::Status(Status::IoError))
         );
         assert!(getattr(c, "data/fixed").unwrap().is_dir);
+        // A name created under a lower directory copies it up: it then
+        // moves as an upper directory does.
+        open_with(
+            c,
+            OpenFlags::WRITE | OpenFlags::CREATE,
+            "Data/Fixed/new.esp",
+        )
+        .unwrap();
+        assert_eq!(empty(c, rename("data/fixed", "data/moved")), Ok(()));
+        assert!(getattr(c, "data/moved/new.esp").unwrap().found);
         assert_eq!(empty(c, rename("data/copied.esp", "Data/Up.esp")), Ok(()));
         assert_eq!(knob.contents("data/up.esp"), Some(vec![3, 3, 3]));
         assert!(!getattr(c, "data/copied.esp").unwrap().found);

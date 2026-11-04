@@ -8,8 +8,13 @@ use aether_ipc::{DataArena, RequestView};
 use aether_protocol::{Opcode, ReadReply, Reply, Request, Status, READ_RESP_BULK_BIT};
 use aether_rpc::{Tap, TapAction};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// The longest a [`Fault::Delay`] holds a reply: a longer one is cut to
+/// this, so every slot is completed and a serve loop always gets back to
+/// its stop flag. [`Faults::release`] ends a delay sooner.
+pub const MAX_DELAY: Duration = Duration::from_secs(10);
 
 /// Which requests a fault is given to. Every field left `None` matches
 /// everything.
@@ -128,13 +133,23 @@ pub enum Fault {
     /// overflow status, `i32::MIN`, with no payload (`docs/wire.md` 2.5).
     Oversize,
     /// A bulk READ reply naming data outside its bank, `Status::Ok`, given
-    /// to a READ whatever the director answered.
+    /// to a READ whatever the director answered. On any other opcode it
+    /// changes nothing (it still counts as applied): arm it with
+    /// `op: Some(Opcode::Read)`.
     BulkOutside(BulkLie),
-    /// The director's reply, held this long first. The serve thread sleeps,
-    /// as a director that stalls does: other requests wait behind it.
+    /// The director's reply, held this long first (at most [`MAX_DELAY`])
+    /// or until [`Faults::release`] or [`Faults::clear`]. The serve thread
+    /// that took the request waits, as a director that stalls does: with
+    /// one serve thread, other requests wait behind it. A test waits on the
+    /// [`super::Recorder`] (`wait_in_flight`, `wait_for`), not on the clock,
+    /// to know where the delayed request is.
     Delay(Duration),
     /// The director's reply as this function leaves it. Called on the serve
-    /// thread with no lock held, so one that panics poisons nothing.
+    /// thread with no lock held, so one that panics poisons nothing (its
+    /// request is then answered `Status::IoError` and not recorded). A plain
+    /// `fn`, so it captures nothing: what it needs it reads from the
+    /// [`OwnedReplyBytes`] (the request is there); an edit of a typed field
+    /// decodes `payload`, changes it and encodes the reply back.
     Rewrite(fn(&mut OwnedReplyBytes)),
 }
 
@@ -186,6 +201,8 @@ struct State {
     armed: Vec<Armed>,
     /// The table key each open handle was opened on, from OPEN replies.
     handles: HashMap<u64, String>,
+    /// Moved by [`Faults::release`]: a delay that began before it ends.
+    released: u64,
 }
 
 /// A [`Tap`] that gives armed faults to the requests they match. A clone is
@@ -202,11 +219,14 @@ struct State {
 /// front that answers a request itself does not stop the count (the request
 /// still crossed the ring), but the fault then applies to that tap's reply.
 ///
-/// Its locks are never held across a sleep or a [`Fault::Rewrite`], and a
-/// poisoned one is taken anyway, so a tap or a rewrite that panics leaves it
-/// working.
+/// Its lock is never held across a [`Fault::Rewrite`] or while a delay waits
+/// (the wait is on a condition variable, which lets it go), and a poisoned
+/// one is taken anyway, so a tap or a rewrite that panics leaves it working.
+/// One `Faults` serves any number of serve threads, a clone on each.
 pub struct Faults {
     state: Arc<Mutex<State>>,
+    /// Signalled by [`Faults::release`].
+    wake: Arc<Condvar>,
     payload_cap: u32,
     arena: Option<ArenaShape>,
     /// The fault chosen for the request being served, by this handle.
@@ -217,6 +237,7 @@ impl Clone for Faults {
     fn clone(&self) -> Faults {
         Faults {
             state: self.state.clone(),
+            wake: self.wake.clone(),
             payload_cap: self.payload_cap,
             arena: self.arena,
             pending: None,
@@ -226,11 +247,12 @@ impl Clone for Faults {
 
 impl Faults {
     /// Nothing armed, for a ring whose `payload_cap` is this (what
-    /// [`Fault::Oversize`] passes) and with no arena: a [`BulkLie`] then
-    /// names offsets as if the arena were empty at offset 0.
+    /// [`Fault::Oversize`] passes) and with no arena: every [`BulkLie`] then
+    /// names `u64::MAX - len`, outside any mapping.
     pub fn new(payload_cap: u32) -> Faults {
         Faults {
             state: Arc::new(Mutex::new(State::default())),
+            wake: Arc::new(Condvar::new()),
             payload_cap,
             arena: None,
             pending: None,
@@ -263,10 +285,59 @@ impl Faults {
         lock(&self.state).armed.get(id.0).map_or(0, |a| a.applied)
     }
 
-    /// Disarms every fault. Their [`Faults::applied`] counts stay.
+    /// Disarms every fault and ends every delay now holding a reply
+    /// ([`Faults::release`]). Their [`Faults::applied`] counts stay.
     pub fn clear(&self) {
         for a in &mut lock(&self.state).armed {
             a.live = false;
+        }
+        self.release();
+    }
+
+    /// Waits until fault `id` has applied `n` times, or `timeout` passes:
+    /// whether it has. A delay counts as applied as it begins, so this is
+    /// how a test knows a serve thread is holding a reply.
+    pub fn wait_applied(&self, id: FaultId, n: u32, timeout: Duration) -> bool {
+        let end = Instant::now() + timeout;
+        let mut s = lock(&self.state);
+        loop {
+            if s.armed.get(id.0).is_some_and(|a| a.applied >= n) {
+                return true;
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            s = self
+                .wake
+                .wait_timeout(s, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// Ends every [`Fault::Delay`] now holding a reply: each sends it at
+    /// once. A delay that begins later waits as usual.
+    pub fn release(&self) {
+        lock(&self.state).released += 1;
+        self.wake.notify_all();
+    }
+
+    /// Holds the reply for `d` (at most [`MAX_DELAY`]) or until a release
+    /// after `epoch`, the release count when the fault was applied.
+    fn delay(&self, d: Duration, epoch: u64) {
+        let end = Instant::now() + d.min(MAX_DELAY);
+        let mut s = lock(&self.state);
+        while s.released == epoch {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            s = self
+                .wake
+                .wait_timeout(s, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 
@@ -329,7 +400,14 @@ impl Faults {
     }
 
     /// `fault` applied to the reply in `status` and `payload`.
-    fn apply(&self, view: &RequestView<'_>, fault: Fault, status: &mut i32, payload: &mut Vec<u8>) {
+    fn apply(
+        &self,
+        view: &RequestView<'_>,
+        fault: Fault,
+        epoch: u64,
+        status: &mut i32,
+        payload: &mut Vec<u8>,
+    ) {
         match fault {
             Fault::Status(s) => {
                 *status = s.code();
@@ -346,13 +424,14 @@ impl Faults {
                 *payload = bytes;
             }
             Fault::Oversize => payload.resize(self.payload_cap as usize + 1, 0),
-            Fault::BulkOutside(lie) => {
+            Fault::BulkOutside(lie) if view.opcode == Opcode::Read as u32 => {
                 let reply = self.bulk_lie(view, lie, *status, payload);
                 *status = Status::Ok.code();
                 payload.clear();
                 Reply::Read(reply).encode(payload);
             }
-            Fault::Delay(d) => std::thread::sleep(d),
+            Fault::BulkOutside(_) => {}
+            Fault::Delay(d) => self.delay(d, epoch),
             Fault::Rewrite(f) => {
                 let mut r = OwnedReplyBytes {
                     opcode: view.opcode,
@@ -390,11 +469,18 @@ impl Faults {
             asked
         };
         let len = answered.max(1);
-        let arena = self.arena.unwrap_or(ArenaShape {
-            offset: 0,
-            bank_size: 0,
-            banks: 1,
-        });
+        let Some(arena) = self.arena else {
+            // No arena: no offset is in one; this one is not in the mapping
+            // either, and `offset + len` does not overflow.
+            let len = match lie {
+                BulkLie::LenOverRequest => asked.saturating_add(1).min(READ_RESP_BULK_BIT - 1),
+                _ => len,
+            };
+            return ReadReply::Bulk {
+                len,
+                arena_offset: u64::MAX - u64::from(len),
+            };
+        };
         let (len, arena_offset) = match lie {
             BulkLie::PastArena => (len, arena.end()),
             BulkLie::PastBank if arena.banks > 1 => (len, arena.bank(view.slot.wrapping_add(1))),
@@ -457,9 +543,16 @@ impl Tap for Faults {
             return;
         };
         // Counted before it runs, so a rewrite that panics still shows.
-        if let Some(a) = lock(&self.state).armed.get_mut(i) {
-            a.applied = a.applied.saturating_add(1);
-        }
-        self.apply(view, fault, status, payload);
+        // The release count is read with it, so a release after a test saw
+        // it applied ends its delay.
+        let epoch = {
+            let mut s = lock(&self.state);
+            if let Some(a) = s.armed.get_mut(i) {
+                a.applied = a.applied.saturating_add(1);
+            }
+            s.released
+        };
+        self.wake.notify_all();
+        self.apply(view, fault, epoch, status, payload);
     }
 }

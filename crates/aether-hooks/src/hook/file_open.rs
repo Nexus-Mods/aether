@@ -3,8 +3,8 @@
 
 use super::{
     allow_disk_fallthrough, fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours,
-    path_of_tracked, record_path, reset_handle, reset_key, tag_under_root, to_nt_path, ShimIoGuard,
-    HANDLES, TRAMP_CREATE, TRAMP_OPEN,
+    path_of_tracked, record_path, reset_handle, reset_key, surely_outside, tag_under_root,
+    to_nt_path, ShimIoGuard, HANDLES, TRAMP_CREATE, TRAMP_OPEN,
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
@@ -21,6 +21,11 @@ use aether_protocol::{OpenFlags, Status};
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
+
+/// `DELETE` in an open's access mask.
+const DELETE_ACCESS: u32 = 0x0001_0000;
+/// `FILE_NON_DIRECTORY_FILE` in an open's options: the caller opens a file.
+const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 
 /// Record an open the director did not answer that passes through to the real filesystem,
 /// unless `already` is set — meaning `try_fuse_create` already classified this same physical
@@ -596,6 +601,27 @@ unsafe fn route_open(
         opts,
         create,
     } = *call;
+    // A file outside every root, the commonest open there is: the host opens
+    // it, and nothing is decoded or recorded, so nothing is allocated. Only
+    // the handle value's stale record, if any, is cleared (`reset_handle`
+    // without a path: a `try_lock`, as for any open it records nothing for).
+    // What is not recorded is the path it was opened as, which is read for
+    // two things: the parent of a relative open, and the source of a
+    // handle-based delete or rename. A file is the parent only of its own
+    // streams, which lie outside the roots with it, and an open that asks for
+    // `DELETE` keeps the full path below, so a delete or rename through it
+    // still finds the path in the table rather than asking the OS.
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if opts & FILE_NON_DIRECTORY_FILE != 0
+        && access & DELETE_ACCESS == 0
+        && !crate::hookstats::enabled()
+        && unsafe { surely_outside(oa) }
+    {
+        let status = real(oa);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { reset_handle(file_handle, None, status) };
+        return status;
+    }
     // Decode once for the whole call and thread the result through every
     // function below that used to call `path_of(oa)` independently — see
     // `tag_under_root`'s doc comment for the cost argument.

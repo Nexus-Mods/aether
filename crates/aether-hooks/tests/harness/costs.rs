@@ -724,9 +724,15 @@ fn open_outside_root() {
     std::fs::write(&file, b"on disk").unwrap();
     let w = wide(&file);
     close(open_wide(&w, GENERIC_READ));
+    let tracked = aether_hooks::tracked_handle_count();
     let ((), m) = measure(served, || {
         let h = open_wide(&w, GENERIC_READ);
         assert_ne!(h, INVALID_HANDLE_VALUE);
+        assert_eq!(
+            aether_hooks::tracked_handle_count(),
+            tracked,
+            "the open recorded the handle"
+        );
         close(h);
     });
     check("open_outside_root", m);

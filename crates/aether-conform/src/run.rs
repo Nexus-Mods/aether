@@ -71,6 +71,10 @@ pub struct StepResult {
     pub passed: bool,
     /// Why it failed, what was changed on the way, and the scenario's note.
     pub note: Option<String>,
+    /// The status the director answered (`ok` for an OK reply), when it
+    /// answered one the protocol table has; `None` otherwise, and for the
+    /// parts of a run that do not record it.
+    pub answer: Option<String>,
 }
 
 /// One scenario as played.
@@ -94,6 +98,38 @@ pub struct RunReport {
     pub adapter_error: Option<String>,
     /// The generator's seed, for a run with generated cases.
     pub seed: Option<u64>,
+    /// For the scenario files: by opcode, how often each answer came (`ok`
+    /// or a status name), every answer a step allows counted, so one a
+    /// scenario allows and no director answer gave shows as 0.
+    pub answers: Answers,
+}
+
+/// Opcode name to answer name to count ([`RunReport::answers`]).
+pub type Answers = std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>>;
+
+/// Adds `s`'s steps, as played in `r`, to `tally`: every answer each step
+/// allows (at 0 if not given yet) and the one it got.
+fn count_answers(tally: &mut Answers, s: &Scenario, r: &ScenarioResult) {
+    fn allowed(e: &scenario::Expect, out: &mut Vec<String>) {
+        match e {
+            scenario::Expect::Reply(_) => out.push("ok".into()),
+            scenario::Expect::Status(st) => out.push(st.name().into()),
+            scenario::Expect::OneOf(alts) => alts.iter().for_each(|a| allowed(a, out)),
+        }
+    }
+    for (step, played) in s.steps.iter().zip(&r.steps) {
+        let op = tally
+            .entry(step.request.opcode().name().into())
+            .or_default();
+        let mut names = Vec::new();
+        allowed(&step.expect, &mut names);
+        for n in names {
+            op.entry(n).or_insert(0);
+        }
+        if let Some(a) = &played.answer {
+            *op.entry(a.clone()).or_insert(0) += 1;
+        }
+    }
 }
 
 impl RunReport {
@@ -168,6 +204,7 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             .as_ref()
             .map(|g| g.seed)
             .or(opts.concurrent.as_ref().map(|c| c.seed)),
+        answers: Answers::new(),
     };
     for (file, s) in &scenarios {
         let mut result = ScenarioResult {
@@ -180,6 +217,7 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
         match one(&mut adapter, file, s, opts.timeout, &mut result) {
             Ok(()) => {
                 result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
+                count_answers(&mut report.answers, s, &result);
                 report.scenarios.push(result);
             }
             Err(e) => {
@@ -323,7 +361,12 @@ pub(crate) fn play(
     let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
-        let mut req = session.translate(&step.request);
+        // A literal handle is sent as written (`Step::literal_fh`).
+        let mut req = if step.literal_fh {
+            step.request.clone()
+        } else {
+            session.translate(&step.request)
+        };
         if crate::clients::fit_to_ring(ring, &mut req) {
             notes.push("sent without read_bulk: the ring has no arena (wire.md 2.6)".into());
         }
@@ -346,11 +389,12 @@ pub(crate) fn play(
             Err(e) => {
                 out.push(StepResult {
                     index: i,
-                    request: crate::scenario::request_json(&step.request),
+                    request: crate::scenario::step_request_json(step),
                     expected: render_expect(&step.expect),
                     got: format!("no answer: {e}"),
                     passed: false,
                     note: Some(join(notes, step.note.as_deref())),
+                    answer: None,
                 });
                 return Err(format!("step {i}: the ring gave no answer: {e}"));
             }
@@ -386,6 +430,11 @@ pub(crate) fn play(
             }
         }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
+        let answer = match &sent {
+            Sent::Answer(Ok(_)) => Some("ok".to_string()),
+            Sent::Answer(Err(st)) => Some(st.name().to_string()),
+            Sent::Bad(_) => None,
+        };
         let gen_after = reg_gen.after(&step.request, succeeded, gen_before, gen_now);
         if let Some(why) = gen_broken.or(gen_after) {
             notes.insert(0, why);
@@ -393,11 +442,12 @@ pub(crate) fn play(
         }
         out.push(StepResult {
             index: i,
-            request: crate::scenario::request_json(&step.request),
+            request: crate::scenario::step_request_json(step),
             expected: render_expect(&step.expect),
             got,
             passed,
             note: Some(join(notes, step.note.as_deref())).filter(|n| !n.is_empty()),
+            answer,
         });
     }
     Ok(())
@@ -689,8 +739,8 @@ fn send<N: aether_ipc::Notifier>(
     if request.opcode() == Opcode::Read {
         return read(ring, client, &request);
     }
-    // On a held slot, so an error's payload and an OPEN reply's reserved
-    // bytes can be looked at before the reply is decoded.
+    // On a held slot, so an error's payload and an OK reply's shape
+    // (`crate::shape`) can be looked at before the reply is decoded.
     let mut body = Vec::new();
     request.encode(&mut body);
     let (op, flags) = (request.opcode(), request.flags());
@@ -703,10 +753,8 @@ fn send<N: aether_ipc::Notifier>(
     if let Some(sent) = refused(reply.status, &reply.payload) {
         return Ok(sent);
     }
-    if op == Opcode::Open {
-        if let Some(why) = crate::compare::open_reply_reserved(&reply.payload) {
-            return Ok(Sent::Bad(why));
-        }
+    if let Some(why) = crate::shape::reply_shape(op, &reply.payload) {
+        return Ok(Sent::Bad(why));
     }
     Ok(match Reply::decode(op, flags, &reply.payload) {
         Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
@@ -756,6 +804,8 @@ fn read<N: aether_ipc::Notifier>(
     let reply = replies.pop().expect("one reply per request");
     let sent = if let Some(sent) = refused(reply.status, &reply.payload) {
         sent
+    } else if let Some(why) = crate::shape::reply_shape(Opcode::Read, &reply.payload) {
+        Sent::Bad(why)
     } else {
         match Reply::decode(Opcode::Read, flags, &reply.payload) {
             Ok(r) => match OwnedReply::from_reply(&r) {

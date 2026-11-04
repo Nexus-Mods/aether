@@ -74,11 +74,20 @@ root writable as a whole, `"."`.
 `{"size": N, "seed": S}` is N bytes generated from S: start with the 32-bit
 `x = 0x9E3779B9 ^ low32(S) ^ high32(S)`, and for each position `i` from 0,
 set `x = x * 1664525 + 1013904223` (mod 2^32) and emit the byte `(x >> 24) ^
-(i & 0xFF)`.
+(i & 0xFF)` (so `{"size": 100, "seed": S}` is the first 100 bytes of any
+longer fill of S). In a step (WRITE's `data`, a value's `data`, READ's reply
+`data`, not a tree's `contents`) two more forms are allowed: `{"zeros": N}`,
+N zero bytes, and `{"concat": [..]}`, the bytes of each element (any of
+these forms) in order, so a file grown and spliced can be written down
+(`{"concat": [{"size": 65536, "seed": 3}, "TAIL", {"zeros": 4460}]}`).
 
 **Requests.** `op` and every request field of that opcode in
 `protocol.json`, padding aside; nothing else, except READ's optional
 `slot_flags` (`["read_bulk"]`). `flags` is a list of `open_flags` names.
+A handle (`fh` of READ, WRITE, SETATTR, CLOSE) is a scenario number, paired
+with the director's (below), or `{"literal": n}`, sent as `n` itself and
+never paired: how a scenario sends a number no director issues (`fh` 0,
+wire.md 3.4.3, 3.4.10).
 File paths (`path`, `from`, `to` of file opcodes) must be canonical: `/`
 between components, none empty, `.` or `..`, no `\`, and `"."` for the root.
 wire.md 3.2 says other syntax is director-defined ("a client must not rely
@@ -161,7 +170,14 @@ state):
 
 An error answer must carry no payload (wire.md 3.1: "A director answers
 every error with an empty payload"); one that does fails its step whatever
-the expectation.
+the expectation. An OK answer must have the shape wire.md gives its reply,
+beyond what the shim's lenient decoders read (3.2: "The file-op decoders
+ignore trailing bytes"), or it fails its step whatever the expectation:
+GETATTR 18 bytes, OPEN 24, WRITE 8, an inline READ `8 + n` and a bulk one
+16, each with its zero bytes zero (3.4.1, 3.4.3 to 3.4.5); a READDIR reply
+ending with its last entry (3.4.2); nothing for the opcodes whose reply is
+the status only; and REG_KEY's children sorted and unique by `folded` (4.3,
+which the shim's map of them would not show).
 
 ## Checks across steps
 
@@ -178,3 +194,4 @@ To play scenarios against a director, see `docs/conformance.md`. A generated
 case that fails (`aether-conform run --generate`) is written in this format
 too, with the reference's answers as its expectations, so it replays as any
 other scenario.
+

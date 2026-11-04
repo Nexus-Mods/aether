@@ -3103,6 +3103,7 @@ impl Gen {
             cite,
             note: Some(note),
             client,
+            literal_fh: false,
         });
         if let Ok(r) = &got {
             self.record_version(r);
@@ -3166,6 +3167,7 @@ impl Gen {
                         plan.wire
                     )),
                     client,
+                    literal_fh: false,
                 });
                 let after = self.oracle.ask(&listing(root, &dir));
                 let (Some(Ok(b @ OwnedReply::ReadDir(_))), Ok(a @ OwnedReply::ReadDir(_))) =
@@ -3192,6 +3194,7 @@ impl Gen {
                         plan.wire
                     )),
                     client,
+                    literal_fh: false,
                 });
                 self.done = true;
                 Ok(())

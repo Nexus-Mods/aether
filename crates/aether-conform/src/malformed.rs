@@ -923,6 +923,7 @@ fn play(ring: &Attached, mount: Mount, out: &mut Vec<StepResult>) -> Result<(), 
                     got: format!("no answer: {e}"),
                     passed: false,
                     note: None,
+                    answer: None,
                 });
                 return Err(format!("case {i}: the ring gave no answer: {e}"));
             }
@@ -956,6 +957,7 @@ fn play(ring: &Attached, mount: Mount, out: &mut Vec<StepResult>) -> Result<(), 
             got,
             passed,
             note,
+            answer: None,
         });
     }
     // And still answers a well-formed request as before.
@@ -988,6 +990,7 @@ fn play(ring: &Attached, mount: Mount, out: &mut Vec<StepResult>) -> Result<(), 
         got: render_got(&got),
         passed: note.is_none(),
         note,
+        answer: None,
     });
     for fh in handles {
         let _ = client.call(&Request::Close { fh }, &mut scratch);

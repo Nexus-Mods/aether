@@ -338,6 +338,7 @@ mod tests {
                     got: String::new(),
                     passed: *passed,
                     note: None,
+                    answer: None,
                 })
                 .collect(),
             error: error.map(str::to_string),

@@ -15,7 +15,8 @@
 //! joins the ring the adapter names as the shim would, [`run`] plays and
 //! compares, and [`report`] writes TAP or JSON. [`adapters`] holds the
 //! built-in reference adapter. [`malformed`] sends requests that are not
-//! valid requests through the raw ring. [`generate`] plays generated cases,
+//! valid requests through the raw ring; [`shape`] checks what an OK reply's
+//! payload holds beyond what its decoder reads. [`generate`] plays generated cases,
 //! which [`model`] makes from proptest values by reading them against an
 //! in-process reference, and shrinks the first that fails into a scenario
 //! file. [`clients`] sends requests from a slot the caller picks and runs
@@ -43,6 +44,7 @@ pub mod model;
 pub mod report;
 pub mod run;
 pub mod scenario;
+pub mod shape;
 
 pub use aether_refdirector::tree;
 pub use compare::{Mismatch, Session};

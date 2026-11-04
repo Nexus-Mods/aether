@@ -227,10 +227,8 @@ pub(crate) fn decode(
             ),
         };
     }
-    if op == Opcode::Open {
-        if let Some(why) = crate::compare::open_reply_reserved(payload) {
-            return (Answer::Bad(why), None);
-        }
+    if let Some(why) = crate::shape::reply_shape(op, payload) {
+        return (Answer::Bad(why), None);
     }
     let Ok(reply) = Reply::decode(op, flags, payload) else {
         return (

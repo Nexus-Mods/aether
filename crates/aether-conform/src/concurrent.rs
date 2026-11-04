@@ -428,6 +428,7 @@ fn round(
                 cite: st.cite.clone(),
                 note: st.note.clone(),
                 client: k as u32,
+                literal_fh: false,
             };
             mine.push((steps.len(), step.clone()));
             steps.push(step);
@@ -994,6 +995,7 @@ fn client(
                     got: format!("no answer: {e}"),
                     passed: false,
                     note: Some(notes.join("; ")),
+                    answer: None,
                 });
                 return (
                     out,
@@ -1050,6 +1052,7 @@ fn client(
             got,
             passed,
             note: Some(notes.join("; ")),
+            answer: None,
         });
     }
     (out, None)
@@ -1546,6 +1549,7 @@ mod tests {
             cite: None,
             note: None,
             client: 0,
+            literal_fh: false,
         }
     }
 

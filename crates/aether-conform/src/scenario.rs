@@ -19,12 +19,15 @@
 //! ```
 //!
 //! A request is `op` (an opcode's name) and that opcode's request fields;
-//! READ may add `slot_flags` (`["read_bulk"]`). An expectation is a
+//! READ may add `slot_flags` (`["read_bulk"]`), and a handle may be written
+//! `{"literal": n}` to be sent as it is ([`Step::literal_fh`]). An
+//! expectation is a
 //! `reply` (the opcode's reply fields), a `status` name, or `one_of`
 //! several, which needs `wire`, the `docs/wire.md` section that allows more
 //! than one answer. `{"status": "ok"}` is the empty reply, for the opcodes
 //! that have one. Bytes are a string (UTF-8), `{"hex": ".."}` or
-//! `{"size": N, "seed": S}`. File paths in requests are canonical
+//! `{"size": N, "seed": S}`, and in a step also `{"zeros": N}` and
+//! `{"concat": [..]}`. File paths in requests are canonical
 //! (`docs/wire.md` 3.2: other syntax is director-defined). Anything else (an
 //! unknown op, field, flag or status, a missing field, a non-canonical path)
 //! is a [`LoadError`] naming the file, the step and the field.
@@ -63,6 +66,10 @@ pub struct Step {
     /// client per number, each a process of the session as the shim's are
     /// (`docs/wire.md` 2.8.1), and pairs handles across all of them.
     pub client: u32,
+    /// The request's `fh` was written `{"literal": n}`: sent as it is, not
+    /// paired with a director's handle, so a scenario can send a number no
+    /// director issues (`fh` 0, wire.md 3.4.3, 3.4.10).
+    pub literal_fh: bool,
 }
 
 /// What a step expects: a reply (status OK), an error status, or any of
@@ -581,9 +588,26 @@ impl<'v> Obj<'v> {
 
     fn bytes(&mut self, name: &str) -> R<Vec<u8>> {
         let v = self.get(name)?;
-        serde_json::from_value::<Contents>(v.clone())
-            .map(|c| c.bytes())
-            .map_err(|e| self.bad(name, e.to_string()))
+        step_bytes(v).map_err(|e| self.bad(name, e))
+    }
+
+    /// A handle field: a number, or `{"literal": n}` (sets `literal`).
+    fn fh(&mut self, literal: &mut bool) -> R<u64> {
+        let v = self.get("fh")?;
+        if let Some(m) = v.as_object() {
+            let n = m.get("literal").and_then(Value::as_u64);
+            return match (n, m.len()) {
+                (Some(n), 1) => {
+                    *literal = true;
+                    Ok(n)
+                }
+                _ => Err(self.bad(
+                    "fh",
+                    format!("a handle number or {{\"literal\": n}} expected, found {v}"),
+                )),
+            };
+        }
+        self.u64("fh")
     }
 
     /// A list of names, each one of `known`'s, as their masks or'ed.
@@ -625,6 +649,39 @@ impl<'v> Obj<'v> {
 /// components are allowed: they cannot bring a path that starts above the root
 /// back inside it. A path that goes up only after other components is not
 /// sent, since directors differ on where it ends up.
+/// The most bytes `{"zeros": n}` may stand for: the reference's largest file.
+const MAX_ZEROS: u64 = aether_refdirector::MAX_FILE_LEN as u64;
+
+/// Bytes in a step (WRITE's `data`, READ's reply `data`, a value's `data`):
+/// the tree's forms ([`Contents`]), and two more, `{"zeros": n}` (n zero
+/// bytes) and `{"concat": [..]}` (each element's bytes, in order), so a
+/// file spliced from several fills can be written down.
+fn step_bytes(v: &Value) -> Result<Vec<u8>, String> {
+    if let Some(m) = v.as_object() {
+        if let (Some(z), 1) = (m.get("zeros"), m.len()) {
+            return match z.as_u64() {
+                Some(n) if n <= MAX_ZEROS => Ok(vec![0; n as usize]),
+                _ => Err(format!(
+                    "zeros: a count of at most {MAX_ZEROS} expected, found {z}"
+                )),
+            };
+        }
+        if let (Some(c), 1) = (m.get("concat"), m.len()) {
+            let parts = c
+                .as_array()
+                .ok_or_else(|| format!("concat: a list of bytes expected, found {c}"))?;
+            let mut out = Vec::new();
+            for (n, p) in parts.iter().enumerate() {
+                out.extend(step_bytes(p).map_err(|e| format!("concat[{n}]: {e}"))?);
+            }
+            return Ok(out);
+        }
+    }
+    serde_json::from_value::<Contents>(v.clone())
+        .map(|c| c.bytes())
+        .map_err(|e| e.to_string())
+}
+
 fn is_escape(path: &str) -> bool {
     let mut parts = path.split('/');
     parts.next() == Some("..") && !path.contains('\\') && parts.all(|c| !c.is_empty() && c != ".")
@@ -728,7 +785,8 @@ fn check_handles(steps: &[Step]) -> R<()> {
 
 fn parse_step(i: usize, v: &Value) -> R<Step> {
     let mut o = Obj::new(v, "", Some(i))?;
-    let request = parse_request(i, o.get("request")?)?;
+    let mut literal_fh = false;
+    let request = parse_request(i, o.get("request")?, &mut literal_fh)?;
     let note = match o.opt("note") {
         None => None,
         Some(_) => Some(o.str("note")?),
@@ -745,13 +803,14 @@ fn parse_step(i: usize, v: &Value) -> R<Step> {
         cite,
         note,
         client,
+        literal_fh,
     })
 }
 
 /// A request in the scenario format ([`request_json`]) read back, as a
 /// client worker receives it; the error says which field is wrong.
 pub fn parse_request_value(v: &Value) -> Result<OwnedRequest, String> {
-    parse_request(0, v).map_err(|b| format!("{}: {}", b.field, b.message))
+    parse_request(0, v, &mut false).map_err(|b| format!("{}: {}", b.field, b.message))
 }
 
 /// A director's answer in the scenario's expectation format: `{"reply":
@@ -774,7 +833,8 @@ pub fn parse_answer(op: Opcode, v: &Value) -> Result<Result<OwnedReply, Status>,
     }
 }
 
-fn parse_request(i: usize, v: &Value) -> R<OwnedRequest> {
+/// A request; `literal` is set when its `fh` is written `{"literal": n}`.
+fn parse_request(i: usize, v: &Value, literal: &mut bool) -> R<OwnedRequest> {
     use OwnedRequest as O;
     let mut o = Obj::new(v, "request.", Some(i))?;
     let name = o.str("op")?;
@@ -807,17 +867,17 @@ fn parse_request(i: usize, v: &Value) -> R<OwnedRequest> {
                     o.flags("slot_flags", &as_refs(&request_flag_names()))?,
                 ),
             },
-            fh: o.u64("fh")?,
+            fh: o.fh(literal)?,
             offset: o.u64("offset")?,
             len: o.u32("len")?,
         },
         Opcode::Write => O::Write {
-            fh: o.u64("fh")?,
+            fh: o.fh(literal)?,
             offset: o.u64("offset")?,
             data: o.bytes("data")?,
         },
         Opcode::SetAttr => O::SetAttr {
-            fh: o.u64("fh")?,
+            fh: o.fh(literal)?,
             size: o.u64("size")?,
         },
         Opcode::Rename => O::Rename {
@@ -834,7 +894,7 @@ fn parse_request(i: usize, v: &Value) -> R<OwnedRequest> {
             mode: o.u32("mode")?,
             path: o.vpath("path")?,
         },
-        Opcode::Close => O::Close { fh: o.u64("fh")? },
+        Opcode::Close => O::Close { fh: o.fh(literal)? },
         Opcode::Heartbeat => O::Heartbeat,
         Opcode::StoredNames => O::StoredNames {
             root: o.root("root")?,
@@ -1225,7 +1285,18 @@ fn step_json(s: &Step) -> Value {
     if s.client != 0 {
         v["client"] = Value::from(s.client);
     }
+    if s.literal_fh {
+        if let Some(fh) = v["request"].get("fh").cloned() {
+            v["request"]["fh"] = serde_json::json!({ "literal": fh });
+        }
+    }
     v
+}
+
+/// A step's request in the scenario format, as the step wrote it (a
+/// literal handle as `{"literal": n}`).
+pub fn step_request_json(s: &Step) -> Value {
+    step_json(s)["request"].take()
 }
 
 /// A request in the scenario format: `op` and its fields.

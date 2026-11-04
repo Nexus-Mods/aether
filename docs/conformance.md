@@ -66,6 +66,17 @@ For every scenario, and for each generated case and the malformed part:
   data, and must lie inside the mapping (2.6). An error status must come
   with an empty payload (3.1: "A director answers every error with an empty
   payload"), whatever the step expects.
+- **What an OK reply holds beyond what the shim decodes.** The shim's file-op
+  decoders ignore trailing bytes (3.2, "Lenient vs strict") and it reads
+  REG_KEY's children into a map (4.3), so a reply can decode and still not be
+  the one wire.md gives. Whatever the step expects, a GETATTR reply is 18
+  bytes (3.4.1), an OPEN reply 24 with its reserved bits and bytes zero
+  (3.4.3), a WRITE reply 8 with its second word zero (3.4.5), an inline READ
+  reply `8 + n` bytes and a bulk one 16, each with its second word zero
+  (3.4.4); a READDIR reply ends with its last entry (3.4.2); the opcodes whose
+  reply is the status only send no payload; and REG_KEY's children are sorted
+  and unique by `folded` (4.3: "sorted by `folded` in byte order", "send them
+  sorted and unique").
 - **What the shim caches on the director's word**, across a scenario's steps
   (or a generated case's), where no single answer shows it:
   - *The read cache* (3.4.3: "two immutable opens of one path with equal size
@@ -778,7 +789,11 @@ scenario first. A ring that stops answering ends that scenario. Steps are
 numbered from 0, as in the scenario's `steps` list.
 
 TAP (version 13), one test point per scenario; a failed one has a YAML
-block with its error, if any, and each failed step:
+block with its error, if any, and each failed step. After the test points,
+a comment line per opcode counts the answers the director gave to the
+scenario files' steps, listing every answer a step allows, so one that no
+step drew shows as 0 (`# answers stage-exec: bad-request 0, not-found 0,
+not-supported 4, ok 0` is a director that stages nothing):
 
 ```text
 TAP version 13
@@ -817,6 +832,7 @@ JSON has every step, passed or not:
         "passed": false, "note": "different attributes (mtime aside)"}]}
   ],
   "seed": null,
+  "answers": {"getattr": {"not-found": 0, "ok": 1}},
   "adapter_error": null
 }
 ```
@@ -825,7 +841,7 @@ A scenario's `error` says what stopped it outside its steps: a refused mount
 (`mount refused: ...`), a failed attach (`attach failed: ...`), a ring that
 gave no answer, or the adapter error that ended the run, which is also in
 `adapter_error`. `seed` is the generator's seed, and `null` for a run without
-`--generate`.
+`--generate`. `answers` is the count the TAP comment lines give.
 
 The malformed part is one entry, `malformed`, a step per case; its `request`
 names the rule and shows the slot fields and payload in hex. The generated

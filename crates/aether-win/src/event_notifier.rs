@@ -1,4 +1,4 @@
-//! **B4:** Windows event-based `Notifier` for the control ring.
+//! Windows event-based `Notifier` for the control ring.
 #![allow(unsafe_code)]
 
 use std::cell::Cell;

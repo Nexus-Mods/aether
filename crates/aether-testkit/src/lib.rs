@@ -1,5 +1,6 @@
 //! Helpers the workspace's integration tests share. Depend on it from `[dev-dependencies]` only; nothing ships it.
 
+pub mod alloc;
 pub mod artifacts;
 pub mod scratch;
 pub mod zip;

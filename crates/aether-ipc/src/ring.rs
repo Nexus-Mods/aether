@@ -51,17 +51,32 @@ pub fn slot_state(seg: &SharedSeg, geom: &Geom, slot: u32) -> Option<u32> {
     state(seg, geom, slot).map(|st| st.load(Ordering::Acquire))
 }
 
+/// `align8(32 + payload_cap)`, the stride of a slot (`docs/wire.md` 2.1),
+/// worked in 64 bits: `None` when it does not fit the header's u32. In a
+/// 32-bit `usize` the sum wraps for a cap within 32 bytes of `u32::MAX`.
+fn stride_of(payload_cap: u32) -> Option<u32> {
+    let n = SLOT_HEADER_SIZE as u64 + u64::from(payload_cap);
+    u32::try_from((n + 7) & !7).ok()
+}
+
+/// The bytes a ring of `slot_count` slots of `stride` takes, header
+/// included, if a `usize` holds them.
+fn ring_len(slot_count: u32, stride: u32) -> Option<usize> {
+    let total = RING_HEADER_SIZE as u64 + u64::from(slot_count) * u64::from(stride);
+    usize::try_from(total).ok()
+}
+
 /// Lay out an empty ring in `seg`. Returns its geometry.
 pub fn init(seg: &SharedSeg, slot_count: u32, payload_cap: u32) -> Result<Geom, IpcError> {
-    let stride = align8(SLOT_HEADER_SIZE + payload_cap as usize);
-    let total = RING_HEADER_SIZE + slot_count as usize * stride;
-    if total > seg.len() {
-        return Err(IpcError::Layout);
+    let stride = stride_of(payload_cap).ok_or(IpcError::Layout)?;
+    match ring_len(slot_count, stride) {
+        Some(total) if total <= seg.len() => {}
+        _ => return Err(IpcError::Layout),
     }
     seg.write_u32(RH_MAGIC, MAGIC);
     seg.write_u32(RH_VERSION, VERSION);
     seg.write_u32(RH_SLOT_COUNT, slot_count);
-    seg.write_u32(RH_SLOT_STRIDE, stride as u32);
+    seg.write_u32(RH_SLOT_STRIDE, stride);
     seg.write_u32(RH_PAYLOAD_CAP, payload_cap);
     seg.write_u32(RH_WORKER_HINT, 0);
     seg.write_u64(RH_REQ_SEQ, 0);
@@ -69,7 +84,7 @@ pub fn init(seg: &SharedSeg, slot_count: u32, payload_cap: u32) -> Result<Geom, 
     seg.write_u64(RH_REG_GEN, 0);
     let geom = Geom {
         slot_count,
-        slot_stride: stride as u32,
+        slot_stride: stride,
         payload_cap,
     };
     for s in 0..slot_count {
@@ -89,12 +104,14 @@ pub fn open(seg: &SharedSeg) -> Result<Geom, IpcError> {
     let slot_count = seg.read_u32(RH_SLOT_COUNT).ok_or(IpcError::Layout)?;
     let slot_stride = seg.read_u32(RH_SLOT_STRIDE).ok_or(IpcError::Layout)?;
     let payload_cap = seg.read_u32(RH_PAYLOAD_CAP).ok_or(IpcError::Layout)?;
-    if slot_stride as usize != align8(SLOT_HEADER_SIZE + payload_cap as usize) {
+    // Worked in 64 bits on every target (a 32-bit `usize` wraps), and a
+    // header whose numbers do not fit is refused.
+    if stride_of(payload_cap) != Some(slot_stride) {
         return Err(IpcError::Layout);
     }
-    let total = RING_HEADER_SIZE as u64 + slot_count as u64 * slot_stride as u64;
-    if total > seg.len() as u64 {
-        return Err(IpcError::Layout);
+    match ring_len(slot_count, slot_stride) {
+        Some(total) if total <= seg.len() => {}
+        _ => return Err(IpcError::Layout),
     }
     Ok(Geom {
         slot_count,
@@ -392,12 +409,10 @@ pub fn server_complete(
         ST_ABANDONED => return Ok(drain(st)),
         _ => return Ok(Completion::Stale),
     }
-    let (status, len) = if resp.len() > geom.payload_cap as usize {
-        (i32::MIN, 0usize) // overflow sentinel; bulk arena deferred
-    } else {
-        seg.write_bytes(geom.payload_off(slot), resp);
-        (status, resp.len())
-    };
+    let (status, len) = sent(geom.payload_cap, status, resp.len());
+    if len > 0 {
+        seg.write_bytes(geom.payload_off(slot), &resp[..len]);
+    }
     seg.write_i32(base + SH_STATUS, status);
     seg.write_u32(base + SH_PAYLOAD_LEN, len as u32);
     seg.write_u32(base + SH_ACK, req_id as u32);
@@ -411,6 +426,18 @@ pub fn server_complete(
         // The client gave up while the response was being written.
         Err(ST_ABANDONED) => Ok(drain(st)),
         Err(_) => Ok(Completion::Stale),
+    }
+}
+
+/// The status and payload length [`server_complete`] sends for a reply of
+/// `len` bytes with `status`: as given, or the overflow sentinel `i32::MIN`
+/// with no payload when `len` is past `payload_cap` (`docs/wire.md` 2.5).
+/// Public so a tap that records what the client got applies the same rule.
+pub fn sent(payload_cap: u32, status: i32, len: usize) -> (i32, usize) {
+    if len > payload_cap as usize {
+        (i32::MIN, 0) // overflow sentinel; bulk arena deferred
+    } else {
+        (status, len)
     }
 }
 
@@ -539,6 +566,34 @@ mod tests {
         assert_eq!(opened.slot_count, geom.slot_count);
         assert_eq!(opened.payload_cap, 64);
         assert_eq!(opened.slot_stride, geom.slot_stride);
+    }
+
+    /// A `payload_cap` within 32 bytes of `u32::MAX` has no stride a u32
+    /// holds. Worked in 32 bits, `32 + payload_cap` wraps to a small number
+    /// whose `align8` is a stride a header can state, so a ring of tiny
+    /// slots would open claiming slots of 4 GiB. `docs/wire.md` 2.4 refuses
+    /// it on every target.
+    #[test]
+    fn open_refuses_a_payload_cap_whose_stride_wraps() {
+        let owned = OwnedSeg::new(4096);
+        let seg = owned.seg();
+        for cap in [u32::MAX, u32::MAX - 7, u32::MAX - 15, u32::MAX - 31] {
+            // What `align8(32 + cap)` comes to in 32-bit arithmetic.
+            let wrapped = (32u32.wrapping_add(cap)).wrapping_add(7) & !7;
+            seg.write_u32(RH_MAGIC, MAGIC);
+            seg.write_u32(RH_VERSION, VERSION);
+            seg.write_u32(RH_SLOT_COUNT, 1);
+            seg.write_u32(RH_SLOT_STRIDE, wrapped);
+            seg.write_u32(RH_PAYLOAD_CAP, cap);
+            assert_eq!(open(seg), Err(IpcError::Layout), "payload_cap {cap:#x}");
+        }
+        // The largest cap whose stride fits: a header may state it, and a
+        // segment that small is refused for its size, not its arithmetic.
+        let cap = u32::MAX - 39;
+        seg.write_u32(RH_SLOT_STRIDE, u32::MAX - 7);
+        seg.write_u32(RH_PAYLOAD_CAP, cap);
+        assert_eq!(open(seg), Err(IpcError::Layout));
+        assert_eq!(init(seg, 1, u32::MAX - 15), Err(IpcError::Layout));
     }
 
     #[test]

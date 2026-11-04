@@ -841,6 +841,30 @@ fn a_director_writing_every_bulk_reply_into_bank_zero_fails_on_other_slots() {
     );
 }
 
+/// wire.md 2.1 and 2.6: without `VFS_ARENA_OFFSET` the arena starts right
+/// after the last slot, and the shim checks every bulk reply against the
+/// bank there. A director that puts the arena elsewhere and does not say so,
+/// or says a wrong place, fails every bulk READ, in every kind of run.
+#[test]
+fn a_director_placing_its_arena_off_the_assumed_start_fails_its_bulk_reads() {
+    for how in ["arena-elsewhere", "arena-offset-wrong"] {
+        let (entries, all) = committed_with(how, "20");
+        let failing = failed(&entries);
+        assert!(failing.contains(&"concurrent"), "{how}: {all}");
+        assert!(
+            failing.contains(&"multi-handle-shared"),
+            "{how}: {failing:?}"
+        );
+        let shared = entry(&entries, "multi-handle-shared");
+        assert!(
+            shared.3.iter().any(|n| n.contains("wire.md 2.6")),
+            "{how}: {shared:?}"
+        );
+        let notes = limits_failing(how);
+        assert!(notes.iter().any(|n| n.contains("2.6")), "{how}: {notes:?}");
+    }
+}
+
 /// wire.md 2.5: a reply goes into the slot of the request it answers. A
 /// director that swaps the replies of two requests in flight together
 /// passes every scenario, whose steps go one at a time, and fails the
@@ -852,8 +876,9 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
     // Failed for a reply in the wrong slot, not a timeout. Which mismatch
     // shows first depends on which two requests were swapped: another
     // client's answer, a status meant for another request, a payload of
-    // another opcode's shape that does not decode, or a meeting whose two
-    // requests got each other's answers.
+    // another opcode's shape that does not decode or is not that opcode's
+    // length (an attach's HEARTBEAT given a GETATTR's reply, say), or a
+    // meeting whose two requests got each other's answers.
     let concurrent = entry(&entries, "concurrent");
     let error = concurrent.2.as_deref().unwrap_or("");
     assert!(!error.contains("no answer within"), "{concurrent:?}");
@@ -862,6 +887,8 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
             || s.starts_with("a different")
             || s.starts_with("none of the allowed")
             || s.contains("does not decode")
+            || (s.contains(" reply ") && s.contains("payload (wire.md 3.4"))
+            || (s.contains(" reply of ") && s.contains(" bytes (wire.md 3.4"))
             || s.contains(" got Got(")
             || s.contains("meeting:")
     };

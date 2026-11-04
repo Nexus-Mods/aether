@@ -22,16 +22,21 @@
 //! file. [`clients`] sends requests from a slot the caller picks and runs
 //! a scenario's other clients as processes of their own; [`concurrent`]
 //! plays rounds of generated cases from several clients at once.
+//! [`workload`] reads the benchmark workloads (`contract/workloads/`), and
+//! [`bench`] times a director on them over the null adapter's ring floor,
+//! on the [`machine`] it names.
 //! `docs/conformance.md` is the user's guide.
 //!
 //! Unsafe is confined to [`job`] (Windows only): the Job Object an adapter
-//! runs in and the director's wake event.
+//! runs in and the director's wake event; and to [`machine`]'s registry
+//! reads on Windows.
 
 #![deny(unsafe_code)]
 
 pub mod adapter;
 pub mod adapters;
 pub mod attach;
+pub mod bench;
 pub mod clients;
 pub mod compare;
 pub mod concurrent;
@@ -39,12 +44,14 @@ pub mod generate;
 #[cfg(windows)]
 pub mod job;
 pub mod limits;
+pub mod machine;
 pub mod malformed;
 pub mod model;
 pub mod report;
 pub mod run;
 pub mod scenario;
 pub mod shape;
+pub mod workload;
 
 pub use aether_refdirector::tree;
 pub use compare::{Mismatch, Session};

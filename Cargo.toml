@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# cargo-fuzz's crate: nightly, its own lockfile (fuzz/Cargo.toml).
+exclude = ["fuzz"]
 members = [
   # The case fold every name crosses the ring in, shared by file paths
   # (aether-redirect) and registry keys (aether-registry). No dependencies.
@@ -27,6 +29,9 @@ members = [
   # The conformance tool: scenarios (JSON) and the rules a director's replies
   # are compared with the reference's by. Portable.
   "crates/aether-conform",
+  # The fuzz targets' bodies, replayed on stable in every CI run; fuzz/ (outside the
+  # workspace) runs them under cargo-fuzz.
+  "crates/aether-fuzz",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.
@@ -48,6 +53,10 @@ members = [
   # Its own package because its build.rs links vproxy.dll.lib, which only
   # exists once vproxy is built (in an earlier cargo invocation, cargo#6313).
   "crates/aether-fixture-staticimp",
+  # What a Win32 call costs under the shim (aether-shimbench), natively and
+  # injected. Windows only, a benchmark: not shipped, and not in
+  # contract/artifacts.json.
+  "crates/aether-shimbench",
 ]
 
 [workspace.package]
@@ -102,6 +111,12 @@ windows-sys = "0.61"
 bitflags = "2"
 # Generative tests of the wire codecs (aether-protocol, its `testing` feature).
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+# Micro-benchmarks (benches/ of five crates, dev-dependency only). No plots: the
+# HTML reports would pull in plotters for nothing a terminal does not say.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Latency histograms of `aether-conform bench`. No serialisation formats: the
+# report is JSON of quantiles, not histogram logs.
+hdrhistogram = { version = "7.5", default-features = false }
 
 # Everything here unwinds so the library can catch panics at FFI boundaries
 # instead of killing its host process.

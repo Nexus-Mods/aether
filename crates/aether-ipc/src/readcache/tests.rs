@@ -845,6 +845,122 @@ fn a_delete_or_rename_drops_the_path_and_everything_under_it() {
 }
 
 #[test]
+fn nothing_under_a_deleted_or_renamed_path_is_cached_again_opened_before_or_not() {
+    let c = tiny();
+    let s = Source::new(content(100));
+    assert!(lock(&c.files).blocked.is_empty(), "empty until a change");
+    c.invalidate_path(0, "/mods/dir/");
+    for p in ["mods/dir", "mods/dir/y.bin", "mods/dir/deep/z.bin"] {
+        assert!(!c.register(0, p, 100, 0, true, false).cacheable(), "{p}");
+    }
+    for (root, p) in [
+        (0, "mods/dir2/y.bin"),
+        (0, "mods/di"),
+        (1, "mods/dir/y.bin"),
+    ] {
+        let f = c.register(root, p, 100, 0, true, false);
+        assert!(f.cacheable(), "{root} {p}");
+        assert!(read(&c, &f, &s, 0, 4).is_some());
+    }
+    c.invalidate_path(1, ".");
+    assert!(!c.register(1, "any/where", 100, 0, true, false).cacheable());
+    assert!(c.register(0, "mods/other", 100, 0, true, false).cacheable());
+}
+
+/// The blocked paths of `root`: how many, and whether the whole root is.
+fn blocked_of(c: &ReadCache, root: u32) -> (usize, bool) {
+    lock(&c.files)
+        .blocked
+        .get(&root)
+        .map_or((0, false), |b| (b.prefixes.len(), b.whole))
+}
+
+fn is_cacheable(c: &ReadCache, root: u32, path: &str) -> bool {
+    c.register(root, path, 100, 0, true, false).cacheable()
+}
+
+#[test]
+fn deleting_10000_distinct_temp_files_keeps_the_blocked_set_small() {
+    let c = tiny();
+    // Written, then deleted: each was opened for write by this process, so
+    // the file table already holds it poisoned and the set adds nothing.
+    for i in 0..10_000 {
+        let p = format!("saves/tmp{i}.tmp");
+        let _ = c.register(0, &p, 0, 0, false, true);
+        c.invalidate_path(0, &p);
+    }
+    assert_eq!(blocked_of(&c, 0), (0, false));
+    assert!(!is_cacheable(&c, 0, "saves/tmp7.tmp"));
+    // Deleted by name without this process opening them: bounded by the
+    // per-root cap, and every one still blocked.
+    for i in 0..10_000 {
+        c.invalidate_path(0, &format!("cache/shader{i}.bin"));
+    }
+    let (n, _) = blocked_of(&c, 0);
+    assert!(n <= MAX_BLOCKED_PER_ROOT, "{n}");
+    for i in (0..10_000).step_by(97) {
+        assert!(!is_cacheable(&c, 0, &format!("cache/shader{i}.bin")), "{i}");
+    }
+    assert!(
+        is_cacheable(&c, 0, "data/a.esp"),
+        "outside what was deleted"
+    );
+}
+
+#[test]
+fn blocking_an_ancestor_drops_its_descendants_and_covered_paths_add_nothing() {
+    let c = tiny();
+    for p in ["mods/a/b", "mods/a/c/d", "mods/x"] {
+        c.invalidate_path(0, p);
+    }
+    assert_eq!(blocked_of(&c, 0), (3, false));
+    c.invalidate_path(0, "mods/a");
+    assert_eq!(blocked_of(&c, 0), (2, false), "mods/a and mods/x");
+    c.invalidate_path(0, "mods/a/z/deeper");
+    c.invalidate_path(0, "mods/a");
+    assert_eq!(blocked_of(&c, 0), (2, false), "already covered");
+    for p in [
+        "mods/a/b",
+        "mods/a/c/d",
+        "mods/a/z/deeper",
+        "mods/x",
+        "mods/a",
+    ] {
+        assert!(!is_cacheable(&c, 0, p), "{p}");
+    }
+    assert!(is_cacheable(&c, 0, "mods/ab"));
+    c.invalidate_path(0, ".");
+    c.invalidate_path(0, "anything/else");
+    assert_eq!(blocked_of(&c, 0), (0, true), "the whole root covers all");
+}
+
+#[test]
+fn an_overflowing_set_collapses_to_parents_then_the_root_and_blocks_all_it_did() {
+    let c = tiny();
+    // Under eight directories: past the cap, each new path blocks its
+    // parent instead, which takes in that directory's paths.
+    let n = MAX_BLOCKED_PER_ROOT + 100;
+    let deep = |i: usize| format!("d{}/f{i}", i % 8);
+    for i in 0..n {
+        c.invalidate_path(0, &deep(i));
+        assert!(blocked_of(&c, 0).0 <= MAX_BLOCKED_PER_ROOT);
+    }
+    let (len, whole) = blocked_of(&c, 0);
+    assert!(!whole && len <= MAX_BLOCKED_PER_ROOT, "{len} {whole}");
+    for i in 0..n {
+        assert!(!is_cacheable(&c, 0, &deep(i)), "{}", deep(i));
+    }
+    assert!(is_cacheable(&c, 0, "other/x"));
+    // Top-level names have no parent to collapse to: the root goes.
+    for i in 0..n {
+        c.invalidate_path(1, &format!("f{i}"));
+    }
+    assert_eq!(blocked_of(&c, 1), (0, true));
+    assert!(!is_cacheable(&c, 1, "f0") && !is_cacheable(&c, 1, "never/named"));
+    assert!(is_cacheable(&c, 0, "other/x"), "another root is untouched");
+}
+
+#[test]
 fn a_remount_with_other_content_at_the_path_is_another_file() {
     let c = tiny();
     let old = Source::new(content(100));

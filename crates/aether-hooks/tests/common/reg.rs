@@ -1,19 +1,19 @@
 //! The registry tests' shared fixture pieces: NT key calls, scratch real keys, the unhooked
 //! checker process, and the director plus hooks every registry test runs against.
 //!
-//! A test file keeps only what is its own: its `BASE` key, the real keys it makes, and the
-//! extras its `Fixture` carries. Declare this module in the test binary as
+//! A test file keeps only what is its own: its `BASE` key (a [`Base`]), the real keys it
+//! makes, and the extras its `Fixture` carries. Declare this module in the test binary as
 //! `#[path = "../common/reg.rs"] mod reg;` (the checker is then `reg::reg_checker`, see
 //! [`CHECKER_TEST`]).
 
 use std::ffi::c_void;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{LocalFree, FILETIME, HANDLE};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW,
     RegQueryValueExW, RegSetKeySecurity, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ,
     REG_OPTION_NON_VOLATILE,
 };
@@ -216,19 +216,124 @@ fn unlock(sub: &str) {
     }
 }
 
-/// Delete `HKCU\<base>` and wait until it is gone. `locked` names the subkeys (relative to
-/// `base`) a test gives a restrictive DACL: Wine's server keeps a key's DACL for as long as it
-/// runs, so a previous test's locked keys survive a delete until they are unlocked.
-pub(crate) fn reset_base(base: &str, locked: &[&str]) {
+/// A test file's scratch key under `HKCU\Software`: `<name>-<pid>`, so two test processes
+/// that run at once (two `cargo test` runs on one machine, each test in a process of its own)
+/// never share a real key: one process's [`Base::reset`] never deletes and remakes the keys
+/// another is reading.
+///
+/// Declare it as `static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsFooTest");`; it
+/// is a `&str` (`Deref`) and formats as the full subkey (`format!(r"{BASE}\{rel}")`).
+pub(crate) struct Base {
+    name: &'static str,
+    full: OnceLock<String>,
+}
+
+impl Base {
+    pub(crate) const fn new(name: &'static str) -> Base {
+        Base {
+            name,
+            full: OnceLock::new(),
+        }
+    }
+
+    /// Delete this process's key (panicking if it is still there), then delete what earlier test
+    /// processes left under the same name (a key whose process has exited). `locked`
+    /// names the subkeys (relative to the base) a test gives a restrictive DACL: Wine's server
+    /// keeps a key's DACL for as long as it runs, so locked keys survive a delete until they are
+    /// unlocked.
+    pub(crate) fn reset(&self, locked: &[&str]) {
+        delete_scratch(self, locked);
+        if let Some(k) = reg_open(self, KEY_READ) {
+            unsafe { RegCloseKey(k) };
+            panic!(r"HKCU\{self} could not be deleted");
+        }
+        let (parent, prefix) = self
+            .name
+            .rsplit_once('\\')
+            .expect(r"a name under HKCU\Software");
+        let Some(p) = reg_open(parent, KEY_READ) else {
+            return;
+        };
+        let prefix = format!("{prefix}-");
+        let mut stale = Vec::new();
+        let mut buf = [0u16; 256];
+        for i in 0.. {
+            let mut len = buf.len() as u32;
+            let st = unsafe {
+                RegEnumKeyExW(
+                    p,
+                    i,
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if st != 0 {
+                break;
+            }
+            let leaf = String::from_utf16_lossy(&buf[..len as usize]);
+            let pid = leaf
+                .strip_prefix(&prefix)
+                .and_then(|s| s.parse::<u32>().ok());
+            if pid.is_some_and(|pid| !process_running(pid)) {
+                stale.push(format!(r"{parent}\{leaf}"));
+            }
+        }
+        unsafe { RegCloseKey(p) };
+        for s in stale {
+            delete_scratch(&s, locked);
+        }
+    }
+}
+
+impl std::ops::Deref for Base {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.full
+            .get_or_init(|| format!("{}-{}", self.name, std::process::id()))
+    }
+}
+
+impl std::fmt::Display for Base {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+/// `HKCU\<sub>` opened with `access`, if it opens.
+fn reg_open(sub: &str, access: u32) -> Option<HKEY> {
+    let mut k: HKEY = std::ptr::null_mut();
+    let st = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, wide(sub).as_ptr(), 0, access, &mut k) };
+    (st == 0).then_some(k)
+}
+
+/// Unlock `locked` under `HKCU\<base>` and delete the tree.
+fn delete_scratch(base: &str, locked: &[&str]) {
     for rel in locked {
         unlock(&format!(r"{base}\{rel}"));
     }
     unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(base).as_ptr()) };
-    let mut k: HKEY = std::ptr::null_mut();
-    let st = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, wide(base).as_ptr(), 0, KEY_READ, &mut k) };
-    if st == 0 {
-        unsafe { RegCloseKey(k) };
-        panic!("HKCU\\{base} could not be deleted");
+}
+
+/// Whether process `pid` is still running. A pid that cannot be opened is taken as gone (a
+/// process of the same user can always be opened for this right).
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        !ok || code == STILL_ACTIVE as u32
     }
 }
 
@@ -411,16 +516,47 @@ fn reg_checker() {
 /// overlay on (`VFS_REGISTRY`, which `regclient::enabled` reads once). Returns the virtual
 /// root's directory too.
 pub(crate) fn start_director(tag: &str) -> (&'static Fake, std::path::PathBuf) {
+    let (served, root) = start_director_with(
+        tag,
+        fakedirector::Options {
+            arena_len: 0,
+            ..fakedirector::Options::default()
+        },
+    );
+    (served.fake, root)
+}
+
+/// [`start_director`] on a ring and with a registry generation as `opts` says, returning
+/// what the harness taps saw and can do (`fakedirector::install_with`).
+pub(crate) fn start_director_with(
+    tag: &str,
+    opts: fakedirector::Options,
+) -> (&'static fakedirector::Served, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!("aether-shim-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var(aether_env::REGISTRY, "1");
-    let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
-    (fake, root)
+    let served = fakedirector::install_with(&root, Fake::new().with_registry(), opts);
+    (served, root)
 }
 
 /// [`start_director`], then the shim's hooks over an empty root. Never uninstalled.
 pub(crate) fn install_hooks(tag: &str) -> &'static Fake {
-    let (fake, _root) = start_director(tag);
+    install_hooks_with(
+        tag,
+        fakedirector::Options {
+            arena_len: 0,
+            ..fakedirector::Options::default()
+        },
+    )
+    .fake
+}
+
+/// [`start_director_with`], then the shim's hooks over an empty root. Never uninstalled.
+pub(crate) fn install_hooks_with(
+    tag: &str,
+    opts: fakedirector::Options,
+) -> &'static fakedirector::Served {
+    let (served, _root) = start_director_with(tag, opts);
     std::mem::forget(install().expect("install"));
     assert_eq!(
         aether_hooks::reg_overlay_disabled_by(),
@@ -428,7 +564,7 @@ pub(crate) fn install_hooks(tag: &str) -> &'static Fake {
         "every registry detour is in"
     );
     assert!(regclient::enabled());
-    fake
+    served
 }
 
 /// Whether this test runs under Wine: Wine's ntdll exports `wine_get_version`, Windows' does

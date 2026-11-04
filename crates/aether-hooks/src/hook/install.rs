@@ -13,8 +13,8 @@ use super::{
     query_value_hook, qvol_hook, raise_hard_error_hook, read_hook, rename_key_hook,
     replace_key_hook, restore_key_hook, save_key_ex_hook, save_key_hook, save_merged_hook,
     set_info_key_hook, set_info_object_hook, set_security_hook, set_value_key_hook, setinfo_hook,
-    unload_key2_hook, unload_key_ex_hook, unload_key_hook, unlock_hook, unmap_view_hook,
-    write_hook, CreateProcessInternalWFn, SELF_DLL,
+    unload_key2_hook, unload_key_ex_hook, unload_key_hook, unlock_hook, unmap_view_ex_hook,
+    unmap_view_hook, write_hook, CreateProcessInternalWFn, SELF_DLL,
 };
 use crate::child::self_dll_path;
 use crate::ntdef::{
@@ -30,8 +30,8 @@ use crate::ntdef::{
     NtQueryValueKeyFn, NtQueryVolumeInformationFileFn, NtRaiseHardErrorFn, NtReadFileFn,
     NtRenameKeyFn, NtReplaceKeyFn, NtRestoreKeyFn, NtSaveKeyExFn, NtSaveKeyFn, NtSaveMergedKeysFn,
     NtSetInformationFileFn, NtSetInformationKeyFn, NtSetInformationObjectFn, NtSetSecurityObjectFn,
-    NtSetValueKeyFn, NtUnloadKey2Fn, NtUnloadKeyFn, NtUnlockFileFn, NtUnmapViewOfSectionFn,
-    NtWriteFileFn,
+    NtSetValueKeyFn, NtUnloadKey2Fn, NtUnloadKeyFn, NtUnlockFileFn, NtUnmapViewOfSectionExFn,
+    NtUnmapViewOfSectionFn, NtWriteFileFn,
 };
 use crate::tramp::{RawTramp, Tramp};
 use retour::RawDetour;

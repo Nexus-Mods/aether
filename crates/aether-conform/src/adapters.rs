@@ -94,6 +94,14 @@ pub enum Break {
     /// Every bulk READ reply is written into bank 0, whatever slot it answers
     /// (wire.md 2.6: "Slot `s` owns bank `s % banks`").
     BankZero,
+    /// The arena is one bank past the end of the last slot and
+    /// `VFS_ARENA_OFFSET` is not set, so the shim, which then takes the arena
+    /// to start right after the last slot, finds every bulk reply in the wrong
+    /// bank (wire.md 2.1, 2.6).
+    ArenaElsewhere,
+    /// As [`Break::ArenaElsewhere`], but `VFS_ARENA_OFFSET` is set to the
+    /// end of the last slot, which is not where the arena is (wire.md 2.6).
+    ArenaOffsetWrong,
     /// Not a broken rule: handles are numbered down from `u64::MAX` (the
     /// reference's 1 is `u64::MAX`, its 2 is `u64::MAX - 1`), which wire.md
     /// 3.4.3 allows ("any u64 the director chooses"). A run must pass it,
@@ -246,6 +254,9 @@ pub enum Break {
     /// `ST_OK` and changes nothing (wire.md 3.4.5, 3.4.6: `ST_NO_SPACE` or
     /// `ST_BAD_REQUEST`).
     HugeWriteOk,
+    /// A WRITE of more than one byte takes its first half and answers that
+    /// count `ST_OK` (wire.md 3.4.5: on `ST_OK`, `written` is `len`).
+    ShortWrite,
     /// RENAME_X between two roots onto a directory answers `ST_OK` and moves
     /// nothing (wire.md 3.4.13: `ST_IS_DIR` or `ST_IO_ERROR`).
     RenameXOntoDirOk,
@@ -386,6 +397,8 @@ impl Break {
             "per-slot-fh" => Some(Break::PerSlotFh),
             "slot-zero-only" => Some(Break::SlotZeroOnly),
             "bank-zero" => Some(Break::BankZero),
+            "arena-elsewhere" => Some(Break::ArenaElsewhere),
+            "arena-offset-wrong" => Some(Break::ArenaOffsetWrong),
             "downward-fh" => Some(Break::DownwardFh),
             "short-bulk" => Some(Break::ShortBulk),
             "truncate-readdir" => Some(Break::TruncateReaddir),
@@ -423,6 +436,7 @@ impl Break {
             "same-name-exists" => Some(Break::SameNameExists),
             "read-offset-wraps" => Some(Break::ReadOffsetWraps),
             "huge-write-ok" => Some(Break::HugeWriteOk),
+            "short-write" => Some(Break::ShortWrite),
             "rename-x-onto-dir-ok" => Some(Break::RenameXOntoDirOk),
             "skip-past-end-echo" => Some(Break::SkipPastEndEcho),
             "parent-respelled" => Some(Break::ParentRespelled),
@@ -538,6 +552,312 @@ impl Mounted {
     }
 }
 
+/// The ring the null adapter serves: how many slots, the payload cap, the
+/// arena's length (0 for none) and the threads serving it. The default is
+/// the reference adapter's ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NullGeometry {
+    pub slots: u32,
+    pub payload_cap: u32,
+    pub arena_len: usize,
+    pub workers: u32,
+}
+
+impl Default for NullGeometry {
+    fn default() -> NullGeometry {
+        NullGeometry {
+            slots: SLOTS,
+            payload_cap: PAYLOAD_CAP,
+            arena_len: SLOTS as usize * BANK,
+            workers: WORKERS,
+        }
+    }
+}
+
+/// Runs the null adapter until EOF on stdin: the adapter protocol with
+/// [`Floor`] behind it, which answers every request OK with the smallest
+/// reply and a READ with the bytes it asks for, on a ring of `geometry` (a
+/// file, or on Windows a named section). The tree a mount names is never
+/// read. What a request costs here is the ring's own cost, data movement
+/// included, the floor `aether-conform bench` subtracts. The exit code.
+pub fn null_adapter(kind: RingKind, geometry: NullGeometry) -> i32 {
+    if kind == RingKind::Section && !cfg!(windows) {
+        eprintln!("null-adapter: --ring section needs Windows");
+        return 2;
+    }
+    let mut mounted: Option<Mounted> = None;
+    answer_requests(|req| match req {
+        AdapterRequest::Mount { .. } => {
+            if mounted.is_some() {
+                return json!({"ok": false, "error": "a tree is already mounted"});
+            }
+            match mount_null(kind, geometry) {
+                Ok(m) => {
+                    let env = m.env.clone();
+                    mounted = Some(m);
+                    json!({"ok": true, "env": env})
+                }
+                Err(e) => json!({"ok": false, "error": e}),
+            }
+        }
+        AdapterRequest::Unmount => match mounted.take().map(Mounted::unmount) {
+            Some(Err(e)) => json!({"ok": false, "error": e}),
+            _ => json!({"ok": true}),
+        },
+    });
+    if let Some(m) = mounted.take() {
+        let _ = m.unmount();
+    }
+    0
+}
+
+/// A ring of `g` served by [`Floor`] on `g.workers` threads, and the
+/// handshake variables naming it.
+fn mount_null(kind: RingKind, g: NullGeometry) -> Result<Mounted, String> {
+    if g.slots == 0 || g.workers == 0 {
+        return Err("a ring needs at least one slot and one serving thread".into());
+    }
+    let stride = (32 + g.payload_cap as usize).next_multiple_of(8);
+    let arena_offset = aether_ipc::layout::RING_HEADER_SIZE + g.slots as usize * stride;
+    let ring_bytes = (arena_offset + g.arena_len)
+        .next_multiple_of(65536)
+        .max(2 * 1024 * 1024);
+    let init = |b: &dyn RingBacking| -> Result<(), String> {
+        ring::init(b.seg(), g.slots, g.payload_cap).map_err(|e| format!("ring init: {e:?}"))?;
+        ring::set_worker_hint(b.seg(), g.workers);
+        Ok(())
+    };
+    let mut env = Env::new();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (backing, file, threads): Started = match kind {
+        RingKind::File => {
+            let path = std::env::temp_dir().join(format!("{}.ring", unique("null-ring")));
+            let f = aether_filering::FileRing::create(&path, ring_bytes)
+                .map_err(|e| format!("create {}: {e}", path.display()))?;
+            let b: Arc<dyn RingBacking> = Arc::new(f);
+            init(&*b)?;
+            env.insert(
+                aether_env::RING_PATH.into(),
+                path.to_string_lossy().into_owned(),
+            );
+            let t = serve_null(
+                b.clone(),
+                Arc::new(aether_ipc::AdaptiveNotifier),
+                g,
+                arena_offset,
+                stop.clone(),
+            );
+            (b, Some(path), t)
+        }
+        RingKind::Section => null_section(&mut env, g, ring_bytes, arena_offset, &init, &stop)?,
+    };
+    env.insert(aether_env::RING_BYTES.into(), ring_bytes.to_string());
+    env.insert(
+        aether_env::RING_PAYLOAD_CAP.into(),
+        g.payload_cap.to_string(),
+    );
+    if g.arena_len > 0 {
+        env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+        env.insert(aether_env::ARENA_LEN.into(), g.arena_len.to_string());
+    }
+    env.insert(
+        aether_env::VIRTUAL_DIR.into(),
+        r"C:\aether-conform\root0".into(),
+    );
+    Ok(Mounted {
+        stop,
+        threads,
+        backing,
+        file,
+        cfg: PathBuf::new(),
+        staged: Arc::default(),
+        env,
+    })
+}
+
+#[cfg(windows)]
+fn null_section(
+    env: &mut Env,
+    g: NullGeometry,
+    ring_bytes: usize,
+    arena_offset: usize,
+    init: &dyn Fn(&dyn RingBacking) -> Result<(), String>,
+    stop: &Arc<AtomicBool>,
+) -> Result<Started, String> {
+    let name = format!(r"Local\{}", unique("null-section"));
+    let (srv, cli) = (format!("{name}_srv"), format!("{name}_cli"));
+    let m = aether_win::SharedMapping::create(&name, ring_bytes)
+        .map_err(|e| format!("create section {name}: {e}"))?;
+    let events = aether_win::EventNotifier::create(&srv, &cli)
+        .map_err(|e| format!("create events {srv}, {cli}: {e}"))?;
+    let b: Arc<dyn RingBacking> = Arc::new(m);
+    init(&*b)?;
+    env.insert(aether_env::RING_SECTION.into(), name);
+    env.insert(aether_env::SERVER_EV.into(), srv);
+    env.insert(aether_env::CLIENT_EV.into(), cli);
+    let t = serve_null(b.clone(), Arc::new(events), g, arena_offset, stop.clone());
+    Ok((b, None, t))
+}
+
+#[cfg(not(windows))]
+fn null_section(
+    _env: &mut Env,
+    _g: NullGeometry,
+    _ring_bytes: usize,
+    _arena_offset: usize,
+    _init: &dyn Fn(&dyn RingBacking) -> Result<(), String>,
+    _stop: &Arc<AtomicBool>,
+) -> Result<Started, String> {
+    Err("a named section needs Windows".into())
+}
+
+/// The null adapter's director: [`aether_refdirector::Null`] for every
+/// opcode but READ, which moves as many bytes as it is asked for, so that a
+/// floor's READ costs the ring's data movement as a director's does. It
+/// answers in bulk when the request sets `FLAG_READ_BULK` and the ring has
+/// an arena, with `min(len, bank_size)` bytes of its slot's bank, and inline
+/// otherwise, with `min(len, payload_cap - 8)` bytes; the bytes are zeros,
+/// written each time. `aether-conform bench` sends the floor each READ with
+/// the length and the form the director's reply had.
+#[derive(Default)]
+struct Floor {
+    null: aether_refdirector::Null,
+    zeros: Vec<u8>,
+}
+
+impl Director for Floor {
+    fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
+        self.null.get_attr(root, path)
+    }
+    fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
+        self.null.read_dir(root, path, out)
+    }
+    fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
+        self.null.open(root, flags, path)
+    }
+    fn read(
+        &mut self,
+        at: ReadSlot<'_>,
+        slot_flags: RequestFlags,
+        _: u64,
+        _: u64,
+        len: u32,
+    ) -> Result<ReadReply<'_>, Status> {
+        if let (true, Some(arena)) = (slot_flags.contains(RequestFlags::READ_BULK), at.arena) {
+            return match arena.fill_bank(at.slot, len as usize, |buf| {
+                buf.fill(0);
+                Ok(buf.len())
+            }) {
+                Ok((arena_offset, n)) => Ok(ReadReply::Bulk {
+                    len: n as u32,
+                    arena_offset,
+                }),
+                Err(st) => Err(Status::try_from(st).unwrap_or(Status::IoError)),
+            };
+        }
+        let n = (len as usize).min(at.inline_cap);
+        self.zeros.clear();
+        self.zeros.resize(n, 0);
+        Ok(ReadReply::Inline(&self.zeros))
+    }
+    fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
+        self.null.write(fh, offset, data)
+    }
+    fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
+        self.null.set_attr(fh, size)
+    }
+    fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
+        self.null.rename(root, from, to)
+    }
+    fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
+        self.null.delete(root, path)
+    }
+    fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
+        self.null.mkdir(root, mode, path)
+    }
+    fn close(&mut self, fh: u64) -> Result<(), Status> {
+        self.null.close(fh)
+    }
+    fn heartbeat(&mut self) -> Result<(), Status> {
+        self.null.heartbeat()
+    }
+    fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
+        self.null.stored_names(root, skip, path)
+    }
+    fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {
+        self.null.reg_lookup(path)
+    }
+    fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
+        self.null.reg_key(path)
+    }
+    fn reg_set_value(
+        &mut self,
+        path: &str,
+        name: &str,
+        ty: u32,
+        data: &[u8],
+    ) -> Result<u64, Status> {
+        self.null.reg_set_value(path, name, ty, data)
+    }
+    fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {
+        self.null.reg_delete_value(path, name)
+    }
+    fn reg_create_key(&mut self, path: &str, volatile: bool) -> Result<u64, Status> {
+        self.null.reg_create_key(path, volatile)
+    }
+    fn reg_delete_key(&mut self, path: &str) -> Result<u64, Status> {
+        self.null.reg_delete_key(path)
+    }
+    fn reg_rename_key(&mut self, path: &str, new_leaf: &str) -> Result<u64, Status> {
+        self.null.reg_rename_key(path, new_leaf)
+    }
+    fn reg_changed(
+        &mut self,
+        path: &str,
+        subtree: bool,
+        since: u64,
+    ) -> Result<ChangedReply, Status> {
+        self.null.reg_changed(path, subtree, since)
+    }
+    fn rename_x(
+        &mut self,
+        from_root: RootId,
+        to_root: RootId,
+        from: &str,
+        to: &str,
+    ) -> Result<(), Status> {
+        self.null.rename_x(from_root, to_root, from, to)
+    }
+    fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
+        self.null.stage_exec(root, path)
+    }
+}
+
+/// Serves [`Floor`] on `backing` until `stop`, on `g.workers` threads sharing
+/// one notifier, as a Rust director serves (`aether_rpc::serve_with_arena`).
+fn serve_null<N: Notifier + Send + Sync + 'static>(
+    backing: Arc<dyn RingBacking>,
+    notifier: Arc<N>,
+    g: NullGeometry,
+    arena_offset: usize,
+    stop: Arc<AtomicBool>,
+) -> Vec<JoinHandle<Result<(), IpcError>>> {
+    (0..g.workers)
+        .map(|_| {
+            let backing = backing.clone();
+            let notifier = SharedNotifier(notifier.clone());
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let seg = backing.seg();
+                let server = RingServer::new(seg, notifier)?;
+                let arena = (g.arena_len > 0)
+                    .then(|| DataArena::new(seg, arena_offset, g.arena_len, g.slots as usize));
+                aether_rpc::serve_with_arena(&server, arena.as_ref(), &mut Floor::default(), &stop)
+            })
+        })
+        .collect()
+}
+
 /// A name no other mount of this or another process has.
 fn unique(tag: &str) -> String {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -574,7 +894,12 @@ fn mount(
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
-    let arena_offset = aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
+    let after_slots = aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
+    let misplaced = matches!(
+        broken,
+        Some(Break::ArenaElsewhere | Break::ArenaOffsetWrong)
+    );
+    let arena_offset = after_slots + if misplaced { BANK } else { 0 };
     let arena_len = if arena { SLOTS as usize * BANK } else { 0 };
     let ring_bytes = (arena_offset + arena_len)
         .next_multiple_of(65536)
@@ -608,7 +933,15 @@ fn mount(
     env.insert(aether_env::RING_BYTES.into(), ring_bytes.to_string());
     env.insert(aether_env::RING_PAYLOAD_CAP.into(), PAYLOAD_CAP.to_string());
     if arena_len > 0 {
-        env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+        match broken {
+            Some(Break::ArenaElsewhere) => {}
+            Some(Break::ArenaOffsetWrong) => {
+                env.insert(aether_env::ARENA_OFFSET.into(), after_slots.to_string());
+            }
+            _ => {
+                env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+            }
+        }
         env.insert(aether_env::ARENA_LEN.into(), arena_len.to_string());
     }
     // Where the program would see each root. Nothing on the ring names
@@ -1881,6 +2214,9 @@ impl Director for Served {
                 .is_none_or(|end| end > aether_refdirector::MAX_FILE_LEN as u64)
         {
             return Ok(data.len() as u32);
+        }
+        if self.broken == Some(Break::ShortWrite) && data.len() > 1 {
+            return self.reference.write(fh, offset, &data[..data.len() / 2]);
         }
         if self.broken == Some(Break::GrowthGarbage) {
             let end = self.length(fh)?;

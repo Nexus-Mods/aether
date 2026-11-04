@@ -6,7 +6,9 @@ program, has it mount a scenario's tree, attaches to the ring the director
 names exactly as the shim would, plays the scenario's requests, and compares
 each answer with the one the scenario expects. Scenarios live in
 `contract/scenarios/` and their format is described in
-`contract/scenarios/README.md`.
+`contract/scenarios/README.md`. Through the same adapter, `aether-conform
+bench` times a director on the workloads in `contract/workloads/`
+("Benchmarks" below).
 
 A run has up to five parts, all through the same adapter:
 
@@ -121,7 +123,7 @@ are the only exceptions, and each is allowed by the wire.md text quoted:
 
 | What | Rule | wire.md |
 |---|---|---|
-| OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. Never 0. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles"; the shim keeps 0 for a directory it made. |
+| OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. Never 0. | 3.4.3: "`fh` is any u64 the director chooses except 0, unique among open handles". |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and where a director starts it is its own. |
 | OPEN `immutable` | Not compared, but must be clear on a write open, on a directory and on a file under a `writable` entry, and reads through immutable handles are checked against each other ("What the shim caches", above). The reply's other flag bits and bytes 18-19 must be zero. | 3.4.3: "Never set it for a write open or a directory"; "never set it for a file a writable provider holds"; "other bits zero"; 7. |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
@@ -797,6 +799,13 @@ request at a time only uses slot 0. `swap-replies` passes every scenario,
 since a scenario's steps go one at a time. Each fails the concurrent
 clients.
 
+A bulk reply's bank is checked against the arena's start as the shim takes
+it (wire.md 2.1, 2.6): `VFS_ARENA_OFFSET`, or right after the last slot when
+it is not set. `--misbehave arena-elsewhere` (the arena one bank later, the
+variable not set) and `--misbehave arena-offset-wrong` (the variable set to
+the end of the last slot) fail every bulk READ, in the scenarios, the
+generated cases, the concurrent clients and the limits.
+
 ## Reading a report
 
 Every step is played even after one fails, so the report shows them all; a
@@ -864,3 +873,126 @@ names the rule and shows the slot fields and payload in hex. The generated
 part is one entry, `generated`: passed, with no steps and the case count and
 seed as its `file`, or failed, with the shrunk case's steps and the file it
 was written to.
+
+## Benchmarks
+
+`aether-conform bench` times a director on the workloads in
+`contract/workloads/` (their format is in `contract/workloads/README.md`):
+the same adapter as `run`, the same attach, and then requests sent as fast
+as client threads can send them, not compared with anything but the floor.
+
+```sh
+cargo build --release -p aether-conform
+target/release/aether-conform bench --director "target/release/aether-conform reference-adapter" \
+    --workloads contract/workloads --out target/bench/reference.json
+# Over a named section (Windows), one workload, four clients per thread:
+target/release/aether-conform bench --director "target/release/aether-conform reference-adapter --ring section" \
+    --only launch-storm --clients 4 --out target/bench/storm.json
+# Against an earlier report from this machine:
+target/release/aether-conform bench --director "..." --baseline target/bench/reference.json
+```
+
+Per workload the adapter mounts its tree (written as a scenario file with
+no steps, so an adapter needs nothing new). Each phase is played once as a
+warm-up, not recorded, and then recorded: `threads x --clients` threads at
+once, each with its own ring client, each sending the requests the workload
+gives that thread in the same order every time. A request is timed from
+before it is sent until its reply is decoded, a bulk READ's data copied out
+of the arena as the shim copies it, into a histogram per opcode (1 ns to
+60 s, three significant figures). Then the same requests go to the floor: by
+default `aether-conform null-adapter`, which never reads the tree, on a ring
+of the director's kind with the director's slot count, payload cap, arena
+length and `worker_hint` as its serving threads. It answers every request OK
+with the smallest reply, except READ. Each recorded READ goes to the floor
+asking for as many bytes as the director's reply to it gave, with
+`FLAG_READ_BULK` set exactly when that reply came in bulk, and the floor
+answers that many bytes (zeros) in that form: written into the slot inline,
+or into the slot's bank in bulk, and copied out as the director's were. So
+the floor includes the round trip, the copies of the request and the reply
+through the slot, and a READ's data movement through the slot or the arena;
+what it leaves out is what the director does to answer. The report gives
+both and, per opcode, the director's p50, p99 and p99.9 less the floor's.
+`--floor "<command line>"` names another floor adapter, which is sent the
+READs the same way.
+
+A reply that is not what the phase expects stops the workload with an
+error, and the workload has no numbers: a status other than OK, a GETATTR
+of a file of the tree with `found = 0`, a READ shorter than the file the
+OPEN described, a WRITE that took fewer bytes than sent, a READDIR with
+another number of entries than the tree has. The floor is held to OK
+statuses only. A workload the ring cannot carry (a WRITE whose 24-byte
+header and data are past the payload cap, an inline READ whose reply is, a
+bulk READ with no arena) fails the same way.
+
+`bench`'s options:
+
+| Option | Meaning |
+|---|---|
+| `--director "<command line>"` | The adapter to start, as for `run`. Required. |
+| `--workloads DIR` | Default `contract/workloads`. |
+| `--only NAME[,NAME...]` | Only these workloads. |
+| `--floor "<command line>"` | The floor's adapter. Default: this program's `null-adapter` on a ring like the director's. |
+| `--clients N` | Client threads per phase thread, 1 to 64. Default 1. |
+| `--quick` | One repeat of at most 64 requests per thread (and the CLOSEs of what they opened): checks that every workload mounts and is answered, for CI. Its numbers are not timings. |
+| `--out FILE` | Where the JSON report goes. A summary goes to stdout either way. |
+| `--baseline FILE` | Print each value's change against an earlier report. A report from another machine (CPU model, logical cores, OS), director, `--clients` or `--quick` is refused, and so is one where a workload both ran has another ring geometry. |
+| `--fail-over PCT` | With `--baseline`: exit 3 when an opcode's p50 rose more than PCT percent. |
+| `--timeout SECS` | Every adapter answer and request. Default 120 (a mount builds large trees). |
+
+Exit code: 0 when every workload ran, 1 when one failed, 2 on a usage or
+adapter error or a refused baseline, 3 for a rise past `--fail-over`. A run
+slower than its baseline exits 0: timed numbers are one machine's, and only
+someone at that machine, asking with `--fail-over`, turns them into a
+failure. CI never does; it runs the `--quick` pass over every workload but
+`sequential-bulk` (whose 256 MiB tree is slow to build in a debug build),
+which checks replies and counts and nothing that is timed.
+
+The report:
+
+```json
+{
+  "machine": {"cpu": "...", "cores": 16, "os": "...",
+              "build": {"profile": "release", "rustc": "rustc ...", "git": "..."}},
+  "director": "<command line>", "floor": "<command line>", "clients": 1, "quick": false,
+  "workloads": [
+    {"name": "random-small",
+     "geometry": {"ring": "file", "slots": 8, "payload_cap": 1048576, "arena_len": 8388608,
+                  "worker_hint": 4},
+     "floor": "<command line>",
+     "floor_geometry": {"...": "the same fields, for the floor's ring"},
+     "phases": [
+      {"name": "reads", "threads": 4, "requests": 32776, "seconds": 0.41,
+       "requests_per_s": 79941.5, "read_bytes": 134217728, "bulk_bytes": 0,
+       "bulk_mib_s": null,
+       "floor": {"seconds": 0.07, "requests_per_s": 468228.6,
+                 "read_bytes": 134217728, "bulk_bytes": 0},
+       "per_op": {"read": {"count": 32768, "p50_us": 18.2, "p99_us": 61.0,
+                           "p999_us": 140.3, "max_us": 802.0, "mean_us": 20.1,
+                           "floor_p50_us": 3.1, "floor_p99_us": 9.4,
+                           "floor_p999_us": 21.0, "floor_max_us": 95.1,
+                           "over_floor_p50_us": 15.1, "over_floor_p99_us": 51.6,
+                           "over_floor_p999_us": 119.3}}}]},
+    {"name": "save-heavy", "error": "phase save, thread 0: request 3 (write ...): ..."}
+  ]
+}
+```
+
+Times are microseconds. `read_bytes` is the bytes READs returned and
+`bulk_bytes` those that came in bulk, the floor's the same on its side;
+`bulk_mib_s` is the bulk bytes over the phase's wall time, `null` for a
+phase that sent none. Each workload is mounted on a ring of its own, so the
+ring's geometry, the floor's command line and the floor's geometry are given
+per workload; the top-level `floor` is the one asked for. The numbers above
+show the shape, not a machine's results.
+
+How to compare two commits, and the other benchmarks of this repository, are
+in [benchmarks.md](benchmarks.md).
+
+`aether-conform null-adapter [--ring file|section] [--slots N]
+[--payload-cap N] [--arena-len N] [--workers N]` is the floor: the adapter
+protocol with a director behind it that answers every opcode OK with the
+smallest valid reply (GETATTR finds nothing, OPEN gives handle 1 of size 0),
+except READ, which gives as many zeros as it asks for, up to what the reply
+holds: in bulk when it sets `FLAG_READ_BULK` and the ring has an arena,
+inline otherwise. Its ring has 8 slots, a 1 MiB payload cap, an 8 MiB arena
+and 4 serving threads unless told otherwise.

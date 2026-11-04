@@ -1,0 +1,20 @@
+{
+  "name": "sequential-bulk",
+  "description": "A 256 MiB archive read from start to end in 1 MiB bulk READs, by one reader twice and then by four at once",
+  "tree": {
+    "roots": [
+      {
+        "id": 0,
+        "files": [
+          {"path": "Data/Textures0.bsa", "contents": {"size": 268435456, "seed": 7}}
+        ]
+      }
+    ]
+  },
+  "phases": [
+    {"name": "one-reader", "threads": 1, "repeat": 2, "kind": "sequential_read",
+     "path": "Data/Textures0.bsa", "chunk": 1048576, "bulk": true},
+    {"name": "four-readers", "threads": 4, "repeat": 1, "kind": "sequential_read",
+     "path": "Data/Textures0.bsa", "chunk": 1048576, "bulk": true}
+  ]
+}

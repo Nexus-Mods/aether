@@ -24,6 +24,7 @@ mod open;
 mod panics;
 mod registry;
 mod report;
+mod sections;
 mod tally;
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,10 @@ pub use open::*;
 pub use panics::*;
 pub use registry::*;
 pub(crate) use report::*;
+pub use sections::{lazy_region_count, section_failure_count};
+pub(crate) use sections::{
+    note_in_page_error, note_lazy_region, note_section_failure, LazyBacking, SectionFailure,
+};
 
 /// Generates [`Hook`], its count and its names from `detour_table!`: one `Variant = id` per row
 /// that has a `stat` column.

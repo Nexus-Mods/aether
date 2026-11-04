@@ -5,7 +5,8 @@ use super::{
     open_synth, synth_path, TRAMP_FLUSH, TRAMP_LOCK, TRAMP_READ, TRAMP_UNLOCK, TRAMP_WRITE,
 };
 use crate::ntdef::{
-    STATUS_END_OF_FILE, STATUS_INVALID_HANDLE, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    STATUS_DISK_FULL, STATUS_END_OF_FILE, STATUS_INVALID_HANDLE, STATUS_SUCCESS,
+    STATUS_UNSUCCESSFUL,
 };
 use crate::synth_file::FileView;
 use core::ffi::c_void;
@@ -185,7 +186,6 @@ pub(super) unsafe fn write_hook_body(
         let explicit = unsafe { crate::ntbuf::explicit_offset(byte_offset) };
         if let Some(FileView {
             fh,
-            size,
             position: pos,
             append_only,
             ..
@@ -208,37 +208,57 @@ pub(super) unsafe fn write_hook_body(
                     crate::read_cache::invalidate(&f);
                 }
             }
-            let n = if want == 0 || buffer.is_null() {
-                0usize
+            // What landed, and the failure that stopped the rest: a write that
+            // fails part way grew the file by what its earlier chunks wrote,
+            // and says so in `Information`, but leaves the file pointer where
+            // it was, as NTFS does (docs/wire.md 3.4.5).
+            let (n, failed) = if want == 0 || buffer.is_null() {
+                (0usize, None)
             } else {
                 // SAFETY: NtWriteFile contract — buffer is readable for `length` bytes.
                 let slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, want) };
-                match crate::director::global()
-                    .ok_or(aether_protocol::Status::IoError)
-                    .and_then(|c| c.write(fh, off, slice))
-                {
-                    Ok(n) => n,
-                    Err(_) => {
-                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0) };
-                        return STATUS_UNSUCCESSFUL;
-                    }
+                match crate::director::global() {
+                    None => (0, Some(STATUS_UNSUCCESSFUL)),
+                    Some(c) => match c.write(fh, off, slice) {
+                        Ok(n) => (n, None),
+                        Err(crate::director::WriteFailed { written, status }) => (
+                            written,
+                            Some(match status {
+                                aether_protocol::Status::NoSpace => STATUS_DISK_FULL,
+                                _ => STATUS_UNSUCCESSFUL,
+                            }),
+                        ),
+                    },
                 }
             };
-            // Append-only always tracks position (every write moved EOF
-            // forward regardless of what the caller passed); otherwise only
-            // an implicit-offset write consumes the file pointer.
-            if append_only || explicit.is_none() {
+            if failed.is_some() && n == 0 {
+                // Nothing landed: nothing moves.
+                let st = failed.unwrap_or(STATUS_UNSUCCESSFUL);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, st, 0) };
+                return st;
+            }
+            // Append-only always tracks position (it is the end of file every
+            // append lands at, and the landed bytes moved it, failed or not);
+            // otherwise only an implicit-offset write that succeeded moves the
+            // file pointer. A failed one leaves it, so a retry of the same
+            // buffer lands where this one started.
+            if append_only || (explicit.is_none() && failed.is_none()) {
                 crate::synth_file::set_position(handle as isize, off + n as u64);
             }
             // The synthetic size is set at open; a write that extends the
             // file must bump it too, or `read_hook`'s EOF check and
             // `fuse_query_information`'s `metadata().len()` keep reporting the
             // pre-write length forever. A director-served file has no kernel
-            // FCB to track this.
-            let end = off + n as u64;
-            if end > size {
-                crate::synth_file::grow_size(handle as isize, end);
+            // FCB to track this. A write that landed anything also drops the
+            // time the handle kept (`docs/wire.md` 3.2, "Timestamps").
+            if n > 0 {
+                crate::synth_file::wrote(handle as isize, off + n as u64);
+            }
+            if let Some(st) = failed {
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, st, n) };
+                return st;
             }
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n) };

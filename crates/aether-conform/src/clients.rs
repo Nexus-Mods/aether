@@ -248,22 +248,16 @@ pub(crate) fn decode(
             let banks = ring.geom().slot_count.max(1);
             let own = slot % banks;
             let end = arena_offset.saturating_add(u64::from(len));
-            // Without VFS_ARENA_OFFSET the banks' places are only assumed, so
-            // the data need only lie in the mapping (`Attached::arena_offset_given`).
-            let given = ring.arena_offset_given();
-            let placed = if given {
-                ring.bank_of(arena_offset, len)
-            } else {
-                Some(own)
-            };
-            match placed {
+            // The shim's rule (wire.md 2.1, 2.6): the arena starts at
+            // `VFS_ARENA_OFFSET`, or right after the last slot, and the
+            // reply must lie in its own slot's bank there.
+            match ring.bank_of(arena_offset, len) {
                 Some(b) if b == own && end <= ring.ring_bytes() as u64 => {
                     match ring.seg().read_bytes(arena_offset as usize, len as usize) {
-                        Some(data) => (Answer::Got(Ok(OwnedReply::Read(data))), given.then_some(b)),
+                        Some(data) => (Answer::Got(Ok(OwnedReply::Read(data))), Some(b)),
                         None => (
                             Answer::Bad(format!(
-                                "a bulk reply of {len} bytes at {arena_offset}, outside the \
-                                 mapping (wire.md 2.6)"
+                                "a bulk reply of {len} bytes at {arena_offset}, outside the \n                                 mapping (wire.md 2.6)"
                             )),
                             None,
                         ),
@@ -273,7 +267,7 @@ pub(crate) fn decode(
                     Answer::Bad(format!(
                         "a bulk reply in slot {slot} of {len} bytes at mapping offset \
                          {arena_offset}, which is {} and not in bank {own} (the arena is {} \
-                         bytes at {}; wire.md 2.6: \"Slot `s` owns bank `s % banks`\", and 2.5: \
+                         bytes at {}, {}; wire.md 2.6: \"Slot `s` owns bank `s % banks`\", and 2.5: \
                          the bank belongs to the slot's owner, so data in another bank is \
                          another request's)",
                         match other {
@@ -282,6 +276,11 @@ pub(crate) fn decode(
                         },
                         ring.arena_len(),
                         ring.arena_offset(),
+                        if ring.arena_offset_given() {
+                            "from VFS_ARENA_OFFSET"
+                        } else {
+                            "right after the last slot, as VFS_ARENA_OFFSET is not set (2.1)"
+                        },
                     )),
                     None,
                 ),

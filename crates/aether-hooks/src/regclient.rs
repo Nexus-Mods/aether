@@ -17,8 +17,10 @@
 //! **Errors.** Every call returns the director's status as `Err`: a request
 //! that could not be sent or was never answered is `Status::IoError`, a director with no
 //! registry attached `Status::NotSupported`, a `REG_KEY` answer too large for the ring
-//! `Status::ReplyTooLarge`. A failed read is counted as a fallback in the shim stats; the caller
-//! then serves the real key alone. A failed write is never retried against the real registry;
+//! `Status::ReplyTooLarge` (the director's own status, or the ring's overflow, which says the
+//! same). A failed read is counted as a fallback in the shim stats and the caller serves the real
+//! key alone, except a key too large to read: its overlay holds what the real key does not, so
+//! the caller fails the read (`docs/wire.md` 4.4) and nothing is counted. A failed write is never retried against the real registry;
 //! the caller returns `STATUS_UNSUCCESSFUL`.
 
 use std::collections::HashMap;
@@ -35,6 +37,9 @@ use crate::director::{self, FuseClient};
 /// this between two writes; the bound only stops a pathological enumeration from growing it
 /// without end.
 const CACHE_ENTRIES: usize = 4096;
+
+/// The status a ring sends for a reply longer than its `payload_cap` (`docs/wire.md` 2.5).
+const RING_OVERFLOW: i32 = i32::MIN;
 
 /// Registry virtualisation is on for this process: the host set [`aether_env::REGISTRY`] (it does
 /// so only while a registry layer is attached), every registry detour was installed
@@ -114,6 +119,17 @@ pub fn lookup(path: &str) -> Result<(Lookup, bool), Status> {
     }
 }
 
+/// [`lookup`], asked of the director even when an answer is cached (and kept in its place).
+/// For the lookup after a key create answered `ST_EXISTS` (`docs/wire.md` 4.4): that answer
+/// says the key was made since the one cached, which a director whose generation did not move
+/// leaves in place.
+pub fn lookup_fresh(path: &str) -> Result<(Lookup, bool), Status> {
+    match global() {
+        Some(c) => c.lookup_fresh(path),
+        None => read_failed(Status::NotSupported),
+    }
+}
+
 /// `REG_KEY` through [`global`]: the key's overlay node, if it has one. Cached.
 pub fn key(path: &str) -> Result<Option<Node>, Status> {
     match global() {
@@ -180,7 +196,8 @@ pub fn changed(path: &str, subtree: bool, since: u64) -> Result<(bool, u64), Sta
 fn read_failed<T>(status: Status) -> Result<T, Status> {
     if IN_WRITE.with(|w| w.get()) {
         crate::hookstats::note_reg_write_refused();
-    } else {
+    } else if status != Status::ReplyTooLarge {
+        // A key too large to read is failed, not served from the real registry.
         crate::hookstats::note_reg_read_fallback();
     }
     Err(status)
@@ -188,6 +205,28 @@ fn read_failed<T>(status: Status) -> Result<T, Status> {
 
 thread_local! {
     static IN_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The folded path a cache lookup asks with, in a buffer each thread keeps.
+    /// It never shrinks: it is as large as the longest key path the thread has
+    /// asked about (a registry path is at most 32767 units), kept for the
+    /// thread's life.
+    static FOLDED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// `f` of `fold(path)`, folded into this thread's kept buffer, so a lookup
+/// that hits allocates nothing once the buffer has grown. A fresh string when
+/// the buffer is in use (or the thread is ending).
+fn with_folded<R>(path: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut f = Some(f);
+    let kept = FOLDED.try_with(|cell| {
+        let mut buf = cell.try_borrow_mut().ok()?;
+        aether_registry::path::fold_into(path, &mut buf);
+        f.take().map(|f| f(&buf))
+    });
+    match (kept, f) {
+        (Ok(Some(r)), _) => r,
+        (_, Some(f)) => f(&fold(path)),
+        (_, None) => unreachable!("`f` ran and returned"),
+    }
 }
 
 /// While held, this thread is answering a registry write: a director request that fails is
@@ -245,18 +284,29 @@ impl<'a> RegClient<'a> {
     }
 
     pub fn lookup(&self, path: &str) -> Result<(Lookup, bool), Status> {
-        self.cached(
-            path,
+        self.cached(path, |c| &mut c.lookups, || self.fetch_lookup(path))
+    }
+
+    /// [`RegClient::lookup`] asked of the director even when an answer is cached; the answer
+    /// is kept in place of the cached one.
+    pub fn lookup_fresh(&self, path: &str) -> Result<(Lookup, bool), Status> {
+        let generation = self.fc.reg_generation();
+        self.fetched(
+            generation,
+            fold(path),
             |c| &mut c.lookups,
-            || {
-                // A lookup state outside the table does not decode: a read failure, so the
-                // caller serves the real key rather than a guess.
-                self.read(&Request::RegLookup { path }, |r| match r {
-                    Reply::RegLookup(l) => Some((l.state, l.below)),
-                    _ => None,
-                })
-            },
+            || self.fetch_lookup(path),
         )
+    }
+
+    /// One `REG_LOOKUP` round trip.
+    fn fetch_lookup(&self, path: &str) -> Result<(Lookup, bool), Status> {
+        // A lookup state outside the table does not decode: a read failure, so the caller
+        // serves the real key rather than a guess.
+        self.read(&Request::RegLookup { path }, |r| match r {
+            Reply::RegLookup(l) => Some((l.state, l.below)),
+            _ => None,
+        })
     }
 
     pub fn key(&self, path: &str) -> Result<Option<Node>, Status> {
@@ -266,16 +316,22 @@ impl<'a> RegClient<'a> {
     /// [`RegClient::key`] with `f` run on the cached node in place (under the cache lock).
     pub fn with_key<R>(&self, path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, Status> {
         let generation = self.fc.reg_generation();
-        let k = fold(path);
+        let mut f = Some(f);
         if generation != 0 {
-            if let Ok(mut c) = self.cache.lock() {
-                if c.at(generation) {
-                    if let Some(v) = c.keys.get(&k) {
-                        return Ok(f(v.as_ref()));
-                    }
+            let hit = with_folded(path, |k| {
+                let mut c = self.cache.lock().ok()?;
+                if !c.at(generation) {
+                    return None;
                 }
+                let v = c.keys.get(k)?;
+                f.take().map(|f| f(v.as_ref()))
+            });
+            if let Some(r) = hit {
+                return Ok(r);
             }
         }
+        let f = f.expect("run only on a hit, which returned");
+        let k = fold(path);
         let v = match self.fetch_key(path) {
             Ok(v) => v,
             Err(st) => return read_failed(st),
@@ -292,10 +348,16 @@ impl<'a> RegClient<'a> {
     }
 
     /// One `REG_KEY` round trip: the key's node, owned (the reply decodes it).
+    /// A reply past `payload_cap`, which the ring sends as its overflow status, is
+    /// `Status::ReplyTooLarge`, as the director's own answer would be.
     fn fetch_key(&self, path: &str) -> Result<Option<Node>, Status> {
-        self.read(&Request::RegKey { path }, |r| match r {
+        self.request(&Request::RegKey { path }, |r| match r {
             Reply::RegKey(k) => Some(k.node.map(std::borrow::Cow::into_owned)),
             _ => None,
+        })
+        .map_err(|e| match e {
+            CallError::UnknownStatus(RING_OVERFLOW) => Status::ReplyTooLarge,
+            e => director::failed(e),
         })
     }
 
@@ -397,16 +459,30 @@ impl<'a> RegClient<'a> {
         fetch: impl FnOnce() -> Result<T, Status>,
     ) -> Result<T, Status> {
         let generation = self.fc.reg_generation();
-        let k = fold(path);
         if generation != 0 {
-            if let Ok(mut c) = self.cache.lock() {
-                if c.at(generation) {
-                    if let Some(v) = map(&mut c).get(&k) {
-                        return Ok(v.clone());
-                    }
+            let hit = with_folded(path, |k| {
+                let mut c = self.cache.lock().ok()?;
+                if !c.at(generation) {
+                    return None;
                 }
+                map(&mut c).get(k).cloned()
+            });
+            if let Some(v) = hit {
+                return Ok(v);
             }
         }
+        self.fetched(generation, fold(path), map, fetch)
+    }
+
+    /// `fetch`'s answer, kept in `map` under `generation` (read before asking; 0 keeps
+    /// nothing), replacing what was there.
+    fn fetched<T: Clone>(
+        &self,
+        generation: u64,
+        k: String,
+        map: fn(&mut Cache) -> &mut HashMap<String, T>,
+        fetch: impl FnOnce() -> Result<T, Status>,
+    ) -> Result<T, Status> {
         let v = match fetch() {
             Ok(v) => v,
             Err(st) => return read_failed(st),

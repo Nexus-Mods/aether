@@ -185,6 +185,12 @@ impl PathCache {
         guard.map.get(key).cloned()
     }
 
+    /// Whether a cached `key` is under a root, read without cloning its hit.
+    pub(crate) fn is_inside(&self, key: &str) -> Option<bool> {
+        let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+        guard.map.get(key).map(Option::is_some)
+    }
+
     pub(crate) fn insert(&self, key: String, value: Option<RootHit>) {
         let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
         // Another thread may have raced this one to compute and insert the

@@ -12,8 +12,17 @@
 //! SETATTR (truncate), DELETE, RENAME, MKDIR, CLOSE, STORED_NAMES and
 //! RENAME_X, and the registry opcodes when it has a registry layer
 //! ([`Reference::with_registry`]). STAGE_EXEC is `Status::NotSupported`: it
-//! stages nothing. A name keeps the spelling it was created with (a fixture's
-//! vpath, a creating OPEN, MKDIR, a RENAME or RENAME_X target), and READDIR
+//! stages nothing.
+//!
+//! **Test knobs.** [`Reference::set_mount_gen`] and
+//! [`Reference::replace_content`] act as a remount would, and the builder
+//! methods from [`Reference::with_fh_base`] to [`Reference::with_lower_dir`]
+//! give answers other directors give and `docs/wire.md` allows (each names
+//! its section). Each is off until a test sets it; with none set, every
+//! answer below is as described, and conformance never sets one.
+//!
+//! A name keeps the spelling it was created with (a fixture's vpath, a
+//! creating OPEN, MKDIR, a RENAME or RENAME_X target), and READDIR
 //! and STORED_NAMES answer with it (wire.md 3.2). Where the fake it was
 //! moved from differed from `docs/wire.md`, it answers as wire.md says: an
 //! opcode outside the table or
@@ -74,8 +83,8 @@
 //! registry and [`Tally`]. Each handle has its own reply buffer.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,6 +104,13 @@ pub const BULK_THRESHOLD: u32 = 64 * 1024;
 /// The longest file the reference holds. A WRITE ending past it, or a
 /// SETATTR to a larger size, is `Status::NoSpace`.
 pub const MAX_FILE_LEN: usize = 64 * 1024 * 1024;
+
+/// The longest file a mounted tree may hold ([`crate::tree::Tree`]): larger
+/// than [`MAX_FILE_LEN`], so a benchmark can read an archive of a game's
+/// size. Such a file is read like any other; a WRITE ending past
+/// [`MAX_FILE_LEN`] is still `Status::NoSpace`, and so is a SETATTR to any
+/// size above it, a shrink of such a file included.
+pub const MAX_MOUNTED_LEN: usize = 512 * 1024 * 1024;
 
 /// How the reference answers READ for one file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -295,6 +311,25 @@ struct Graph {
     registry: Option<Registry>,
     /// The roots besides 0 that are served. Fixed once built.
     roots: Vec<u32>,
+    /// The `mount_gen` every OPEN reports: 0 until a test moves it
+    /// ([`Reference::set_mount_gen`]).
+    mount_gen: AtomicU32,
+    /// [`Reference::mkdir_existing_ok`].
+    mkdir_existing_ok: bool,
+    /// [`Reference::inline_reads`]: the `payload_cap` every READ is answered
+    /// inline within.
+    inline_cap: Option<u32>,
+    /// [`Reference::staging`]: the real path STAGE_EXEC answers, by table key.
+    staging: HashMap<String, String>,
+    /// [`Reference::with_mtime`]: the mtime GETATTR and READDIR report, by
+    /// table key.
+    mtimes: HashMap<String, i64>,
+    /// The table keys held only in a read-only lower
+    /// ([`Reference::with_lower`]). Locked after `dirs` and `files`.
+    lower: Mutex<HashSet<String>>,
+    /// [`Reference::reissue_fh`]: the closed handles to issue again, lowest
+    /// first; `None` when off.
+    reissue: Option<Mutex<BTreeSet<u64>>>,
 }
 
 impl Graph {
@@ -313,6 +348,26 @@ impl Graph {
 
     fn handle(&self, fh: u64) -> Option<Handle> {
         self.handles.lock().unwrap().get(&fh).cloned()
+    }
+
+    /// The mtime GETATTR and READDIR report for table key `k`: 0 unless
+    /// [`Reference::with_mtime`] set one.
+    fn mtime(&self, k: &str) -> i64 {
+        self.mtimes.get(k).copied().unwrap_or(0)
+    }
+
+    /// Whether table key `k` is held only in the read-only lower.
+    fn is_lower(&self, k: &str) -> bool {
+        self.lower.lock().unwrap().contains(k)
+    }
+
+    /// `k` and every directory above it are in the upper now (a copy-up, or
+    /// a name created under them): no longer lower-only.
+    fn copy_up(&self, k: &str) {
+        let mut lower = self.lower.lock().unwrap();
+        if !lower.is_empty() {
+            lower.retain(|l| l != k && !k.starts_with(&format!("{l}/")));
+        }
     }
 
     /// The root a table key or prefix is under ([`key`]'s `@<id>/`).
@@ -360,7 +415,11 @@ impl Graph {
     }
 
     fn issue(&self, vpath: String, file: Option<u64>, append: bool, tally: &Tally) -> u64 {
-        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+        let reused = self
+            .reissue
+            .as_ref()
+            .and_then(|r| r.lock().unwrap().pop_first());
+        let fh = reused.unwrap_or_else(|| self.next_fh.fetch_add(1, Ordering::Relaxed));
         Tally::bump(&tally.opened, &vpath);
         self.handles.lock().unwrap().insert(
             fh,
@@ -561,6 +620,13 @@ impl Reference {
                 failing: Vec::new(),
                 registry: None,
                 roots: Vec::new(),
+                mount_gen: AtomicU32::new(0),
+                mkdir_existing_ok: false,
+                inline_cap: None,
+                staging: HashMap::new(),
+                mtimes: HashMap::new(),
+                lower: Mutex::new(HashSet::new()),
+                reissue: None,
             }),
             tally: Arc::new(Tally::default()),
             read_buf: Vec::new(),
@@ -706,6 +772,117 @@ impl Reference {
         self
     }
 
+    /// Test knob: the `mount_gen` every later OPEN reports, as a director
+    /// that replaced a root's content does (`docs/wire.md` 3.4.3). Until it
+    /// is called every OPEN reports 0. Conformance never calls it.
+    pub fn set_mount_gen(&self, g: u32) {
+        self.graph.mount_gen.store(g, Ordering::Relaxed);
+    }
+
+    /// Test knob: `vpath` now holds `bytes`, as a remount gives one file new
+    /// content; it keeps its stored spelling and read style, and one the
+    /// graph did not hold is added. Handles open on it read the new bytes.
+    /// Pair it with [`Reference::set_mount_gen`] for a remount a cache may
+    /// rely on. Conformance never calls it.
+    pub fn replace_content(&self, vpath: &str, bytes: Vec<u8>) {
+        // Between requests, never inside one (wire.md 2.8.1).
+        let _whole = self.graph.serve.lock().unwrap();
+        let mut files = self.graph.files.lock().unwrap();
+        files
+            .entry(fold(vpath))
+            .and_modify(|e| e.bytes.clone_from(&bytes))
+            .or_insert_with(|| Entry {
+                id: self.graph.new_id(),
+                bytes: bytes.clone(),
+                style: ReadStyle::Whole,
+                name: spelling(vpath),
+            });
+    }
+
+    /// Handles counted up from `n` instead of 1. Any `n` but 0 is an answer
+    /// other directors give (`docs/wire.md` 3.4.3); `n = 0` is a director
+    /// outside it (a director never issues 0), for a test that checks the
+    /// shim gives 0 no meaning of its own. Off by default; conformance never
+    /// sets it.
+    pub fn with_fh_base(mut self, n: u64) -> Reference {
+        self.building().next_fh = AtomicU64::new(n);
+        self
+    }
+
+    /// An answer other directors give: a closed handle is issued again, the
+    /// lowest first, before a new one is counted up. An `fh` need only be
+    /// unique among open handles (`docs/wire.md` 3.4.3), so a client must
+    /// not carry anything over from a handle closed before. Off by default
+    /// (handles only count up); conformance never sets it.
+    pub fn reissue_fh(mut self) -> Reference {
+        self.building().reissue = Some(Mutex::new(BTreeSet::new()));
+        self
+    }
+
+    /// An answer other directors give: MKDIR of a directory that exists
+    /// under a writable prefix is `Status::Ok`, as a writable provider may
+    /// answer, instead of `Status::Exists` (`docs/wire.md` 3.4.9 allows
+    /// either). Off by default; conformance never sets it.
+    pub fn mkdir_existing_ok(mut self) -> Reference {
+        self.building().mkdir_existing_ok = true;
+        self
+    }
+
+    /// A director outside `docs/wire.md` 3.4.4: every READ is answered
+    /// inline, at most `payload_cap - 8` bytes, whatever its flags and length
+    /// ask for and whether or not the server has an arena. `payload_cap` is
+    /// the ring's, which a director method is not told. Off by default;
+    /// conformance never sets it.
+    pub fn inline_reads(mut self, payload_cap: u32) -> Reference {
+        self.building().inline_cap = Some(payload_cap);
+        self
+    }
+
+    /// An answer other directors give: STAGE_EXEC of `vpath` answers
+    /// `real_path` (`docs/wire.md` 3.4.14). Once any path is staged, one that
+    /// is not is `Status::NotFound`, as a director with a stager answers;
+    /// with none (the default) every STAGE_EXEC is `Status::NotSupported`.
+    /// Conformance never sets it.
+    pub fn staging(mut self, vpath: &str, real_path: &str) -> Reference {
+        self.note_root(vpath);
+        self.building()
+            .staging
+            .insert(fold(vpath), real_path.to_string());
+        self
+    }
+
+    /// An answer other directors give: GETATTR and READDIR report `mtime`
+    /// for the file or directory at `vpath` instead of 0 (`docs/wire.md`
+    /// 3.4.1, 3.4.2; OPEN carries no time). Kept by vpath: a rename does not
+    /// take it along. Off by default; conformance never sets it.
+    pub fn with_mtime(mut self, vpath: &str, mtime: i64) -> Reference {
+        self.building().mtimes.insert(fold(vpath), mtime);
+        self
+    }
+
+    /// An answer other directors give: a file held only in a read-only
+    /// lower under a writable prefix, answered as `docs/wire.md` 3.4.9's
+    /// "Names only in a read-only lower" says an overlay may answer: DELETE
+    /// hides it, RENAME copies it up (to another case of itself, `Status::Ok`
+    /// with the lower's spelling kept), MKDIR over it makes the directory. A
+    /// write open copies it up, after which it is an ordinary file. Meant
+    /// under a [`Reference::writable_under`] prefix. Off by default;
+    /// conformance never sets it.
+    pub fn with_lower(self, vpath: &str, bytes: Vec<u8>) -> Reference {
+        let mut r = self.with(vpath, bytes, ReadStyle::Whole);
+        r.building().lower.get_mut().unwrap().insert(fold(vpath));
+        r
+    }
+
+    /// [`Reference::with_lower`] for a directory: DELETE hides it and
+    /// everything under it, and RENAME to another name is
+    /// `Status::IoError` (lower directories do not move).
+    pub fn with_lower_dir(self, vpath: &str) -> Reference {
+        let mut r = self.with_dir(vpath);
+        r.building().lower.get_mut().unwrap().insert(fold(vpath));
+        r
+    }
+
     /// The bytes the graph holds for `vpath` now: what a WRITE that crossed
     /// the ring left behind.
     pub fn contents(&self, vpath: &str) -> Option<Vec<u8>> {
@@ -757,6 +934,17 @@ impl Reference {
         if !g.is_writable(&from) || !g.is_writable(&to_key) {
             return Err(Status::ReadOnly);
         }
+        // A lower-only name (wire.md 3.4.9, "Names only in a read-only
+        // lower"): another case of itself keeps the lower's spelling, a
+        // directory does not move, a file is copied up and moves below.
+        if g.is_lower(&from) {
+            if to_key == from {
+                return Ok(());
+            }
+            if !is_file {
+                return Err(Status::IoError);
+            }
+        }
         g.parent_exists(&dirs, &files, &to_key)?;
         // A directory never replaces a file (wire.md 3.4.7).
         if !is_file && to_key != from && files.contains_key(&to_key) {
@@ -776,6 +964,9 @@ impl Reference {
         if to_key != from {
             files.remove(&to_key);
         }
+        // Nothing below fails: the source, if lower-only, is copied up now.
+        g.lower.lock().unwrap().remove(&from);
+        g.copy_up(&to_key);
         if is_file {
             let mut e = files.remove(&from).expect("just checked");
             e.name = created_spelling(&dirs, &files, to_root.0, to);
@@ -868,7 +1059,7 @@ impl Director for Reference {
                 found: true,
                 is_dir: true,
                 size: 0,
-                mtime: 0,
+                mtime: self.graph.mtime(&vpath),
             });
         }
         let files = self.graph.files.lock().unwrap();
@@ -877,7 +1068,7 @@ impl Director for Reference {
             found: found.is_some(),
             is_dir: false,
             size: found.map(|e| e.bytes.len() as u64).unwrap_or(0),
-            mtime: 0,
+            mtime: found.map_or(0, |_| self.graph.mtime(&vpath)),
         })
     }
 
@@ -936,12 +1127,16 @@ impl Director for Reference {
         }
         drop(dirs);
         rows.sort_by(|a, b| a.0.cmp(&b.0));
-        for (_, name, is_dir, size) in &rows {
+        for (folded, name, is_dir, size) in &rows {
             out.push(DirEntry {
                 name,
                 is_dir: *is_dir,
                 size: *size,
-                mtime: 0,
+                mtime: if self.graph.mtimes.is_empty() {
+                    0
+                } else {
+                    self.graph.mtime(&format!("{prefix}{folded}"))
+                },
             });
         }
         Ok(())
@@ -985,6 +1180,7 @@ impl Director for Reference {
                 fh,
                 size: 0,
                 is_dir: true,
+                mount_gen: g.mount_gen.load(Ordering::Relaxed),
                 ..Default::default()
             });
         }
@@ -1032,13 +1228,20 @@ impl Director for Reference {
         let id = e.id;
         drop(files);
         drop(dirs);
+        if write {
+            // A lower-only file a write open reaches is in the upper now
+            // ([`Reference::with_lower`]), and so is a name created under a
+            // lower directory.
+            g.copy_up(&vpath);
+        }
         // A read open of a file a read-only provider holds is immutable
         // (wire.md 3.4.3): nothing the reference serves changes it (a write
         // open, DELETE, RENAME, RENAME_X and MKDIR of it are refused, and so
         // are WRITE and SETATTR through the read handle), and
         // the reference never replaces a root's content, so `mount_gen`
-        // stays 0. Never on a write open, a directory, or a file the
-        // writable provider holds.
+        // stays 0 unless a test moves it ([`Reference::set_mount_gen`]).
+        // Never on a write open, a directory, or a file the writable
+        // provider holds.
         let immutable = !write && !g.is_writable(&vpath);
         let fh = g.issue(vpath, Some(id), append, &self.tally);
         Ok(OpenResp {
@@ -1046,7 +1249,7 @@ impl Director for Reference {
             size,
             is_dir: false,
             immutable,
-            ..Default::default()
+            mount_gen: g.mount_gen.load(Ordering::Relaxed),
         })
     }
 
@@ -1084,10 +1287,16 @@ impl Director for Reference {
         if let ReadStyle::Short(n) = e.style {
             want = want.min(n);
         }
+        // An inline-only director ([`Reference::inline_reads`]) answers what
+        // fits the slot, never in bulk.
+        if let Some(cap) = self.graph.inline_cap {
+            want = want.min(cap.saturating_sub(8) as usize);
+        }
         let src = &e.bytes[start..start + want];
         // Bulk chosen as a director chooses it, so a fixture gets
         // production's transport.
-        let want_bulk = slot_flags.contains(RequestFlags::READ_BULK) || len >= BULK_THRESHOLD;
+        let want_bulk = self.graph.inline_cap.is_none()
+            && (slot_flags.contains(RequestFlags::READ_BULK) || len >= BULK_THRESHOLD);
         if let (true, Some(arena)) = (want_bulk, at.arena) {
             Tally::bump(&self.tally.bulk_reads, &vpath);
             let max = arena.bank_size.min(src.len());
@@ -1207,6 +1416,16 @@ impl Director for Reference {
         if !is_dir && !files.contains_key(&vpath) {
             return Err(Status::NotFound);
         }
+        if self.graph.is_lower(&vpath) {
+            // A whiteout hides a lower-only name and everything under it
+            // (wire.md 3.4.9, "Names only in a read-only lower").
+            let below = format!("{vpath}/");
+            let gone = |k: &String| *k == vpath || k.starts_with(&below);
+            dirs.retain(|k, _| !gone(k));
+            files.retain(|k, _| !gone(k));
+            self.graph.lower.lock().unwrap().retain(|k| !gone(k));
+            return Ok(());
+        }
         if !self.graph.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
@@ -1238,9 +1457,24 @@ impl Director for Reference {
             return Err(Status::IoError);
         }
         let mut dirs = g.dirs.lock().unwrap();
-        let files = g.files.lock().unwrap();
+        let mut files = g.files.lock().unwrap();
         if is_dir_in(&dirs, &vpath) {
-            return Err(Status::Exists);
+            // A writable provider may answer OK ([`mkdir_existing_ok`]).
+            return if g.mkdir_existing_ok && g.is_writable(&vpath) {
+                Ok(())
+            } else {
+                Err(Status::Exists)
+            };
+        }
+        if files.contains_key(&vpath) && g.is_lower(&vpath) {
+            // The directory, made in the upper, hides the lower-only file
+            // (wire.md 3.4.9, "Names only in a read-only lower").
+            files.remove(&vpath);
+            let name = created_spelling(&dirs, &files, root.0, path);
+            drop(files);
+            g.copy_up(&vpath);
+            dirs.insert(vpath, name);
+            return Ok(());
         }
         if files.contains_key(&vpath) {
             return Err(if g.is_writable(&vpath) {
@@ -1259,6 +1493,7 @@ impl Director for Reference {
         g.parent_exists(&dirs, &files, &vpath)?;
         let name = created_spelling(&dirs, &files, root.0, path);
         drop(files);
+        g.copy_up(&vpath);
         dirs.insert(vpath, name);
         Ok(())
     }
@@ -1271,6 +1506,9 @@ impl Director for Reference {
         let Some(h) = self.graph.handles.lock().unwrap().remove(&fh) else {
             return Err(Status::BadFh);
         };
+        if let Some(r) = &self.graph.reissue {
+            r.lock().unwrap().insert(fh);
+        }
         Tally::bump(&self.tally.closed, &h.vpath);
         Ok(())
     }
@@ -1323,9 +1561,19 @@ impl Director for Reference {
     }
 
     /// The reference stages nothing, which wire.md 3.4.14 says is answered
-    /// first.
-    fn stage_exec(&mut self, _: RootId, _: &str) -> Result<&str, Status> {
-        Err(Status::NotSupported)
+    /// first, unless a test staged a path ([`Reference::staging`]): then a
+    /// path it did not stage is `Status::NotFound`, as a director that
+    /// stages may answer.
+    fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
+        if self.graph.staging.is_empty() {
+            return Err(Status::NotSupported);
+        }
+        let k = self.graph.resolve_name(root, path)?;
+        self.graph
+            .staging
+            .get(&k)
+            .map(String::as_str)
+            .ok_or(Status::NotFound)
     }
 
     fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {

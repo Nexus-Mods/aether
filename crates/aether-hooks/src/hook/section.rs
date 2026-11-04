@@ -1,7 +1,9 @@
-//! Sections and views: `NtCreateSection`, `NtMapViewOfSection`, `NtUnmapViewOfSection`.
+//! Sections and views: `NtCreateSection`, `NtMapViewOfSection`, `NtUnmapViewOfSection`(`Ex`).
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{ShimIoGuard, TRAMP_CREATE_SECTION, TRAMP_MAP_VIEW, TRAMP_UNMAP_VIEW};
+use super::{
+    ShimIoGuard, TRAMP_CREATE_SECTION, TRAMP_MAP_VIEW, TRAMP_UNMAP_VIEW, TRAMP_UNMAP_VIEW_EX,
+};
 use crate::ntdef::{
     NtCreateSectionFn, ObjectAttributes, SEC_IMAGE, STATUS_INVALID_FILE_FOR_SECTION,
     STATUS_INVALID_HANDLE, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
@@ -129,10 +131,11 @@ unsafe fn fuse_create_section(
             return STATUS_UNSUCCESSFUL;
         };
         let mut pe = vec![0u8; size as usize];
-        match client.read_fragmented(fh, 0, &mut pe) {
-            Ok(n) if n == pe.len() => {}
-            Ok(n) if n > 0 => pe.truncate(n),
-            _ => return STATUS_INVALID_FILE_FOR_SECTION,
+        // Whole or not at all, as a data section's fill (docs/wire.md 3.4.4):
+        // a truncated image is not the file.
+        if !read_whole_retrying(client, fh, &mut pe) {
+            crate::hookstats::note_section_failure(crate::hookstats::SectionFailure::ImageRead);
+            return STATUS_UNSUCCESSFUL;
         }
         if !aether_pe::pe_looks_like_image(&pe) {
             return STATUS_INVALID_FILE_FOR_SECTION;
@@ -204,11 +207,16 @@ unsafe fn fuse_create_section(
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
 
-    const EAGER_MAX: u64 = 256 * 1024 * 1024;
     if size > crate::lazy_section::MAX_LAZY {
         return STATUS_SECTION_TOO_BIG;
     }
-    if size > EAGER_MAX {
+    if size > crate::lazy_section::eager_max() {
+        // The section reads through `fh` for as long as it lives, so it holds
+        // the director handle past the program's close of the file
+        // (docs/wire.md 3.4.10).
+        let Some(fh) = crate::synth_file::hold(file_handle as isize) else {
+            return STATUS_INVALID_FILE_FOR_SECTION;
+        };
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         return match unsafe { crate::lazy_section::create_lazy_data_section(fh, size) } {
             Some(h) => {
@@ -220,7 +228,12 @@ unsafe fn fuse_create_section(
                 }
                 STATUS_SUCCESS
             }
-            None => STATUS_SECTION_TOO_BIG,
+            None => {
+                // No region holds it: let it go (closing it, if another
+                // thread closed the file meanwhile).
+                crate::lazy_section::let_go(Some(fh));
+                STATUS_SECTION_TOO_BIG
+            }
         };
     }
     // Eager path (≤256 MiB): stream on this thread into VirtualAlloc.
@@ -231,7 +244,11 @@ unsafe fn fuse_create_section(
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
-    let map_len = size as usize;
+    // At most `eager_max()` (256 MiB), so it fits; checked, not cast, so a
+    // test's larger limit on x86 cannot wrap it.
+    let Ok(map_len) = usize::try_from(size) else {
+        return STATUS_SECTION_TOO_BIG;
+    };
     // SAFETY: FFI call with valid arguments.
     let base = unsafe {
         VirtualAlloc(
@@ -246,14 +263,11 @@ unsafe fn fuse_create_section(
     }
     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
     let dest = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, map_len) };
-    let fill_ok = match client.read_fragmented(fh, 0, dest) {
-        Ok(n) if n == map_len => true,
-        Ok(n) if n > 0 => {
-            dest[n..].fill(0);
-            true
-        }
-        _ => false,
-    };
+    // Whole or not at all: OPEN gave the size, so a short answer before it
+    // is a failed read, not the end of the file (docs/wire.md 3.4.4's
+    // `n < len` is the end only at that size), and zeros in its place would
+    // be data the file does not hold.
+    let fill_ok = matches!(client.read_fragmented(fh, 0, dest), Ok(n) if n == map_len);
     // Opt-in trace only: this runs inside NtCreateSection, so the file I/O
     // re-enters our own hooks on every section the game creates.
     if let Some(path) = aether_env::raw(aether_env::SECTION_FILL_LOG) {
@@ -267,6 +281,7 @@ unsafe fn fuse_create_section(
         }
     }
     if !fill_ok {
+        crate::hookstats::note_section_failure(crate::hookstats::SectionFailure::EagerFill);
         // SAFETY: FFI call with valid arguments.
         unsafe { VirtualFree(base, 0, MEM_RELEASE) };
         return STATUS_UNSUCCESSFUL;
@@ -440,17 +455,69 @@ pub(super) unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) ->
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if !base.is_null() && crate::synth_section::is_synth_view(base as usize) {
-        let b = base as usize;
-        // Retire one reference; the backing VA outlives it unless the section
-        // handle is already closed and this was the last view — a BSA reader
-        // slides views over one open section and must keep the others.
-        crate::synth_section::unmap_view(b);
-        crate::lazy_section::on_view_unmapped(b);
+    if unmap_synth_view(process, base) {
         return STATUS_SUCCESS;
     }
     // SAFETY: the original NT function, called with valid NT arguments.
     unsafe { tramp(process, base) }
+}
+
+/// `NtUnmapViewOfSectionEx` hook, the call `UnmapViewOfFile` makes: as
+/// [`unmap_view_hook_body`]. The flags (`MEM_UNMAP_WITH_TRANSIENT_BOOST`,
+/// `MEM_PRESERVE_PLACEHOLDER`) say nothing a synthetic view needs.
+pub(super) unsafe fn unmap_view_ex_hook_body(
+    process: HANDLE,
+    base: *mut c_void,
+    flags: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::UnmapViewEx);
+    let tramp = match TRAMP_UNMAP_VIEW_EX.get() {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if unmap_synth_view(process, base) {
+        return STATUS_SUCCESS;
+    }
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(process, base, flags) }
+}
+
+/// Retire one reference to the synthetic view at `base`; `false` when it is
+/// not one. The backing VA outlives it unless the section handle is already
+/// closed and this was the last view: a BSA reader slides views over one open
+/// section and must keep the others.
+///
+/// Only an unmap in this process: synthetic views are this process's, so an
+/// unmap that names another (`UnmapViewOfFile2` of a child) at an address
+/// that happens to be one of ours goes to NT untouched.
+fn unmap_synth_view(process: HANDLE, base: *mut c_void) -> bool {
+    if base.is_null() || !crate::synth_section::is_synth_view(base as usize) {
+        return false;
+    }
+    if !is_this_process(process) {
+        return false;
+    }
+    let b = base as usize;
+    crate::synth_section::unmap_view(b);
+    crate::lazy_section::on_view_unmapped(b);
+    true
+}
+
+/// Whether `process` names this process: the `NtCurrentProcess()`
+/// pseudo-handle (-1), or a real handle to it. A handle whose process id
+/// cannot be read (one opened with `PROCESS_VM_OPERATION` only, enough for
+/// an unmap) is taken as this process's: a
+/// handle to a child from `CreateProcess` has full access and is told apart.
+fn is_this_process(process: HANDLE) -> bool {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetProcessId};
+    if process as isize == -1 {
+        return true;
+    }
+    // SAFETY: plain FFI; it answers 0 for a handle it cannot query.
+    match unsafe { GetProcessId(process) } {
+        0 => true,
+        pid => pid == unsafe { GetCurrentProcessId() },
+    }
 }
 
 /// Where images served from the VFS are written for the loader to map: beside
@@ -470,4 +537,22 @@ fn pe_cache_dir() -> std::path::PathBuf {
             .unwrap_or_else(|| std::env::temp_dir().join("vfs-pe-cache"))
     })
     .clone()
+}
+
+/// Read all of `buf` from the start of `fh`: the first try and up to
+/// [`crate::lazy_section::FILL_RETRIES`] more, none started after the
+/// client's deadline has passed since the first, as a demand-paged fill is
+/// asked again. `true` only when the director answered every byte.
+fn read_whole_retrying(client: &crate::director::FuseClient, fh: u64, buf: &mut [u8]) -> bool {
+    let started = std::time::Instant::now();
+    let mut tries = 0;
+    loop {
+        if matches!(client.read_fragmented(fh, 0, buf), Ok(n) if n == buf.len()) {
+            return true;
+        }
+        tries += 1;
+        if tries > crate::lazy_section::FILL_RETRIES || started.elapsed() >= client.deadline() {
+            return false;
+        }
+    }
 }

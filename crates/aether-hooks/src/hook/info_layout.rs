@@ -22,3 +22,14 @@ pub(super) unsafe fn caller_buf<'a>(p: *mut c_void, len: usize) -> &'a mut [u8] 
     // SAFETY: as this function's contract says.
     unsafe { core::slice::from_raw_parts_mut(p as *mut u8, len) }
 }
+
+/// The `FILETIME` a query reports for a director `mtime` (`docs/wire.md` 3.2,
+/// "Timestamps"): the time itself when the director sent one (above 0), else
+/// `none`, what that query reports for a file with no time.
+pub(super) fn time_or(mtime: i64, none: i64) -> i64 {
+    if mtime > 0 {
+        aether_ntlayout::filetime_of(mtime)
+    } else {
+        none
+    }
+}

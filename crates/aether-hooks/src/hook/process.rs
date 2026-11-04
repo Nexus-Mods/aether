@@ -32,6 +32,12 @@ pub(super) type CreateProcessInternalWFn = unsafe extern "system" fn(
 /// process-creation hook can inject the same DLL into children.
 pub(super) static SELF_DLL: OnceLock<String> = OnceLock::new();
 
+/// A test's observer of each child this hook created, called with the
+/// child's process handle and id before it is injected (and so before it may
+/// be killed). Not in the shipped shim.
+#[cfg(feature = "test-support")]
+pub(crate) static CHILD_CREATED: OnceLock<fn(HANDLE, u32)> = OnceLock::new();
+
 /// `CreateProcessInternalW` hook: force the child to start suspended, inject
 /// the shim (which bootstraps inside its `LoadLibrary`), then resume, unless the
 /// caller asked for a suspended child, which it gets still suspended. The child
@@ -108,6 +114,14 @@ pub(super) unsafe fn cpiw_hook_body(
         .map_or(env, |v| v.as_ptr().cast());
 
     let forced = super::child_start::flags_for(plan.as_ref(), child_creation_flags(flags));
+    // A child started in a backing directory: the host checks that folder
+    // (`GetFileAttributesW` of the working directory), a real one that the
+    // hooks would route to the root itself. That check alone goes to the
+    // real disk; the rest of the host's call stays virtualised.
+    let real_dir = plan
+        .as_ref()
+        .and_then(|p| p.backing.as_deref())
+        .map(super::child_start::RealDirScope::enter);
     // SAFETY: the original NT function, called with valid NT arguments.
     let r = unsafe {
         tramp(
@@ -125,6 +139,7 @@ pub(super) unsafe fn cpiw_hook_body(
             ptok,
         )
     };
+    drop(real_dir);
     if r != 0 && !pi.is_null() {
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
         let pid = unsafe { (*pi).dwProcessId };
@@ -132,6 +147,10 @@ pub(super) unsafe fn cpiw_hook_body(
         let hprocess = unsafe { (*pi).hProcess };
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
         let hthread = unsafe { (*pi).hThread };
+        #[cfg(feature = "test-support")]
+        if let Some(observe) = CHILD_CREATED.get() {
+            observe(hprocess, pid);
+        }
         // Started in a backing directory: told its virtual one before it runs.
         if let Some(dir) = plan.as_ref().and_then(|p| p.virtual_cwd.as_deref()) {
             // SAFETY: a suspended process this call just created.
@@ -267,35 +286,43 @@ fn log_refusal(image: &str, reason: &str) {
 /// `app` and `cmd` are null or point to NUL-terminated UTF-16.
 unsafe fn child_image(app: *const u16, cmd: *const u16) -> String {
     const CAP: usize = 4096;
-    let read = |p: *const u16| -> Vec<u16> {
-        let mut v = Vec::new();
-        if !p.is_null() {
-            // SAFETY: per the contract, read up to the NUL or the cap.
-            unsafe {
-                while v.len() < CAP && *p.add(v.len()) != 0 {
-                    v.push(*p.add(v.len()));
-                }
-            }
+    // The caller's strings are read in place, up to the NUL or the cap: one
+    // allocation for the answer, however long the path.
+    let read = |p: *const u16| -> &[u16] {
+        if p.is_null() {
+            return &[];
         }
-        v
+        // SAFETY: per the contract, readable up to the NUL; nothing past the
+        // NUL or the cap is read.
+        unsafe {
+            let len = (0..CAP).take_while(|&i| *p.add(i) != 0).count();
+            core::slice::from_raw_parts(p, len)
+        }
     };
     let mut w = read(app);
     if w.is_empty() {
         let c = read(cmd);
         w = match c.first() {
-            Some(&q) if q == u16::from(b'"') => c[1..]
-                .iter()
-                .copied()
-                .take_while(|&x| x != u16::from(b'"'))
-                .collect(),
-            _ => c
-                .iter()
-                .copied()
-                .take_while(|&x| x != u16::from(b' '))
-                .collect(),
+            Some(&q) if q == u16::from(b'"') => {
+                let rest = &c[1..];
+                &rest[..rest
+                    .iter()
+                    .position(|&x| x == u16::from(b'"'))
+                    .unwrap_or(rest.len())]
+            }
+            _ => {
+                &c[..c
+                    .iter()
+                    .position(|&x| x == u16::from(b' '))
+                    .unwrap_or(c.len())]
+            }
         };
     }
-    String::from_utf16_lossy(&w).replace(['\r', '\n'], " ")
+    let mut image = String::from_utf16_lossy(w);
+    if image.contains(['\r', '\n']) {
+        image = image.replace(['\r', '\n'], " ");
+    }
+    image
 }
 
 #[cfg(test)]

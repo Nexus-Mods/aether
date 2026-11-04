@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use aether_conform::adapters::{reference_adapter, test_adapter, Break, Misbehave, RingKind};
+use aether_conform::adapters::{
+    null_adapter, reference_adapter, test_adapter, Break, Misbehave, NullGeometry, RingKind,
+};
+use aether_conform::bench::{self, BenchOptions};
 use aether_conform::concurrent::{self, ConcurrentOptions};
 use aether_conform::generate::{self, GenerateOptions};
 use aether_conform::report;
@@ -21,6 +24,12 @@ usage:
                      [--concurrent N [--concurrent-cases C]]
                      [--report tap|json] [--out FILE] [--timeout SECS]
   aether-conform reference-adapter [--ring file|section] [--no-arena]
+  aether-conform bench --director \"<command line>\" [--workloads DIR]
+                       [--only NAME[,NAME...]] [--floor \"<command line>\"]
+                       [--clients N] [--quick] [--out FILE] [--baseline FILE
+                       [--fail-over PCT]] [--timeout SECS]
+  aether-conform null-adapter [--ring file|section] [--slots N]
+                       [--payload-cap N] [--arena-len N] [--workers N]
 
 run       starts the director's adapter (the command line) and plays every
           scenario in DIR (default contract/scenarios) against it. The report
@@ -48,7 +57,26 @@ reference-adapter
           an adapter serving each scenario's tree from the reference
           director, over a ring file (default) or, on Windows, a named
           section. --no-arena gives the ring no bulk arena, so every READ
-          is answered inline.";
+          is answered inline.
+bench     times the director on every workload in DIR (default
+          contract/workloads), or the ones --only names: a warm-up pass,
+          then each phase with threads x N clients (default 1), latency per
+          opcode, requests per second and bulk bandwidth. Then the same
+          requests against the floor (default: null-adapter on a ring of the
+          director's kind and shape), and per opcode the director's p50,
+          p99 and p99.9 less the floor's. Prints a summary and writes the
+          JSON report to FILE. --quick plays one repeat of at most 64
+          requests per thread: counts, not timings. --baseline prints the
+          change against a report from the same machine; only --fail-over
+          PCT turns a p50 rise above PCT percent into exit code 3. Exit code
+          0 when every workload ran, 1 when one failed (its replies were not
+          what the phase expects), 2 on a usage or adapter error. SECS
+          (default 120) bounds every adapter answer and request.
+null-adapter
+          an adapter answering every request OK with the smallest reply,
+          whatever tree a mount names: the ring's own cost. Its ring has
+          N slots (8), a payload cap of N bytes (1048576), an arena of N
+          bytes (8 MiB; 0 for none) and N serving threads (4).";
 
 fn usage(msg: &str) -> ExitCode {
     eprintln!("aether-conform: {msg}\n\n{USAGE}");
@@ -62,6 +90,8 @@ fn main() -> ExitCode {
     };
     match cmd.as_str() {
         "run" => cmd_run(rest),
+        "bench" => cmd_bench(rest),
+        "null-adapter" => cmd_null_adapter(rest),
         // `--break` is test-only (`adapters::Break`) and not in the usage.
         "reference-adapter" => match switches(rest, &["--ring", "--break"], &["--no-arena"]) {
             Ok(f) => {
@@ -366,6 +396,180 @@ fn cmd_run(args: &[String]) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+fn ring_kind(v: Option<&str>) -> Result<RingKind, String> {
+    match v {
+        None | Some("file") => Ok(RingKind::File),
+        Some("section") => Ok(RingKind::Section),
+        Some(other) => Err(format!("unknown ring {other:?}: file or section")),
+    }
+}
+
+fn cmd_null_adapter(args: &[String]) -> ExitCode {
+    let f = match flags(
+        args,
+        &[
+            "--ring",
+            "--slots",
+            "--payload-cap",
+            "--arena-len",
+            "--workers",
+        ],
+    ) {
+        Ok(f) => f,
+        Err(e) => return usage(&e),
+    };
+    let get = |k: &str| {
+        f.iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
+    };
+    let kind = match ring_kind(get("--ring")) {
+        Ok(k) => k,
+        Err(e) => return usage(&e),
+    };
+    let mut g = NullGeometry::default();
+    for (k, v) in &f {
+        let n = match v.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) if k == "--ring" => continue,
+            Err(_) => return usage(&format!("{k} {v:?} is not a whole number")),
+        };
+        let small = |n: u64| u32::try_from(n).map_err(|_| format!("{k} {n} is too large"));
+        let set = match k.as_str() {
+            "--slots" => small(n).map(|n| g.slots = n),
+            "--payload-cap" => small(n).map(|n| g.payload_cap = n),
+            "--arena-len" => usize::try_from(n)
+                .map(|n| g.arena_len = n)
+                .map_err(|_| format!("{k} {n} is too large")),
+            "--workers" => small(n).map(|n| g.workers = n),
+            _ => Ok(()),
+        };
+        if let Err(e) = set {
+            return usage(&e);
+        }
+    }
+    code(null_adapter(kind, g))
+}
+
+fn cmd_bench(args: &[String]) -> ExitCode {
+    let f = match switches(
+        args,
+        &[
+            "--director",
+            "--workloads",
+            "--only",
+            "--floor",
+            "--clients",
+            "--out",
+            "--baseline",
+            "--fail-over",
+            "--timeout",
+        ],
+        &["--quick"],
+    ) {
+        Ok(f) => f,
+        Err(e) => return usage(&e),
+    };
+    let get = |k: &str| f.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let Some(director) = get("--director") else {
+        return usage("bench needs --director \"<command line>\"");
+    };
+    let clients = match get("--clients").map(|v| v.parse::<u32>()) {
+        None => 1,
+        Some(Ok(n)) if (1..=64).contains(&n) => n,
+        Some(_) => return usage("--clients needs a number from 1 to 64"),
+    };
+    let timeout = match get("--timeout").map(|t| t.parse::<f64>()) {
+        None => Duration::from_secs(120),
+        Some(Ok(s)) if s > 0.0 && s.is_finite() => Duration::from_secs_f64(s),
+        Some(_) => return usage("--timeout needs a positive number of seconds"),
+    };
+    let fail_over = match get("--fail-over").map(|p| p.parse::<f64>()) {
+        None => None,
+        Some(Ok(p)) if p.is_finite() => Some(p),
+        Some(_) => return usage("--fail-over needs a number of percent"),
+    };
+    let baseline = get("--baseline").map(PathBuf::from);
+    if fail_over.is_some() && baseline.is_none() {
+        return usage("--fail-over goes with --baseline");
+    }
+    // Read before the run, so a baseline that is not a report fails at once.
+    let base = match &baseline {
+        None => None,
+        Some(b) => match std::fs::read_to_string(b)
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string()))
+        {
+            Ok(v) => Some(v),
+            Err(e) => return usage(&format!("baseline {}: {e}", b.display())),
+        },
+    };
+    let opts = BenchOptions {
+        director,
+        workloads: get("--workloads")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("contract/workloads")),
+        only: get("--only")
+            .map(|o| o.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
+        floor: get("--floor"),
+        clients,
+        quick: f.iter().any(|(n, _)| n == "--quick"),
+        timeout,
+        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aether-conform")),
+    };
+    let report = match bench::run(&opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("aether-conform: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    print!("{}", bench::summary(&report));
+    if let Some(out) = get("--out").map(PathBuf::from) {
+        if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let text = serde_json::to_string_pretty(&report).expect("a report is JSON");
+        if let Err(e) = std::fs::write(&out, text + "\n") {
+            eprintln!("aether-conform: cannot write {}: {e}", out.display());
+            return ExitCode::from(2);
+        }
+    }
+    let failed = report["workloads"]
+        .as_array()
+        .is_some_and(|ws| ws.iter().any(|w| w.get("error").is_some()));
+    if let Some(base) = &base {
+        match bench::compare(&report, base) {
+            Ok(c) => {
+                println!("against the baseline:");
+                for l in &c.lines {
+                    println!("  {l}");
+                }
+                if let Some(pct) = fail_over {
+                    if c.worst_rise_pct > pct {
+                        eprintln!(
+                            "aether-conform: an opcode's p50 rose {:.1}%, over {pct}%",
+                            c.worst_rise_pct
+                        );
+                        return ExitCode::from(3);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("aether-conform: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

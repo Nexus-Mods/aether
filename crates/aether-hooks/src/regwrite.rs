@@ -175,10 +175,19 @@ fn find_value(n: Option<&Node>, folded: &str) -> Found {
     let Some(n) = n else {
         return Found::Real;
     };
-    if n.values.iter().any(|v| fold(&v.name) == folded) {
+    // Compared as `regquery::hit` compares, so a read and a write agree on a
+    // value whatever case a director stored it in.
+    if n.values
+        .iter()
+        .any(|v| aether_casefold::eq_folded(&v.name, folded))
+    {
         return Found::Overlay;
     }
-    if n.created || n.value_tombstones.iter().any(|t| t == folded) {
+    if n.created
+        || n.value_tombstones
+            .iter()
+            .any(|t| aether_casefold::eq_folded(t, folded))
+    {
         return Found::Hidden;
     }
     Found::Real

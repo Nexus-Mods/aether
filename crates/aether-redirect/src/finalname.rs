@@ -12,31 +12,36 @@
 //!
 //! Pure: the listing is asked for through a closure.
 
-use aether_casefold::fold;
+use aether_casefold::{eq_folded, fold};
 
-/// The components of a DOS path, without its NT prefix: `\??\C:\A\b` and
-/// `C:/A/b/` both give `["C:", "A", "b"]`.
-fn components(path: &str) -> Vec<&str> {
+/// The components of a DOS path, one at a time, without its NT prefix:
+/// `\??\C:\A\b` and `C:/A/b/` both give `C:`, `A`, `b`.
+fn component_iter(path: &str) -> impl Iterator<Item = &str> + Clone {
     path.strip_prefix(r"\??\")
         .or_else(|| path.strip_prefix(r"\\?\"))
         .unwrap_or(path)
         .split(['\\', '/'])
         .filter(|c| !c.is_empty())
-        .collect()
 }
 
 /// The caller's own spelling of the components `under` the root, when its
 /// path ends in exactly those components (case apart). A device or
 /// short-name spelling of the *root* still does; only the prefix differs.
 /// `None` when it does not — a short name somewhere under the root, say.
+///
+/// The components are walked, not collected, and compared by their folds in
+/// place (a component of `under` is already folded, and a fold is its own
+/// fold): what this allocates is the tail it returns, however many
+/// components lie above the root on the real disk.
 pub fn opened_tail<'a>(opened: &'a str, under: &[String]) -> Option<Vec<&'a str>> {
-    let asked = components(opened);
-    let at = asked.len().checked_sub(under.len())?;
-    let tail = &asked[at..];
-    tail.iter()
-        .zip(under)
-        .all(|(a, u)| fold(a) == *u)
-        .then(|| tail.to_vec())
+    let at = component_iter(opened).count().checked_sub(under.len())?;
+    let tail = component_iter(opened).skip(at);
+    if !tail.clone().zip(under).all(|(a, u)| eq_folded(a, u)) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(under.len());
+    out.extend(tail);
+    Some(out)
 }
 
 /// The final DOS path (`C:\Games\Skyrim\Data\a.esp`, no NT prefix, no
@@ -57,41 +62,55 @@ pub fn opened_tail<'a>(opened: &'a str, under: &[String]) -> Option<Vec<&'a str>
 /// A component with no stored spelling — a named stream, a file that is
 /// gone, a director that cannot be asked — keeps the caller's spelling, so
 /// the answer is never worse than the path that was opened.
-pub fn final_dos_path(
+pub fn final_dos_path<S: AsRef<str>>(
     opened: &str,
     under: &[String],
     roots: &[&str],
-    mut stored: impl FnMut(usize) -> Option<String>,
+    mut stored: impl FnMut(usize) -> Option<S>,
 ) -> String {
-    let asked = components(opened);
-    let tail = opened_tail(opened, under);
-    let asked_prefix: Vec<String> = match tail {
-        Some(_) => asked[..asked.len() - under.len()]
-            .iter()
-            .map(|c| fold(c))
-            .collect(),
-        None => Vec::new(),
-    };
+    // Names compare by their folds without building them (`eq_folded`); a
+    // component of `under` is already folded, and a fold is its own fold.
+    // The caller's components are walked, never collected, so the answer
+    // costs the same however deep the root sits on the real disk.
+    let at = component_iter(opened)
+        .count()
+        .checked_sub(under.len())
+        .filter(|&at| {
+            component_iter(opened)
+                .skip(at)
+                .zip(under)
+                .all(|(a, u)| eq_folded(a, u))
+        });
+    let asked_prefix = || component_iter(opened).take(at.unwrap_or(0));
     let root = roots
         .iter()
         .find(|r| {
-            let comps = components(r);
-            comps.len() == asked_prefix.len()
-                && comps.iter().zip(&asked_prefix).all(|(c, a)| fold(c) == *a)
+            component_iter(r).count() == at.unwrap_or(0)
+                && component_iter(r)
+                    .zip(asked_prefix())
+                    .all(|(c, a)| eq_folded(c, a))
         })
-        .or(roots.first())
-        .map(|r| components(r).join("\\"))
-        .unwrap_or_default();
+        .or(roots.first());
+    let mut tail = at.map(|at| component_iter(opened).skip(at));
 
-    let mut out = root;
+    // Sized for the usual answer: stored spellings as long as the folds.
+    let mut out = String::with_capacity(
+        root.map_or(0, |r| r.len()) + under.iter().map(|u| u.len() + 1).sum::<usize>() + 1,
+    );
+    for (i, c) in root.into_iter().flat_map(|r| component_iter(r)).enumerate() {
+        if i > 0 {
+            out.push('\\');
+        }
+        out.push_str(c);
+    }
     for (i, folded) in under.iter().enumerate() {
-        let spelled = match (stored(i), &tail) {
-            (Some(name), _) => name,
-            (None, Some(tail)) => tail[i].to_string(),
-            (None, None) => folded.clone(),
-        };
         out.push('\\');
-        out.push_str(&spelled);
+        let asked = tail.as_mut().and_then(Iterator::next);
+        match (stored(i), asked) {
+            (Some(name), _) => out.push_str(name.as_ref()),
+            (None, Some(asked)) => out.push_str(asked),
+            (None, None) => out.push_str(folded),
+        }
     }
     // A bare drive is named with its root separator, as NTFS names it.
     if out.len() == 2 && out.ends_with(':') {
@@ -131,7 +150,14 @@ pub fn final_dos_path_by_listing(
 pub struct NameCache {
     ttl_ms: u64,
     capacity: usize,
-    names: std::collections::HashMap<(u32, String), (String, u64)>,
+    /// Per root: folded path to its last component's stored spelling and
+    /// when it was learned. Keyed by root first, so a lookup borrows the
+    /// path as a `&str`.
+    names: std::collections::HashMap<u32, std::collections::HashMap<String, (String, u64)>>,
+    /// The path a lookup builds, kept between lookups so that a hit
+    /// allocates nothing: [`NameCache::remember`] sizes it for every path it
+    /// stores.
+    scratch: std::cell::Cell<String>,
 }
 
 impl NameCache {
@@ -143,36 +169,80 @@ impl NameCache {
             ttl_ms,
             capacity: capacity.max(1),
             names: std::collections::HashMap::new(),
+            scratch: std::cell::Cell::new(String::new()),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.names.len()
+        self.names.values().map(|t| t.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
+        self.names.values().all(|t| t.is_empty())
     }
 
     /// The stored spellings of the leading components of `under` that are
     /// known and fresh at `now_ms`: as many as are, in order, stopping at the
-    /// first that is not.
+    /// first that is not. Owned: the list and each name are allocated. A
+    /// caller that only reads them uses [`NameCache::leading_with`] and
+    /// [`NameCache::spelling`], which allocate nothing on a hit.
     pub fn leading(&self, root: u32, under: &[String], now_ms: u64) -> Vec<String> {
         let mut out = Vec::new();
-        let mut path = String::new();
+        self.leading_with(root, under, now_ms, |name| out.push(name.to_string()));
+        out
+    }
+
+    /// [`NameCache::leading`] without building a list: `each` is given the
+    /// spelling of each leading component that is known and fresh, in order,
+    /// and the count is returned. Allocates nothing for a path no longer
+    /// than one [`NameCache::remember`] stored.
+    pub fn leading_with(
+        &self,
+        root: u32,
+        under: &[String],
+        now_ms: u64,
+        mut each: impl FnMut(&str),
+    ) -> usize {
+        let Some(tree) = self.names.get(&root) else {
+            return 0;
+        };
+        let mut path = self.scratch.take();
+        path.clear();
+        let mut known = 0;
         for comp in under {
             if !path.is_empty() {
                 path.push('/');
             }
             path.push_str(comp);
-            match self.names.get(&(root, path.clone())) {
+            match tree.get(path.as_str()) {
                 Some((name, at)) if now_ms.saturating_sub(*at) < self.ttl_ms => {
-                    out.push(name.clone())
+                    each(name);
+                    known += 1;
                 }
                 _ => break,
             }
         }
-        out
+        self.scratch.set(path);
+        known
+    }
+
+    /// The stored spelling of `under[i]` (the path `under[..=i]`), fresh or
+    /// not, borrowed: for a caller that [`NameCache::leading_with`] already
+    /// told every component is fresh. Allocates nothing for a path no longer
+    /// than one [`NameCache::remember`] stored.
+    pub fn spelling(&self, root: u32, under: &[String], i: usize) -> Option<&str> {
+        let tree = self.names.get(&root)?;
+        let mut path = self.scratch.take();
+        path.clear();
+        for (n, comp) in under.get(..=i)?.iter().enumerate() {
+            if n > 0 {
+                path.push('/');
+            }
+            path.push_str(comp);
+        }
+        let found = tree.get(path.as_str()).map(|(name, _)| name.as_str());
+        self.scratch.set(path);
+        found
     }
 
     /// Remember `names` as the spellings of `under[first..]`, learned at
@@ -188,26 +258,32 @@ impl NameCache {
         if first > under.len() || names.len() != under.len() - first {
             return;
         }
-        if self.names.len() + names.len() > self.capacity {
+        if self.len() + names.len() > self.capacity {
             self.names.clear();
         }
+        let longest = under.iter().map(|c| c.len() + 1).sum::<usize>();
+        let scratch = self.scratch.get_mut();
+        scratch.reserve(longest.saturating_sub(scratch.len()));
+        let tree = self.names.entry(root).or_default();
         for (i, name) in names.iter().enumerate() {
             let path = under[..first + i + 1].join("/");
-            self.names.insert((root, path), (name.clone(), now_ms));
+            tree.insert(path, (name.clone(), now_ms));
         }
     }
 
     /// Forget how `folded` (a folded, `/`-joined path under `root`) and
     /// everything beneath it is spelled: it was created, renamed or removed.
     pub fn forget(&mut self, root: u32, folded: &str) {
+        let Some(tree) = self.names.get_mut(&root) else {
+            return;
+        };
         let folded = folded.trim_matches('/');
         if folded.is_empty() || folded == "." {
-            self.names.retain(|(r, _), _| *r != root);
+            tree.clear();
             return;
         }
         let below = format!("{folded}/");
-        self.names
-            .retain(|(r, path), _| *r != root || !(path == folded || path.starts_with(&below)));
+        tree.retain(|path, _| !(path == folded || path.starts_with(&below)));
     }
 }
 

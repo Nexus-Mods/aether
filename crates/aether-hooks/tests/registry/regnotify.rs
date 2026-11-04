@@ -3,10 +3,11 @@
 //! points with the shim's detours installed and the fake director's registry behind the ring
 //! (`fakedirector` with [`Fake::with_registry`]).
 //!
-//! Real scratch keys live under `HKCU\Software\AetherVfsRegNotifyTest`, made before the hooks go
-//! in. What the *real* registry holds afterwards is asked of a checker: this same test binary,
-//! started before the hooks were installed (so it has none), running the ignored `reg_checker`
-//! test (see `common/reg.rs`), which answers over its stdin and stdout.
+//! Real scratch keys live under `HKCU\Software\AetherVfsRegNotifyTest-<pid>` (`reg::Base`),
+//! made before the hooks go in. What the *real* registry holds afterwards is asked of a
+//! checker: this same test binary, started before the hooks were installed (so it has none),
+//! running the ignored `reg_checker` test (see `common/reg.rs`), which answers over its stdin
+//! and stdout.
 //!
 //! The ntdll calls are looked up at run time: Wine's ntdll lacks some of them, and an import of
 //! a missing export would stop the binary loading at all.
@@ -39,7 +40,7 @@ use windows_sys::Win32::System::Threading::{CreateEventW, SleepEx, WaitForSingle
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-const BASE: &str = r"Software\AetherVfsRegNotifyTest";
+static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsRegNotifyTest");
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_PENDING: i32 = 0x103;
@@ -306,7 +307,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static F: OnceLock<Fixture> = OnceLock::new();
     let f = F.get_or_init(|| {
-        reg::reset_base(BASE, &[]);
+        BASE.reset(&[]);
         for k in [
             "Syn",
             "Apc",
@@ -344,7 +345,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         let fake = reg::install_hooks("regnotify");
         Fixture {
             fake,
-            paths: Paths::new(BASE),
+            paths: Paths::new(&BASE),
             checker,
             files,
             report,

@@ -11,8 +11,19 @@ aether-ipc.workspace = true
 aether-protocol.workspace = true
 
 [dev-dependencies]
+# Micro-benchmarks (benches/), run by hand: cargo bench -p aether-rpc.
+criterion.workspace = true
+# The null director the ring bench serves (a dev-dependency cycle: the director
+# implements this crate's trait, and a bench is a separate target).
+aether-refdirector.workspace = true
 # The registry node a REG_KEY reply carries, for the tests' large replies.
 aether-registry.workspace = true
+# The shared allocation counter (`tests/alloc.rs`).
+aether-testkit.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "ring"
+harness = false

@@ -1,4 +1,4 @@
-//! **A name NT refuses is refused, not forwarded.** (cleanup C2, fix round 1.)
+//! **A name NT refuses is refused, not forwarded.**
 //!
 //! An `OBJECT_ATTRIBUTES` name with an odd `Length` is `STATUS_OBJECT_NAME_INVALID` to NT. If the
 //! hooks treated it as "undecodable" and handed it on, Wine would round the length down to an

@@ -32,19 +32,39 @@ pub fn normalize_vpath(raw: &str) -> Result<String, PathError> {
         }
     }
 
-    let mut out: Vec<&str> = Vec::new();
+    let mut out = String::with_capacity(s.len());
     for comp in s.split(['/', '\\']) {
         match comp {
             "" | "." => continue,
             ".." => {
-                if out.pop().is_none() {
+                if !pop_component(&mut out) {
                     return Err(PathError::EscapesRoot);
                 }
             }
-            other => out.push(other),
+            other => push_component(&mut out, other),
         }
     }
-    Ok(out.join("/"))
+    Ok(out)
+}
+
+/// Append `comp` to the `/`-joined `out`. With [`pop_component`], the stack
+/// of components `..` walks back up, kept in one string sized for the input:
+/// a path costs one allocation however many components it has.
+pub(crate) fn push_component(out: &mut String, comp: &str) {
+    if !out.is_empty() {
+        out.push('/');
+    }
+    out.push_str(comp);
+}
+
+/// Drop the last component of the `/`-joined `out`; `false` if it had none.
+pub(crate) fn pop_component(out: &mut String) -> bool {
+    if out.is_empty() {
+        return false;
+    }
+    let keep = out.rfind('/').unwrap_or(0);
+    out.truncate(keep);
+    true
 }
 
 #[cfg(test)]

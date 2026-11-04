@@ -54,8 +54,8 @@ use crate::ntdef::{
     KEY_NODE_INFORMATION, KEY_VALUE_BASIC_INFORMATION, KEY_VALUE_PARTIAL_INFORMATION,
     STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
     STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_KEY_DELETED, STATUS_NO_MORE_ENTRIES,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_REGISTRY_IO_FAILED,
+    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use crate::regclient;
 use crate::regkeys::{
@@ -397,9 +397,22 @@ fn value_class(class: u32) -> Option<ValueInfoClass> {
     })
 }
 
-/// The overlay node at the key, or `Err` when the director cannot be asked.
+/// The overlay node at the key, or `Err`: [`STATUS_REGISTRY_IO_FAILED`] for a node too large
+/// for one reply ([`unreadable`]), `STATUS_UNSUCCESSFUL` when the director cannot be asked.
 fn node_of(p: &str) -> Result<Option<Node>, NTSTATUS> {
-    regclient::key(p).map_err(|_| STATUS_UNSUCCESSFUL)
+    regclient::key(p).map_err(|st| match unreadable(st) {
+        true => STATUS_REGISTRY_IO_FAILED,
+        false => STATUS_UNSUCCESSFUL,
+    })
+}
+
+/// Whether a failed overlay read means the key cannot be read at all: its node is larger than
+/// one reply (`docs/wire.md` 4.3), so the overlay holds values, children or tombstones of its
+/// own and the real key alone would answer wrongly. The query fails
+/// [`STATUS_REGISTRY_IO_FAILED`]. Any other failure leaves the real key alone to answer
+/// (4.4).
+fn unreadable(st: aether_protocol::Status) -> bool {
+    st == aether_protocol::Status::ReplyTooLarge
 }
 
 /// The caller's `UNICODE_STRING` as a value name: a NULL pointer is `STATUS_ACCESS_VIOLATION`,
@@ -493,6 +506,7 @@ unsafe fn merged_key_info(
     };
     let node = match node_of(&ctx.path) {
         Ok(n) => n,
+        Err(STATUS_REGISTRY_IO_FAILED) => return STATUS_REGISTRY_IO_FAILED,
         // Lost the director since the lookup: the real key alone.
         Err(st) => {
             return match ctx.real {
@@ -727,6 +741,7 @@ unsafe fn view<K: Kind>(real: &Real, ctx: &KeyRef, index: u32) -> Result<Arc<Vec
     };
     let node = match node_of(&ctx.path) {
         Ok(n) => n,
+        Err(STATUS_REGISTRY_IO_FAILED) => return Err(STATUS_REGISTRY_IO_FAILED),
         // The director cannot be asked (counted by `regclient`): the real list alone, for this
         // call only, so the merge comes back as soon as the director does.
         Err(_) => return Ok(Arc::new(K::entries(names.as_deref(), None))),
@@ -795,8 +810,10 @@ pub(crate) unsafe fn enumerate_key(
         return e.real.map_or(STATUS_NO_MORE_ENTRIES, forward);
     }
     let child = format!("{}\\{}", ctx.path, e.name);
-    let Ok(node) = node_of(&child) else {
-        return e.real.map_or(STATUS_UNSUCCESSFUL, forward);
+    let node = match node_of(&child) {
+        Ok(n) => n,
+        Err(STATUS_REGISTRY_IO_FAILED) => return STATUS_REGISTRY_IO_FAILED,
+        Err(_) => return e.real.map_or(STATUS_UNSUCCESSFUL, forward),
     };
     let created = node.as_ref().is_some_and(|n| n.created);
     let need = Need::of(kc);
@@ -884,14 +901,24 @@ enum Hit {
     Real,
 }
 
-fn hit(n: Option<&Node>, folded: &str) -> Hit {
+/// What `n` says about the value `name`, folded or not: names compare by
+/// their folds (`eq_folded`, which builds neither), and a fold is its own fold.
+fn hit(n: Option<&Node>, name: &str) -> Hit {
     let Some(n) = n else {
         return Hit::Real;
     };
-    if let Some(v) = n.values.iter().find(|v| fold(&v.name) == folded) {
+    if let Some(v) = n
+        .values
+        .iter()
+        .find(|v| aether_casefold::eq_folded(&v.name, name))
+    {
         return Hit::Overlay(v.clone());
     }
-    if n.created || n.value_tombstones.iter().any(|t| t == folded) {
+    if n.created
+        || n.value_tombstones
+            .iter()
+            .any(|t| aether_casefold::eq_folded(t, name))
+    {
         return Hit::Hidden;
     }
     Hit::Real
@@ -930,9 +957,12 @@ pub(crate) unsafe fn query_value_key(
         Ok(v) => v,
         Err(st) => return st,
     };
-    let f = fold(&vname);
     // The director lost since the lookup: the real key alone (counted by `regclient`).
-    let found = regclient::with_key(&ctx.path, |n| hit(n, &f)).unwrap_or(Hit::Real);
+    let found = match regclient::with_key(&ctx.path, |n| hit(n, &vname)) {
+        Ok(f) => f,
+        Err(st) if unreadable(st) => return STATUS_REGISTRY_IO_FAILED,
+        Err(_) => Hit::Real,
+    };
     match found {
         Hit::Overlay(v) => emit(info, len, ret, |b| layout::write_value_info(vc, &v, b)),
         Hit::Hidden => STATUS_OBJECT_NAME_NOT_FOUND,
@@ -1018,10 +1048,13 @@ pub(crate) unsafe fn query_multiple_value_key(
         }
     }
     let folded: Vec<String> = names.iter().map(|s| fold(s)).collect();
-    let hits = regclient::with_key(&ctx.path, |node| {
+    let hits = match regclient::with_key(&ctx.path, |node| {
         folded.iter().map(|f| hit(node, f)).collect::<Vec<_>>()
-    })
-    .unwrap_or_else(|_| folded.iter().map(|_| Hit::Real).collect());
+    }) {
+        Ok(h) => h,
+        Err(st) if unreadable(st) => return STATUS_REGISTRY_IO_FAILED,
+        Err(_) => folded.iter().map(|_| Hit::Real).collect(),
+    };
     // One value (or `None`) per entry, so the two lists have the same length; resolving stops
     // at the first missing value, where the layout stops too.
     let mut values: Vec<Option<Value>> = Vec::with_capacity(n);

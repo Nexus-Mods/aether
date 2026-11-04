@@ -51,8 +51,9 @@ fn hook_names_cover_every_variant() {
     assert_eq!(NAMES.len(), N);
     // The last variant must index the last name, or a hook silently
     // reports under a neighbour's label.
-    assert_eq!(Hook::Cpiw as usize, N - 1);
+    assert_eq!(Hook::UnmapViewEx as usize, N - 1);
     assert_eq!(NAMES[Hook::UnmapView as usize], "NtUnmapViewOfSection");
+    assert_eq!(NAMES[Hook::UnmapViewEx as usize], "NtUnmapViewOfSectionEx");
     assert_eq!(NAMES[Hook::Cpiw as usize], "CreateProcessInternalW");
     assert_eq!(NAMES[Hook::FlushKey as usize], "NtFlushKey");
     assert_eq!(NAMES[Hook::NotifyChangeKey as usize], "NtNotifyChangeKey");
@@ -281,6 +282,9 @@ fn empty_snapshot() -> Snapshot {
         fills_started: 0,
         fills_completed: 0,
         fills_failed: 0,
+        section_failures: [0; super::sections::SECTION_FAILURE_N],
+        lazy_regions: [0; super::sections::LAZY_BACKING_N],
+        last_in_page_addr: 0,
         fill_bytes: 0,
         fill_nanos: 0,
         fill_max_nanos: 0,
@@ -420,4 +424,43 @@ fn a_refused_child_is_counted_and_reported_by_reason() {
     let s = render_child_inject_refused(&snap);
     assert!(s.contains("CHILD PROCESSES REFUSED: 3"), "{s}");
     assert!(s.contains("ready-timeout"), "{s}");
+}
+
+#[test]
+fn a_section_failure_is_counted_by_label_and_reported() {
+    let before = section_failure_count("image-read");
+    note_section_failure(SectionFailure::ImageRead);
+    assert_eq!(section_failure_count("image-read"), before + 1);
+    assert_eq!(section_failure_count("no-such-label"), 0);
+    assert_eq!(SectionFailure::EagerFill.label(), "eager-fill");
+
+    assert_eq!(
+        super::sections::render_section_failures(&empty_snapshot()),
+        ""
+    );
+    let mut snap = empty_snapshot();
+    snap.section_failures[SectionFailure::InPageError as usize] = 2;
+    snap.last_in_page_addr = 0x1234_0000;
+    let s = super::sections::render_section_failures(&snap);
+    assert!(s.contains("SECTION FILLS FAILED"), "{s}");
+    assert!(s.contains("in-page-error"), "{s}");
+    assert!(!s.contains("eager-fill"), "{s}");
+    assert!(s.contains("0x12340000"), "{s}");
+}
+
+#[test]
+fn a_lazy_region_s_backing_is_counted_and_a_private_one_reported() {
+    let before = lazy_region_count("private-reserve-failed");
+    note_lazy_region(LazyBacking::PrivateReserveFailed);
+    assert_eq!(lazy_region_count("private-reserve-failed"), before + 1);
+    assert_eq!(lazy_region_count("no-such-label"), 0);
+
+    let mut snap = empty_snapshot();
+    snap.lazy_regions = [5, 0, 0];
+    assert_eq!(super::sections::render_lazy_regions(&snap), "");
+    snap.lazy_regions = [5, 1, 2];
+    let s = super::sections::render_lazy_regions(&snap);
+    assert!(s.contains("shared 5"), "{s}");
+    assert!(s.contains("no second-view fill) 1"), "{s}");
+    assert!(s.contains("section reserve failed) 2"), "{s}");
 }

@@ -1,0 +1,18 @@
+{
+  "name": "random-small",
+  "description": "4 KiB inline READs at random 4 KiB-aligned offsets of a 64 MiB archive, from four threads",
+  "tree": {
+    "roots": [
+      {
+        "id": 0,
+        "files": [
+          {"path": "Data/Meshes.bsa", "contents": {"size": 67108864, "seed": 11}}
+        ]
+      }
+    ]
+  },
+  "phases": [
+    {"name": "reads", "threads": 4, "repeat": 1, "kind": "random_read",
+     "path": "Data/Meshes.bsa", "len": 4096, "count": 8192, "seed": 1}
+  ]
+}

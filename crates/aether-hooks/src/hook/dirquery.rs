@@ -170,7 +170,17 @@ unsafe fn serve_dir_query(
                 }
                 return passthrough();
             }
-            Some(t) => (restart || t.state.is_none(), t.dir_nt_path.clone()),
+            // The path is needed only to build the listing: a query served
+            // from the one the handle keeps copies nothing.
+            Some(t) => {
+                let build = restart || t.state.is_none();
+                let path = if build {
+                    t.dir_nt_path.clone()
+                } else {
+                    String::new()
+                };
+                (build, path)
+            }
         }
     };
 
@@ -217,7 +227,23 @@ unsafe fn serve_dir_query(
                         }
                         items
                     }
-                    Err(_) => Vec::new(),
+                    // The directory is gone: an empty listing.
+                    Err(aether_protocol::Status::NotFound) => Vec::new(),
+                    // Any other failure (a status, the overflow status of a listing
+                    // past `payload_cap`, a reply that does not decode, no reply in
+                    // time) fails this query, where an empty listing would hide the
+                    // directory's content without telling anyone. Nothing is kept, so
+                    // the next query asks again (docs/wire.md 3.4.2).
+                    Err(_) => {
+                        if let Ok(mut table) = HANDLES.lock() {
+                            if let Some(t) = table.dir_mut(key) {
+                                t.state = None;
+                            }
+                        }
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0) };
+                        return STATUS_UNSUCCESSFUL;
+                    }
                 };
                 // Not fixed here: a marker still does not hide its target from an open through
                 // the director. See docs/shim-invariants.md, "Enumeration containment".

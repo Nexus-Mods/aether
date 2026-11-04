@@ -224,20 +224,49 @@ pub fn serve_one_with_arena<N: Notifier, D: Director + ?Sized>(
     d: &mut D,
     scratch: &mut Scratch,
 ) -> Result<bool, IpcError> {
+    serve_one_tapped(server, arena, d, &mut (), scratch)
+}
+
+/// [`serve_one_with_arena`] with a [`Tap`] on the request and its reply.
+///
+/// The tap runs inside the ring's handler, after the request is decoded and
+/// dispatched and before the slot is completed. Its reply is whatever the
+/// tap leaves in the status and the payload; one longer than `payload_cap`
+/// is the ring's overflow, `i32::MIN` with no payload (`docs/wire.md` 2.5),
+/// as for any director. The tap cannot reach the slot header, so it cannot
+/// make the ring answer the wrong request.
+pub fn serve_one_tapped<N: Notifier, D: Director + ?Sized, T: Tap + ?Sized>(
+    server: &RingServer<'_, N>,
+    arena: Option<&DataArena<'_>>,
+    d: &mut D,
+    tap: &mut T,
+    scratch: &mut Scratch,
+) -> Result<bool, IpcError> {
+    let payload_cap = server.geom().payload_cap;
     // An inline READ reply and a registry reply both hold `payload_cap - 8`
     // bytes (wire.md 3.4.4, 4.3).
-    let registry_cap = (server.geom().payload_cap as usize).saturating_sub(8);
+    let registry_cap = (payload_cap as usize).saturating_sub(8);
     let Scratch {
         req,
         reply,
         listing,
     } = scratch;
     server.serve_one_into(req, reply, |view, out| {
-        let status = dispatch(d, view, arena, registry_cap, listing, out);
-        if status != Status::Ok {
-            out.clear();
-        }
-        status.code()
+        let mut status = match tap.on_request(view) {
+            TapAction::Pass => {
+                let status = dispatch(d, view, arena, registry_cap, listing, out);
+                if status != Status::Ok {
+                    out.clear();
+                }
+                status.code()
+            }
+            TapAction::Answer { status } => status,
+        };
+        tap.on_reply(view, &mut status, out);
+        // What `server_complete` is about to send, by the ring's own rule.
+        let (sent, len) = aether_ipc::ring::sent(payload_cap, status, out.len());
+        tap.on_sent(view, sent, &out[..len]);
+        status
     })
 }
 
@@ -258,11 +287,91 @@ pub fn serve_with_arena<N: Notifier, D: Director + ?Sized>(
     d: &mut D,
     stop: &AtomicBool,
 ) -> Result<(), IpcError> {
+    serve_tapped(server, arena, d, &mut (), stop)
+}
+
+/// [`serve_with_arena`] with a [`Tap`] ([`serve_one_tapped`]).
+pub fn serve_tapped<N: Notifier, D: Director + ?Sized, T: Tap + ?Sized>(
+    server: &RingServer<'_, N>,
+    arena: Option<&DataArena<'_>>,
+    d: &mut D,
+    tap: &mut T,
+    stop: &AtomicBool,
+) -> Result<(), IpcError> {
     let mut scratch = Scratch::default();
     while !stop.load(Ordering::Acquire) {
-        serve_one_with_arena(server, arena, d, &mut scratch)?;
+        serve_one_tapped(server, arena, d, tap, &mut scratch)?;
     }
     Ok(())
+}
+
+/// A hook on the serve loop's bytes: what the shim's test harness records,
+/// answers early and corrupts replies through. Both methods default to doing
+/// nothing, and `()` is the tap that does, so an untapped server pays only
+/// for a call the compiler removes.
+pub trait Tap {
+    /// Sees each request before the director does, except one whose header
+    /// claims a payload past the slot, which the ring answers `BadRequest`
+    /// first (`docs/wire.md` 2.5). An unknown opcode or a
+    /// payload that does not decode is seen: the tap works on the raw view.
+    /// [`TapAction::Answer`] skips the director.
+    fn on_request(&mut self, view: &RequestView<'_>) -> TapAction {
+        let _ = view;
+        TapAction::Pass
+    }
+
+    /// Sees the reply about to be completed and may change it: `status` is
+    /// the code and `payload` the reply bytes (empty for an error status, or
+    /// for an answered request, unless a tap put something there). Whatever
+    /// is left there is what the ring sends, past `payload_cap` or not.
+    fn on_reply(&mut self, view: &RequestView<'_>, status: &mut i32, payload: &mut Vec<u8>) {
+        let _ = (view, status, payload);
+    }
+
+    /// Sees what the ring sends, after every tap's [`Tap::on_reply`]: the
+    /// status and payload as `aether_ipc::ring::sent` decides them, so a
+    /// reply past `payload_cap` is the overflow `i32::MIN` with no payload
+    /// (`docs/wire.md` 2.5), as the client gets it. Not called for a request
+    /// whose director or tap panicked (the ring answers it
+    /// `Status::IoError`).
+    fn on_sent(&mut self, view: &RequestView<'_>, status: i32, payload: &[u8]) {
+        let _ = (view, status, payload);
+    }
+}
+
+/// What a [`Tap`] does with a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapAction {
+    /// Let the director answer.
+    Pass,
+    /// Answer with this status and an empty payload, without asking the
+    /// director; [`Tap::on_reply`] then sees that reply and may fill it.
+    Answer { status: i32 },
+}
+
+impl Tap for () {}
+
+/// Two taps in a row: `A` sees the request first and the reply last. Both
+/// see every request; the first one that answers decides it.
+impl<A: Tap, B: Tap> Tap for (A, B) {
+    fn on_request(&mut self, view: &RequestView<'_>) -> TapAction {
+        let a = self.0.on_request(view);
+        let b = self.1.on_request(view);
+        match a {
+            TapAction::Pass => b,
+            answer => answer,
+        }
+    }
+
+    fn on_reply(&mut self, view: &RequestView<'_>, status: &mut i32, payload: &mut Vec<u8>) {
+        self.1.on_reply(view, status, payload);
+        self.0.on_reply(view, status, payload);
+    }
+
+    fn on_sent(&mut self, view: &RequestView<'_>, status: i32, payload: &[u8]) {
+        self.1.on_sent(view, status, payload);
+        self.0.on_sent(view, status, payload);
+    }
 }
 
 /// The status for one request, its reply payload (on `Status::Ok`) in `out`.

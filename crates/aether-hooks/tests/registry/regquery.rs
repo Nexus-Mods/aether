@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Registry::{
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-const BASE: &str = r"Software\AetherVfsRegQueryTest";
+static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsRegQueryTest");
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_NO_MORE_ENTRIES: i32 = 0x8000_001Au32 as i32;
@@ -42,6 +42,7 @@ const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023u32 as i32;
 const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034u32 as i32;
 const STATUS_KEY_DELETED: i32 = 0xC000_017Cu32 as i32;
+const STATUS_REGISTRY_IO_FAILED: i32 = 0xC000_016Bu32 as i32;
 
 const KEY_QUERY_VALUE: u32 = 0x1;
 const KEY_ENUMERATE_SUB_KEYS: u32 = 0x8;
@@ -194,7 +195,7 @@ fn merged_values() -> Vec<Value> {
 }
 
 fn build_real_keys() {
-    reg::reset_base(BASE, &["Limited"]);
+    BASE.reset(&["Limited"]);
     // The key the overlay changes, and its children.
     make(r"M\Merge", Some("MCls"), &merge_real_values());
     make(r"M\Merge\Sa", None, &[val("x", REG_DWORD, &dword(1))]);
@@ -301,7 +302,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         let merge_real_lw = last_write_of(r"M\Merge");
         let limited_as_expected = !grants("Limited", KEY_READ)
             && grants("Limited", KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS);
-        let paths = Paths::new(BASE);
+        let paths = Paths::new(&BASE);
         let (st, pre) = open_abs(&paths.nt("Pre"), KEY_ENUMERATE_SUB_KEYS);
         assert_eq!(st, STATUS_SUCCESS);
         let fake = reg::install_hooks("regquery");
@@ -1052,25 +1053,29 @@ fn a_handle_opened_before_the_hooks_is_merged_too() {
 }
 
 #[test]
-fn a_node_too_large_to_read_enumerates_the_real_key_alone() {
+fn a_node_too_large_for_one_reply_fails_every_read_of_the_key() {
+    // wire.md 4.3: the director answers REG_KEY `ST_REPLY_TOO_LARGE`. The overlay holds
+    // values of its own, so the real key alone would answer wrongly: each read fails.
     isolate!();
     let (_g, f) = fixture();
     let h = f.open("TooBig", NT_KEY_READ);
     assert!(is_synthetic_key_handle(h));
     let states = registry_enum_states();
     let fallbacks = aether_hooks::reg_read_fallback_count();
-    assert_eq!(subkey_names(h), ["R1", "R2"]);
-    assert_eq!(value_names(h), ["r"]);
+    let failed = STATUS_REGISTRY_IO_FAILED;
+    assert_eq!(ekey(h, 0, 0, 512).st, failed, "enumerate a subkey");
+    assert_eq!(eval(h, 0, 0, 512).st, failed, "enumerate a value");
+    assert_eq!(qval(h, "a", 2, 64).st, failed, "an overlay value");
+    // Never the real key's value: the overlay might hold another, or a tombstone.
+    assert_eq!(qval(h, "r", 2, 64).st, failed, "a real value");
+    assert_eq!(qmulti(h, &["r"], 64).0, failed, "several values");
+    assert_eq!(qkey(h, 2, 512).st, failed, "the key's value count");
+    assert_eq!(registry_enum_states(), states, "no list is kept");
     assert_eq!(
-        registry_enum_states(),
-        states,
-        "a fallback list is not kept"
+        aether_hooks::reg_read_fallback_count(),
+        fallbacks,
+        "nothing fell back"
     );
-    assert!(
-        aether_hooks::reg_read_fallback_count() > fallbacks,
-        "fallbacks are counted"
-    );
-    assert_eq!(qval(h, "r", 2, 64).bytes[12..16], dword(1)[..]);
     NtCloseAll(&[h]);
 }
 

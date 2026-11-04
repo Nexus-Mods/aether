@@ -225,11 +225,9 @@ impl Attached {
     }
 
     /// Whether `VFS_ARENA_OFFSET` named the arena's start. Without it the
-    /// start is assumed (after the last slot, where a director usually puts
-    /// it, wire.md 2.1), and the shim, which takes data offsets from bulk replies
-    /// and never needs the start (5.3: "Informational"), would accept an
-    /// arena elsewhere; so the bank a bulk reply lies in is checked only
-    /// when this is true.
+    /// start is right after the last slot (wire.md 2.1, 5.3), as the shim
+    /// takes it; the bank a bulk reply lies in is checked against that start
+    /// either way.
     pub fn arena_offset_given(&self) -> bool {
         self.arena_offset_given
     }
@@ -324,9 +322,8 @@ fn open_server_event(env: &Env) -> Option<crate::job::WakeEvent> {
 /// (`backings_from_env`, `parse_backings`) and hands them all to
 /// `RootMap::with_roots`, whose error fails the load ("managed root is not a
 /// usable path"). That last call is the shim's own, from `aether-redirect`;
-/// the parsing before it is copied from `director.rs`, which lives in a
-/// Windows-only crate. The volume map is left empty: it adds aliases, never
-/// refuses a root.
+/// the parsing before it is `aether_env::session`, the shim's own. The
+/// volume map is left empty: it adds aliases, never refuses a root.
 pub fn shim_roots(env: &Env) -> Result<(), String> {
     let get = |k: &str| env.get(k).map(String::as_str);
     let Some(virtual_dir) = get(aether_env::VIRTUAL_DIR) else {
@@ -461,44 +458,17 @@ pub fn against_tree(env: &Env, tree: &aether_refdirector::tree::Tree) -> Result<
     }
 }
 
-/// `director.rs`, `merge_extra_roots`.
 fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
-    let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];
-    let Some(extra) = spec else {
-        return out;
-    };
-    for entry in extra.split(';') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let Some((id, path)) = entry.split_once('=') else {
-            continue;
-        };
-        let (Ok(id), path) = (id.trim().parse::<u32>(), path.trim()) else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
-        }
-        match out.iter_mut().find(|(r, _)| r.0 == id) {
-            Some(slot) => slot.1 = path.to_string(),
-            None => out.push((RootId(id), path.to_string())),
-        }
-    }
-    out
+    aether_env::session::roots(virtual_dir, spec)
+        .into_iter()
+        .map(|(id, path)| (RootId(id), path))
+        .collect()
 }
 
-/// `director.rs`, `parse_backings`.
 fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
-    spec.unwrap_or_default()
-        .split(';')
-        .filter_map(|entry| {
-            let (id, path) = entry.trim().split_once('=')?;
-            let id = id.trim().parse::<u32>().ok()?;
-            let path = path.trim();
-            (!path.is_empty()).then(|| (RootId(id), normalize_path_for_root(path)))
-        })
+    aether_env::session::backings(spec)
+        .into_iter()
+        .map(|(id, path)| (RootId(id), path))
         .collect()
 }
 
@@ -520,13 +490,8 @@ fn stage_root(image: &str) -> Option<String> {
     Some(normalize_path_for_root(&dir))
 }
 
-/// `director.rs`, `normalize_path_for_root` (with `strip_nt_device`).
 fn normalize_path_for_root(p: &str) -> String {
-    let p = p
-        .strip_prefix(r"\??\")
-        .or_else(|| p.strip_prefix(r"\\?\"))
-        .unwrap_or(p);
-    p.replace('/', "\\").to_ascii_lowercase()
+    aether_env::session::normalize_path_for_root(p)
 }
 
 /// The client's notifier: wakes the director's event on a section, nothing

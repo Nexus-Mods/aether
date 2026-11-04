@@ -26,6 +26,8 @@
 //! host computes). It owns the *name*, the *meaning*, and the parsing of the
 //! handful of switches that are booleans, so "is `0` false?" has one answer.
 
+pub mod session;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -139,7 +141,7 @@ pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 180;
 /// The ready wait in seconds, as the environment says it: [`READY_TIMEOUT_SECS`]
 /// if set and numeric, else [`DEFAULT_READY_TIMEOUT_SECS`]; never below 1.
 pub fn ready_timeout_secs() -> u64 {
-    parsed_or(READY_TIMEOUT_SECS, DEFAULT_READY_TIMEOUT_SECS).max(1)
+    session::ready_timeout_secs(text(READY_TIMEOUT_SECS).as_deref())
 }
 /// Working directory `aether-injector` starts its target in, as the target sees
 /// it (`C:\…`). Set by the Proton launch; unset, the target inherits the
@@ -267,7 +269,7 @@ pub const REJECT_FUSE_DATA_SECTION: &str = "VFS_REJECT_FUSE_DATA_SECTION";
 pub const LAZY_NO_VEH: &str = "VFS_LAZY_NO_VEH";
 /// The shim's block cache for small reads of immutable files
 /// (`aether_ipc::readcache`). On unless set to `0`/`false`/`no`/`off`, which
-/// sends every read over the ring as before — what to do when capturing a
+/// sends every read over the ring: what to do when capturing a
 /// provider-side trace of the program's own read pattern, which the cache
 /// otherwise turns into 1 MiB block fetches.
 pub const SHIM_READ_CACHE: &str = "VFS_SHIM_READ_CACHE";
@@ -1022,10 +1024,7 @@ pub fn is_known(name: &str) -> bool {
 /// un-seals the managed root, and it must not be possible to enable it by
 /// accident: under the opposite rule, `=off` would read as *true*.
 pub fn opt_in(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-        Err(_) => false,
-    }
+    session::opt_in(text(name).as_deref())
 }
 
 /// A switch that is **on unless explicitly turned off**.
@@ -1038,13 +1037,7 @@ pub fn opt_in(name: &str) -> bool {
 /// only a negative, so the same string meant different things in different
 /// crates. Naming the intent makes the call site say which one it wants.
 pub fn opt_out(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => true,
-    }
+    session::opt_out(text(name).as_deref())
 }
 
 /// A switch whose presence alone enables something, whatever its value.

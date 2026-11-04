@@ -1,0 +1,164 @@
+# Timed benchmarks of a base commit and the head, by hand only (docs/benchmarks.md).
+#
+# Both are built and measured on one Windows runner, in this one job, so they
+# see the same machine and the same neighbours. The head's tools are run with
+# --baseline set to the base's report, so their output carries the change.
+#
+# What the numbers are: a shared runner's. They are comparable only with the
+# other half of the same run (or with an earlier run of this workflow, as
+# trend), never with a fixed value, and a difference smaller than the spread
+# between two runs of one commit is not a finding. For that reason nothing
+# here gates on a timing: --fail-over is never passed, a base without a tool
+# skips that tool, and a step fails only when a build fails or a director's
+# reply is wrong. What gates a push is counted, not timed: costs.txt, the
+# fault table and the fuzz replay (ci.yml).
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: The commit, branch or tag to compare the head with
+        default: origin/master
+      iterations:
+        description: Timed calls per case of aether-shimbench
+        default: '100000'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # as ci.yml: the runner's default TMP has an 8.3 alias
+  TMP: C:\vfstmp
+  TEMP: C:\vfstmp
+
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BASE: ${{ inputs.base }}
+      ITERATIONS: ${{ inputs.iterations }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create an 8.3-free TMP
+        run: New-Item -ItemType Directory -Force -Path C:\vfstmp | Out-Null
+        shell: pwsh
+      # the base commit, beside the head, with its own toolchain file
+      - name: Check out the base
+        run: |
+          git worktree add ../base "$BASE"
+          echo "base: $(git -C ../base rev-parse HEAD)"
+          echo "head: $(git rev-parse HEAD)"
+      - name: Rust toolchain (head)
+        run: rustup toolchain install
+      - name: Rust toolchain (base)
+        working-directory: ../base
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: |
+            . -> target
+            ../base -> target
+          save-if: false
+      # Each tree is built with what it has: a base without a tool skips that
+      # tool's steps below.
+      - name: Build the head
+        run: cargo build --release -p aether-conform -p aether-inject -p aether-shim -p aether-shimbench
+      - name: Build the base
+        working-directory: ../base
+        run: |
+          packages="-p aether-conform"
+          if [ -d crates/aether-shimbench ]; then
+            packages="$packages -p aether-inject -p aether-shim -p aether-shimbench"
+          fi
+          cargo build --release $packages
+      - name: Director benchmark, base
+        run: |
+          mkdir -p bench-out
+          if [ -d ../base/contract/workloads ]; then
+            (cd ../base && target/release/aether-conform bench \
+              --director "target/release/aether-conform reference-adapter" \
+              --workloads contract/workloads --out "$GITHUB_WORKSPACE/bench-out/base-conform.json") \
+              | tee bench-out/base-conform.txt
+          else
+            echo "::notice::the base has no aether-conform bench; skipped"
+          fi
+      - name: Director benchmark, head
+        run: |
+          run() {
+            target/release/aether-conform bench \
+              --director "target/release/aether-conform reference-adapter" \
+              --workloads contract/workloads --out bench-out/head-conform.json "$@"
+          }
+          if [ -f bench-out/base-conform.json ]; then
+            set +e
+            run --baseline bench-out/base-conform.json | tee bench-out/head-conform.txt
+            rc=${PIPESTATUS[0]}
+            set -e
+            # 2 is a usage error or a refused baseline: report the head alone
+            if [ "$rc" -eq 2 ]; then
+              echo "::notice::the base's report could not be compared; head alone"
+              run | tee bench-out/head-conform.txt
+            elif [ "$rc" -ne 0 ]; then
+              exit "$rc"
+            fi
+          else
+            run | tee bench-out/head-conform.txt
+          fi
+      - name: Shim benchmark, base
+        run: |
+          if [ -d ../base/crates/aether-shimbench ]; then
+            (cd ../base && target/release/aether-shimbench --iterations "$ITERATIONS" \
+              --out "$GITHUB_WORKSPACE/bench-out/base-shim.json") | tee bench-out/base-shim.txt
+          else
+            echo "::notice::the base has no aether-shimbench; skipped"
+          fi
+      - name: Shim benchmark, head
+        run: |
+          run() {
+            target/release/aether-shimbench --iterations "$ITERATIONS" --out bench-out/head-shim.json "$@"
+          }
+          if [ -f bench-out/base-shim.json ]; then
+            set +e
+            run --baseline bench-out/base-shim.json | tee bench-out/head-shim.txt
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -eq 2 ]; then
+              echo "::notice::the base's report could not be compared; head alone"
+              run | tee bench-out/head-shim.txt
+            elif [ "$rc" -ne 0 ]; then
+              exit "$rc"
+            fi
+          else
+            run | tee bench-out/head-shim.txt
+          fi
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Benchmarks: head against base on one runner"
+            echo
+            echo "Shared-runner numbers: read the change within this run, not the values."
+            for f in head-conform head-shim; do
+              [ -f "bench-out/$f.txt" ] || continue
+              echo
+              echo "### $f"
+              echo '```'
+              cat "bench-out/$f.txt"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: bench-out
+          if-no-files-found: ignore

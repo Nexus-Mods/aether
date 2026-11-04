@@ -48,9 +48,32 @@ pub fn fold(s: &str) -> String {
     fold_unicode(s)
 }
 
+/// [`fold`] into `out`, which is cleared first: the same string, in a buffer
+/// the caller keeps, so a fold into a buffer that has grown allocates nothing.
+pub fn fold_into(s: &str, out: &mut String) {
+    out.clear();
+    if s.is_ascii() {
+        out.push_str(s);
+        out.make_ascii_lowercase();
+    } else {
+        out.extend(s.chars().flat_map(char::to_lowercase));
+    }
+}
+
 /// [`fold`]'s definition: `char::to_lowercase` of every character.
 fn fold_unicode(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
+}
+
+/// Whether `a` and `b` fold to the same string, `fold(a) == fold(b)`, without
+/// building either fold.
+pub fn eq_folded(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
 }
 
 /// Case-insensitive comparison. Fold-equal strings compare `Equal`; callers that
@@ -77,6 +100,75 @@ mod tests {
     fn folds_ascii_and_unicode() {
         assert_eq!(fold("FooBAR.ESP"), "foobar.esp");
         assert_eq!(fold("ÄÖÜ"), "äöü");
+    }
+
+    #[test]
+    fn eq_folded_is_equality_of_the_folds() {
+        // Cases a property may not draw: characters outside the BMP, the
+        // three sigmas, a fold that is a prefix of the other, a character
+        // whose lowercase is two characters.
+        let words = [
+            "File.txt", "file.TXT", "File.tx", "", "ÄÖÜ", "äöü", "Äö", "ǅ", "ǆ", "İ", "i̇", "ẞ",
+            "ß", "ss", "K", "K", "k", "𐐀", "𐐨", "𐐀𐐁", "𐐨𐐩", "Σ", "σ", "ς", "ΣΑΣ", "σας",
+        ];
+        for a in words {
+            for b in words {
+                assert_eq!(eq_folded(a, b), fold(a) == fold(b), "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// `s` with each character upper- or lowercased as `flips` says: another
+    /// spelling of the same name, or, where a mapping is not reversible,
+    /// another name.
+    fn respell(s: &str, flips: &[bool]) -> String {
+        s.chars()
+            .zip(flips.iter().cycle())
+            .flat_map(|(c, up)| {
+                let out: Vec<char> = if *up {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_lowercase().collect()
+                };
+                out
+            })
+            .collect()
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn eq_folded_agrees_with_the_folds_for_any_two_strings(a in ".*", b in ".*") {
+            proptest::prop_assert_eq!(eq_folded(&a, &b), fold(&a) == fold(&b));
+        }
+
+        #[test]
+        fn eq_folded_agrees_with_the_folds_for_a_string_and_a_respelling(
+            a in ".*",
+            flips in proptest::collection::vec(proptest::bool::ANY, 1..8),
+        ) {
+            let b = respell(&a, &flips);
+            proptest::prop_assert_eq!(eq_folded(&a, &b), fold(&a) == fold(&b));
+            proptest::prop_assert_eq!(eq_folded(&b, &a), fold(&b) == fold(&a));
+        }
+    }
+
+    #[test]
+    fn fold_into_gives_the_fold() {
+        let mut out = String::from("left over");
+        for s in ["", "FooBAR.ESP", "ÄÖÜ", "İstanbul", r"data\SKSE\Plugins"] {
+            fold_into(s, &mut out);
+            assert_eq!(out, fold(s), "{s:?}");
+        }
+    }
+
+    /// So a name already folded compares as itself: `eq_folded(a, fold(b))` is
+    /// `fold(a) == fold(b)`.
+    #[test]
+    fn fold_is_idempotent_over_every_char() {
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            let once = fold(&c.to_string());
+            assert_eq!(fold(&once), once, "{c:?} (U+{:04X})", c as u32);
+        }
     }
 
     #[test]

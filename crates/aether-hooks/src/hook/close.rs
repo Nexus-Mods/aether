@@ -30,7 +30,15 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
             if let Some(c) = crate::director::global() {
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
-                let _ = c.close(fh);
+                // Only a handle the director issued is closed there: the directory
+                // handle a create makes holds none (`synth_file::open_dir_unissued`),
+                // and the shim gives no `fh` a meaning, 0 included (a director never issues 0,
+                // docs/wire.md 3.4.3, but nothing here relies on it). Nor one a
+                // demand-paged section still reads through: its last release closes it
+                // (`synth_file::hold`, `lazy_section::let_go`).
+                if let Some(fh) = fh {
+                    let _ = c.close(fh);
+                }
                 // `FILE_DELETE_ON_CLOSE`: the delete happens now, at the director, as NT does it
                 // at the last close. Wine's `DeleteFileW` is exactly this (an open with the flag,
                 // then a close), so without it every Win32 delete of a served file was a silent

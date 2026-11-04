@@ -554,6 +554,54 @@ pub struct ReadPlan {
     /// Requests in flight for a read of at least `stream_bytes`.
     pub depth_stream: usize,
     pub stream_bytes: usize,
+    /// The arena's length, banked one per slot (`docs/wire.md` 2.6), or 0
+    /// when this client uses none. With an arena, a bulk reply's data must
+    /// lie in its own slot's bank; without one, anywhere in the mapping.
+    pub arena_len: usize,
+    /// The mapping offset the arena starts at (`VFS_ARENA_OFFSET`,
+    /// `docs/wire.md` 2.1). Unused when `arena_len` is 0.
+    pub arena_offset: usize,
+}
+
+/// Where bulk READ replies may put their data (`docs/wire.md` 2.6): one
+/// bank per slot from the arena's start, or anywhere in the mapping when
+/// there is no arena. Worked out once per read.
+#[derive(Debug, Clone, Copy)]
+struct Banks {
+    start: u64,
+    /// 0: no arena.
+    size: u64,
+    count: u32,
+    mapping: u64,
+}
+
+impl Banks {
+    fn of(plan: &ReadPlan, geom: &Geom, mapping_len: usize) -> Banks {
+        let count = geom.slot_count.max(1);
+        let size = if plan.arena_len == 0 {
+            0
+        } else {
+            (plan.arena_len / count as usize).max(4096) as u64
+        };
+        Banks {
+            start: plan.arena_offset as u64,
+            size,
+            count,
+            mapping: mapping_len as u64,
+        }
+    }
+
+    /// Whether `[offset, offset + n)` lies where a reply on `slot` may put
+    /// its data.
+    fn hold(&self, slot: u32, offset: u64, n: u64) -> bool {
+        let (lo, hi) = if self.size == 0 {
+            (0, self.mapping)
+        } else {
+            let lo = self.start + u64::from(slot % self.count) * self.size;
+            (lo, lo + self.size)
+        };
+        offset >= lo && offset.checked_add(n).is_some_and(|end| end <= hi)
+    }
 }
 
 /// Read `[offset, offset + buf.len())` of `fh` into `buf`, as pipelined ring
@@ -584,6 +632,7 @@ pub fn read_fragmented<N: Notifier>(
         plan.depth
     }
     .clamp(1, slots);
+    let banks = Banks::of(plan, &c.geom(), seg.len());
     let mut filled = 0usize;
 
     while filled < buf.len() {
@@ -654,7 +703,12 @@ pub fn read_fragmented<N: Notifier>(
         let mut batch_filled = 0usize;
         let mut eof = false;
         let mut copy_err: Option<i32> = None;
-        for ((resp, want), (_, flags, _)) in responses.iter().zip(wants.iter()).zip(reqs.iter()) {
+        for (((resp, want), (_, flags, _)), slot) in responses
+            .iter()
+            .zip(wants.iter())
+            .zip(reqs.iter())
+            .zip(held.iter())
+        {
             if resp.status != Status::Ok.code() {
                 copy_err = Some(resp.status);
                 break;
@@ -662,23 +716,35 @@ pub fn read_fragmented<N: Notifier>(
             let frag_start = filled + batch_filled;
             let dest = &mut buf[frag_start..frag_start + *want];
             // Decoded only after OK; an OK reply that does not decode is a
-            // bad request (`docs/wire.md` 3.1).
+            // bad request (`docs/wire.md` 3.1). So is one that answers more
+            // bytes than were asked for (3.4.4: `n <= len`).
             let n = match Reply::decode(Opcode::Read, *flags, &resp.payload) {
+                Ok(Reply::Read(ReadReply::Bulk { len: bn, .. })) if bn as usize > dest.len() => {
+                    copy_err = Some(Status::BadRequest.code());
+                    break;
+                }
+                Ok(Reply::Read(ReadReply::Inline(data))) if data.len() > dest.len() => {
+                    copy_err = Some(Status::BadRequest.code());
+                    break;
+                }
                 Ok(Reply::Read(ReadReply::Bulk {
                     len: bn,
                     arena_offset: aoff,
                 })) => {
-                    let n = (bn as usize).min(dest.len());
+                    let n = bn as usize;
+                    // The data must lie in this slot's bank (2.6): anywhere
+                    // else is another request's bytes, or none.
+                    let inside = banks.hold(*slot, aoff, n as u64);
                     // Shared arena → destination (one memcpy; not via ring).
-                    if n > 0 && seg.copy_to(aoff as usize, &mut dest[..n]).is_none() {
+                    if n > 0 && (!inside || seg.copy_to(aoff as usize, &mut dest[..n]).is_none()) {
                         copy_err = Some(Status::IoError.code());
                         break;
                     }
                     n
                 }
                 Ok(Reply::Read(ReadReply::Inline(data))) => {
-                    let n = data.len().min(dest.len());
-                    dest[..n].copy_from_slice(&data[..n]);
+                    let n = data.len();
+                    dest[..n].copy_from_slice(data);
                     n
                 }
                 _ => {

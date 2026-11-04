@@ -37,6 +37,9 @@ pub(super) const COLD_AFTER_FAILED_FETCHES: u32 = 4;
 pub(super) const PRESSURE_MEMORY: usize = 4096;
 /// Files whose diagnostics are kept after nothing holds them any more.
 pub(super) const RETIRED_DIAGS: usize = 4096;
+/// Deleted or renamed paths one root keeps blocked from the cache before
+/// they collapse to their parents (`Blocked`).
+pub(super) const MAX_BLOCKED_PER_ROOT: usize = 4096;
 
 /// How the cache is cut up. [`Default`] is what the shim uses.
 #[derive(Debug, Clone, Copy)]

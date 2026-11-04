@@ -3,10 +3,11 @@
 //! through the real ntdll entry points with the shim's detours installed and the fake director's
 //! registry behind the ring (`fakedirector` with [`Fake::with_registry`]).
 //!
-//! Real scratch keys live under `HKCU\Software\AetherVfsRegWriteTest`, made before the hooks go
-//! in. What the *real* registry holds afterwards is asked of a checker: this same test binary,
-//! started before the hooks were installed (so it has none), running the ignored `reg_checker`
-//! test (see `common/reg.rs`), which answers over its stdin and stdout.
+//! Real scratch keys live under `HKCU\Software\AetherVfsRegWriteTest-<pid>` (`reg::Base`),
+//! made before the hooks go in. What the *real* registry holds afterwards is asked of a
+//! checker: this same test binary, started before the hooks were installed (so it has none),
+//! running the ignored `reg_checker` test (see `common/reg.rs`), which answers over its stdin
+//! and stdout.
 //!
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 
@@ -30,7 +31,7 @@ use windows_sys::Win32::System::Registry::{
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-const BASE: &str = r"Software\AetherVfsRegWriteTest";
+static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsRegWriteTest");
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
@@ -255,7 +256,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static F: OnceLock<Fixture> = OnceLock::new();
     let f = F.get_or_init(|| {
-        reg::reset_base(BASE, &[]);
+        BASE.reset(&[]);
         real_key("Cow", &[("orig", 1), ("dv", 7)]);
         real_key("Seen", &[]);
         real_key(r"Del\Parent\Child", &[]);
@@ -276,7 +277,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         real_key("Dead", &[("v", 1)]);
         real_key("Pre", &[]);
         real_key("Names", &[("orig", 1)]);
-        let paths = Paths::new(BASE);
+        let paths = Paths::new(&BASE);
         let (st, pre) = open_abs(&paths.nt("Pre"), NT_KEY_ALL_ACCESS);
         assert_eq!(st, STATUS_SUCCESS);
 

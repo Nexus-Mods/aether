@@ -43,7 +43,7 @@ that none of the four imports the VC++ runtime (on by default when `$env:CI`
 is set). `bin\natives-key.ps1` prints the natives key, the hash of what the
 four are built from; it leaves out the crates no native depends on (the
 fixtures, the test kit, `aether-conform`, `aether-refdirector`,
-`aether-filering`), and `bin\natives-key.tests.ps1` checks with `cargo tree`
+`aether-filering`, `aether-fuzz`, `aether-shimbench`), and `bin\natives-key.tests.ps1` checks with `cargo tree`
 that neither native's dependency tree holds any of them.
 
 On Linux and macOS, `bin/build-windows [--release]` cross-builds the same
@@ -72,6 +72,17 @@ $env:TMP = 'C:\vfstmp'; $env:TEMP = 'C:\vfstmp'
 Tests whose prerequisite is missing (a fixture not built) skip; with
 `VFS_TEST_REQUIRE_ALL=1` a skip is a failure. The fixtures must be built
 first (`cargo build` of the inject artifacts, as ci.yml does).
+
+## Benchmarks and fuzzing
+
+What the shim costs a call, what a director costs per opcode, the
+micro-benchmarks, the counted cost record (`costs.txt`) that every push
+checks, and the fuzz targets are described in
+[docs/benchmarks.md](docs/benchmarks.md). `cargo run --release -p
+aether-shimbench` times Win32 calls natively and under the shim,
+`aether-conform bench` times a director, and the manual
+[`bench`](.github/workflows/bench.yml) workflow compares a base commit with
+the head on one runner.
 
 ## Crates
 
@@ -155,8 +166,9 @@ a run checks and where the contract lets directors differ are in
 that are not valid ones, and `--generate` plays generated trees and operation
 sequences (`--cases`, `--seed`), shrinking and saving the first failure as a
 scenario file you can replay. `aether-conform reference-adapter` is the
-reference director behind an adapter, a working example. To build it from
-source: `cargo build --release -p aether-conform`.
+reference director behind an adapter, a working example. `aether-conform
+bench` times a director on `contract/workloads/` ([docs/benchmarks.md](docs/benchmarks.md)).
+To build it from source: `cargo build --release -p aether-conform`.
 
 ## License
 

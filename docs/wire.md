@@ -144,6 +144,9 @@ The shim refuses the ring (and so fails its load) unless all of these hold:
 3. `slot_stride == align8(32 + payload_cap)`.
 4. `48 + slot_count * slot_stride <= mapping length`.
 
+Both are worked without wrapping, on 32-bit clients too: a `payload_cap`
+within 32 bytes of `2^32` has no stride a u32 holds, and is refused.
+
 The mapping length the shim uses is `VFS_RING_BYTES` (section 5.3). Nothing
 else in the header is validated.
 
@@ -262,10 +265,14 @@ Sizing rules a director must meet, from what the shim sends:
   1 MiB)` bytes. A director answers at most `min(len, bank_size)` bytes, and
   the shim reads a short answer as end of file. So **each bank must be at
   least the shim's chunk**: with `bank_size = arena_len / slot_count`, that
-  means `arena_len >= 256 KiB * slot_count`.
+  means `arena_len >= 256 KiB * slot_count`. The shim uses a ring whose
+  `VFS_ARENA_LEN` is smaller as if it had no arena, except that its inline
+  READs stay below 65 536 bytes so that no director answers them in bulk.
 - Every arena byte must lie inside the first `VFS_RING_BYTES` bytes of the
-  mapping: the shim bounds-checks the copy and fails the read with
-  `ST_IO_ERROR` otherwise.
+  mapping. The shim copies a bulk reply's data only from inside the
+  slot's own bank, and only as many bytes as the request asked for; with
+  no arena in use (`VFS_ARENA_LEN` unset, 0, or below the rule above),
+  only from inside the mapping. It fails the read otherwise (section 3.7).
 - With `VFS_ARENA_LEN` unset or 0, the shim never sets `FLAG_READ_BULK` and
   sends inline reads of up to `payload_cap - 8` bytes; a director with an
   arena may still answer those in bulk (section 3.4.4), and the shim accepts
@@ -548,6 +555,27 @@ director reports for a path, if any, is the director's to choose: the shim
 checks no time it is sent. A director should report one `mtime` for a path
 in GETATTR and in READDIR until the path changes. The reference reports 0 everywhere.
 
+A file's time is the same in every query that reports it. A directory listing
+and a query by path (the attribute queries and the query by name, every class
+that carries times) report the `mtime` its READDIR or GETATTR reply carried,
+or the substitute when that is 0 or less. A query by handle (the basic,
+network-open, all-information and stat classes, which `GetFileTime` and
+`GetFileInformationByHandle` reach) has no time from OPEN, so the handle's
+first time query sends one GETATTR for its path and reports its `mtime` the
+same way. The handle keeps that answer until a WRITE that lands bytes or a
+SETATTR reaches the same file (the same path, case apart) through any handle
+in the process, after which its next time query asks again. A change made
+outside the process after a handle kept its time is not seen through that
+handle while it stays open.
+
+The shim learns from these answers whether the director sends times. Once any
+GETATTR or READDIR reply has carried an `mtime` above 0, every handle asks as
+above. If a handle's first time query in a process comes before any reply has
+carried a time and its GETATTR carries none, the shim takes it that the
+director sends no times: later handle time queries report the substitute and
+send nothing, until a GETATTR or READDIR reply carries a time. A director that
+sends no times so pays at most one GETATTR per process for them.
+
 ### 3.3 Opcode table
 
 Opcode numbers are never renumbered. The table is also published as data,
@@ -678,6 +706,12 @@ an empty or a failed listing.) The reference answers both with an empty
 listing. An oversized listing is answered with the overflow status
 `i32::MIN` (section 2.5, step 3).
 
+The shim lists a directory answered `ST_NOT_FOUND` as empty (it is gone).
+Any other failure (another status, the overflow status, a reply that does
+not decode, no reply in time) fails the program's query with
+`STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) and keeps nothing, so its next
+query on that handle sends READDIR again.
+
 #### 3.4.3 OPEN (3)
 
 Request:
@@ -705,6 +739,11 @@ bits for the NT disposition: `FILE_SUPERSEDE`/`FILE_OVERWRITE_IF` =
 `CREATE|TRUNC`, `FILE_CREATE` = `CREATE|EXCL`, `FILE_OPEN_IF` = `CREATE`,
 `FILE_OVERWRITE` = `TRUNC`, `FILE_OPEN` = none. The shim never sends
 `OPEN_APPEND`.
+The shim never adds `OPEN_READ` to a write open, even when the program asked
+for read access as well: a handle opened with `OPEN_WRITE` serves READ and
+SETATTR too, and the shim reads and truncates through it. A director must
+therefore serve READ on any handle it opened; the reference director checks
+no access bits on READ.
 
 `OPEN_TRUNC` or `OPEN_APPEND` without `OPEN_WRITE`, and `OPEN_CREATE`
 without `OPEN_WRITE`, are never sent by the shim. A director may ignore
@@ -723,9 +762,11 @@ Reply, 24 bytes:
 | 20 | 4 | u32 | `mount_gen` |
 
 - `fh` is any u64 the director chooses except 0, unique among open handles.
-  The reference starts at 1 and counts up. A shim may send `CLOSE(0)` when a
+  The reference starts at 1 and counts up. A client may send `CLOSE(0)` when a
   program closes a directory it created with MKDIR, which holds no director
-  handle, so a director never issues 0.
+  handle, so a director never issues 0. The shim sends no such CLOSE (3.4.10)
+  and gives 0 no meaning of its own: it carries whatever `fh` an OPEN
+  returned.
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
   read cache caches small reads only through read-only, immutable handles.
   Never set it for a write open or a directory. Since every handle of a file
@@ -803,10 +844,36 @@ through any handle, or a truncating OPEN, by any client, is seen by the next
 READ through every other handle of that file, as NTFS shows it.
 A director that gives an arena (`VFS_ARENA_LEN`) must answer a READ that sets
 `FLAG_READ_BULK` of more than `payload_cap - 8` bytes in bulk: an inline
-reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
-remainders of 64 KiB up to it, with the flag, and inline READs of at most
-65 535 bytes, or of at most `payload_cap - 8` with no arena; its read cache
-fetches runs of up to 16 blocks of 64 KiB the same way.
+reply cannot hold it. The shim's own READs on a ring whose arena meets
+section 2.6's rule are that section's bulk chunk and remainders of 64 KiB up
+to it, with the flag, and inline READs of at most 65 535 bytes. With
+`VFS_ARENA_LEN` unset or 0 it sends no flag and its inline READs are of at
+most `payload_cap - 8` bytes. An arena below 2.6's rule counts as none, except
+that the inline READs stay at 65 535 bytes at most, so that a director with
+that arena still answers them inline. The read cache fetches runs of up to 16
+blocks of 64 KiB the same way.
+
+For a section over a file (a program's `CreateFileMappingW`), the shim takes
+OPEN's `size` as the file's end: a READ that fails, or answers short of
+`min(len, size - offset)`, fails the fill. A section filled at creation then
+fails (`STATUS_UNSUCCESSFUL`); an image section (`SEC_IMAGE`) is read whole,
+asked again up to three times, and then fails (`STATUS_UNSUCCESSFUL`); a page
+filled on first touch is asked again up to three times and then raises
+`STATUS_IN_PAGE_ERROR`, as NT does when a mapped file's paging read fails.
+Each of those READs is bounded by the client's deadline. Past `size`, a page
+holds zeros. An image section over a file larger than 256 MiB is refused
+(`STATUS_INVALID_FILE_FOR_SECTION`) before any READ.
+
+None of this changes what the director sees; it is how the shim holds the
+bytes. A section filled on first
+touch (a file over 256 MiB) is a view of a pagefile section of the shim's
+own, so no thread reads a page before its fill is in place. That costs about
+4 MiB of commit and 2 MiB of paged pool per GiB of file while it is mapped
+(measured on Windows 11), before any page is filled. Where that section
+cannot be had, or the host cannot fill through a second view, the shim
+uses private memory instead, which costs nothing up front but can show a
+page's zeros to another thread while the page fills; the stats report counts
+each kind.
 
 #### 3.4.5 WRITE (6)
 
@@ -842,6 +909,16 @@ both on a file a writable provider holds. (The shim never sends either.)
 
 Reply, 8 bytes: `written:u32 | zero:u32`. The shim reads only the first 4
 bytes.
+
+A WRITE that fails ends the program's write, and the shim sends no further
+chunk. It reports what the chunks before it wrote in `IoStatus.Information`,
+and the file's size grows by that, but the file pointer stays where the call
+found it, as NTFS leaves it after a failed write, so a retry of the same
+buffer lands where this write started (an append-only handle's end of file
+still moves). The status is `STATUS_DISK_FULL` for `ST_NO_SPACE` and
+`STATUS_UNSUCCESSFUL` for any other failure. A
+`written` larger than the chunk's `len` is a reply the shim cannot use: that
+chunk counts as not written and the write fails `STATUS_UNSUCCESSFUL`.
 
 A WRITE on a directory handle the writable provider holds is `ST_IS_DIR`,
 whatever access the directory was opened with; SETATTR (3.4.6) on one is too.
@@ -942,10 +1019,12 @@ existing path the writable provider holds, directors may differ (for a path
 that exists only in a read-only layer beneath it, see below):
 
 - An existing directory: a director may answer `ST_OK` or `ST_EXISTS`, and a
-  client must accept either. The reference director answers `ST_EXISTS`. The
-  shim, on any failure, asks GETATTR whether a directory is there, so either
-  answer gives the program the same result for `FILE_OPEN_IF`; for
-  `FILE_CREATE` only `ST_EXISTS` reports the name collision.
+  client must accept either. The reference director answers `ST_EXISTS`. For
+  `FILE_CREATE` and `FILE_OPEN_IF` the shim asks GETATTR before MKDIR, and
+  sends no MKDIR when a directory is there: `FILE_CREATE` reports the name
+  collision and `FILE_OPEN_IF` opens it (`FILE_OPENED`). After any failed
+  MKDIR it asks GETATTR again. So either answer gives the program the same
+  result.
 - An existing file: `ST_IO_ERROR` where a writable provider serves the path,
   `ST_EXISTS` where none does. The reference director answers the same.
 
@@ -975,8 +1054,13 @@ The reference director has no layers, so it never gives these answers.
 #### 3.4.10 CLOSE (11)
 
 Request, 8 bytes: `fh:u64`. Reply: status only. Unknown `fh` `ST_BAD_FH`;
-`CLOSE(0)` is `ST_BAD_FH` (3.4.3: 0 is never a handle), which the shim
-ignores.
+`CLOSE(0)` is `ST_BAD_FH` (3.4.3: 0 is never a handle).
+The shim sends CLOSE only for an `fh` an OPEN returned: the handle it gives a
+program for a directory it created with MKDIR (3.4.9) holds none, and closing
+it sends nothing. A `ST_BAD_FH` answer to a CLOSE it sends is ignored.
+A file over which a program made a section that fills on first touch keeps
+its `fh` until the last of the program's file handle, the section and its
+views is gone, and the CLOSE goes then, once: the section reads through it.
 
 #### 3.4.11 HEARTBEAT (13)
 
@@ -997,7 +1081,8 @@ Reply: the stored spelling of each component of `vpath` from index `skip` on,
 joined by `/`, no length prefix, exactly `components - skip` names. A
 component the director has no entry for SHOULD come back as it was sent. A
 director MAY instead answer `ST_NOT_FOUND` for a path it does not have. The
-shim discards a reply with the wrong number of names, and on any non-OK
+shim discards a reply with the wrong number of names, or with a name that
+does not fold to the component it answers (section 3.7), and on any non-OK
 status or discarded reply uses the caller's own spelling. Used for
 `GetFinalPathNameByHandle`.
 
@@ -1136,6 +1221,136 @@ it with replacement characters and carry on.
 The slot `flags` word is ignored for every opcode but READ, and bits other
 than bit 0 are ignored for READ.
 
+### 3.7 What the shim makes of a reply it cannot use
+
+A reply can be one the shim cannot use: a status that says the request
+failed, a status no table names, the ring's overflow status, an `ST_OK`
+payload that does not decode, a bulk READ reply whose data is not where
+section 2.6 puts it, or no reply within the shim's deadline (section 2.5,
+"Deadlines"). A reply the shim refuses gives the program none of its data:
+the shim answers the call itself, and goes on serving, so the next call
+goes to the director as before. The shim accepts two kinds of reply that
+are not exactly their form: bytes after a file reply's fields (section
+3.2), and a WRITE reply cut short after its first word (3.4.5). The table
+shows them as success. A reply that arrives after its
+deadline lands in a slot the shim has given up, and answers nothing.
+
+The table gives what the program gets for each kind of bad reply, by the
+call it made. A cell names an NTSTATUS without its `STATUS_` prefix, or:
+
+- **success**: the call goes on as if the reply had been good.
+- **fallback**: the call succeeds without the director's answer. A
+  registry read serves the real key alone (section 4.4); a final name
+  keeps the program's own spelling of every component the director did
+  not answer (3.4.12).
+- **load fails**: the shim does not attach; its ready file says
+  `fuse-failed:` (section 6.2), and the injector kills the target.
+- **refused**: `CreateProcessW` fails with `ERROR_FILE_NOT_FOUND` and no
+  process starts.
+- **n/a**: the fault cannot reach the call.
+
+The columns:
+
+- A named status (`ST_NOT_FOUND` to `ST_REPLY_TOO_LARGE`): that status, with an
+  empty payload, for a request the director never carried out.
+- **any other status**: `ST_NOT_A_DIRECTORY`, `ST_IO_ERROR`, `ST_BAD_FH`,
+  `ST_NOT_SUPPORTED`, a negative status no table names, or a positive
+  status.
+- **overflow**: the ring's overflow status, -2147483648 (section 2.5): the
+  director carried out the request and its reply did not fit.
+- **truncated**: an `ST_OK` payload one byte short.
+- **trailing bytes**: an `ST_OK` payload with bytes after it. A file reply
+  ignores them (section 3.2); a registry reply refuses them. The reply of
+  STORED_NAMES or STAGE_EXEC is all text, so they are part of it; the
+  table's trailing bytes are not UTF-8.
+- **garbage**: `ST_OK` with a payload shorter than any fixed reply and not
+  UTF-8.
+- **bulk reply out of place**: an `ST_OK` bulk READ reply whose data does
+  not lie inside the slot's own bank (another slot's bank, past the arena,
+  or an `arena_offset + n` that overflows), or whose `n` is more than the
+  request's `len`. An inline READ reply with more than `len` bytes is
+  refused the same way.
+- **no reply in time**: the deadline passes while the director holds the
+  reply.
+- **the call after a late reply**: the same call made again once the late
+  reply has landed.
+
+The calls, each the first of its kind on a handle or name:
+
+- **attach**: the shim's one HEARTBEAT (3.4.11). An `ST_OK` reply's
+  payload is not read.
+- **open to read** and **open to write**: `NtCreateFile` or `NtOpenFile` of
+  a file, for reading, or for writing with `FILE_OPEN` (3.4.3).
+- **attributes by name**: `NtQueryFullAttributesFile` and the other calls
+  answered by GETATTR (3.4.1).
+- **read, inline** and **read, bulk**: `NtReadFile` of a file that may
+  change, of 100 bytes (one inline READ) and of 128 KiB (one bulk READ).
+  A read the read cache serves crosses the ring only to fill a block; a
+  failed fill is read again uncached.
+- **section filled at creation**: `NtCreateSection` over a file of up to
+  256 MiB, whose READs fill it at once (3.4.4). A page of a larger section,
+  filled on first touch, is asked again up to three times and then raises
+  `STATUS_IN_PAGE_ERROR` (3.4.4); that ends the program, so it is not in
+  the table.
+- **write, first chunk** and **write, a later chunk**: `NtWriteFile`. When
+  a later chunk fails, `IoStatus.Information` carries what the chunks
+  before it wrote (3.4.5). The shim reads only the first word of a WRITE
+  reply, so one cut short in its padding still succeeds.
+- **set the size**: `FileEndOfFileInformation` (SETATTR, 3.4.6).
+- **list a directory**: the first `NtQueryDirectoryFile` on a directory
+  handle (READDIR, 3.4.2). A listing that failed is asked for again by the
+  next query.
+- **rename**: `FileRenameInformation` within one root (RENAME, 3.4.7). A
+  rename between two roots (RENAME_X, 3.4.13) answers the same.
+- **delete by name**: `NtDeleteFile`. **delete through a handle**:
+  `FileDispositionInformation` (DELETE, 3.4.8).
+- **create a directory**: `NtCreateFile` with `FILE_CREATE` and
+  `FILE_DIRECTORY_FILE` (MKDIR, 3.4.9). After a failed MKDIR the shim asks
+  GETATTR; a directory found there is a name collision. So a director that
+  made the directory and then answered too late, or too large, gives
+  `OBJECT_NAME_COLLISION`.
+- **final name**: `GetFinalPathNameByHandleW` (STORED_NAMES, 3.4.12). A
+  reply with a name that is not a spelling of the component asked about
+  (it folds to another name) is not used either.
+- **start a child**: `CreateProcessW` of an image under a root with a
+  backing (STAGE_EXEC, 3.4.14).
+- **registry read**: `NtQueryValueKey` and the other calls answered by
+  REG_LOOKUP and REG_KEY (section 4.4). A REG_KEY answered
+  `ST_REPLY_TOO_LARGE`, or with the ring's overflow, says the key's overlay
+  holds more than one reply carries: the call fails
+  `STATUS_REGISTRY_IO_FAILED` rather than serve the real key alone (4.4).
+- **registry write**: `NtSetValueKey` and the other calls answered by
+  REG_SET_VALUE to REG_RENAME_KEY (section 4.4; a key create answered
+  `ST_EXISTS` is asked about again, as 4.4 says).
+
+A reply that comes too late or too large does not undo what the director
+did: any change it carried out (a rename, a delete, a write, a new size, a
+registry write) is still done, though the program was told the call
+failed. Creating a directory is the exception, as its call above says: the
+shim finds the directory and answers `OBJECT_NAME_COLLISION`.
+
+| Operation | `ST_NOT_FOUND` | `ST_EXISTS` | `ST_READ_ONLY` | `ST_IS_DIR` | `ST_NO_SPACE` | `ST_BAD_REQUEST` | `ST_CROSS_ROOT` | `ST_REPLY_TOO_LARGE` | any other status | overflow | truncated | trailing bytes | garbage | bulk reply out of place | no reply in time | the call after a late reply |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| attach (HEARTBEAT) | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | success | success | success | n/a | load fails | n/a |
+| open to read (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| open to write (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| attributes by name (GETATTR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| read, inline (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| read, bulk (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| section filled at creation (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| write, first chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| write, a later chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| set the size (SETATTR) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| list a directory (READDIR) | NO_MORE_FILES | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| rename (RENAME) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | NOT_SAME_DEVICE | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| delete by name (DELETE) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| delete through a handle (DELETE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| create a directory (MKDIR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | OBJECT_NAME_COLLISION | success | success | success | n/a | OBJECT_NAME_COLLISION | success |
+| final name (STORED_NAMES) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | n/a | fallback | success |
+| start a child (STAGE_EXEC) | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | n/a | refused | success |
+| registry read (REG_KEY) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | REGISTRY_IO_FAILED | fallback | REGISTRY_IO_FAILED | fallback | fallback | fallback | n/a | fallback | success |
+| registry write (REG_SET_VALUE) | KEY_DELETED | CANNOT_DELETE | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | INVALID_PARAMETER | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+
 ---
 
 ## 4. Registry encodings
@@ -1241,8 +1456,8 @@ children into a map keyed by `folded`, so their order is not checked and a
 duplicate `folded` key keeps the last one; send them sorted and unique.
 
 A REG_KEY reply longer than `payload_cap - 8` must be answered
-`ST_REPLY_TOO_LARGE` instead; the shim then serves
-the real key alone. A director may apply the same rule to every registry
+`ST_REPLY_TOO_LARGE` instead; the shim then fails every query of the key
+(section 4.4). A director may apply the same rule to every registry
 reply; the other replies are at most 10 bytes, so only REG_KEY's can ever
 reach it.
 
@@ -1328,8 +1543,26 @@ wire.
 
 ### 4.4 Shim handling of registry replies
 
-A read (REG_LOOKUP, REG_KEY) that fails for any reason is a fallback: the hook
-serves the real key alone. A write that fails is not retried against the real
+Section 3.7 gives what every kind of bad reply does, registry calls among
+them.
+
+A read (REG_LOOKUP, REG_KEY) that fails is a fallback: the hook serves the
+real key alone, as if the overlay held nothing for it.
+
+The exception is a key too large to read. A REG_KEY answered
+`ST_REPLY_TOO_LARGE`, or with the ring's overflow status (section 2.5), says
+the key's overlay holds more than one reply carries: values, subkeys or
+tombstones the real key does not have, so the real key alone would answer
+with wrong values. Every query of that key (a value, several values, the
+key's information, an enumeration of its values or subkeys, a subkey's entry
+in its parent's enumeration) fails `STATUS_REGISTRY_IO_FAILED`, the status NT
+gives when the registry cannot read what backs a key. A program takes it as
+a failed read. `STATUS_BUFFER_OVERFLOW` and `STATUS_BUFFER_TOO_SMALL` would
+tell it to ask again with a larger buffer, which cannot help, and
+`STATUS_INSUFFICIENT_RESOURCES` that the system is short of memory. A write
+to the key that needs its node fails `STATUS_UNSUCCESSFUL`.
+
+A write that fails is not retried against the real
 registry. Its status becomes the NT status the caller gets:
 
 | Director status | NT status |
@@ -1430,7 +1663,7 @@ case-insensitive); an **opt-out** switch is off only for `0`, `false`, `no`,
 | `VFS_RING_PATH` | director | shim | Ring file path as the shim sees it (2.10). Wins over the section. |
 | `VFS_RING_BYTES` | director | shim | Decimal bytes to map. Must cover the ring and the arena. Shim default if unparsable: 2 097 152. |
 | `VFS_RING_PAYLOAD_CAP` | director | shim | Decimal. Must equal the header's `payload_cap`: the shim sizes WRITE chunks and inline reads from this value, and a request over the header's cap is refused locally. Shim default: 1 048 576. |
-| `VFS_ARENA_OFFSET` | director | nobody | Decimal mapping offset of the arena. Informational: the shim takes data offsets from bulk replies. |
+| `VFS_ARENA_OFFSET` | director | shim | Decimal mapping offset of the arena. Authoritative when set: the shim locates each slot's bank from it (2.6) and fails a bulk reply whose data lies outside that bank, so a wrong value fails every bulk READ. Unset or unparsable: the arena is taken to start directly after the last slot (2.1). |
 | `VFS_ARENA_LEN` | director | shim | Decimal arena length; 0 or unset disables bulk reads (2.6). |
 | `VFS_SERVER_EV` | director | shim | Server event name (section mode only). |
 | `VFS_CLIENT_EV` | director | nobody | Client event name. The shim does not open it. |

@@ -3,11 +3,11 @@
 //! the shim's detours installed and the fake director's registry behind the ring
 //! (`fakedirector` with [`Fake::with_registry`]).
 //!
-//! Real scratch keys live under `HKCU\Software\AetherVfsRegKeysTest`, made before the hooks go
-//! in (afterwards no write reaches the real registry, which is the point). Whether a key exists
-//! *for real* is asked of a checker: this same test binary, started before the hooks were
-//! installed (so it has none), running the ignored `reg_checker` test (see `common/reg.rs`),
-//! which answers over its stdin and stdout.
+//! Real scratch keys live under `HKCU\Software\AetherVfsRegKeysTest-<pid>` (`reg::Base`),
+//! made before the hooks go in (afterwards no write reaches the real registry, which is the
+//! point). Whether a key exists *for real* is asked of a checker: this same test binary,
+//! started before the hooks were installed (so it has none), running the ignored
+//! `reg_checker` test (see `common/reg.rs`), which answers over its stdin and stdout.
 //!
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 
@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Registry::{
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-const BASE: &str = r"Software\AetherVfsRegKeysTest";
+static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsRegKeysTest");
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
@@ -159,7 +159,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static F: OnceLock<Fixture> = OnceLock::new();
     let f = F.get_or_init(|| {
-        reg::reset_base(BASE, &["Locked", "ReadLimited"]);
+        BASE.reset(&["Locked", "ReadLimited"]);
         for k in REAL_KEYS {
             unsafe { RegCloseKey(reg_create(&format!(r"{BASE}\{k}"))) };
         }
@@ -177,7 +177,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         assert!(aether_hooks::registry_detours_installed() > 0);
         Fixture {
             fake,
-            paths: Paths::new(BASE),
+            paths: Paths::new(&BASE),
             checker,
             locked_refuses_write,
             read_limited_refuses_key_read,

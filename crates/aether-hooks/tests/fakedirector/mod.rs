@@ -1,52 +1,220 @@
 //! The shim tests' director: `aether_refdirector::Reference` served over a
-//! real named section, the one the shim's own `FuseClient` attaches to
-//! through `try_init_from_env` exactly as in production. Only the far side
-//! of the ring is in memory.
+//! real ring, the one the shim's own `FuseClient` attaches to through
+//! `try_init_from_env` exactly as in production. Only the far side of the
+//! ring is in memory.
 //!
 //! What the director answers lives in `crates/aether-refdirector`. This
-//! module creates the section, installs the handshake environment, runs the
-//! serve thread with the arena laid out as a director lays it out, and makes
-//! the extra clients a few tests need.
+//! module creates the ring (a named section, or a file for the Wine
+//! transport), installs the handshake environment, serves it on several
+//! threads with the arena laid out as a director lays it out, and makes the
+//! extra clients a few tests need.
+//!
+//! Every request crosses the harness's taps, chained as
+//! `((recorder, (overrides, faults)), extra)`: the [`Recorder`] keeps what
+//! the ring sent, the [`Override`] changes the fields of OPEN replies a
+//! director may give, and the [`Faults`] answer what one should not. A test
+//! reads and arms them through the [`Served`] that [`install_with`] returns:
+//!
+//! ```text
+//! let served = fakedirector::install_with(&root, fake, Options { deadline: Some(ms(300)), ..Default::default() });
+//! let mark = served.recorder.mark();
+//! // ... a hooked call ...
+//! assert_eq!(served.recorder.ops_since(mark), [Some(Opcode::Open), Some(Opcode::Read), Some(Opcode::Close)]);
+//! ```
 
 // Compiled into several test binaries, each using a different subset.
 #![allow(dead_code, unused_imports)]
+// The wake event is a Win32 handle.
+#![allow(unsafe_code)]
 
-use std::sync::atomic::AtomicBool;
-use std::sync::OnceLock;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
-use aether_ipc::{DataArena, RingServer, SpinNotifier};
+use aether_hooks::director::FuseInitError;
+use aether_ipc::{Notifier, RequestView, SharedSeg};
+use aether_refdirector::harness::{serve_threads, ArenaShape, FaultId, Geometry};
+use aether_rpc::{Tap, TapAction};
 use aether_win::SharedMapping;
+use std::cell::Cell;
+use std::time::Instant;
+use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::System::Threading::{CreateEventW, Sleep, WaitForSingleObject};
 
-// The tests know the reference director by its old name here.
+// The tests call the reference director `Fake`.
+pub(crate) use aether_refdirector::harness::{Fault, Faults, Match, Override, Recorder};
 pub(crate) use aether_refdirector::{key, pattern, ReadStyle, Reference as Fake, BULK_THRESHOLD};
 
 /// Deliberately small: 4 KiB caps an inline READ response at 4088 bytes, so
 /// any fixture bigger than that is guaranteed to span several ring round
 /// trips. A test that only ever moved one payload's worth of data would pass
 /// against an implementation that reads once and calls it done.
-pub(crate) const PAYLOAD_CAP: u32 = 4096;
-pub(crate) const SLOTS: u32 = 8;
+pub(crate) const PAYLOAD_CAP: u32 = Geometry::SHIM_TESTS.payload_cap;
+pub(crate) const SLOTS: u32 = Geometry::SHIM_TESTS.slots;
 
 /// An arena of `SLOTS` x 256 KiB. The bank size the client computes
 /// (`arena_len / slot_count`, clamped to at least 256 KiB) then agrees exactly
 /// with the one the server hands out, so a bulk read is not silently truncated
 /// to a smaller bank and resumed, which would still pass a byte-exactness
 /// test while hiding whether the bank sizing was right.
-pub(crate) const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
+pub(crate) const ARENA_LEN: usize = Geometry::SHIM_TESTS.arena_len;
 
-/// Control ring length, and therefore the arena's offset within the section:
-/// the layout a director uses (`arena_offset = ring_bytes`).
-fn ring_bytes() -> usize {
-    let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
-    aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride
+/// How long a serve thread of a [`RingKind::SectionWithWake`] ring waits for
+/// the event before it looks at the ring anyway. Only a bound: the client
+/// signals the event for every request, and an auto-reset event keeps a
+/// signal until a waiter takes it.
+const WAKE_WAIT_MS: u32 = 1_000;
+
+/// How long a polling serve thread stays hot (no back-off) after it served a
+/// request: a test's calls in quick succession see no added latency. After
+/// that the thread looks once a millisecond (Windows rounds `Sleep(1)` up to
+/// its timer resolution, up to about 15.6 ms), the cost of a request after a
+/// quiet spell. So a burst stays hot, not the first request after a pause: a
+/// test that bounds one call's latency serves with `RingKind::SectionWithWake`.
+const HOT_FOR: Duration = Duration::from_millis(20);
+
+/// The ring's transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RingKind {
+    /// A named section (`VFS_RING_SECTION`); the director's threads look at
+    /// the ring without being woken (the shim's `VFS_SERVER_EV` unset).
+    #[default]
+    Section,
+    /// A named section and the director's wake event (`VFS_SERVER_EV`): the
+    /// serve threads wait on the event, which the shim signals per request.
+    SectionWithWake,
+    /// A ring in a real file (`VFS_RING_PATH`), served by `aether-filering`:
+    /// the Wine and Proton transport, where no event reaches the director.
+    File,
 }
 
-/// Publish `fake` on a real named section and point the shim's `FuseClient` at
-/// it, once per test process. Returns the fake so tests can read its counters.
-///
-/// The section, the server thread and the fake are all leaked deliberately:
-/// they must outlive every test in the binary, and the process is the only
-/// thing that can decide when that is.
+/// Who publishes the registry generation in the ring header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RegGen {
+    /// The reference, before attach and before each write's reply
+    /// (`docs/wire.md` 4.5).
+    #[default]
+    Reference,
+    /// This value, once, before attach; nobody moves it. `Fixed(0)`: the
+    /// header never holds a generation, so the shim caches nothing.
+    Fixed(u64),
+    /// Only the test, through [`Served::publish_reg_generation`]: a director
+    /// that bumps when the test says (after its reply, say).
+    Manual,
+}
+
+/// How [`install_with`] builds the ring and attaches the shim.
+pub(crate) struct Options {
+    /// The ring's slot count.
+    pub slots: u32,
+    /// The ring's `payload_cap`.
+    pub payload_cap: u32,
+    /// The arena's length, banked per slot; 0 forces every READ inline.
+    pub arena_len: usize,
+    /// Bytes between the end of the last slot and the arena's start
+    /// (`VFS_ARENA_OFFSET`, `docs/wire.md` 2.1): 0 puts the arena right after
+    /// the ring, as both directors do; wire.md lets a director put it anywhere.
+    pub arena_gap: usize,
+    /// The worker count the ring header states (`ring::set_worker_hint`); 0
+    /// states none. The fake serves on that many threads, at most one per
+    /// slot, and on `aether_ipc::DEFAULT_WORKER_COUNT` when it is 0.
+    /// It also sets how many data requests the shim keeps in flight
+    /// (`aether_ipc::concurrent::data_limit`: 3 for a hint of 0 on 8 slots,
+    /// 6 for 8), so a test that needs a deep pipeline sets it, and `slots`.
+    pub worker_hint: u32,
+    /// The transport.
+    pub ring: RingKind,
+    /// [`RingKind::SectionWithWake`]: how long a serve thread waits on the
+    /// event, in milliseconds (`INFINITE`, `u32::MAX`, waits for ever: a
+    /// request the shim does not signal then hangs, and every look at the
+    /// ring is a wake). Default [`WAKE_WAIT_MS`], a bound only.
+    pub wake_wait_ms: u32,
+    /// `Some`: the shim's client gives up on a request after this
+    /// ([`aether_hooks::director::FuseClient::with_deadline`]), heartbeat
+    /// included, and is installed through `install_global`.
+    pub deadline: Option<Duration>,
+    /// Who publishes the registry generation.
+    pub reg_gen: RegGen,
+    /// Faults armed before the client's attach HEARTBEAT. With any here, a
+    /// failed attach is the test's to look at ([`Served::attach`]) rather
+    /// than a panic.
+    pub attach_faults: Vec<(Match, Fault)>,
+    /// One more tap, after the chain: it sees each request after the chain
+    /// has and each reply before it does, as the director gave it.
+    pub tap: Option<Box<dyn Tap + Send>>,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            slots: SLOTS,
+            payload_cap: PAYLOAD_CAP,
+            arena_len: ARENA_LEN,
+            arena_gap: 0,
+            worker_hint: 0,
+            ring: RingKind::Section,
+            wake_wait_ms: WAKE_WAIT_MS,
+            deadline: None,
+            reg_gen: RegGen::Reference,
+            attach_faults: Vec::new(),
+            tap: None,
+        }
+    }
+}
+
+/// What [`install_with`] serves, for the test to read and arm.
+pub(crate) struct Served {
+    /// The director.
+    pub fake: &'static Fake,
+    /// Every request that crossed the ring, as it was sent.
+    pub recorder: Recorder,
+    /// Faults to arm.
+    pub faults: Faults,
+    /// OPEN reply fields to change.
+    pub overrides: Override,
+    /// The ring's shared memory.
+    pub seg: &'static SharedSeg,
+    /// What attaching the shim's client gave: `try_init_from_env`'s result,
+    /// or, with [`Options::deadline`], the same from the client connected
+    /// with that deadline.
+    pub attach: Result<(), FuseInitError>,
+    /// The [`Options::attach_faults`], in order.
+    pub attach_faults: Vec<FaultId>,
+    /// What the serve threads' waits on the wake event ended in (all zero
+    /// unless [`RingKind::SectionWithWake`]).
+    pub wakes: Arc<WakeStats>,
+}
+
+/// How the serve threads' waits on the director's wake event ended.
+#[derive(Debug, Default)]
+pub(crate) struct WakeStats {
+    /// Waits that ended because the event was signalled.
+    pub signalled: AtomicU64,
+    /// Waits that ended because their time was up.
+    pub timeouts: AtomicU64,
+}
+
+impl WakeStats {
+    pub fn signalled(&self) -> u64 {
+        self.signalled.load(Ordering::SeqCst)
+    }
+    pub fn timeouts(&self) -> u64 {
+        self.timeouts.load(Ordering::SeqCst)
+    }
+}
+
+impl Served {
+    /// Put `g` in the ring header as the registry generation, as a director
+    /// does after a write (for [`RegGen::Manual`]).
+    pub fn publish_reg_generation(&self, g: u64) {
+        aether_ipc::ring::publish_reg_generation(self.seg, g);
+    }
+}
+
+/// Publish `fake` on a ring built as [`Options::default`] says, with an arena
+/// of `arena_len`, and point the shim's `FuseClient` at it, once per test
+/// process. Returns the fake so tests can read its counters.
 ///
 /// `virtual_dir` becomes `VFS_VIRTUAL_DIR`: root 0 of the shim's client. A
 /// test that declares more roots sets `VFS_VIRTUAL_ROOTS` before this.
@@ -56,59 +224,242 @@ fn ring_bytes() -> usize {
 /// request at or above [`BULK_THRESHOLD`] takes the same transport it takes
 /// live. Below the threshold reads stay inline either way, so one ring can
 /// cover both.
-pub(crate) fn install(
-    virtual_dir: &std::path::Path,
-    fake: Fake,
-    arena_len: usize,
-) -> &'static Fake {
-    static FAKE: OnceLock<&'static Fake> = OnceLock::new();
-    FAKE.get_or_init(|| {
-        let fake: &'static Fake = Box::leak(Box::new(fake));
-        let name = section_name();
-        let arena_offset = ring_bytes();
-        // Whole section, ring first then arena: `VFS_RING_BYTES` names the
-        // whole thing because the shim maps all of it and a bulk response's
-        // offset is section-absolute.
-        let map_bytes = ((arena_offset + arena_len + 0xFFFF) & !0xFFFF).max(256 * 1024);
-        let mapping: &'static SharedMapping = Box::leak(Box::new(
-            SharedMapping::create(&name, map_bytes).expect("section"),
-        ));
-        aether_ipc::ring::init(mapping.seg(), SLOTS, PAYLOAD_CAP).expect("ring init");
-        // The registry generation is in the ring header before any client
-        // attaches, and each write's is there before its reply leaves.
-        fake.publish_generation(move |g| {
-            aether_ipc::ring::publish_reg_generation(mapping.seg(), g)
-        });
+pub(crate) fn install(virtual_dir: &Path, fake: Fake, arena_len: usize) -> &'static Fake {
+    install_with(
+        virtual_dir,
+        fake,
+        Options {
+            arena_len,
+            ..Options::default()
+        },
+    )
+    .fake
+}
 
-        let mut served = fake.share();
-        std::thread::Builder::new()
-            .name("fake-director".into())
-            .spawn(move || {
-                let server = RingServer::new(mapping.seg(), SpinNotifier).expect("ring open");
-                // One arena for the life of the thread, banked per slot: a
-                // director worker's shape. `banks == slot_count` is what makes
-                // the client's `arena_len / slot_count` bank size agree with
-                // the server's.
-                let arena = (arena_len > 0).then(|| {
-                    DataArena::new(mapping.seg(), arena_offset, arena_len, SLOTS as usize)
-                });
-                // Never set: runs until the ring goes away with the process.
-                // A spin, which is fine for a fixture whose whole life is a
-                // handful of copy-ups.
-                static STOP: AtomicBool = AtomicBool::new(false);
-                let _ = aether_rpc::serve_with_arena(&server, arena.as_ref(), &mut served, &STOP);
-            })
-            .expect("server thread");
+/// Publish `fake` on a ring built as `opts` says and attach the shim's
+/// client to it, once per test process (a second call returns the first's).
+///
+/// The ring, the serve threads and the fake are all leaked deliberately:
+/// they must outlive every test in the binary, and the process is the only
+/// thing that can decide when that is.
+///
+/// Panics if the attach fails, unless `opts.attach_faults` names faults for
+/// it, when the result is [`Served::attach`].
+pub(crate) fn install_with(virtual_dir: &Path, fake: Fake, opts: Options) -> &'static Served {
+    static SERVED: OnceLock<Served> = OnceLock::new();
+    SERVED.get_or_init(|| serve(virtual_dir, fake, opts))
+}
 
-        std::env::set_var(aether_env::RING_SECTION, &name);
-        std::env::set_var(aether_env::RING_BYTES, map_bytes.to_string());
-        std::env::set_var(aether_env::RING_PAYLOAD_CAP, PAYLOAD_CAP.to_string());
-        std::env::set_var(aether_env::ARENA_OFFSET, arena_offset.to_string());
-        std::env::set_var(aether_env::ARENA_LEN, arena_len.to_string());
-        std::env::set_var(aether_env::VIRTUAL_DIR, virtual_dir);
-        aether_hooks::director::try_init_from_env().expect("fuse client");
-        fake
-    })
+fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
+    let Options {
+        slots,
+        payload_cap,
+        arena_len,
+        arena_gap,
+        worker_hint,
+        ring,
+        wake_wait_ms,
+        deadline,
+        reg_gen,
+        attach_faults,
+        tap,
+    } = opts;
+    let fake: &'static Fake = Box::leak(Box::new(fake));
+    let geometry = Geometry {
+        slots,
+        payload_cap,
+        arena_len,
+        arena_gap,
+    };
+    let arena_offset = geometry.arena_offset();
+    let map_bytes = geometry.map_bytes();
+    let seg: &'static SharedSeg = match ring {
+        RingKind::Section | RingKind::SectionWithWake => {
+            let mapping: &'static SharedMapping = Box::leak(Box::new(
+                SharedMapping::create(&section_name(), map_bytes).expect("section"),
+            ));
+            mapping.seg()
+        }
+        RingKind::File => {
+            let path = ring_file();
+            let file: &'static aether_filering::FileRing = Box::leak(Box::new(
+                aether_filering::FileRing::create(&path, map_bytes).expect("ring file"),
+            ));
+            std::env::set_var(aether_env::RING_PATH, &path);
+            aether_ipc::RingBacking::seg(file)
+        }
+    };
+    geometry.init(seg, worker_hint).expect("ring init");
+    // The registry generation is in the ring header before any client
+    // attaches.
+    match reg_gen {
+        RegGen::Reference => {
+            fake.publish_generation(move |g| aether_ipc::ring::publish_reg_generation(seg, g))
+        }
+        RegGen::Fixed(g) => aether_ipc::ring::publish_reg_generation(seg, g),
+        RegGen::Manual => {}
+    }
+
+    let recorder = Recorder::new();
+    let overrides = Override::new();
+    // One bank per slot: a director worker's shape. `banks == slot_count` is
+    // what makes the client's `arena_len / slot_count` bank size agree with
+    // the server's.
+    let arena = geometry.arena();
+    let faults = match arena {
+        Some(a) => Faults::new(payload_cap).with_arena(a),
+        None => Faults::new(payload_cap),
+    };
+    let attach_ids: Vec<FaultId> = attach_faults
+        .into_iter()
+        .map(|(when, fault)| faults.arm(when, fault))
+        .collect();
+
+    let wake = (ring == RingKind::SectionWithWake).then(|| {
+        let name = format!("Local\\aether-shim-wake-{}", std::process::id());
+        let w: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+        // SAFETY: the name is NUL-terminated; an auto-reset event,
+        // unsignalled. Leaked with the ring.
+        let h = unsafe { CreateEventW(core::ptr::null(), 0, 0, w.as_ptr()) };
+        assert!(!h.is_null(), "the director's wake event");
+        std::env::set_var(aether_env::SERVER_EV, &name);
+        h as usize
+    });
+    let threads = match worker_hint {
+        0 => aether_ipc::DEFAULT_WORKER_COUNT as u32,
+        n => n,
+    }
+    .clamp(1, slots.max(1)) as usize;
+    let wakes = Arc::new(WakeStats::default());
+    let chain = (
+        (recorder.clone(), (overrides.clone(), faults.clone())),
+        Extra(tap.map(|t| Arc::new(Mutex::new(t)))),
+    );
+    let thread_wakes = wakes.clone();
+    std::thread::Builder::new()
+        .name("fake-director".into())
+        .spawn(move || {
+            // Never set: the threads serve until the ring goes away with the
+            // process.
+            static STOP: AtomicBool = AtomicBool::new(false);
+            let stats = thread_wakes;
+            let notifier = move || match wake {
+                Some(h) => Wake::Event(h, stats.clone(), wake_wait_ms),
+                None => Wake::Poll(Cell::new(None)),
+            };
+            std::thread::scope(|s| {
+                let workers = serve_threads(s, threads, seg, arena, &notifier, fake, &chain, &STOP);
+                for w in workers {
+                    let _ = w.join();
+                }
+            });
+        })
+        .expect("server thread");
+
+    if ring != RingKind::File {
+        std::env::set_var(aether_env::RING_SECTION, section_name());
+    }
+    std::env::set_var(aether_env::RING_BYTES, map_bytes.to_string());
+    std::env::set_var(aether_env::RING_PAYLOAD_CAP, payload_cap.to_string());
+    std::env::set_var(aether_env::ARENA_OFFSET, arena_offset.to_string());
+    std::env::set_var(aether_env::ARENA_LEN, arena_len.to_string());
+    std::env::set_var(aether_env::VIRTUAL_DIR, virtual_dir);
+    let attach = match deadline {
+        None => aether_hooks::director::try_init_from_env(),
+        Some(d) => attach_with_deadline(d),
+    };
+    if attach_ids.is_empty() {
+        if let Err(e) = &attach {
+            panic!("fuse client: {e:?}");
+        }
+    }
+    Served {
+        fake,
+        recorder,
+        faults,
+        overrides,
+        seg,
+        attach,
+        attach_faults: attach_ids,
+        wakes,
+    }
+}
+
+/// What `try_init_from_env` does, with the client's deadline cut to `d`
+/// before its heartbeat.
+fn attach_with_deadline(d: Duration) -> Result<(), FuseInitError> {
+    let client = aether_hooks::director::connect_from_env()?.with_deadline(d);
+    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
+    aether_hooks::director::install_global(client)
+        .map_err(|_| FuseInitError::ConnectFailed("a client was already installed".into()))
+}
+
+/// The serve threads' notifier: poll the ring, or wait on the director's wake
+/// event.
+enum Wake {
+    /// Look again at once (giving the processor to whatever else is ready)
+    /// for [`HOT_FOR`] after this thread last served a request, then 1 ms
+    /// between looks. `yield_now` (`SwitchToThread`) returns at once when
+    /// nothing else is ready, so without the back-off an idle thread is a
+    /// busy loop. The back-off is `Sleep`, which is `NtDelayExecution` and
+    /// makes no handle (std's `thread::sleep` creates a waitable timer and
+    /// closes it through the hooked `NtClose`). `None`: nothing served yet.
+    Poll(Cell<Option<Instant>>),
+    /// The event's handle, as an address (a `HANDLE` is not `Send`), where
+    /// to count how its waits end, and how long a wait is (ms).
+    Event(usize, Arc<WakeStats>, u32),
+}
+
+impl Notifier for Wake {
+    fn wait_server(&self) {
+        match *self {
+            Wake::Poll(ref last) => match last.get() {
+                Some(t) if t.elapsed() < HOT_FOR => std::thread::yield_now(),
+                // SAFETY: a plain delay; no handle.
+                _ => unsafe { Sleep(1) },
+            },
+            // SAFETY: the event is leaked with the ring, so the handle stays
+            // valid for the process.
+            Wake::Event(h, ref stats, ms) => unsafe {
+                match WaitForSingleObject(h as _, ms) {
+                    WAIT_OBJECT_0 => stats.signalled.fetch_add(1, Ordering::SeqCst),
+                    WAIT_TIMEOUT => stats.timeouts.fetch_add(1, Ordering::SeqCst),
+                    _ => 0,
+                };
+            },
+        }
+    }
+    // Called by the server after each request it completes.
+    fn notify_client(&self, _slot: u32) {
+        if let Wake::Poll(ref last) = *self {
+            last.set(Some(Instant::now()));
+        }
+    }
+}
+
+/// [`Options::tap`], shared by every serve thread.
+#[derive(Clone)]
+struct Extra(Option<Arc<Mutex<Box<dyn Tap + Send>>>>);
+
+impl Extra {
+    fn with<R>(&self, f: impl FnOnce(&mut dyn Tap) -> R) -> Option<R> {
+        self.0.as_ref().map(|t| {
+            let mut t = t.lock().unwrap_or_else(PoisonError::into_inner);
+            f(&mut **t)
+        })
+    }
+}
+
+impl Tap for Extra {
+    fn on_request(&mut self, view: &RequestView<'_>) -> TapAction {
+        self.with(|t| t.on_request(view)).unwrap_or(TapAction::Pass)
+    }
+    fn on_reply(&mut self, view: &RequestView<'_>, status: &mut i32, payload: &mut Vec<u8>) {
+        self.with(|t| t.on_reply(view, status, payload));
+    }
+    fn on_sent(&mut self, view: &RequestView<'_>, status: i32, payload: &[u8]) {
+        self.with(|t| t.on_sent(view, status, payload));
+    }
 }
 
 /// The section [`install`] serves.
@@ -116,21 +467,31 @@ fn section_name() -> String {
     format!("Local\\aether-shim-cowseed-{}", std::process::id())
 }
 
+/// Where a [`RingKind::File`] ring lives: a folder of its own, leaked with
+/// the ring.
+fn ring_file() -> std::path::PathBuf {
+    let dir = aether_testkit::tempdir().expect("ring folder");
+    let path = dir.path().join("ring");
+    std::mem::forget(dir);
+    path
+}
+
 /// Another client on the ring [`install`] serves, as a second injected process of the session
 /// would have: its own mapping of the section, its own `FuseClient`.
-pub(crate) fn second_client(virtual_dir: &std::path::Path) -> aether_hooks::director::FuseClient {
-    let bytes: usize = std::env::var(aether_env::RING_BYTES)
-        .unwrap()
-        .parse()
-        .unwrap();
+pub(crate) fn second_client(virtual_dir: &Path) -> aether_hooks::director::FuseClient {
+    assert!(
+        std::env::var_os(aether_env::RING_SECTION).is_some(),
+        "second_client connects to the section ring; a RingKind::File ring has none"
+    );
+    let env = |name: &str| -> String { std::env::var(name).unwrap() };
     aether_hooks::director::FuseClient::connect(
         &section_name(),
         &[(
             aether_redirect::RootId::DEFAULT,
             virtual_dir.to_string_lossy().into_owned(),
         )],
-        PAYLOAD_CAP,
-        bytes,
+        env(aether_env::RING_PAYLOAD_CAP).parse().unwrap(),
+        env(aether_env::RING_BYTES).parse().unwrap(),
         0,
     )
     .expect("second client")
@@ -139,8 +500,8 @@ pub(crate) fn second_client(virtual_dir: &std::path::Path) -> aether_hooks::dire
 /// A client on a ring nobody serves (a director that died), giving up on each request after
 /// `deadline`.
 pub(crate) fn unserved_client(
-    virtual_dir: &std::path::Path,
-    deadline: std::time::Duration,
+    virtual_dir: &Path,
+    deadline: Duration,
 ) -> aether_hooks::director::FuseClient {
     let name = format!("Local\\aether-shim-dead-{}", std::process::id());
     let bytes = 256 * 1024;

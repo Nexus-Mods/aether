@@ -57,46 +57,7 @@ pub enum FuseInitError {
     ConnectFailed(String),
 }
 
-/// Where the ring's shared memory comes from.
-///
-/// Two spellings of one thing: a mapped `SharedSeg` the director also has. The
-/// distinction survives only as far as [`FuseClient::connect_source`], which
-/// obtains the mapping and then stops caring.
-#[derive(Debug, PartialEq, Eq)]
-enum RingSource {
-    /// A named page-file-backed section ([`aether_env::RING_SECTION`]) — the
-    /// Windows deployment, and what the shipped shim uses.
-    Section(String),
-    /// A real file ([`aether_env::RING_PATH`]), mapped by path — the only kind of
-    /// shared memory a shim inside Wine and a native Linux director can both
-    /// name. A page-file-backed section has no identity outside its own
-    /// Windows/Wine session.
-    File(String),
-}
-
-/// Pick the ring source. **The path wins when both are set**, and that
-/// ordering is a correctness requirement rather than a preference.
-///
-/// A session configured for the Wine boundary must never fall back to a named
-/// section: `VFS_RING_SECTION` may well still be set (the launcher writes ten
-/// `VFS_*` vars together), and a section of that name may even exist — from an
-/// unrelated director on the same box. Falling back would attach the shim to
-/// the *wrong* director, or to nothing, and report success either way.
-///
-/// An empty `VFS_RING_PATH` is treated as absent. Believing it would map `""`
-/// and fail with a confusing io error while a perfectly good section was
-/// named, the same trap as an empty `VFS_RING_SECTION`. Neither set stays
-/// `None`, which the caller turns into [`FuseInitError::NotConfigured`].
-///
-/// Split from [`ring_source_from_env`] so the precedence is testable without
-/// writing to the process environment — global mutable state every other test
-/// in this binary shares.
-fn ring_source(ring_path: Option<String>, section: Option<String>) -> Option<RingSource> {
-    match ring_path.filter(|p| !p.is_empty()) {
-        Some(path) => Some(RingSource::File(path)),
-        None => section.map(RingSource::Section),
-    }
-}
+use aether_env::session::{ring_source, RingSource};
 
 fn ring_source_from_env() -> Option<RingSource> {
     ring_source(
@@ -109,25 +70,75 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
     if FUSE.get().is_some() {
         return Ok(());
     }
-    // Test-only escape hatch (see the constant's doc comment in `aether-env`): lets
-    // the launch-abort path be exercised without standing up a director that is
-    // actually broken.
+    forced_failure()?;
+    let client = client_from_env()?;
+    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
+    let _ = FUSE.set(client);
+    Ok(())
+}
+
+/// The process's client, set once, for a test that builds its own (one with
+/// [`FuseClient::with_deadline`], say). `Err` gives `client` back when one is
+/// already set. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+// `OnceLock::set`'s shape: the client comes back whole, once, in a test.
+#[allow(clippy::result_large_err)]
+pub fn install_global(client: FuseClient) -> Result<(), FuseClient> {
+    FUSE.set(client)
+}
+
+/// A client connected from the environment [`try_init_from_env`] reads, not
+/// yet asked for a heartbeat and not installed. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn connect_from_env() -> Result<FuseClient, FuseInitError> {
+    forced_failure()?;
+    client_from_env()
+}
+
+/// How far a test has moved the spelling cache's clock past real time
+/// ([`advance_name_clock`]). Not in the shipped shim.
+#[cfg(feature = "test-support")]
+static NAME_CLOCK_AHEAD_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a remembered spelling is used without asking again, for a test
+/// that moves the clock past it. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub const NAME_TTL_MS_FOR_TESTS: u64 = NAME_TTL_MS;
+
+/// Move the clock every client's spelling cache reads `ms` ahead, so that a
+/// test sees an entry expire without sleeping. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn advance_name_clock(ms: u64) {
+    NAME_CLOCK_AHEAD_MS.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Test-only escape hatch (see the constant's doc comment in `aether-env`): lets
+/// the launch-abort path be exercised without standing up a director that is
+/// actually broken.
+fn forced_failure() -> Result<(), FuseInitError> {
     if aether_env::opt_in(aether_env::TEST_FUSE_INIT_FAIL) {
         return Err(FuseInitError::ConnectFailed(format!(
             "forced failure via {}",
             aether_env::TEST_FUSE_INIT_FAIL
         )));
     }
+    Ok(())
+}
+
+/// What [`try_init_from_env`] connects: the ring and roots the environment
+/// names.
+fn client_from_env() -> Result<FuseClient, FuseInitError> {
     let source = ring_source_from_env().ok_or(FuseInitError::NotConfigured)?;
-    let ring_bytes: usize = aether_env::text(aether_env::RING_BYTES)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2 * 1024 * 1024);
-    let payload_cap: u32 = aether_env::text(aether_env::RING_PAYLOAD_CAP)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1_048_576);
-    let arena_len: usize = aether_env::text(aether_env::ARENA_LEN)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let aether_env::session::Ring {
+        bytes: ring_bytes,
+        payload_cap,
+        arena_len,
+        ..
+    } = ring_numbers();
     // Required, not defaulted: this names *which tree is being virtualised*, and
     // there is no sensible guess. A default would connect the client to a path
     // nothing matches, surfacing much later as content simply missing.
@@ -140,11 +151,19 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
         )
     })?;
     let roots = roots_from_env(&root);
-    let client = FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
-        .map_err(FuseInitError::ConnectFailed)?;
-    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
-    let _ = FUSE.set(client);
-    Ok(())
+    FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
+        .map_err(FuseInitError::ConnectFailed)
+}
+
+/// The ring's numbers as the environment gives them (`aether_env::session`).
+fn ring_numbers() -> aether_env::session::Ring {
+    let get = aether_env::text;
+    aether_env::session::ring(
+        get(aether_env::RING_BYTES).as_deref(),
+        get(aether_env::RING_PAYLOAD_CAP).as_deref(),
+        get(aether_env::ARENA_LEN).as_deref(),
+        get(aether_env::ARENA_OFFSET).as_deref(),
+    )
 }
 
 /// Concurrent bulk READs in flight (each uses its own arena bank via slot id).
@@ -162,8 +181,39 @@ const PIPELINE_DEPTH_STREAM: usize = 8;
 const NAME_TTL_MS: u64 = 2_000;
 /// How many spellings are remembered.
 const NAME_CACHE_ENTRIES: usize = 8_192;
+/// [`FuseClient::sends_times`]: nothing known yet.
+const TIMES_UNKNOWN: u8 = 0;
+/// [`FuseClient::sends_times`]: a reply carried a time.
+const TIMES_SENT: u8 = 1;
+/// [`FuseClient::sends_times`]: a handle's first time query found none.
+const TIMES_NONE: u8 = 2;
 /// A read at least this long gets [`PIPELINE_DEPTH_STREAM`].
 const STREAM_BYTES: usize = 4 * 1024 * 1024;
+/// The smallest bulk READ this client sends: the bank each slot must have
+/// (`docs/wire.md` 2.6).
+const MIN_BULK_CHUNK: usize = 256 * 1024;
+
+/// The arena this client uses and the most one inline READ asks for, given
+/// the arena the ring states, its slot count and its payload cap.
+///
+/// `docs/wire.md` 2.6: each bank must hold the shim's bulk chunk, so
+/// `arena_len >= 256 KiB x slot_count`. A director answers a bulk READ with
+/// at most a bank and the shim reads a short answer as end of file, so a
+/// smaller arena would cut every large file at its first chunk. Such a ring
+/// is used without its arena, and its inline READs stay below
+/// [`BULK_THRESHOLD`]: a director with an arena answers an unflagged READ of
+/// 64 KiB or more in bulk (wire.md 3.4.4), from the same small bank, so only
+/// a smaller one comes back whole from every director. A ring that meets
+/// the rule, or states no arena, is used as it states.
+fn arena_rule(arena_len: usize, slot_count: u32, payload_cap: u32) -> (usize, usize) {
+    let inline = payload_cap.saturating_sub(8) as usize;
+    let needed = MIN_BULK_CHUNK.saturating_mul(slot_count.max(1) as usize);
+    if arena_len == 0 || arena_len >= needed {
+        (arena_len, inline)
+    } else {
+        (0, inline.min(BULK_THRESHOLD as usize - 1))
+    }
+}
 /// How long a wait for a response may yield the processor before it sleeps.
 ///
 /// A read served from the local store is back within this (its 1 MiB chunks
@@ -277,7 +327,19 @@ pub struct FuseClient {
     names: std::sync::Mutex<aether_redirect::finalname::NameCache>,
     /// What the cache's clock counts from.
     started: std::time::Instant,
+    /// What this client knows of whether the director sends times
+    /// ([`FuseClient::sends_times`]): [`TIMES_UNKNOWN`], [`TIMES_SENT`] once a
+    /// GETATTR or READDIR reply has carried an `mtime` above 0, or
+    /// [`TIMES_NONE`] once a handle's first time query found none
+    /// ([`FuseClient::settle_times`]).
+    times: std::sync::atomic::AtomicU8,
+    /// The arena's length, or 0 when the ring has none this client uses
+    /// ([`arena_rule`]).
     arena_len: usize,
+    /// The mapping offset the arena starts at.
+    arena_offset: usize,
+    /// Most bytes one inline READ asks for ([`arena_rule`]).
+    inline_chunk: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened
     /// (the ring still works, just with timer-tick latency) and null
     /// *by design* for a [`RingSource::File`] ring, where the director is a
@@ -373,6 +435,12 @@ impl FuseClient {
         // Sized from the worker count the director published in the ring
         // header (a ring that names none is taken to have the default four).
         let gate = DataGate::for_ring(mapping.seg(), &geom);
+        let (arena_len, inline_chunk) = arena_rule(arena_len, geom.slot_count, payload_cap);
+        // Where the arena starts (`docs/wire.md` 2.1): what the environment
+        // says, else right after the last slot, where both directors put it.
+        let arena_offset = ring_numbers()
+            .arena_offset
+            .unwrap_or_else(|| geom.slot_off(geom.slot_count));
 
         // The staged launch directory is a second spelling of root 0, not a
         // root of its own: a staged game resolves `Data\` relative to its own
@@ -415,7 +483,10 @@ impl FuseClient {
                 NAME_CACHE_ENTRIES,
             )),
             started: std::time::Instant::now(),
+            times: std::sync::atomic::AtomicU8::new(TIMES_UNKNOWN),
             arena_len,
+            arena_offset,
+            inline_chunk,
             server_ev,
             gate,
             deadline: aether_ipc::RESPONSE_DEADLINE,
@@ -428,6 +499,11 @@ impl FuseClient {
     pub fn with_deadline(mut self, deadline: core::time::Duration) -> Self {
         self.deadline = deadline;
         self
+    }
+
+    /// How long this client waits for an answer to one request.
+    pub(crate) fn deadline(&self) -> core::time::Duration {
+        self.deadline
     }
 
     /// Test-only constructor for the predicate alone: no ring, no OS volume
@@ -524,10 +600,47 @@ impl FuseClient {
 
     pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, Status> {
         self.call(&Request::GetAttr { root, path: vpath }, |r| match r {
-            Reply::GetAttr(a) => Some(a),
+            Reply::GetAttr(a) => {
+                self.saw_time(a.mtime);
+                Some(a)
+            }
             _ => None,
         })
         .map_err(failed)
+    }
+
+    /// Remember that the director sends times, once a reply carries one.
+    fn saw_time(&self, mtime: i64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if mtime > 0 && self.times.load(Relaxed) != TIMES_SENT {
+            self.times.store(TIMES_SENT, Relaxed);
+        }
+    }
+
+    /// Whether the director sends times (`docs/wire.md` 3.2, "Timestamps"):
+    /// `Some(true)` once a GETATTR or READDIR reply carried one, `Some(false)`
+    /// once a handle's first time query found none before any had, `None`
+    /// while neither. A handle's time query asks GETATTR unless it is
+    /// `Some(false)`.
+    pub fn sends_times(&self) -> Option<bool> {
+        match self.times.load(std::sync::atomic::Ordering::Relaxed) {
+            TIMES_SENT => Some(true),
+            TIMES_NONE => Some(false),
+            _ => None,
+        }
+    }
+
+    /// A handle's time query got `mtime` from GETATTR: a time turns
+    /// per-handle fetching on ([`Self::saw_time`] already did), and none,
+    /// while nothing is known, says this director sends no times, so later
+    /// handle time queries stop asking. A time seen later turns it on again.
+    pub fn settle_times(&self, mtime: i64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if mtime <= 0 {
+            let _ = self
+                .times
+                .compare_exchange(TIMES_UNKNOWN, TIMES_NONE, Relaxed, Relaxed);
+        }
     }
 
     /// The directory's listing, each entry made into a `T` by `each` while
@@ -541,7 +654,10 @@ impl FuseClient {
         self.call(&Request::ReadDir { root, path: vpath }, |r| match r {
             Reply::ReadDir(list) => {
                 let mut out = Vec::with_capacity(list.len());
-                out.extend(list.iter().map(&mut each));
+                out.extend(list.iter().map(|e| {
+                    self.saw_time(e.mtime);
+                    each(e)
+                }));
                 Some(out)
             }
             _ => None,
@@ -590,7 +706,12 @@ impl FuseClient {
 
     /// Write `data` at `offset` to a virtual write handle. Chunks to fit the ring
     /// payload (inline; bulk-arena writes are a later step).
-    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, Status> {
+    ///
+    /// `Ok` is what the director wrote, short when a chunk was written short.
+    /// A chunk that fails ends the write: [`WriteFailed`] carries what the
+    /// chunks before it wrote. A `written` past the chunk is a reply this
+    /// cannot use: that chunk counts as not written and fails `IoError`.
+    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, WriteFailed> {
         if data.is_empty() {
             return Ok(0);
         }
@@ -608,10 +729,19 @@ impl FuseClient {
                 offset: offset + written as u64,
                 data: piece,
             };
-            let n = self.call_data(&req, &mut payload, |r| match r {
-                Reply::Write(n) => Some(n as usize),
-                _ => None,
-            })?;
+            let n = self
+                .call_data(&req, &mut payload, |r| match r {
+                    Reply::Write(n) => Some(n as usize),
+                    _ => None,
+                })
+                .and_then(|n| {
+                    if n > piece.len() {
+                        Err(Status::IoError)
+                    } else {
+                        Ok(n)
+                    }
+                })
+                .map_err(|status| WriteFailed { written, status })?;
             written += n;
             if n < piece.len() {
                 break;
@@ -628,7 +758,7 @@ impl FuseClient {
         let slots = self.geom.slot_count.max(1) as usize;
         // Cap at 1 MiB per round trip: large copies and deep pipelines on a
         // game thread (or long join windows) are not worth the risk.
-        (self.arena_len / slots).clamp(256 * 1024, 1024 * 1024)
+        (self.arena_len / slots).clamp(MIN_BULK_CHUNK, 1024 * 1024)
     }
 
     /// Read into `buf` (game NtReadFile buffer or CreateSection destination).
@@ -651,10 +781,12 @@ impl FuseClient {
                 usize::MAX
             },
             bulk_chunk: self.bulk_bank_bytes(),
-            inline_chunk: self.payload_cap.saturating_sub(8) as usize,
+            inline_chunk: self.inline_chunk,
             depth: PIPELINE_DEPTH,
             depth_stream: PIPELINE_DEPTH_STREAM,
             stream_bytes: STREAM_BYTES,
+            arena_len: self.arena_len,
+            arena_offset: self.arena_offset,
         };
         aether_ipc::read_fragmented(&self.client(), &self.gate, &plan, fh, offset, buf)
     }
@@ -780,9 +912,8 @@ impl FuseClient {
             .filter(|(id, _)| *id == root)
             .map(|(_, p)| p.as_str())
             .collect();
-        let stored = self.stored_names(root, &under);
-        let mut name = aether_redirect::finalname::final_dos_path(path, &under, &spellings, |i| {
-            stored.get(i).cloned()
+        let mut name = self.with_stored_names(root, &under, |stored| {
+            aether_redirect::finalname::final_dos_path(path, &under, &spellings, stored)
         });
         // A named stream is part of what was opened, not of where the file
         // lives; it is carried through as the caller spelled it.
@@ -792,18 +923,54 @@ impl FuseClient {
         Some(name)
     }
 
+    /// `f` given how each component of `under` is spelled where it is stored
+    /// (`None` for one nobody could say). When this client remembers every
+    /// component, `f` runs under the cache's lock with the spellings
+    /// borrowed from it: no request and no allocation. Otherwise the rest are
+    /// asked for ([`Self::stored_names`]).
+    fn with_stored_names<R>(
+        &self,
+        root: RootId,
+        under: &[String],
+        f: impl for<'a> FnOnce(&'a mut dyn FnMut(usize) -> Option<&'a str>) -> R,
+    ) -> R {
+        crate::hookstats::note_name_query();
+        let now = self.name_clock_ms();
+        let mut f = Some(f);
+        if let Ok(names) = self.names.lock() {
+            if names.leading_with(root.0, under, now, |_| ()) == under.len() {
+                crate::hookstats::note_name_query_cached();
+                let f = f.take().expect("not yet called");
+                return f(&mut |i| names.spelling(root.0, under, i));
+            }
+        }
+        let stored = self.stored_names(root, under, now);
+        let f = f.take().expect("not yet called");
+        f(&mut |i| stored.get(i).map(String::as_str))
+    }
+
+    /// The total length of the spellings [`Self::with_stored_names`] gives
+    /// for `under` (folded components) under root `root`, for a test that
+    /// counts what a cache hit costs. Not in the shipped shim.
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn spelled_length_for_tests(&self, root: u32, under: &[String]) -> usize {
+        self.with_stored_names(RootId(root), under, |stored| {
+            (0..under.len())
+                .map(|i| stored(i).map_or(0, str::len))
+                .sum()
+        })
+    }
+
     /// How each component of `under` is spelled where it is stored: from
     /// what this client remembers, and for the rest from the director. Fewer
     /// names than components (none, even) if the director could not say.
-    fn stored_names(&self, root: RootId, under: &[String]) -> Vec<String> {
-        crate::hookstats::note_name_query();
-        let now = self.started.elapsed().as_millis() as u64;
+    fn stored_names(&self, root: RootId, under: &[String], now: u64) -> Vec<String> {
         let mut known = match self.names.lock() {
             Ok(names) => names.leading(root.0, under, now),
             Err(_) => Vec::new(),
         };
         if known.len() == under.len() {
-            crate::hookstats::note_name_query_cached();
             return known;
         }
         crate::hookstats::note_name_lookup();
@@ -828,11 +995,31 @@ impl FuseClient {
         if rest.len() != under.len() - known.len() {
             return known;
         }
+        // A stored spelling is a spelling of the name asked about
+        // (`docs/wire.md` 3.4.12): one that folds to another name is not an
+        // answer either, and nothing is learned.
+        if !rest
+            .iter()
+            .zip(&under[known.len()..])
+            .all(|(stored, asked)| aether_casefold::eq_folded(stored, asked))
+        {
+            return known;
+        }
         if let Ok(mut names) = self.names.lock() {
             names.remember(root.0, under, known.len(), &rest, now);
         }
         known.extend(rest);
         known
+    }
+
+    /// The spelling cache's clock: milliseconds since this client was made
+    /// (plus what a test moved it ahead, in a test build).
+    fn name_clock_ms(&self) -> u64 {
+        #[cfg(feature = "test-support")]
+        let ahead = NAME_CLOCK_AHEAD_MS.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(feature = "test-support"))]
+        let ahead = 0;
+        self.started.elapsed().as_millis() as u64 + ahead
     }
 
     /// Something this process did may have changed how `vpath` (folded,
@@ -853,8 +1040,7 @@ impl FuseClient {
     /// The providers resolve either spelling to the same entry (the provider
     /// contract's case rule), so this changes what a new name is called and
     /// nothing about what an existing one resolves to. A path whose spelling
-    /// cannot be read off it (a short name under the root) is sent folded,
-    /// as before.
+    /// cannot be read off it (a short name under the root) is sent folded.
     pub fn vpath_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
         let (root, folded) = self.vpath_under_root(path)?;
         let (plain, stream) = aether_redirect::split_stream_suffix(path);
@@ -879,6 +1065,13 @@ impl FuseClient {
     pub fn route_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
         self.vpath_as_spelled(path)
             .map(|(root, vpath)| (root, wire_vpath(vpath)))
+    }
+
+    /// Whether `path` is under a root: [`Self::vpath_under_root`]`.is_some()`,
+    /// without building the vpath. A path asked about before allocates
+    /// nothing.
+    pub fn is_under_root(&self, path: &str) -> bool {
+        self.roots.contains(path)
     }
 
     /// Map an absolute path into the virtual namespace: **which root** it
@@ -928,12 +1121,20 @@ impl FuseClient {
     }
 }
 
+/// A [`FuseClient::write`] that failed part way: the bytes the chunks before
+/// the failing one wrote (from the start of the write), and why it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteFailed {
+    pub written: usize,
+    pub status: Status,
+}
+
 /// The status a failed call stands for, as the shim acts on it.
 ///
 /// A status outside the table (the ring's overflow sentinel among them) is
 /// `Status::IoError`: every caller gives an unknown status the answer it
 /// gives `Status::IoError`, so nothing a caller does changes. So is a ring
-/// that gave no answer, as before. An OK reply that does not decode is
+/// that gave no answer. An OK reply that does not decode is
 /// `Status::BadRequest` (`docs/wire.md` 3.1).
 pub(crate) fn failed(e: CallError) -> Status {
     match e {
@@ -981,30 +1182,10 @@ pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
 /// without writing to the process environment — which is global mutable state
 /// every other test in this binary shares.
 fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
-    let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];
-    let Some(extra) = spec else {
-        return out;
-    };
-    for entry in extra.split(';') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let Some((id, path)) = entry.split_once('=') else {
-            continue;
-        };
-        let (Ok(id), path) = (id.trim().parse::<u32>(), path.trim()) else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
-        }
-        match out.iter_mut().find(|(r, _)| r.0 == id) {
-            Some(slot) => slot.1 = path.to_string(),
-            None => out.push((RootId(id), path.to_string())),
-        }
-    }
-    out
+    aether_env::session::roots(virtual_dir, spec)
+        .into_iter()
+        .map(|(id, path)| (RootId(id), path))
+        .collect()
 }
 
 /// Each root's backing directory where it differs from the root's location
@@ -1015,14 +1196,9 @@ pub(crate) fn backings_from_env() -> Vec<(RootId, String)> {
 
 /// The parsing half of [`backings_from_env`].
 fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
-    spec.unwrap_or_default()
-        .split(';')
-        .filter_map(|entry| {
-            let (id, path) = entry.trim().split_once('=')?;
-            let id = id.trim().parse::<u32>().ok()?;
-            let path = path.trim();
-            (!path.is_empty()).then(|| (RootId(id), normalize_path_for_root(path)))
-        })
+    aether_env::session::backings(spec)
+        .into_iter()
+        .map(|(id, path)| (RootId(id), path))
         .collect()
 }
 
@@ -1044,19 +1220,32 @@ fn stage_root_from_env() -> Option<String> {
 }
 
 pub fn strip_nt_device(p: &str) -> &str {
-    p.strip_prefix(r"\??\")
-        .or_else(|| p.strip_prefix(r"\\?\"))
-        .unwrap_or(p)
+    aether_env::session::strip_nt_device(p)
 }
 
 pub fn normalize_path_for_root(p: &str) -> String {
-    strip_nt_device(p).replace('/', "\\").to_ascii_lowercase()
+    aether_env::session::normalize_path_for_root(p)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn an_arena_below_wire_md_2_6_s_rule_is_not_used() {
+        const K: usize = 1024;
+        // Meets the rule, or states none: used as given.
+        assert_eq!(arena_rule(8 * 256 * K, 8, 4096), (8 * 256 * K, 4088));
+        assert_eq!(
+            arena_rule(32 * 1024 * K, 32, 1 << 20),
+            (32 * 1024 * K, (1 << 20) - 8)
+        );
+        assert_eq!(arena_rule(0, 8, 1 << 20), (0, (1 << 20) - 8));
+        // One byte short: no arena, and inline READs below the bulk threshold.
+        assert_eq!(arena_rule(8 * 256 * K - 1, 8, 4096), (0, 4088));
+        assert_eq!(arena_rule(8 * 128 * K, 8, 1 << 20), (0, 65_535));
+    }
 
     /// The unified predicate, exercised the way `FuseClient::vpath_under_root`
     /// exercises it (`RootMap::resolve` then join), without needing a live

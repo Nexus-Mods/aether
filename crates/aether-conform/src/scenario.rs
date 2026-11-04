@@ -670,9 +670,14 @@ fn step_bytes(v: &Value) -> Result<Vec<u8>, String> {
             return Ok(out);
         }
     }
-    serde_json::from_value::<Contents>(v.clone())
-        .map(|c| c.bytes())
-        .map_err(|e| e.to_string())
+    match serde_json::from_value::<Contents>(v.clone()).map_err(|e| e.to_string())? {
+        // A mounted file may be larger (`MAX_MOUNTED_LEN`); a step's bytes
+        // go no further than the reference's largest file.
+        Contents::Fill { size, .. } if size > MAX_ZEROS => Err(format!(
+            "size {size}: larger than {MAX_ZEROS}, the longest file a write can make"
+        )),
+        c => Ok(c.bytes()),
+    }
 }
 
 /// Whether `path` leaves its root however a director normalises paths: its

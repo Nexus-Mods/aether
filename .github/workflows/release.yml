@@ -5,7 +5,8 @@
 #   fixtures.zip    the test fixtures, with the host-target injector and shim
 #                   beside them (unsigned: test-only)
 #   contract.zip    contract/*.json, the protocol's golden vectors and
-#                   contract/scenarios/ (what a director must do, as data)
+#                   contract/scenarios/ (what a director must do, as data) and
+#                   contract/workloads/ (what it is benchmarked on)
 #   aether-conform-windows-x64.zip   aether-conform.exe, the tool that checks
 #   aether-conform-linux-x64.tar.gz  a director against the wire contract
 #                   (docs/conformance.md): unsigned, never loaded into a game,
@@ -181,8 +182,9 @@ jobs:
           if (-not (Test-Path -LiteralPath "$out\aether-conform-linux-x64.tar.gz")) { throw 'the Linux aether-conform is missing' }
           $fixtures = @($contract.fixtures) | ForEach-Object { Join-Path 'target\release' $_ }
           Compress-Archive -LiteralPath $fixtures -DestinationPath "$out\fixtures.zip" -Force
-          # contract.zip: the JSON and the vectors at the top, the scenarios in
-          # scenarios/. Built with System.IO.Compression so the entry names have
+          # contract.zip: the JSON and the vectors at the top, the scenarios and
+          # the workloads in scenarios/ and workloads/. Built with
+          # System.IO.Compression so the entry names have
           # forward slashes (Windows PowerShell 5.1's Compress-Archive writes
           # backslashes for a folder).
           Add-Type -AssemblyName System.IO.Compression
@@ -193,8 +195,10 @@ jobs:
             @('contract\protocol.json', 'protocol.json'),
             @('crates\aether-protocol\tests\golden\vectors.txt', 'vectors.txt')
           )
-          foreach ($f in @(Get-ChildItem -LiteralPath contract\scenarios -File | Sort-Object Name)) {
-            $entries += ,@($f.FullName, "scenarios/$($f.Name)")
+          foreach ($dir in @('scenarios', 'workloads')) {
+            foreach ($f in @(Get-ChildItem -LiteralPath "contract\$dir" -File | Sort-Object Name)) {
+              $entries += ,@($f.FullName, "$dir/$($f.Name)")
+            }
           }
           $zipPath = Join-Path $PWD "$out\contract.zip"
           if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }

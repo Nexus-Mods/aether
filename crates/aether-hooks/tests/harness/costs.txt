@@ -1,0 +1,35 @@
+# What each hooked call costs: requests to the director, bytes over the ring,
+# allocations on the calling thread. Checked by tests/harness/costs.rs, which
+# says what each case measures. round_trips and ring_bytes must match exactly;
+# allocs may not go up. To rewrite it after a deliberate change, in the same
+# commit:
+#   AETHER_COSTS_UPDATE=1 cargo test -p aether-hooks --test harness costs::
+attributes_in_root round_trips=1 ring_bytes=32 allocs<=7
+attributes_outside_root round_trips=0 ring_bytes=0 allocs<=0
+close round_trips=1 ring_bytes=8 allocs<=0
+create_directory round_trips=2 ring_bytes=50 allocs<=37
+create_process round_trips=2 ring_bytes=58 allocs<=130
+delete round_trips=3 ring_bytes=68 allocs<=37
+final_path_name_cold round_trips=1 ring_bytes=36 allocs<=23
+final_path_name_not_stored round_trips=1 ring_bytes=22 allocs<=8
+final_path_name_warm round_trips=0 ring_bytes=0 allocs<=7
+list_100_entries round_trips=3 ring_bytes=2966 allocs<=131
+list_next_entry round_trips=0 ring_bytes=0 allocs<=1
+move round_trips=3 ring_bytes=85 allocs<=71
+open_missing round_trips=1 ring_bytes=24 allocs<=7
+open_outside_root round_trips=0 ring_bytes=0 allocs<=0
+open_read_root round_trips=1 ring_bytes=42 allocs<=17
+open_write_writable round_trips=1 ring_bytes=43 allocs<=28
+query_key_not_a_key round_trips=0 ring_bytes=0 allocs<=0
+query_size_class round_trips=0 ring_bytes=0 allocs<=0
+read_bulk_1_mib round_trips=4 ring_bytes=1048736 allocs<=26
+read_small_cached round_trips=0 ring_bytes=0 allocs<=0
+read_small_cached_cold round_trips=1 ring_bytes=65576 allocs<=16
+read_small_mutable round_trips=1 ring_bytes=1056 allocs<=9
+read_stream_5_mib round_trips=20 ring_bytes=5243680 allocs<=130
+reg_query_overlay_cold round_trips=1 ring_bytes=118 allocs<=10
+reg_query_overlay_warm round_trips=0 ring_bytes=0 allocs<=4
+section_eager_1_mib round_trips=4 ring_bytes=1048736 allocs<=29
+section_lazy_page_fill round_trips=1 ring_bytes=262184 allocs<=2
+write_4_kib round_trips=2 ring_bytes=4160 allocs<=6
+write_three_chunks_and_a_byte round_trips=4 ring_bytes=12345 allocs<=8

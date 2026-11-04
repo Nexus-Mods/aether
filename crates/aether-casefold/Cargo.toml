@@ -8,5 +8,14 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+# Micro-benchmarks (benches/), run by hand: cargo bench -p aether-casefold.
+criterion.workspace = true
+proptest = { workspace = true }
+
 [lints]
 workspace = true
+
+[[bench]]
+name = "fold"
+harness = false

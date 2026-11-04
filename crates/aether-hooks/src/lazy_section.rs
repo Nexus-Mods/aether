@@ -10,20 +10,47 @@
 //! big archive, so `NtUnmapViewOfSection` on one window must leave every other
 //! window (and any later remap of the still-open section) valid. The VA is
 //! released only once the section handle is closed *and* the last view is gone.
+//!
+//! **Filling.** No thread may see a chunk before its bytes are in place. A
+//! demand-paged region is a view of a pagefile section of its own
+//! (`SEC_RESERVE`, so only what is filled is committed). A fault commits its
+//! chunk `PAGE_NOACCESS` in that view, the fill writes the director's bytes
+//! through a second, writable view of just that chunk, and only then is the
+//! chunk made readable. Another thread that touches the chunk meanwhile
+//! faults, waits for the fill in the handler (`FILL_LOCK`), and then reads
+//! the bytes. Where a second view cannot fill ([`second_view_fills`]: a host
+//! whose second view does not see the first view's commit), or the region's
+//! section cannot be had (the commit or pool limit, 32-bit address space),
+//! the region is private memory committed readable before its fill, and
+//! there another thread can read the chunk's zeros while it
+//! fills. Each region's backing is counted (`hookstats::lazy_region_count`).
+//!
+//! **Cost.** A private `MEM_RESERVE` charges nothing until a chunk is
+//! committed. A mapped `SEC_RESERVE` section does: measured on Windows 11
+//! (`GetPerformanceInfo` around a mapping), about 4 MiB of commit and 2 MiB
+//! of paged pool per GiB of file, before any chunk is filled (a 64 GiB
+//! region: 257 MiB and 128 MiB), most likely page tables and prototype PTEs.
+//! Created but not mapped it costs about nothing. So a load order with tens
+//! of GiB of archives above the eager limit pays a few hundred MiB of commit
+//! and about 100 MiB of paged pool for them. A region whose section cannot
+//! be had at that price takes the private fallback, not a failed section.
 #![allow(unsafe_code)]
 
 use core::cell::Cell;
 use core::ffi::c_void;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Memory::{
-    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE,
+    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, VirtualAlloc, VirtualFree, VirtualProtect,
+    FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE,
+    PAGE_NOACCESS, PAGE_READWRITE, SEC_RESERVE,
 };
 
 const PAGE: usize = 4096;
@@ -38,31 +65,108 @@ const WARM_BYTES: usize = 2 * 1024 * 1024;
 /// `STATUS_SECTION_TOO_BIG` for those makes the game fail the archive outright.
 pub(crate) const MAX_LAZY: u64 = 64 * 1024 * 1024 * 1024;
 
+/// Largest data section filled whole at `NtCreateSection`; a larger one is
+/// filled on demand (this module).
+const EAGER_MAX: u64 = 256 * 1024 * 1024;
+
+/// A test's [`EAGER_MAX`], 0 for none ([`set_eager_max`]).
+#[cfg(feature = "test-support")]
+static EAGER_MAX_FOR_TESTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The size above which a data section over a director file is demand-paged.
+pub(crate) fn eager_max() -> u64 {
+    #[cfg(feature = "test-support")]
+    match EAGER_MAX_FOR_TESTS.load(Ordering::Relaxed) {
+        0 => {}
+        n => return n,
+    }
+    EAGER_MAX
+}
+
+/// Demand-page every data section larger than `bytes` (0: back to
+/// [`EAGER_MAX`]), so a test reaches the lazy path without a 256 MiB file.
+#[cfg(feature = "test-support")]
+pub(crate) fn set_eager_max(bytes: u64) {
+    EAGER_MAX_FOR_TESTS.store(bytes, Ordering::Relaxed);
+}
+
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-use crate::ntdef::STATUS_ACCESS_VIOLATION;
+use crate::ntdef::{STATUS_ACCESS_VIOLATION, STATUS_IN_PAGE_ERROR, STATUS_UNSUCCESSFUL};
+
+/// How many times a failed fill is asked again within one fault before the
+/// fault becomes `STATUS_IN_PAGE_ERROR`, and a failed image read before its
+/// section fails.
+pub(crate) const FILL_RETRIES: u32 = 3;
 
 /// A shim-owned VA range backing one synthetic section.
 struct OwnedRegion {
     base: usize,
     reserved: usize,
     file_size: u64,
+    /// The director handle a demand-paged region reads through, held for it
+    /// ([`crate::synth_file::hold`]) until the region is dropped.
     fh: u64,
+    /// The pagefile section behind a demand-paged region ([`reserve_shared`]),
+    /// as an address; 0 when the region is private memory (eager, or
+    /// demand-paged where a second view cannot fill, [`second_view_fills`]).
+    section: usize,
     /// Demand-paged: reserved `PAGE_NOACCESS`, chunks committed by the VEH.
     /// Eager regions are fully committed and filled at creation.
     lazy: bool,
     /// The section handle is still open.
     section_open: bool,
     committed: HashSet<usize>,
+    /// Chunks whose fills have failed and are still within their bounded
+    /// retries: the tries so far, and when the first failed. Counted per
+    /// chunk, not per faulting thread, so threads waiting on one chunk
+    /// share one bound.
+    failing: HashMap<usize, (u32, std::time::Instant)>,
+    /// Chunks whose fill failed its bounded retries: every touch raises at
+    /// once, with no READ, for the life of the region (a reopened section
+    /// is a new region, and asks again).
+    failed: HashSet<usize>,
+    /// Fills in progress: while any is, the region is not dropped (see
+    /// [`Filling`]).
+    filling: u32,
 }
 
 impl OwnedRegion {
     /// NT keeps a section's pages alive while any view is mapped, even after
     /// the handle is closed. `synth_section` owns the view refcounts, so ask it
-    /// rather than keeping a second tally that can drift out of step.
+    /// rather than keeping a second tally that can drift out of step. A fill
+    /// in progress keeps it too ([`Filling`]).
     fn is_dead(&self) -> bool {
-        !self.section_open && !crate::synth_section::has_view_in(self.base, self.reserved)
+        !self.section_open
+            && self.filling == 0
+            && !crate::synth_section::has_view_in(self.base, self.reserved)
     }
+}
+
+/// The bytes a region over a file of `file_size` reserves, a whole number of
+/// pages, or `None` when that is 0 or more than `limit` (the address space,
+/// `usize::MAX`). Worked in 64 bits: on x86 a file of 4 GiB or more does not
+/// fit, rather than wrapping to a smaller region.
+fn region_len_within(file_size: u64, limit: u64) -> Option<usize> {
+    let page = PAGE as u64;
+    let len = file_size.checked_add(page - 1)? & !(page - 1);
+    (len != 0 && len <= limit).then_some(len as usize)
+}
+
+/// [`region_len_within`] this target's address space.
+fn region_len(file_size: u64) -> Option<usize> {
+    region_len_within(file_size, usize::MAX as u64)
+}
+
+/// The bytes of the file a fill of `span` bytes at `file_off` reads: what
+/// the file holds there, at most `span`. Worked in 64 bits.
+fn fill_len(file_size: u64, file_off: u64, span: usize) -> usize {
+    file_size.saturating_sub(file_off).min(span as u64) as usize
+}
+
+/// The window filled at creation: [`WARM_BYTES`], or less of a smaller file.
+fn warm_len(file_size: u64) -> usize {
+    file_size.min(WARM_BYTES as u64) as usize
 }
 
 static REGIONS: Mutex<BTreeMap<usize, OwnedRegion>> = Mutex::new(BTreeMap::new());
@@ -98,17 +202,30 @@ fn ensure_veh() {
 // happens to hold the loader lock — and at 256 KiB per chunk a multi-GiB BSA
 // would otherwise burn tens of thousands of thread creations.
 
+/// Where a fill writes.
+#[derive(Debug, Clone, Copy)]
+enum Target {
+    /// Committed, writable memory at this address.
+    At(usize),
+    /// A second view of a region's section (its handle, as an address),
+    /// mapped for the fill at `offset` and unmapped after it.
+    View { section: usize, offset: u64 },
+}
+
 struct FillJob {
     fh: u64,
     file_off: u64,
-    dest: usize,
+    target: Target,
+    /// Bytes the director has there.
     len: usize,
+    /// Bytes the target spans: zeros past `len`.
+    span: usize,
     reply: Sender<Option<usize>>,
 }
 
-// SAFETY: `dest` addresses a committed page owned by the requesting thread for
-// the duration of the job; the requester blocks on `reply` until the worker is
-// done with it.
+// SAFETY: the target is committed memory owned by the requesting thread, or a
+// section its region keeps open, for the duration of the job; the requester
+// blocks on `reply` until the worker is done with it.
 unsafe impl Send for FillJob {}
 
 static FILL_WORKER: OnceLock<Option<Mutex<Sender<FillJob>>>> = OnceLock::new();
@@ -125,13 +242,9 @@ fn ensure_worker() {
             .spawn(move || {
                 IS_FILL_WORKER.with(|c| c.set(true));
                 while let Ok(job) = rx.recv() {
-                    let n = crate::director::global().and_then(|client| {
-                        // SAFETY: requester owns `dest` and blocks until reply.
-                        let dest = unsafe {
-                            core::slice::from_raw_parts_mut(job.dest as *mut u8, job.len)
-                        };
-                        client.read_fragmented(job.fh, job.file_off, dest).ok()
-                    });
+                    // SAFETY: the requester owns the target and blocks until reply.
+                    let n =
+                        unsafe { fill_into(job.fh, job.file_off, job.target, job.len, job.span) };
                     let _ = job.reply.send(n);
                 }
             })
@@ -140,12 +253,13 @@ fn ensure_worker() {
     });
 }
 
-/// Stream `[file_off, file_off+len)` of `fh` into `dest`, returning bytes read.
+/// Stream `[file_off, file_off+len)` of `fh` into `target`, then zeros up to
+/// `span` when all `len` came, returning the bytes read.
 ///
 /// Uses the worker when available; falls back to an inline read (aether-inject
 /// expands the primary stack for exactly this) if the worker never started or
 /// we are already *on* it.
-fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> {
+fn fill_bytes(fh: u64, file_off: u64, target: Target, len: usize, span: usize) -> Option<usize> {
     let on_worker = IS_FILL_WORKER.with(|c| c.get());
     if !on_worker {
         if let Some(Some(tx)) = FILL_WORKER.get() {
@@ -154,8 +268,9 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
                 tx.send(FillJob {
                     fh,
                     file_off,
-                    dest,
+                    target,
                     len,
+                    span,
                     reply,
                 })
                 .ok()
@@ -165,10 +280,181 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
             }
         }
     }
+    // SAFETY: the caller owns the target until this returns.
+    unsafe { fill_into(fh, file_off, target, len, span) }
+}
+
+/// The fill itself, on whichever thread runs it.
+///
+/// # Safety
+/// `target` is `At` committed writable memory of `span` bytes, or `View` an
+/// open section at least `offset + span` bytes long whose pages there are
+/// committed; the caller keeps either until this returns.
+unsafe fn fill_into(
+    fh: u64,
+    file_off: u64,
+    target: Target,
+    len: usize,
+    span: usize,
+) -> Option<usize> {
     let client = crate::director::global()?;
-    // SAFETY: caller committed `[dest, dest+len)` before asking for the fill.
-    let out = unsafe { core::slice::from_raw_parts_mut(dest as *mut u8, len) };
-    client.read_fragmented(fh, file_off, out).ok()
+    let dest = match target {
+        Target::At(a) => a,
+        // SAFETY: an open section, mapped for this fill only.
+        Target::View { section, offset } => unsafe { second_view(section, offset, span) }?,
+    };
+    // SAFETY: `span` writable bytes at `dest`, per the contract or the view.
+    let out = unsafe { core::slice::from_raw_parts_mut(dest as *mut u8, span) };
+    let n = client.read_fragmented(fh, file_off, &mut out[..len]).ok();
+    if n == Some(len) {
+        out[len..].fill(0);
+    }
+    if let Target::View { .. } = target {
+        // SAFETY: the view mapped above, unmapped once.
+        unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: dest as _ }) };
+    }
+    n
+}
+
+/// A writable view of `span` bytes of `section` at `offset`, only where
+/// those pages are committed and writable in it (`VirtualQuery`); `None`,
+/// with nothing mapped, otherwise. So a host whose second view does not see
+/// the first view's commit refuses the fill rather than taking an access
+/// violation the handler would not serve (the fill worker's, or one inside
+/// the program's `NtCreateSection`).
+///
+/// # Safety
+/// `section` is an open section at least `offset + span` bytes long.
+unsafe fn second_view(section: usize, offset: u64, span: usize) -> Option<usize> {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+    // SAFETY: per the contract; the view is unmapped here unless returned.
+    unsafe {
+        let v = MapViewOfFile(
+            section as _,
+            FILE_MAP_WRITE,
+            (offset >> 32) as u32,
+            offset as u32,
+            span,
+        );
+        if v.Value.is_null() {
+            return None;
+        }
+        let mut m: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
+        let n = VirtualQuery(
+            v.Value,
+            &mut m,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        );
+        if n == 0 || m.State != MEM_COMMIT || m.Protect != PAGE_READWRITE || m.RegionSize < span {
+            UnmapViewOfFile(v);
+            return None;
+        }
+        Some(v.Value as usize)
+    }
+}
+
+/// The probe's answer, once it is definite: 0 not yet, 1 works, 2 cannot.
+static SECOND_VIEW: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Whether a chunk can be filled through a second view while the region's
+/// own view of it stays inaccessible: a commit `PAGE_NOACCESS` inside a view
+/// of a `SEC_RESERVE` section, a write through another view (only once
+/// [`second_view`] has seen it committed), a protection change, and the byte
+/// read back through the first.
+///
+/// `Some` is definite and kept for the process: the host does it, or the
+/// sequence ran and misbehaved. `None` (a section, commit or view that could
+/// not be had, at the commit or pool limit say) is asked again at the next
+/// section, which meanwhile takes private memory.
+fn second_view_fills() -> Option<bool> {
+    match SECOND_VIEW.load(Ordering::Acquire) {
+        1 => return Some(true),
+        2 => return Some(false),
+        _ => {}
+    }
+    // SAFETY: a section and views this function creates and releases.
+    let answer = unsafe {
+        let (base, section) = reserve_shared(CHUNK)?;
+        let answer = 'probe: {
+            if VirtualAlloc(base as _, PAGE, MEM_COMMIT, PAGE_NOACCESS).is_null() {
+                break 'probe None;
+            }
+            let Some(v) = second_view(section, 0, PAGE) else {
+                // Committed in the first view, not in the second.
+                break 'probe Some(false);
+            };
+            core::ptr::write_volatile(v as *mut u8, 0x5A);
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ });
+            let mut old = 0;
+            Some(
+                VirtualProtect(base as _, PAGE, PAGE_READWRITE, &mut old) != 0
+                    && old == PAGE_NOACCESS
+                    && core::ptr::read_volatile(base as *const u8) == 0x5A,
+            )
+        };
+        release_va(base, section);
+        answer
+    }?;
+    SECOND_VIEW.store(if answer { 1 } else { 2 }, Ordering::Release);
+    Some(answer)
+}
+
+/// A test's "no pagefile section can be had" ([`fail_shared_reserve`]).
+#[cfg(feature = "test-support")]
+static FAIL_SHARED: AtomicBool = AtomicBool::new(false);
+
+/// While `on`, [`reserve_shared`] fails, as at the commit or pool limit.
+#[cfg(feature = "test-support")]
+pub(crate) fn fail_shared_reserve(on: bool) {
+    FAIL_SHARED.store(on, Ordering::Relaxed);
+}
+
+/// A pagefile section of `len` bytes with nothing committed (`SEC_RESERVE`),
+/// and one writable view of all of it: the view's address and the section's
+/// handle.
+unsafe fn reserve_shared(len: usize) -> Option<(usize, usize)> {
+    #[cfg(feature = "test-support")]
+    if FAIL_SHARED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let len64 = len as u64;
+    // SAFETY: an unnamed pagefile section; the view is of all of it.
+    unsafe {
+        let section = CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            core::ptr::null(),
+            PAGE_READWRITE | SEC_RESERVE,
+            (len64 >> 32) as u32,
+            len64 as u32,
+            core::ptr::null(),
+        );
+        if section.is_null() {
+            return None;
+        }
+        let v = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, len);
+        if v.Value.is_null() {
+            CloseHandle(section);
+            return None;
+        }
+        Some((v.Value as usize, section as usize))
+    }
+}
+
+/// Give back a region's address space: its view and section, or its private
+/// reservation.
+///
+/// # Safety
+/// `base` and `section` are a region's, which nothing uses any more.
+unsafe fn release_va(base: usize, section: usize) {
+    // SAFETY: per the contract.
+    unsafe {
+        if section == 0 {
+            VirtualFree(base as *mut c_void, 0, MEM_RELEASE);
+        } else {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: base as _ });
+            CloseHandle(section as _);
+        }
+    }
 }
 
 // ── section creation ───────────────────────────────────────────────────────
@@ -176,30 +462,55 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
 /// Reserve VA for a director-backed data section; warm first [`WARM_BYTES`].
 ///
 /// Returns a synthetic section handle for [`crate::synth_section::map_view`].
+///
+/// The caller holds `fh` for the region ([`crate::synth_file::hold`]); the
+/// region lets it go when it is dropped (section closed, last view gone). On
+/// `None` there is no region, and the caller lets it go.
 pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize> {
     if file_size == 0 || file_size > MAX_LAZY {
         return None;
     }
-    let reserved = align_up(file_size as usize, PAGE);
-    if reserved == 0 {
-        return None;
-    }
+    // 64-bit first: on x86 a file of 4 GiB or more gets no region
+    // (`STATUS_SECTION_TOO_BIG`), not one cut to its size's low 32 bits.
+    let reserved = region_len(file_size)?;
     // Install VEH only if not disabled (VFS_LAZY_NO_VEH=1 for debug).
     if !aether_env::present(aether_env::LAZY_NO_VEH) {
         ensure_veh();
     }
     ensure_worker();
-    let base = VirtualAlloc(core::ptr::null(), reserved, MEM_RESERVE, PAGE_NOACCESS);
-    if base.is_null() {
-        return None;
-    }
-    let base_u = base as usize;
-    if !track(base_u, reserved, file_size, fh, true) {
-        VirtualFree(base, 0, MEM_RELEASE);
+    // A section of its own where the host fills through a second view and
+    // one can be had; otherwise private memory, which maps the file all the
+    // same but can show a chunk's zeros mid-fill. Decided per section and
+    // counted (`hookstats::lazy_region_count`).
+    use crate::hookstats::{note_lazy_region, LazyBacking};
+    let shared = match second_view_fills() {
+        Some(true) => match reserve_shared(reserved) {
+            Some(s) => Ok(s),
+            None => Err(LazyBacking::PrivateReserveFailed),
+        },
+        Some(false) => Err(LazyBacking::PrivateNoSecondView),
+        None => Err(LazyBacking::PrivateReserveFailed),
+    };
+    let (base_u, section) = match shared {
+        Ok(s) => {
+            note_lazy_region(LazyBacking::Shared);
+            s
+        }
+        Err(why) => {
+            let base = VirtualAlloc(core::ptr::null(), reserved, MEM_RESERVE, PAGE_NOACCESS);
+            if base.is_null() {
+                return None;
+            }
+            note_lazy_region(why);
+            (base as usize, 0)
+        }
+    };
+    if !track(base_u, reserved, file_size, fh, true, section) {
+        release_va(base_u, section);
         return None;
     }
     // Warm header/index window so first peeks work even if VEH is slow/racy.
-    let warm = (file_size as usize).min(WARM_BYTES);
+    let warm = warm_len(file_size);
     if warm > 0 {
         let _ = ensure_range(base_u, 0, warm);
     }
@@ -207,7 +518,7 @@ pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option
         Some(h) => Some(h),
         None => {
             forget(base_u);
-            VirtualFree(base, 0, MEM_RELEASE);
+            release_va(base_u, section);
             None
         }
     }
@@ -218,10 +529,20 @@ pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option
 /// Without this the shim leaks every eager mapping (up to 256 MiB each) for the
 /// life of the process.
 pub(crate) fn track_eager_section(base: usize, size: u64) -> bool {
-    track(base, align_up(size as usize, PAGE), size, 0, false)
+    match region_len(size) {
+        Some(len) => track(base, len, size, 0, false, 0),
+        None => false,
+    }
 }
 
-fn track(base: usize, reserved: usize, file_size: u64, fh: u64, lazy: bool) -> bool {
+fn track(
+    base: usize,
+    reserved: usize,
+    file_size: u64,
+    fh: u64,
+    lazy: bool,
+    section: usize,
+) -> bool {
     match REGIONS.lock() {
         Ok(mut g) => {
             g.insert(
@@ -231,9 +552,13 @@ fn track(base: usize, reserved: usize, file_size: u64, fh: u64, lazy: bool) -> b
                     reserved,
                     file_size,
                     fh,
+                    section,
                     lazy,
                     section_open: true,
                     committed: HashSet::new(),
+                    failing: HashMap::new(),
+                    failed: HashSet::new(),
+                    filling: 0,
                 },
             );
             true
@@ -256,15 +581,32 @@ fn region_key(g: &BTreeMap<usize, OwnedRegion>, addr: usize) -> Option<usize> {
         .map(|(k, _)| *k)
 }
 
-/// Drop the region at `key` if nothing references it any more.
-fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) {
-    if g.get(&key).is_some_and(|r| r.is_dead()) {
-        if let Some(r) = g.remove(&key) {
-            // SAFETY: `base` came from VirtualAlloc(MEM_RESERVE) here and no
-            // view or open section handle refers to it any more.
-            unsafe {
-                VirtualFree(r.base as *mut c_void, 0, MEM_RELEASE);
-            }
+/// Drop the region at `key` if nothing references it any more. Returns the
+/// director handle a dropped demand-paged region held, for [`let_go`] once
+/// `REGIONS` is unlocked.
+fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) -> Option<u64> {
+    if !g.get(&key).is_some_and(|r| r.is_dead()) {
+        return None;
+    }
+    let r = g.remove(&key)?;
+    // SAFETY: `base` came from this module's reservation and no view or
+    // open section handle refers to it any more.
+    unsafe { release_va(r.base, r.section) };
+    r.lazy.then_some(r.fh)
+}
+
+/// Let go of a dropped region's hold on its director handle
+/// ([`crate::synth_file::hold`]), closing it at the director when the
+/// program's file handle is already gone (docs/wire.md 3.4.10). Not under
+/// `REGIONS`: the CLOSE is a round trip, and a fault on another thread must
+/// not wait for it.
+pub(crate) fn let_go(fh: Option<u64>) {
+    let Some(fh) = fh else {
+        return;
+    };
+    if crate::synth_file::release(fh) {
+        if let Some(c) = crate::director::global() {
+            let _ = c.close(fh);
         }
     }
 }
@@ -276,24 +618,26 @@ fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) {
 ///
 /// Call *after* retiring the view in [`crate::synth_section::unmap_view`].
 pub(crate) fn on_view_unmapped(addr: usize) {
-    if let Ok(mut g) = REGIONS.lock() {
-        if let Some(key) = region_key(&g, addr) {
-            reap(&mut g, key);
-        }
-    }
+    let dropped = match REGIONS.lock() {
+        Ok(mut g) => region_key(&g, addr).and_then(|key| reap(&mut g, key)),
+        Err(_) => None,
+    };
+    let_go(dropped);
 }
 
 /// Note that the section handle covering `base` was closed. Frees the region
 /// once the last view is unmapped.
 pub(crate) fn on_section_closed(base: usize) {
-    if let Ok(mut g) = REGIONS.lock() {
-        if let Some(key) = region_key(&g, base) {
+    let dropped = match REGIONS.lock() {
+        Ok(mut g) => region_key(&g, base).and_then(|key| {
             if let Some(r) = g.get_mut(&key) {
                 r.section_open = false;
             }
-            reap(&mut g, key);
-        }
-    }
+            reap(&mut g, key)
+        }),
+        Err(_) => None,
+    };
+    let_go(dropped);
 }
 
 /// Whether `addr` falls in a demand-paged region (so a fault there is ours).
@@ -318,7 +662,7 @@ pub(crate) unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> boo
     let end = offset.saturating_add(len);
     let mut off = offset / CHUNK * CHUNK;
     while off < end {
-        if !fill_chunk_at(base + off) {
+        if fill_chunk_at(base + off) != Fill::Done {
             return false;
         }
         off += CHUNK;
@@ -408,53 +752,167 @@ unsafe fn veh_handler_body(info: *mut EXCEPTION_POINTERS) -> i32 {
     let Some(_veh) = VehGuard::enter() else {
         return EXCEPTION_CONTINUE_SEARCH;
     };
-    if fill_chunk_at(fault_addr) {
-        EXCEPTION_CONTINUE_EXECUTION
-    } else {
-        EXCEPTION_CONTINUE_SEARCH
+    // Ask until the chunk is filled or stamped failed. The bound is the
+    // chunk's, shared by every thread on it (`record_failure`), so this ends:
+    // each `Failed` is one of at most 1 + FILL_RETRIES tries in all.
+    loop {
+        match fill_chunk_at(fault_addr) {
+            Fill::Done => return EXCEPTION_CONTINUE_EXECUTION,
+            Fill::NotOurs => return EXCEPTION_CONTINUE_SEARCH,
+            Fill::Failed => {}
+            Fill::Dead => break,
+        }
+    }
+    // The page holds nothing the file holds, and it is still `PAGE_NOACCESS`:
+    // the fault becomes the one NT raises when a mapped file's paging read
+    // fails, for the program's handlers (or the end of the process) to see.
+    // Parameters as NT gives them: the access type (kept), the address, and
+    // the status the read failed with.
+    crate::hookstats::note_in_page_error(fault_addr);
+    (*rec).ExceptionCode = STATUS_IN_PAGE_ERROR;
+    (*rec).NumberParameters = 3;
+    (*rec).ExceptionInformation[1] = fault_addr;
+    (*rec).ExceptionInformation[2] = STATUS_UNSUCCESSFUL as u32 as usize;
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+/// What [`fill_chunk_at`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// The chunk holds the file's bytes (now, or already).
+    Done,
+    /// The address is in no demand-paged region, or the chunk could not be
+    /// committed: not a fault this module can serve.
+    NotOurs,
+    /// The READ failed, or came back short of what the file holds there.
+    /// The chunk is inaccessible (`PAGE_NOACCESS`, or reserved again), and
+    /// the next try asks again.
+    Failed,
+    /// The chunk's fill has failed its bounded retries (the first try and
+    /// [`FILL_RETRIES`] more, none started after the client's deadline has
+    /// passed since the first failed), whichever threads made them: this
+    /// touch, and every later one for the life of the region, raises
+    /// `STATUS_IN_PAGE_ERROR` with no READ.
+    Dead,
+}
+
+/// Count one failed fill of `chunk` in the region at `base`: [`Fill::Dead`]
+/// when that was its last allowed try (it is then stamped failed),
+/// [`Fill::Failed`] otherwise.
+fn record_failure(base: usize, chunk: usize) -> Fill {
+    let deadline = crate::director::global()
+        .map(|c| c.deadline())
+        .unwrap_or(aether_ipc::RESPONSE_DEADLINE);
+    let Ok(mut g) = REGIONS.lock() else {
+        // Nothing to count with: no more tries.
+        return Fill::Dead;
+    };
+    let Some(r) = g.get_mut(&base) else {
+        return Fill::Dead;
+    };
+    let (tries, first) = r
+        .failing
+        .entry(chunk)
+        .or_insert((0, std::time::Instant::now()));
+    *tries += 1;
+    if *tries > FILL_RETRIES || first.elapsed() >= deadline {
+        r.failing.remove(&chunk);
+        r.failed.insert(chunk);
+        return Fill::Dead;
+    }
+    Fill::Failed
+}
+
+/// A fill in progress on the region at its address (`OwnedRegion::filling`).
+///
+/// The fill uses the region's section handle and memory after `REGIONS` is
+/// unlocked (the READ is a round trip). Without this, a program that unmaps
+/// the last view and closes the section while another of its threads is
+/// faulting on it would have the region reaped mid-fill: the section handle
+/// closed and its value free for reuse, so the worker's `MapViewOfFile`
+/// could map an unrelated section and write this file's bytes into it, or
+/// the fill write into freed address space. While one of these lives the
+/// region is not dropped; the last fill to end drops a region that died
+/// meanwhile. (No test: the only reproduction is a program that unmaps a
+/// view another thread is reading, which ends that process either way.)
+struct Filling(usize);
+
+impl Drop for Filling {
+    fn drop(&mut self) {
+        let dropped = match REGIONS.lock() {
+            Ok(mut g) => {
+                if let Some(r) = g.get_mut(&self.0) {
+                    r.filling = r.filling.saturating_sub(1);
+                }
+                reap(&mut g, self.0)
+            }
+            Err(_) => None,
+        };
+        let_go(dropped);
     }
 }
 
 /// Commit + stream the CHUNK covering `addr` (addr may be anywhere in the chunk).
-unsafe fn fill_chunk_at(addr: usize) -> bool {
+///
+/// A fill is committed only whole: `min(CHUNK, size - offset)` bytes from
+/// the director, then zeros past the end of the file, as NT gives the tail of
+/// a mapped file's last page. A short answer before the file's size is not
+/// the end of the file here (OPEN gave the size; docs/wire.md 3.4.4's
+/// `n < len` end of file is only at that size), so it is [`Fill::Failed`].
+unsafe fn fill_chunk_at(addr: usize) -> Fill {
     let _guard = match FILL_LOCK.lock() {
         Ok(g) => g,
-        Err(_) => return false,
+        Err(_) => return Fill::NotOurs,
     };
 
-    let (base, file_size, fh, chunk_idx, commit_off, commit_len) = {
-        let g = match REGIONS.lock() {
+    let (base, file_size, fh, section, chunk_idx, commit_off, commit_len) = {
+        let mut g = match REGIONS.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return Fill::NotOurs,
         };
         let Some((_, region)) = g
-            .range(..=addr)
+            .range_mut(..=addr)
             .next_back()
             .filter(|(_, r)| r.lazy && addr < r.base + r.reserved)
         else {
-            return false;
+            return Fill::NotOurs;
         };
         let off = addr - region.base;
         let chunk_idx = off / CHUNK;
         if region.committed.contains(&chunk_idx) {
-            return true;
+            return Fill::Done;
         }
+        if region.failed.contains(&chunk_idx) {
+            return Fill::Dead;
+        }
+        region.filling += 1;
         let commit_off = chunk_idx * CHUNK;
         let commit_len = CHUNK.min(region.reserved - commit_off);
         (
             region.base,
             region.file_size,
             region.fh,
+            region.section,
             chunk_idx,
             commit_off,
             commit_len,
         )
     };
+    // Counted in `filling` above, under the same lock: the region outlives
+    // this fill.
+    let _filling = Filling(base);
 
     let page = (base + commit_off) as *mut c_void;
     // Align commit length to pages (required).
     let commit_len = align_up(commit_len, PAGE);
-    let committed = VirtualAlloc(page, commit_len, MEM_COMMIT, PAGE_READWRITE);
+    // Over a section the chunk stays inaccessible in the program's view
+    // until its bytes are in place (the module's "Filling").
+    let protect = if section != 0 {
+        PAGE_NOACCESS
+    } else {
+        PAGE_READWRITE
+    };
+    let committed = VirtualAlloc(page, commit_len, MEM_COMMIT, protect);
     if committed.is_null() {
         // Might already be committed by a racing fill that dropped lock early.
         if REGIONS
@@ -463,47 +921,54 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
             .and_then(|g| g.get(&base).map(|r| r.committed.contains(&chunk_idx)))
             .unwrap_or(false)
         {
-            return true;
+            return Fill::Done;
         }
-        return false;
+        return Fill::NotOurs;
     }
 
     let file_off = commit_off as u64;
-    let readable = if file_off >= file_size {
-        0usize
-    } else {
-        ((file_size - file_off) as usize).min(commit_len)
-    };
+    let readable = fill_len(file_size, file_off, commit_len);
 
     if readable > 0 {
         // Bracket the fill: a started-without-completed pair is the signature of
         // a wedged faulting thread, which is invisible everywhere else.
         crate::hookstats::note_fill_start();
         let t0 = std::time::Instant::now();
-        let n_read = fill_bytes(fh, file_off, page as usize, readable);
-        crate::hookstats::note_fill_end(
-            n_read.unwrap_or(0),
-            t0.elapsed().as_nanos() as u64,
-            n_read.is_some(),
-        );
-        let dest = core::slice::from_raw_parts_mut(page as *mut u8, readable);
-        match n_read {
-            Some(n) if n < readable => dest[n..].fill(0),
-            Some(_) => {}
-            None => dest.fill(0),
+        let target = if section != 0 {
+            Target::View {
+                section,
+                offset: file_off,
+            }
+        } else {
+            Target::At(page as usize)
+        };
+        let n_read = fill_bytes(fh, file_off, target, readable, commit_len);
+        let whole = n_read == Some(readable);
+        crate::hookstats::note_fill_end(n_read.unwrap_or(0), t0.elapsed().as_nanos() as u64, whole);
+        if !whole {
+            // Inaccessible, so no thread reads the part-filled chunk, and the
+            // next touch faults to fill it again. Private memory goes back to
+            // reserved; a view's pages cannot be decommitted, and stay
+            // committed `PAGE_NOACCESS`.
+            if section == 0 {
+                VirtualFree(page, commit_len, MEM_DECOMMIT);
+            }
+            return record_failure(base, chunk_idx);
         }
     }
-    if readable < commit_len {
-        core::slice::from_raw_parts_mut((page as *mut u8).add(readable), commit_len - readable)
-            .fill(0);
+    // Readable only now, every byte in place (zeros past the file's end).
+    let mut old = 0;
+    if section != 0 && VirtualProtect(page, commit_len, PAGE_READWRITE, &mut old) == 0 {
+        return record_failure(base, chunk_idx);
     }
 
     if let Ok(mut g) = REGIONS.lock() {
         if let Some(region) = g.get_mut(&base) {
             region.committed.insert(chunk_idx);
+            region.failing.remove(&chunk_idx);
         }
     }
-    true
+    Fill::Done
 }
 
 #[cfg(test)]
@@ -651,6 +1116,58 @@ mod tests {
         );
     }
 
+    /// A second view is written only where its pages are committed and
+    /// writable: over an uncommitted range it is refused (not written, so a
+    /// host whose views do not share commit cannot crash the process), and
+    /// once the first view commits the range it is given.
+    #[test]
+    fn a_second_view_of_an_uncommitted_range_is_refused() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, section) = unsafe { reserve_shared(CHUNK) }.expect("a section");
+        assert!(
+            unsafe { second_view(section, 0, PAGE) }.is_none(),
+            "a view of uncommitted pages was handed out"
+        );
+        assert!(!unsafe { VirtualAlloc(base as _, PAGE, MEM_COMMIT, PAGE_NOACCESS) }.is_null());
+        let v = unsafe { second_view(section, 0, PAGE) }.expect("a view of committed pages");
+        unsafe {
+            core::ptr::write_volatile(v as *mut u8, 7);
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ });
+            release_va(base, section);
+        }
+    }
+
+    /// Sizes and offsets are worked in 64 bits and only then fitted to the
+    /// address space. `limit` stands for the target's `usize::MAX`, so the
+    /// 32-bit case is checked on any host: a version that cast the file's
+    /// size to `usize` first would give a 5 GiB file a 1 GiB region there.
+    #[test]
+    fn region_sizes_and_fill_lengths_are_64_bit_before_they_fit_the_address_space() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let x86 = u32::MAX as u64;
+        assert_eq!(region_len_within(5 * GIB, x86), None, "5 GiB on x86");
+        assert_eq!(region_len_within(4 * GIB, x86), None, "4 GiB on x86");
+        assert_eq!(region_len_within(GIB + 1, x86), Some((GIB + 4096) as usize));
+        assert_eq!(region_len_within(3 * 4096 + 1, x86), Some(4 * 4096));
+        assert_eq!(region_len_within(0, x86), None);
+        assert_eq!(region_len_within(u64::MAX, u64::MAX), None, "no overflow");
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(region_len(64 * GIB), Some((64 * GIB) as usize));
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(region_len(5 * GIB), None);
+
+        assert_eq!(fill_len(5 * GIB, 0, CHUNK), CHUNK);
+        assert_eq!(fill_len(5 * GIB, 5 * GIB - 100, CHUNK), 100);
+        assert_eq!(fill_len(5 * GIB, 5 * GIB, CHUNK), 0);
+        assert_eq!(fill_len(4 * GIB + 1, 4 * GIB, CHUNK), 1);
+        assert_eq!(
+            warm_len(4 * GIB + 1),
+            WARM_BYTES,
+            "not the size's low 32 bits"
+        );
+        assert_eq!(warm_len(100), 100);
+    }
+
     #[test]
     fn two_views_at_one_base_are_refcounted() {
         let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -700,6 +1217,36 @@ mod tests {
             MEM_FREE,
             "eager section allocation leaked on close"
         );
+    }
+
+    /// The fill through a second view (the module's "Filling") is what
+    /// this host does: a demand-paged region is a section view, and a chunk
+    /// outside the warm window is inaccessible until filled.
+    #[test]
+    fn a_demand_paged_region_is_a_section_view_here() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            second_view_fills(),
+            Some(true),
+            "this host cannot fill through a second view"
+        );
+        let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");
+        let base = hook_map(h, 0, 0);
+        let section = REGIONS.lock().unwrap().get(&base).map(|r| r.section);
+        assert!(matches!(section, Some(s) if s != 0), "{section:?}");
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+        let at = base + 6 * 1024 * 1024;
+        unsafe {
+            VirtualQuery(
+                at as *const c_void,
+                &mut mbi,
+                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        assert_ne!(mbi.Protect, PAGE_READWRITE, "an unfilled chunk is readable");
+        hook_unmap(base);
+        hook_close(h);
+        assert_eq!(va_state(base), MEM_FREE);
     }
 
     #[test]

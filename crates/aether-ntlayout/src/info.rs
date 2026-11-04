@@ -119,16 +119,24 @@ pub fn put_stat(
 ///
 /// Only the classes that are pure metadata are filled. Anything else under the root falls
 /// through, which is no worse than before the hook existed.
-pub fn by_name_info(class_raw: u32, buf: &mut [u8], is_dir: bool, size: u64) -> Option<usize> {
+///
+/// `time` (a `FILETIME`) is written into every time field of the classes that carry times.
+pub fn by_name_info(
+    class_raw: u32,
+    buf: &mut [u8],
+    is_dir: bool,
+    size: u64,
+    time: i64,
+) -> Option<usize> {
     let need = by_name_info_len(class_raw)?;
     let buf = buf.get_mut(..need)?;
     buf.fill(0);
     let attrs = attributes(is_dir);
     match class_raw {
-        CLASS_BASIC => put_basic(buf, 0, attrs),
+        CLASS_BASIC => put_basic(buf, time, attrs),
         CLASS_STANDARD => put_standard(buf, size, is_dir),
-        CLASS_NETWORK_OPEN => put_network_open(buf, 0, size, attrs),
-        _ => put_stat(buf, 0, 0, size, attrs, 0),
+        CLASS_NETWORK_OPEN => put_network_open(buf, time, size, attrs),
+        _ => put_stat(buf, 0, time, size, attrs, 0),
     }
     Some(need)
 }
@@ -206,13 +214,14 @@ pub fn put_file_name(name: &str, buf: &mut [u8]) -> (Fit, usize) {
     if buf.len() < 8 {
         return (Fit::Mismatch, 0);
     }
-    let units: Vec<u16> = name.encode_utf16().collect();
-    let fits = units.len().min((buf.len() - 4) / 2);
-    put_u32(buf, 0, (units.len() * 2) as u32);
-    for (i, u) in units[..fits].iter().enumerate() {
+    // Counted, then written in place: no allocation.
+    let len = name.encode_utf16().count();
+    let fits = len.min((buf.len() - 4) / 2);
+    put_u32(buf, 0, (len * 2) as u32);
+    for (i, u) in name.encode_utf16().take(fits).enumerate() {
         buf[4 + i * 2..6 + i * 2].copy_from_slice(&u.to_le_bytes());
     }
-    let fit = if fits == units.len() {
+    let fit = if fits == len {
         Fit::Fits
     } else {
         Fit::Overflow
@@ -232,6 +241,23 @@ mod tests {
     }
 
     #[test]
+    fn the_time_given_is_every_time_field_of_a_class_that_has_times() {
+        const T: i64 = 133_444_736_000_000_000;
+        for (class, len, times) in [
+            (CLASS_BASIC, 40usize, [0, 8, 16, 24]),
+            (CLASS_NETWORK_OPEN, 56, [0, 8, 16, 24]),
+            (CLASS_STAT, 72, [8, 16, 24, 32]),
+            (CLASS_STAT_BASIC, 104, [8, 16, 24, 32]),
+        ] {
+            let mut buf = vec![0u8; len];
+            by_name_info(class, &mut buf, false, 1, T).unwrap();
+            for at in times {
+                assert_eq!(i64_at(&buf, at), T, "class {class} at {at}");
+            }
+        }
+    }
+
+    #[test]
     fn every_supported_class_reports_its_documented_length() {
         for (class, want) in [
             (CLASS_BASIC, 40usize),
@@ -242,7 +268,7 @@ mod tests {
         ] {
             let mut buf = vec![0u8; want];
             assert_eq!(
-                by_name_info(class, &mut buf, false, 1),
+                by_name_info(class, &mut buf, false, 1, 0),
                 Some(want),
                 "class {class}"
             );
@@ -262,7 +288,7 @@ mod tests {
         ] {
             let mut buf = vec![0xAAu8; need - 1];
             assert_eq!(
-                by_name_info(class, &mut buf, false, 1),
+                by_name_info(class, &mut buf, false, 1, 0),
                 None,
                 "class {class}"
             );
@@ -276,7 +302,7 @@ mod tests {
     #[test]
     fn an_unknown_class_is_declined_so_the_caller_falls_through() {
         let mut buf = vec![0u8; 512];
-        assert_eq!(by_name_info(9999, &mut buf, false, 1), None);
+        assert_eq!(by_name_info(9999, &mut buf, false, 1, 0), None);
     }
 
     /// The size a stat reports is the whole reason these classes are answered: a caller that
@@ -287,18 +313,18 @@ mod tests {
         const SIZE: u64 = 249_753_412; // Skyrim.esm, i.e. well past 32 bits.
         let mut buf = vec![0u8; 104];
 
-        by_name_info(CLASS_STANDARD, &mut buf, false, SIZE).unwrap();
+        by_name_info(CLASS_STANDARD, &mut buf, false, SIZE, 0).unwrap();
         assert_eq!(i64_at(&buf, 0), SIZE as i64, "standard AllocationSize");
         assert_eq!(i64_at(&buf, 8), SIZE as i64, "standard EndOfFile");
 
         buf.fill(0);
-        by_name_info(CLASS_NETWORK_OPEN, &mut buf, false, SIZE).unwrap();
+        by_name_info(CLASS_NETWORK_OPEN, &mut buf, false, SIZE, 0).unwrap();
         assert_eq!(i64_at(&buf, 32), SIZE as i64, "network-open AllocationSize");
         assert_eq!(i64_at(&buf, 40), SIZE as i64, "network-open EndOfFile");
 
         for class in [CLASS_STAT, CLASS_STAT_BASIC] {
             buf.fill(0);
-            by_name_info(class, &mut buf, false, SIZE).unwrap();
+            by_name_info(class, &mut buf, false, SIZE, 0).unwrap();
             assert_eq!(
                 i64_at(&buf, 40),
                 SIZE as i64,
@@ -318,14 +344,14 @@ mod tests {
             (CLASS_STAT_BASIC, 56),
         ] {
             buf.fill(0);
-            by_name_info(class, &mut buf, true, 0).unwrap();
+            by_name_info(class, &mut buf, true, 0, 0).unwrap();
             assert_eq!(
                 u32_at(&buf, attr_off),
                 FILE_ATTRIBUTE_DIRECTORY,
                 "class {class}"
             );
             buf.fill(0);
-            by_name_info(class, &mut buf, false, 1).unwrap();
+            by_name_info(class, &mut buf, false, 1, 0).unwrap();
             assert_eq!(
                 u32_at(&buf, attr_off),
                 FILE_ATTRIBUTE_NORMAL,
@@ -334,10 +360,10 @@ mod tests {
         }
         // FileStandardInformation carries a boolean rather than an attribute.
         buf.fill(0);
-        by_name_info(CLASS_STANDARD, &mut buf, true, 0).unwrap();
+        by_name_info(CLASS_STANDARD, &mut buf, true, 0, 0).unwrap();
         assert_eq!(buf[21], 1, "standard Directory flag");
         buf.fill(0);
-        by_name_info(CLASS_STANDARD, &mut buf, false, 1).unwrap();
+        by_name_info(CLASS_STANDARD, &mut buf, false, 1, 0).unwrap();
         assert_eq!(buf[21], 0, "standard Directory flag set for a file");
     }
 

@@ -290,7 +290,11 @@ pub(super) unsafe fn setinfo_hook_body(
             && length as usize >= core::mem::size_of::<FilePositionInformation>()
         {
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            let pos = unsafe { (*(info as *const FilePositionInformation)).current_byte_offset };
+            // Read unaligned: a caller's buffer need not be 8-aligned.
+            let pos = unsafe {
+                core::ptr::read_unaligned(info as *const FilePositionInformation)
+                    .current_byte_offset
+            };
             if pos >= 0 {
                 crate::synth_file::set_position(handle as isize, pos as u64);
             }
@@ -302,7 +306,10 @@ pub(super) unsafe fn setinfo_hook_body(
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
         {
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            let eof = unsafe { (*(info as *const FileEndOfFileInformation)).end_of_file };
+            // Read unaligned, as the position above.
+            let eof = unsafe {
+                core::ptr::read_unaligned(info as *const FileEndOfFileInformation).end_of_file
+            };
             if let Some(f) = crate::synth_file::cache(handle as isize) {
                 crate::read_cache::invalidate(&f);
             }

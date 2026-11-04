@@ -711,7 +711,7 @@ type Check = (String, String, String, Option<String>);
 /// A set of READs: what it is, and each one's (offset, length, bulk).
 type ReadSet = (String, Vec<(u64, u32, bool)>);
 
-/// Several READs of one handle in flight at once (C2 of the gap list): the
+/// Several READs of one handle in flight at once (wire.md 2.8): the
 /// shim's pipeline of 4, and of 8 (one slot is kept for a READ sent while
 /// they are held), each set at different offsets published out of order.
 fn pipelined(ring: &Attached, g: Geometry) -> Result<Vec<Check>, String> {
@@ -828,7 +828,7 @@ fn pipelined(ring: &Attached, g: Geometry) -> Result<Vec<Check>, String> {
     Ok(out)
 }
 
-/// A slow READ given up while `PROCESSING` (C7): the slot must end `FREE`,
+/// A slow READ given up while `PROCESSING` (wire.md 2.5): the slot must end `FREE`,
 /// and every slot serve after.
 fn abandoned(ring: &Attached, g: Geometry) -> Result<Check, String> {
     let (seg, geom, wake) = (ring.seg(), ring.geom(), ring.wake());
@@ -963,7 +963,7 @@ fn state_name(s: Option<u32>) -> String {
     }
 }
 
-/// A registry writer and a reader at once (C9): every read made at a
+/// A registry writer and a reader at once (wire.md 4.5): every read made at a
 /// generation a write's reply had already published sees that write.
 fn registry_race(ring: &Attached, env: &Env, timeout: Duration) -> Result<Check, String> {
     let what = format!(

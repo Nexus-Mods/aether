@@ -419,6 +419,17 @@ pub(crate) fn nt_query_by_name_relative(
 pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
     // Read through the handle with NtReadFile so the test stays on the NT
     // surface it is exercising.
+    let mut out = vec![0u8; 4096];
+    let (st, got) = nt_read_at(h, 0, &mut out);
+    assert!(st >= 0, "NtReadFile failed: {st:#x}");
+    out.truncate(got);
+    out
+}
+
+/// One `NtReadFile` of `buf.len()` bytes at `offset`: its status and the
+/// count its `IO_STATUS_BLOCK.Information` reports. One call, so a short
+/// count is what the hook answered, not what a loop added up.
+pub(crate) fn nt_read_at(h: *mut c_void, offset: i64, buf: &mut [u8]) -> (i32, usize) {
     type NtReadFileFn = unsafe extern "system" fn(
         *mut c_void,
         *mut c_void,
@@ -432,9 +443,7 @@ pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
     ) -> i32;
     let p = ntdll_proc("NtReadFile").expect("NtReadFile");
     let f: NtReadFileFn = unsafe { core::mem::transmute(p) };
-    let mut out = vec![0u8; 4096];
     let mut iosb = [0u8; 16];
-    let offset: i64 = 0;
     let st = unsafe {
         f(
             h,
@@ -442,16 +451,13 @@ pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
             core::ptr::null(),
             core::ptr::null(),
             iosb.as_mut_ptr() as *mut c_void,
-            out.as_mut_ptr() as *mut c_void,
-            out.len() as u32,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
             &offset,
             core::ptr::null(),
         )
     };
-    assert!(st >= 0, "NtReadFile failed: {st:#x}");
-    let got = usize::from_le_bytes(iosb[8..16].try_into().unwrap());
-    out.truncate(got);
-    out
+    (st, usize::from_le_bytes(iosb[8..16].try_into().unwrap()))
 }
 
 pub(crate) fn close(h: *mut c_void) {
@@ -574,4 +580,109 @@ pub(crate) fn nt_set_info_raw(h: *mut c_void, buf: &mut [u8], class: u32) -> i32
             class,
         )
     }
+}
+
+/// `NtQueryFullAttributesFile` of an absolute path: its status and the whole
+/// record.
+pub(crate) fn nt_query_full_attributes_abs(path: &str) -> (i32, FileNetworkOpenInformation) {
+    let Some(p) = ntdll_proc("NtQueryFullAttributesFile") else {
+        return (-1, FileNetworkOpenInformation::default());
+    };
+    let f: NtQueryFullAttributesFileFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    let mut info = FileNetworkOpenInformation::default();
+    let st = unsafe { f(&n.oa, &mut info) };
+    (st, info)
+}
+
+/// One `FILE_DIRECTORY_INFORMATION` record's name and the fields a test
+/// compares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirRecord {
+    pub(crate) name: String,
+    pub(crate) last_write_time: i64,
+    pub(crate) end_of_file: i64,
+    pub(crate) allocation_size: i64,
+    pub(crate) file_attributes: u32,
+}
+
+/// Every record of `dir` through `NtQueryDirectoryFile(FileDirectoryInformation)`.
+pub(crate) fn nt_enum_records(dir: *mut c_void) -> Vec<DirRecord> {
+    const FILE_DIRECTORY_INFORMATION: u32 = 1;
+    let Some(p) = ntdll_proc("NtQueryDirectoryFile") else {
+        return Vec::new();
+    };
+    let f: NtQueryDirectoryFileFn = unsafe { core::mem::transmute(p) };
+    let at = |b: &[u8], o: usize| i64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut restart = 1u8;
+    loop {
+        let mut iosb = [0u8; 16];
+        let st = unsafe {
+            f(
+                dir,
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                core::ptr::null(),
+                iosb.as_mut_ptr() as *mut c_void,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                FILE_DIRECTORY_INFORMATION,
+                0,
+                core::ptr::null(),
+                restart,
+            )
+        };
+        restart = 0;
+        if st < 0 {
+            break;
+        }
+        // NextEntryOffset@0, LastWriteTime@24, EndOfFile@40,
+        // AllocationSize@48, FileAttributes@56, FileNameLength@60, FileName@64.
+        let mut off = 0usize;
+        loop {
+            let r = &buf[off..];
+            let next = u32::from_le_bytes(r[0..4].try_into().unwrap()) as usize;
+            let namelen = u32::from_le_bytes(r[60..64].try_into().unwrap()) as usize;
+            let units: Vec<u16> = r[64..64 + namelen]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect();
+            out.push(DirRecord {
+                name: String::from_utf16_lossy(&units),
+                last_write_time: at(r, 24),
+                end_of_file: at(r, 40),
+                allocation_size: at(r, 48),
+                file_attributes: u32::from_le_bytes(r[56..60].try_into().unwrap()),
+            });
+            if next == 0 {
+                break;
+            }
+            off += next;
+        }
+    }
+    out
+}
+
+/// `NtQueryInformationByName` of an absolute path into a 128-byte buffer:
+/// its status and the buffer, or `None` when the export is absent.
+pub(crate) fn nt_query_by_name_abs(path: &str, class: u32) -> Option<(i32, [u8; 128])> {
+    let p = ntdll_proc("NtQueryInformationByName")?;
+    let f: NtQueryInformationByNameFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    let mut buf = [0u8; 128];
+    let mut iosb = [0u8; 16];
+    let st = unsafe {
+        f(
+            &n.oa,
+            iosb.as_mut_ptr() as *mut c_void,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+            class,
+        )
+    };
+    Some((st, buf))
 }

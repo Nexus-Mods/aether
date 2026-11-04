@@ -44,6 +44,35 @@ pub use child::{finish_ready_handshake, signal_bootstrap_failed};
 pub use aether_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
 #[doc(hidden)]
 pub use hook::as_shim_io_for_tests;
+#[cfg(feature = "test-support")]
+pub use hook::{plant_under_root_record_for_tests, with_handle_table_held_for_tests};
+
+/// Fill a data section over a director file on demand when it is larger
+/// than `bytes` (256 MiB in the shipped shim; 0 restores that), so a test
+/// reaches the demand-paged path with a small file. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn set_eager_section_max(bytes: u64) {
+    lazy_section::set_eager_max(bytes);
+}
+
+/// While `on`, a demand-paged section's own pagefile section cannot be had,
+/// as at the commit or pool limit, so the shim takes the private-memory
+/// fallback. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn fail_shared_lazy_reserve(on: bool) {
+    lazy_section::fail_shared_reserve(on);
+}
+/// Call `observe` with the process handle and id of each child the process
+/// hook creates, before the child is injected: what a test reads of the
+/// child (its image, say) while it exists. `false` when one is already set.
+/// Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn on_child_created(observe: fn(windows_sys::Win32::Foundation::HANDLE, u32)) -> bool {
+    hook::CHILD_CREATED.set(observe).is_ok()
+}
 /// Run one `extern "system"` entry point's body with its panic contained.
 ///
 /// Exported for `aether-shim`, which owns the injected DLL's other
@@ -64,9 +93,10 @@ pub use hook::{
 /// quietly start (or stop) counting again.
 pub use hookstats::{
     child_inject_refused_count, child_inject_refused_total, delete_on_close_refused_count,
-    hook_panic_count, hook_panics_total, link_refused_count, outcome_count, reg_notify_count,
-    reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
-    reg_write_refused_count, unrouted_director_opens, OpenOutcome, RegNotify,
+    hook_panic_count, hook_panics_total, lazy_region_count, link_refused_count, outcome_count,
+    reg_notify_count, reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
+    reg_write_refused_count, section_failure_count, unrouted_director_opens, OpenOutcome,
+    RegNotify,
 };
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or

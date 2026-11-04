@@ -152,8 +152,8 @@ pub fn write_dir_info(
     let mut last_end = 0usize;
 
     for it in items {
-        let name16: Vec<u16> = it.name.encode_utf16().collect();
-        let namelen = name16.len() * 2;
+        // Counted, then written in place: a record costs no allocation.
+        let namelen = it.name.encode_utf16().count() * 2;
         let rec = name_off + namelen;
         if off + rec > cap {
             break;
@@ -176,8 +176,10 @@ pub fn write_dir_info(
         }
         buf[off + name_len_off..off + name_len_off + 4]
             .copy_from_slice(&(namelen as u32).to_le_bytes());
-        let name_bytes: Vec<u8> = name16.iter().flat_map(|u| u.to_le_bytes()).collect();
-        buf[off + name_off..off + name_off + namelen].copy_from_slice(&name_bytes);
+        let name_at = off + name_off;
+        for (i, u) in it.name.encode_utf16().enumerate() {
+            buf[name_at + 2 * i..name_at + 2 * i + 2].copy_from_slice(&u.to_le_bytes());
+        }
 
         if let Some(p) = prev {
             let delta = (off - p) as u32;

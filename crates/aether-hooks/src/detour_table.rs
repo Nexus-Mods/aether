@@ -277,6 +277,22 @@ macro_rules! detour_table {
                 ) -> NTSTATUS,
                 on_panic: STATUS_HOOK_PANICKED,
             }
+            // KernelBase's `UnmapViewOfFile` and `UnmapViewOfFileEx` call this one, not the
+            // row above: without it a program's unmap of a view of a director file fails
+            // and the view is never retired. Optional so a host without the export (Win8
+            // and later have it, Wine too) still installs.
+            {
+                export: "NtUnmapViewOfSectionEx",
+                stat: [UnmapViewEx = 59],
+                tramp: TRAMP_UNMAP_VIEW_EX: NtUnmapViewOfSectionExFn,
+                install: Optional, group: File, flags: [],
+                hook: unmap_view_ex_hook = unmap_view_ex_hook_body(
+                    process: HANDLE,
+                    base: *mut c_void,
+                    flags: u32,
+                ) -> NTSTATUS,
+                on_panic: STATUS_HOOK_PANICKED,
+            }
             {
                 export: "NtQueryVolumeInformationFile",
                 stat: [QVol = 14],

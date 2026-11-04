@@ -38,9 +38,13 @@ mod whiteout;
 pub(crate) use self::entry::ShimIoGuard;
 pub use self::entry::{as_shim_io_for_tests, contain_panic};
 pub use self::handles::tracked_handle_count;
+#[cfg(feature = "test-support")]
+pub use self::handles::{plant_under_root_record_for_tests, with_handle_table_held_for_tests};
 pub use self::install::{
     install, registry_detours_installed, skipped_detours, HookGuard, InstallError,
 };
+#[cfg(feature = "test-support")]
+pub(crate) use self::process::CHILD_CREATED;
 pub(crate) use self::registry::reg_real;
 
 // Every module reaches the others' `pub(super)` items through here.

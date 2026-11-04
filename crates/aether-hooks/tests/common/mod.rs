@@ -21,30 +21,83 @@ static SERIAL: Mutex<()> = Mutex::new(());
 macro_rules! isolate {
     () => {{
         fn f() {}
-        if !$crate::common::run_isolated(::std::any::type_name_of_val(&f)) {
+        if !$crate::common::run_isolated(::std::any::type_name_of_val(&f), None) {
+            return;
+        }
+    }};
+}
+
+/// [`isolate!`] for a test whose child must end with exit code `$code` (a `u32`, such as
+/// an NTSTATUS the process dies of) rather than pass. The child is told not to show the
+/// crash dialog.
+#[allow(unused_macros)]
+macro_rules! isolate_expecting_exit {
+    ($code:expr) => {{
+        fn f() {}
+        if !$crate::common::run_isolated(::std::any::type_name_of_val(&f), Some($code)) {
             return;
         }
     }};
 }
 
 /// Whether the caller is the isolated child and should run its body. In the parent this runs
-/// the test in a child and panics if the child fails, so returns `false` only on success.
-/// `fn_path` is the type name of a function item nested in the test.
-pub(crate) fn run_isolated(fn_path: &str) -> bool {
+/// the test in a child and panics if the child fails (or, with `exit`, does not end with that
+/// code), so returns `false` only on success. `fn_path` is the type name of a function item
+/// nested in the test.
+pub(crate) fn run_isolated(fn_path: &str, exit: Option<u32>) -> bool {
+    run_isolated_output(fn_path, exit).is_none()
+}
+
+/// [`run_isolated`], returning what the child wrote to its standard output
+/// once it passed: `None` in the child, which runs the body. A child reaches
+/// the parent past libtest's capture by writing to `std::io::stdout()`
+/// directly rather than through `println!`.
+#[allow(dead_code)]
+pub(crate) fn run_isolated_output(fn_path: &str, exit: Option<u32>) -> Option<String> {
+    run_isolated_output_with(fn_path, exit, &[])
+}
+
+/// [`run_isolated_output`] with `env` set in the child: one test body run
+/// in two processes that differ only in those variables.
+#[allow(dead_code)]
+pub(crate) fn run_isolated_output_with(
+    fn_path: &str,
+    exit: Option<u32>,
+    env: &[(&str, &str)],
+) -> Option<String> {
     if std::env::var_os(CHILD_ENV).is_some() {
-        return true;
+        if exit.is_some() {
+            no_crash_dialog();
+        }
+        return None;
     }
     // `crate::module::test::f` -> libtest's `module::test`.
     let path = fn_path.strip_suffix("::f").expect("a nested fn named f");
     let name = path.split_once("::").map_or(path, |(_, rest)| rest);
     let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let out = Command::new(std::env::current_exe().expect("current exe"))
-        .args(["--exact", name, "--test-threads=1"])
+        // `--include-ignored`: an ignored test run by name (`-- --ignored`) runs its body too.
+        .args(["--exact", name, "--test-threads=1", "--include-ignored"])
         .env(CHILD_ENV, "1")
+        .envs(env.iter().copied())
         .output()
         .expect("spawn the isolated test");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    if let Some(code) = exit {
+        assert_eq!(
+            out.status.code().map(|c| c as u32),
+            Some(code),
+            "{name} should have ended with exit code {code:#x} ({}):\n{stdout}\n{stderr}",
+            out.status
+        );
+        // The filter matched the test, and it got as far as running.
+        assert!(
+            stdout.contains("running 1 test"),
+            "{name} did not run in its own process:\n{stdout}\n{stderr}"
+        );
+        return Some(stdout.into_owned());
+    }
     assert!(
         out.status.success(),
         "{name} failed in its own process ({}):\n{stdout}\n{stderr}",
@@ -55,5 +108,18 @@ pub(crate) fn run_isolated(fn_path: &str) -> bool {
         stdout.contains("1 passed"),
         "{name} did not run in its own process:\n{stdout}\n{stderr}"
     );
-    false
+    Some(stdout.into_owned())
+}
+
+/// An unhandled exception in this process ends it with the exception's code, without Windows
+/// Error Reporting's dialog waiting for someone to close it.
+#[allow(unsafe_code)]
+fn no_crash_dialog() {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    };
+    // SAFETY: sets this process's error mode; no pointers.
+    unsafe {
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    }
 }

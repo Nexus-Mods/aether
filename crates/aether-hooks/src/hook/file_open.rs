@@ -3,8 +3,8 @@
 
 use super::{
     allow_disk_fallthrough, fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours,
-    path_of_tracked, record_path, reset_handle, reset_key, tag_under_root, to_nt_path, ShimIoGuard,
-    HANDLES, TRAMP_CREATE, TRAMP_OPEN,
+    path_of_tracked, record_path, reset_handle, reset_key, surely_outside, tag_under_root,
+    to_nt_path, ShimIoGuard, HANDLES, TRAMP_CREATE, TRAMP_OPEN,
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
@@ -21,6 +21,12 @@ use aether_protocol::{OpenFlags, Status};
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
+
+/// The access bits that can grant `DELETE`: `DELETE` itself, `GENERIC_ALL`
+/// (which maps to `FILE_ALL_ACCESS`) and `MAXIMUM_ALLOWED`.
+const MAY_DELETE: u32 = 0x0001_0000 | 0x1000_0000 | 0x0200_0000;
+/// `FILE_NON_DIRECTORY_FILE` in an open's options: the caller opens a file.
+const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 
 /// Record an open the director did not answer that passes through to the real filesystem,
 /// unless `already` is set — meaning `try_fuse_create` already classified this same physical
@@ -376,72 +382,52 @@ unsafe fn try_fuse_mkdir(
     // folded path. See `FuseClient::vpath_as_spelled`.
     let (root, vp) = client.route_as_spelled(path)?;
     let vp = vp.as_str();
-    client.names_changed(root, &aether_casefold::fold(vp));
-    match client.mkdir(root, vp, 0o755) {
-        Ok(()) => {
-            // Synthesize a virtual directory handle directly — do NOT Opcode::Open the
-            // new dir: the overlay opens paths as FileChannels, and a directory
-            // open throws. fh=0 is never a real director handle, so the NtClose-time
-            // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
-            // needs a handle to receive and immediately close; later metadata
-            // reads are path-based (qattr/getattr), not through this handle.
-            let h = match crate::synth_file::open_fuse(0, 0, true) {
-                Some(h) => h,
-                // A poisoned synth table: fail closed rather than fall through to a real mkdir.
-                None => return Some(STATUS_UNSUCCESSFUL),
-            };
-            if !file_handle.is_null() {
-                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                unsafe {
-                    *file_handle = h as HANDLE;
+    // Every request about the name but MKDIR, which creates it, sends it
+    // folded (docs/wire.md 3.2).
+    let folded = aether_casefold::fold(vp);
+    client.names_changed(root, &folded);
+    // FILE_CREATE and FILE_OPEN_IF ask first whether a directory is there:
+    // a director may answer MKDIR of an existing directory `ST_OK` or
+    // `ST_EXISTS` (docs/wire.md 3.4.9), so MKDIR's answer cannot say whether
+    // it was created. FILE_CREATE of one is a name collision
+    // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), and
+    // FILE_OPEN_IF opens it. Anything else (missing, a file, a failed
+    // GETATTR) goes on to MKDIR, whose answer stands.
+    if matches!(disp, 2 | 3) {
+        if let Ok(a) = client.getattr(root, &folded) {
+            if a.found && a.is_dir {
+                if disp == 2 {
+                    return Some(STATUS_OBJECT_NAME_COLLISION);
                 }
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                return Some(unsafe {
+                    new_dir_handle(file_handle, path, iosb, crate::ntdef::FILE_OPENED)
+                });
             }
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, FILE_CREATED) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { reset_handle(file_handle, Some(path), STATUS_SUCCESS) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
-            Some(STATUS_SUCCESS)
         }
+    }
+    match client.mkdir(root, vp, 0o755) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        Ok(()) => Some(unsafe { new_dir_handle(file_handle, path, iosb, FILE_CREATED) }),
         // Parent missing → name-not-found (do not fall through to a real on-disk
         // mkdir under the root).
         Err(Status::NotFound) => Some(STATUS_OBJECT_NAME_NOT_FOUND),
         // mkdir failed — most often the directory already exists (the overlay
         // raises :already-exists, which the director has no dedicated status for and
         // reports as a generic error). Probe: if a directory is really there,
-        // honor the disposition — FILE_CREATE(2) must report a name collision
-        // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), while
-        // FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
-        Err(st) => match client.getattr(root, vp) {
+        // honor the disposition: FILE_CREATE(2) must report a name collision,
+        // while FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
+        // (For 2 and 3 the GETATTR above usually answered already; this one
+        // covers a directory made between the two requests.)
+        Err(st) => match client.getattr(root, &folded) {
             Ok(a) if a.found && a.is_dir => {
                 if disp == 2 {
                     Some(STATUS_OBJECT_NAME_COLLISION)
                 } else {
-                    let h = match crate::synth_file::open_fuse(0, 0, true) {
-                        Some(h) => h,
-                        // A poisoned synth table: fail closed rather than fall through to a real mkdir.
-                        None => return Some(STATUS_UNSUCCESSFUL),
-                    };
-                    if !file_handle.is_null() {
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            *file_handle = h as HANDLE;
-                        }
-                    }
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe {
-                        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, crate::ntdef::FILE_OPENED)
-                    };
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe { reset_handle(file_handle, Some(path), STATUS_SUCCESS) };
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
-                    Some(STATUS_SUCCESS)
+                    Some(unsafe {
+                        new_dir_handle(file_handle, path, iosb, crate::ntdef::FILE_OPENED)
+                    })
                 }
             }
             // Not there, and refused because no writable layer serves the path
@@ -451,6 +437,42 @@ unsafe fn try_fuse_mkdir(
             _ => Some(STATUS_UNSUCCESSFUL),
         },
     }
+}
+
+/// The handle `try_fuse_mkdir` gives back for a directory it made or found,
+/// with `info` (`FILE_CREATED` or `FILE_OPENED`) in the IO status block.
+///
+/// A synthetic directory handle holding no director handle (so closing it
+/// sends no CLOSE), made without an `Opcode::Open` of the directory: the overlay opens paths as FileChannels, and a directory open
+/// throws. The caller (CreateDirectoryW) only needs a handle to receive and
+/// immediately close; later metadata reads are path-based (qattr/getattr),
+/// not through this handle.
+unsafe fn new_dir_handle(
+    file_handle: *mut HANDLE,
+    path: &str,
+    iosb: *mut c_void,
+    info: usize,
+) -> NTSTATUS {
+    let h = match crate::synth_file::open_dir_unissued() {
+        Some(h) => h,
+        // A poisoned synth table: fail closed rather than fall through to a real mkdir.
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if !file_handle.is_null() {
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        unsafe {
+            *file_handle = h as HANDLE;
+        }
+    }
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info) };
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { reset_handle(file_handle, Some(path), STATUS_SUCCESS) };
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
+    STATUS_SUCCESS
 }
 
 /// Arity mirrors `NtCreateFile` exactly; it is not ours to reduce. (Clippy
@@ -555,8 +577,8 @@ pub(super) struct OpenCall {
 /// an under-root miss behind `allow_disk_fallthrough`). `real` makes the original call with the
 /// `OBJECT_ATTRIBUTES` it is given.
 ///
-/// A name the call carries that cannot be decoded is refused (`path_of_tracked`'s status, the
-/// C2 fail-closed rule), before anything else happens.
+/// A name the call carries that cannot be decoded is refused (`path_of_tracked`'s status: an
+/// undecodable name fails closed), before anything else happens.
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
@@ -574,6 +596,30 @@ unsafe fn route_open(
         opts,
         create,
     } = *call;
+    // A file outside every root, the commonest open there is: the host opens
+    // it, and nothing is decoded or recorded, so nothing is allocated. The
+    // handle value's stale record, if any, is always cleared: the clear waits
+    // for the table's lock, and a removal allocates nothing.
+    // What is not recorded is the path it was opened as, which is read for
+    // two things: the parent of a relative open, and the source of a
+    // handle-based delete or rename. A file is the parent only of its own
+    // streams, which lie outside the roots with it, and an open whose access
+    // can grant `DELETE` keeps the full path below, so a delete or rename
+    // through it still finds the path in the table rather than asking the OS.
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if opts & FILE_NON_DIRECTORY_FILE != 0
+        && access & MAY_DELETE == 0
+        && !crate::hookstats::enabled()
+        && unsafe { surely_outside(oa) }
+    {
+        let status = real(oa);
+        if status >= 0 && !file_handle.is_null() {
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs);
+            // the open succeeded, so the slot holds its handle.
+            reset_key(unsafe { *file_handle } as isize, true);
+        }
+        return status;
+    }
     // Decode once for the whole call and thread the result through every
     // function below rather than each calling `path_of(oa)` itself; see
     // `tag_under_root`'s doc comment for the cost argument.

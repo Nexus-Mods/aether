@@ -36,10 +36,25 @@ windows-sys = { workspace = true, features = [
   "Win32_Storage_FileSystem",
 ] }
 
+[features]
+# Entry points for this crate's own tests (`director::install_global`,
+# `director::connect_from_env`, `director::advance_name_clock` (the spelling cache's clock),
+# `set_eager_section_max`). Off in the shipped shim: only the
+# dev-dependency below turns it on.
+test-support = []
+
 [dev-dependencies]
+# The crate's own tests use the `test-support` entry points.
+aether-hooks = { path = ".", features = ["test-support"] }
 # The director the shim's tests serve (`tests/fakedirector`); its serve loop is
 # `aether-rpc`'s, a normal dependency above.
 aether-refdirector.workspace = true
+# `tests/fakedirector`'s file ring (`RingKind::File`).
+aether-filering.workspace = true
+# The counting allocator (`tests/harness`) and temp folders.
+aether-testkit.workspace = true
+# `tests/harness/faults_*.rs`: generated fault sequences.
+proptest.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
@@ -52,6 +67,9 @@ windows-sys = { workspace = true, features = [
   "Win32_System_LibraryLoader",
   # `tests/diagnostics/child_inject_fails_closed.rs`: the process list.
   "Win32_System_Diagnostics_ToolHelp",
+  # `tests/harness/sections.rs`: file mappings, and `SetErrorMode` for a child that must crash.
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
 ] }
 
 [lints]

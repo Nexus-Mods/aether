@@ -1,0 +1,43 @@
+[package]
+name = "aether-shimbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+# `cargo run -p aether-shimbench` runs the bench, not its target.
+default-run = "aether-shimbench"
+description = "What a Win32 call costs under the shim: each call timed natively and in a process the injector started with the shim, its ring served by the reference or the null director"
+
+[dependencies]
+# The tree's bytes (`pattern`), the same on disk and in the director.
+aether-refdirector.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The handshake names the injector's environment carries.
+aether-env.workspace = true
+# The machine a report names and the baseline rules (`aether_conform::machine`),
+# shared with `aether-conform bench`.
+aether-conform.workspace = true
+aether-ipc.workspace = true
+# The shim's config file (docs/wire.md 5.1).
+aether-protocol.workspace = true
+aether-rpc.workspace = true
+# The injector and the shim as cargo built them, and scratch folders.
+aether-testkit.workspace = true
+# The folders a bench works in.
+tempfile.workspace = true
+# The named section and the director's events.
+aether-win.workspace = true
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Performance",
+  "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

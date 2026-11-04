@@ -31,6 +31,9 @@ pub(super) struct Snapshot {
     pub(super) fills_started: u64,
     pub(super) fills_completed: u64,
     pub(super) fills_failed: u64,
+    pub(super) section_failures: [u64; sections::SECTION_FAILURE_N],
+    pub(super) lazy_regions: [u64; sections::LAZY_BACKING_N],
+    pub(super) last_in_page_addr: usize,
     pub(super) fill_bytes: u64,
     pub(super) fill_nanos: u64,
     pub(super) fill_max_nanos: u64,
@@ -111,6 +114,9 @@ pub(super) fn snapshot() -> Snapshot {
         fills_started: FILLS_STARTED.load(Ordering::Relaxed),
         fills_completed: FILLS_COMPLETED.load(Ordering::Relaxed),
         fills_failed: FILLS_FAILED.load(Ordering::Relaxed),
+        section_failures: sections::section_failures_snapshot(),
+        lazy_regions: sections::lazy_regions_snapshot(),
+        last_in_page_addr: sections::LAST_IN_PAGE_ADDR.load(Ordering::Relaxed),
         fill_bytes: FILL_BYTES.load(Ordering::Relaxed),
         fill_nanos: FILL_NANOS.load(Ordering::Relaxed),
         fill_max_nanos: FILL_MAX_NANOS.load(Ordering::Relaxed),
@@ -215,9 +221,8 @@ pub(super) fn render(snap: &Snapshot) -> String {
 /// can opt into a fast tick for just itself; unset, every existing caller
 /// keeps the same 250ms cadence.
 pub(super) fn report_interval() -> std::time::Duration {
-    std::time::Duration::from_millis(aether_env::parsed_or(
-        aether_env::SHIM_STATS_INTERVAL_MS,
-        250,
+    std::time::Duration::from_millis(aether_env::session::stats_interval_ms(
+        aether_env::text(aether_env::SHIM_STATS_INTERVAL_MS).as_deref(),
     ))
 }
 
@@ -265,14 +270,16 @@ pub(super) fn banner() -> String {
 pub(super) fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render_child_inject_refused(&snap),
+        sections::render_section_failures(&snap),
         render(&snap),
         render_read_cache(&snap),
         render_async(&snap),
         render_fills(&snap),
+        sections::render_lazy_regions(&snap),
         render_name_queries(&snap),
         render_reg_fallbacks(&snap),
         render_stats(&snap),

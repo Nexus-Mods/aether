@@ -1,0 +1,26 @@
+{
+  "name": "launch-storm",
+  "description": "What a game's start looks like: a GETATTR, an OPEN and a CLOSE of each of some three thousand files under Data/, spelled in mixed case as a game spells them, from four threads; then the stored spellings of the textures, as the shim asks for them",
+  "tree": {
+    "roots": [
+      {
+        "id": 0,
+        "files": [
+          {"path": "Data/Main.esm", "contents": {"size": 4194304, "seed": 1}},
+          {"path": "Data/Update.esm", "contents": {"size": 1048576, "seed": 2}}
+        ]
+      }
+    ]
+  },
+  "generate": [
+    {"dir": "Data/Meshes/Clutter", "count": 1000, "name": "Bowl{n}.nif", "pad": 4, "size": 2048, "seed": 1000},
+    {"dir": "Data/Textures/Clutter", "count": 1500, "name": "Bowl{n}_N.dds", "pad": 4, "size": 4096, "seed": 3000},
+    {"dir": "Data/Scripts", "count": 500, "name": "QuestStage{n}.pex", "pad": 3, "size": 1024, "seed": 5000}
+  ],
+  "phases": [
+    {"name": "probe", "threads": 4, "repeat": 1, "kind": "storm",
+     "ops": ["getattr", "open", "close"], "paths": {"prefix": "Data/"}},
+    {"name": "spellings", "threads": 2, "repeat": 1, "kind": "storm",
+     "ops": ["stored_names"], "paths": {"prefix": "Data/Textures/"}}
+  ]
+}

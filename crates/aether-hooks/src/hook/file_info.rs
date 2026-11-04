@@ -4,8 +4,8 @@
 use super::{
     attributes, caller_buf, cwd_from_peb, put_all_prefix, put_attribute_tag, put_basic,
     put_file_name, put_id, put_network_open, put_object_name, put_standard, put_stat, reg_real,
-    under_root_path, Fit, ALL_PREFIX_LEN, ATTRIBUTE_TAG_LEN, BASIC_LEN, ID_LEN, NETWORK_OPEN_LEN,
-    STANDARD_LEN, STAT_LEN, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL,
+    time_or, under_root_path, Fit, ALL_PREFIX_LEN, ATTRIBUTE_TAG_LEN, BASIC_LEN, ID_LEN,
+    NETWORK_OPEN_LEN, STANDARD_LEN, STAT_LEN, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL,
 };
 use crate::ntdef::{
     FileBasicInformation, FileFsDeviceInformation, FileInternalInformation,
@@ -52,6 +52,44 @@ fn synth_final_path(handle: HANDLE) -> Option<String> {
             .trim_end_matches('\\')
             .to_string()
     }))
+}
+
+/// The `FILETIME` a time query on a synthetic handle reports (`docs/wire.md`
+/// 3.2, "Timestamps"): the file's `mtime`, asked by GETATTR on the handle's
+/// first time query and kept in its entry until a write or truncate to the
+/// file through any handle, so a listing, a query by path and a query by
+/// handle agree. The first such query in a process that does not yet know
+/// whether the director sends times asks too, and its answer settles that
+/// ([`FuseClient::settle_times`]). Once it is known that the director sends
+/// none, nothing is asked and [`SYNTH_FILETIME`] is reported, as it is when
+/// the director cannot say.
+///
+/// [`FuseClient::settle_times`]: crate::director::FuseClient::settle_times
+fn handle_time(handle: HANDLE) -> i64 {
+    let none = SYNTH_FILETIME;
+    let Some(c) = crate::director::global().filter(|c| c.sends_times() != Some(false)) else {
+        return none;
+    };
+    let Some((kept, changes)) = crate::synth_file::time_of(handle as isize) else {
+        return none;
+    };
+    if let Some(mtime) = kept {
+        return time_or(mtime, none);
+    }
+    let Some((root, vp)) = crate::synth_file::abs_path(handle as isize)
+        .as_deref()
+        .and_then(|p| c.route(p))
+    else {
+        return none;
+    };
+    match c.getattr(root, &vp) {
+        Ok(a) if a.found => {
+            c.settle_times(a.mtime);
+            crate::synth_file::set_mtime(handle as isize, a.mtime, changes);
+            time_or(a.mtime, none)
+        }
+        _ => none,
+    }
 }
 
 /// The file id a synthetic handle reports: one per *file*, so that two
@@ -157,7 +195,7 @@ unsafe fn fuse_query_information(
             // SAFETY: `info` is non-null and `length` covers the structure (checked above).
             let buf = unsafe { caller_buf(info, BASIC_LEN) };
             buf.fill(0);
-            put_basic(buf, SYNTH_FILETIME, attributes(is_dir));
+            put_basic(buf, handle_time(handle), attributes(is_dir));
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe {
                 crate::ntbuf::iosb_set(
@@ -226,7 +264,7 @@ unsafe fn fuse_query_information(
             }
             // SAFETY: `info` is non-null and `length` covers the structure (checked above).
             let buf = unsafe { caller_buf(info, NETWORK_OPEN_LEN) };
-            put_network_open(buf, SYNTH_FILETIME, size, attributes(is_dir));
+            put_network_open(buf, handle_time(handle), size, attributes(is_dir));
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe {
                 crate::ntbuf::iosb_set(
@@ -251,7 +289,7 @@ unsafe fn fuse_query_information(
             let buf = unsafe { caller_buf(info, ALL_PREFIX_LEN) };
             put_all_prefix(
                 buf,
-                SYNTH_FILETIME,
+                handle_time(handle),
                 is_dir,
                 size,
                 synth_file_id(handle),
@@ -333,7 +371,7 @@ unsafe fn fuse_query_information(
             put_stat(
                 buf,
                 synth_file_id(handle),
-                SYNTH_FILETIME,
+                handle_time(handle),
                 size,
                 attributes(is_dir),
                 0x0012_0089,
@@ -364,7 +402,8 @@ unsafe fn fuse_query_information(
                 Some(need) => {
                     // SAFETY: `info` is non-null and `length` covers the structure (checked above).
                     let buf = unsafe { caller_buf(info, need) };
-                    aether_ntlayout::by_name_info(class, buf, is_dir, size).unwrap_or(0)
+                    let time = handle_time(handle);
+                    aether_ntlayout::by_name_info(class, buf, is_dir, size, time).unwrap_or(0)
                 }
             };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).

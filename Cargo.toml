@@ -111,6 +111,9 @@ windows-sys = "0.61"
 bitflags = "2"
 # Generative tests of the wire codecs (aether-protocol, its `testing` feature).
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+# Micro-benchmarks (benches/ of five crates, dev-dependency only). No plots: the
+# HTML reports would pull in plotters for nothing a terminal does not say.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # Everything here unwinds so the library can catch panics at FFI boundaries
 # instead of killing its host process.

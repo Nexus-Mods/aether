@@ -20,5 +20,11 @@ aether-win.workspace = true
 workspace = true
 
 [dev-dependencies]
+# Micro-benchmarks (benches/), run by hand: cargo bench -p aether-redirect.
+criterion.workspace = true
 # The counting allocator (`tests/name_cache_alloc.rs`).
 aether-testkit.workspace = true
+
+[[bench]]
+name = "paths"
+harness = false

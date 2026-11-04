@@ -17,6 +17,8 @@ bitflags.workspace = true
 proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Micro-benchmarks (benches/), run by hand: cargo bench -p aether-protocol.
+criterion.workspace = true
 # Golden vectors for the ring header live beside the codec vectors.
 # Dev-only: aether-ipc itself depends on this crate.
 aether-ipc.workspace = true
@@ -29,3 +31,7 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "codec"
+harness = false

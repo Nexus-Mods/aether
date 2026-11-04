@@ -9,5 +9,13 @@ publish.workspace = true
 [dependencies]
 aether-protocol.workspace = true
 
+[dev-dependencies]
+# Micro-benchmarks (benches/), run by hand: cargo bench -p aether-ipc.
+criterion.workspace = true
+
 [lints]
 workspace = true
+
+[[bench]]
+name = "readcache"
+harness = false

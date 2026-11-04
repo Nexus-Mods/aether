@@ -45,10 +45,7 @@ pub(crate) fn get() -> Option<&'static ReadCache> {
 /// than 1 MiB, the most a single fetch reserves.
 fn config(mib: Option<&str>) -> CacheConfig {
     let mut cfg = CacheConfig::default();
-    if let Some(m) = mib
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&m| m > 0)
-    {
+    if let Some(m) = aether_env::session::read_cache_mib(mib) {
         cfg.max_bytes = m.saturating_mul(1 << 20);
     }
     cfg

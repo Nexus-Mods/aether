@@ -9,9 +9,11 @@ description = "The bodies of the decoder fuzz targets, replayed on stable Rust i
 
 [dependencies]
 aether-casefold.workspace = true
+aether-env.workspace = true
 aether-ipc.workspace = true
 aether-ntlayout.workspace = true
 aether-protocol.workspace = true
+aether-redirect.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

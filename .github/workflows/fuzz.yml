@@ -14,6 +14,9 @@ on:
         description: Seconds to run each target
         default: '300'
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: never
   CARGO_FUZZ_VERSION: 0.13.2
@@ -49,15 +52,34 @@ jobs:
             mkdir -p "fuzz/corpus/$(basename "$dir")"
             cp -r "$dir". "fuzz/corpus/$(basename "$dir")/"
           done
+      # Tight limits, so a hang or a runaway allocation is a crash at once and
+      # not at libFuzzer's defaults (20 minutes, 2 GiB): 10 s an input, 512 MiB
+      # resident, and no input longer than the largest the target can be given.
+      # Messages are bounded by the ring's payload capacity (1 MiB, and the
+      # 5-byte frame, plus 4 bytes of buffer length and class for dir_records);
+      # the ring slot by its 15-byte header and 256-byte payload; the shim
+      # config and the environment by Windows' 32767-character variable (fifteen
+      # variables for shim_env).
       - name: Run every target
         working-directory: fuzz
         shell: bash
         run: |
           seconds="${{ github.event.inputs.seconds || '300' }}"
           failed=0
-          for target in reply_decode request_decode shim_cfg ring_response dir_records; do
+          entries=(
+            reply_decode:1048581
+            request_decode:1048581
+            shim_cfg:32767
+            ring_response:271
+            dir_records:1048580
+            shim_env:491520
+          )
+          limits=(-timeout=10 -rss_limit_mb=512)
+          for entry in "${entries[@]}"; do
+            target="${entry%%:*}"
+            max_len="${entry##*:}"
             echo "::group::$target"
-            cargo fuzz run "$target" -- -max_total_time="$seconds" || failed=1
+            cargo fuzz run "$target" -- -max_total_time="$seconds" "${limits[@]}" -max_len="$max_len" || failed=1
             echo "::endgroup::"
           done
           exit $failed

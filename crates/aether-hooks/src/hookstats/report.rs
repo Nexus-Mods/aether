@@ -222,9 +222,8 @@ pub(super) fn render(snap: &Snapshot) -> String {
 /// can opt into a fast tick for just itself; unset, every existing caller
 /// keeps the same 250ms cadence.
 pub(super) fn report_interval() -> std::time::Duration {
-    std::time::Duration::from_millis(aether_env::parsed_or(
-        aether_env::SHIM_STATS_INTERVAL_MS,
-        250,
+    std::time::Duration::from_millis(aether_env::session::stats_interval_ms(
+        aether_env::text(aether_env::SHIM_STATS_INTERVAL_MS).as_deref(),
     ))
 }
 

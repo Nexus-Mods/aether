@@ -63,3 +63,10 @@ path = "fuzz_targets/dir_records.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shim_env"
+path = "fuzz_targets/shim_env.rs"
+test = false
+doc = false
+bench = false

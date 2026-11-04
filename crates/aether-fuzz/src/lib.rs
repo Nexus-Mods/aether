@@ -24,15 +24,17 @@ use aether_ipc::layout::{
 use aether_ipc::{ring, OwnedSeg};
 use aether_ntlayout::{write_dir_info, DirInfoClass, DirItem};
 use aether_protocol::shimcfg::{decode_config, encode_config_full};
-use aether_protocol::{Opcode, ReadReply, Reply, Request};
+use aether_protocol::{Opcode, ReadReply, Reply, Request, RootId};
+use aether_redirect::{RootMap, VolumeMap};
 
 /// The target names, as `fuzz/fuzz_targets/<name>.rs` and [`seeds`] use them.
-pub const TARGETS: [&str; 5] = [
+pub const TARGETS: [&str; 6] = [
     "reply_decode",
     "request_decode",
     "shim_cfg",
     "ring_response",
     "dir_records",
+    "shim_env",
 ];
 
 /// The golden vectors, one `name hex` line each.
@@ -242,6 +244,138 @@ pub fn dir_records(data: &[u8]) {
     assert!(!single || r.count <= 1);
 }
 
+/// The variables [`shim_env`] sets, in the order its input lists them, each
+/// with a value a director would give it. The names are `aether_env`'s, so a
+/// renamed variable is a compile error here.
+const ENV_FIELDS: [(&str, &str); 15] = [
+    (aether_env::VIRTUAL_DIR, r"C:\Games\Skyrim"),
+    (aether_env::VIRTUAL_ROOTS, r"1=C:\Games\Saves;2=\??\C:\Mods"),
+    (
+        aether_env::ROOT_BACKINGS,
+        r"1=C:/Backing/Saves;2=\\?\D:\Mods",
+    ),
+    (aether_env::RING_BYTES, "2097152"),
+    (aether_env::RING_PAYLOAD_CAP, "1048576"),
+    (aether_env::ARENA_LEN, "8388608"),
+    (aether_env::ARENA_OFFSET, "65536"),
+    (aether_env::RING_PATH, "/tmp/aether/ring"),
+    (aether_env::RING_SECTION, r"Local\aether-ring-1"),
+    (aether_env::REGISTRY, "1"),
+    (aether_env::READY_TIMEOUT_SECS, "180"),
+    (aether_env::SHIM_STATS_INTERVAL_MS, "250"),
+    (aether_env::SHIM_READ_CACHE_MIB, "256"),
+    (aether_env::SHIM_READ_CACHE, "off"),
+    (aether_env::ALLOW_DISK_FALLTHROUGH, "yes"),
+];
+
+/// Values of the shim's director-controlled environment, as the shim reads
+/// them (`aether_env::session`): each parser takes any text and must return,
+/// and what it returns keeps the promises its documentation makes. The input
+/// is the values of [`ENV_FIELDS`] in order, separated by NUL (which no
+/// environment value can hold); an empty field is an unset variable, and a
+/// field of one `0x01` byte is one set to the empty string. Bytes that are
+/// not UTF-8 read as the replacement character, as the shim reads a value it
+/// can, and a variable it cannot is unset.
+pub fn shim_env(data: &[u8]) {
+    use aether_env::session as s;
+    let mut parts = data.split(|b| *b == 0);
+    let mut field = || -> Option<String> {
+        match parts.next() {
+            None | Some([]) => None,
+            Some([1]) => Some(String::new()),
+            Some(v) => Some(String::from_utf8_lossy(v).into_owned()),
+        }
+    };
+    let [dir, extra, backs, bytes, cap, arena_len, arena_off, path, section, registry, ready, stats, cache_mib, cache, disk] =
+        std::array::from_fn(|_| field());
+    fn r(v: &Option<String>) -> Option<&str> {
+        v.as_deref()
+    }
+
+    let roots = s::roots(r(&dir).unwrap_or(""), r(&extra));
+    assert_eq!(roots[0].0, 0, "root 0 comes first");
+    let mut ids: Vec<u32> = roots.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), roots.len(), "an id is declared once");
+    assert!(roots.iter().skip(1).all(|(_, p)| !p.is_empty()));
+
+    let backings = s::backings(r(&backs));
+    for (_, p) in &backings {
+        assert!(!p.contains('/') && *p == p.to_ascii_lowercase());
+    }
+    // What the shim does with the roots and backings it was given: build
+    // its root map, which refuses one that is no usable path (and so fails
+    // the load) and never panics.
+    let declared: Vec<(RootId, &str)> = roots
+        .iter()
+        .chain(&backings)
+        .map(|(id, p)| (RootId(*id), p.as_str()))
+        .collect();
+    let _ = RootMap::with_roots(&declared, VolumeMap::empty());
+    let ring = s::ring(r(&bytes), r(&cap), r(&arena_len), r(&arena_off));
+    let _ = (
+        ring.bytes,
+        ring.payload_cap,
+        ring.arena_len,
+        ring.arena_offset,
+    );
+    let source = s::ring_source(path.clone(), section.clone());
+    assert_eq!(
+        source.is_none(),
+        path.as_deref().is_none_or(str::is_empty) && section.is_none()
+    );
+    assert!(s::ready_timeout_secs(r(&ready)) >= 1);
+    let _ = s::stats_interval_ms(r(&stats));
+    assert_ne!(s::read_cache_mib(r(&cache_mib)), Some(0));
+    for v in [&registry, &cache, &disk] {
+        // The two readings differ only in what they do with no value.
+        if s::opt_in(r(v)) {
+            assert!(s::opt_out(r(v)));
+        }
+    }
+}
+
+/// The seeds of [`shim_env`], from `contract/env.json`: for each handshake
+/// variable the shim reads, an environment that sets it (to the value a
+/// director gives it) and nothing else, and one that sets them all.
+fn env_seeds() -> Vec<(&'static str, Vec<u8>)> {
+    let contract = include_str!("../../../contract/env.json");
+    let named: Vec<&str> = contract
+        .split('"')
+        .filter(|s| s.starts_with("VFS_"))
+        .collect();
+    let join = |keep: &dyn Fn(&str) -> bool| -> Vec<u8> {
+        let mut v = Vec::new();
+        for (i, (name, value)) in ENV_FIELDS.iter().enumerate() {
+            if i > 0 {
+                v.push(0);
+            }
+            if keep(name) {
+                v.extend_from_slice(value.as_bytes());
+            }
+        }
+        v
+    };
+    let mut out = vec![("shim_env", join(&|_| true))];
+    for name in named {
+        if ENV_FIELDS.iter().any(|(n, _)| *n == name) {
+            out.push(("shim_env", join(&|n| n == name)));
+        }
+    }
+    out
+}
+
+/// The handshake variables of `contract/env.json` the shim parses: the
+/// seeds' coverage of them, for the test that keeps the two in step.
+pub fn parsed_handshake_names() -> Vec<&'static str> {
+    ENV_FIELDS
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| aether_env::handshake::is_handshake(n))
+        .collect()
+}
+
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len() / 2)
         .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).expect("vectors.txt is hex"))
@@ -346,6 +480,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             out.push(("dir_records", v));
         }
     }
+    out.extend(env_seeds());
     out
 }
 
@@ -357,6 +492,7 @@ pub fn run(target: &str, data: &[u8]) {
         "shim_cfg" => shim_cfg(data),
         "ring_response" => ring_response(data),
         "dir_records" => dir_records(data),
+        "shim_env" => shim_env(data),
         other => panic!("no fuzz target named {other}"),
     }
 }

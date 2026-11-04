@@ -67,47 +67,7 @@ pub enum FuseInitError {
     ConnectFailed(String),
 }
 
-/// Where the ring's shared memory comes from.
-///
-/// Two spellings of one thing: a mapped `SharedSeg` the director also has. The
-/// distinction survives only as far as [`FuseClient::connect_source`], which
-/// obtains the mapping and then stops caring.
-#[derive(Debug, PartialEq, Eq)]
-enum RingSource {
-    /// A named page-file-backed section ([`aether_env::RING_SECTION`]) — the
-    /// Windows deployment, and what the shipped shim uses.
-    Section(String),
-    /// A real file ([`aether_env::RING_PATH`]), mapped by path — the only kind of
-    /// shared memory a shim inside Wine and a native Linux director can both
-    /// name. A page-file-backed section has no identity outside its own
-    /// Windows/Wine session.
-    File(String),
-}
-
-/// Pick the ring source. **The path wins when both are set**, and that
-/// ordering is a correctness requirement rather than a preference.
-///
-/// A session configured for the Wine boundary must never fall back to a named
-/// section: `VFS_RING_SECTION` may well still be set (the launcher writes ten
-/// `VFS_*` vars together), and a section of that name may even exist — from an
-/// unrelated director on the same box. Falling back would attach the shim to
-/// the *wrong* director, or to nothing, and report success either way.
-///
-/// An empty `VFS_RING_PATH` is treated as absent. Believing it would map `""`
-/// and fail with a confusing io error while a perfectly good section was
-/// named — the same trap as an empty `VFS_RING_SECTION` (see the Task 2 ruling
-/// in this increment's ledger). Neither set stays `None`, which the caller
-/// turns into [`FuseInitError::NotConfigured`] exactly as before.
-///
-/// Split from [`ring_source_from_env`] so the precedence is testable without
-/// writing to the process environment — global mutable state every other test
-/// in this binary shares.
-fn ring_source(ring_path: Option<String>, section: Option<String>) -> Option<RingSource> {
-    match ring_path.filter(|p| !p.is_empty()) {
-        Some(path) => Some(RingSource::File(path)),
-        None => section.map(RingSource::Section),
-    }
-}
+use aether_env::session::{ring_source, RingSource};
 
 fn ring_source_from_env() -> Option<RingSource> {
     ring_source(
@@ -183,15 +143,12 @@ fn forced_failure() -> Result<(), FuseInitError> {
 /// names.
 fn client_from_env() -> Result<FuseClient, FuseInitError> {
     let source = ring_source_from_env().ok_or(FuseInitError::NotConfigured)?;
-    let ring_bytes: usize = aether_env::text(aether_env::RING_BYTES)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2 * 1024 * 1024);
-    let payload_cap: u32 = aether_env::text(aether_env::RING_PAYLOAD_CAP)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1_048_576);
-    let arena_len: usize = aether_env::text(aether_env::ARENA_LEN)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let aether_env::session::Ring {
+        bytes: ring_bytes,
+        payload_cap,
+        arena_len,
+        ..
+    } = ring_numbers();
     // Required, not defaulted: this names *which tree is being virtualised*, and
     // there is no sensible guess. The default it used to carry pointed at a
     // layout that no longer exists, so an unset root connected the client to a
@@ -207,6 +164,17 @@ fn client_from_env() -> Result<FuseClient, FuseInitError> {
     let roots = roots_from_env(&root);
     FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
         .map_err(FuseInitError::ConnectFailed)
+}
+
+/// The ring's numbers as the environment gives them (`aether_env::session`).
+fn ring_numbers() -> aether_env::session::Ring {
+    let get = aether_env::text;
+    aether_env::session::ring(
+        get(aether_env::RING_BYTES).as_deref(),
+        get(aether_env::RING_PAYLOAD_CAP).as_deref(),
+        get(aether_env::ARENA_LEN).as_deref(),
+        get(aether_env::ARENA_OFFSET).as_deref(),
+    )
 }
 
 /// Concurrent bulk READs in flight (each uses its own arena bank via slot id).
@@ -486,8 +454,8 @@ impl FuseClient {
         let (arena_len, inline_chunk) = arena_rule(arena_len, geom.slot_count, payload_cap);
         // Where the arena starts (`docs/wire.md` 2.1): what the environment
         // says, else right after the last slot, where both directors put it.
-        let arena_offset = aether_env::text(aether_env::ARENA_OFFSET)
-            .and_then(|s| s.parse().ok())
+        let arena_offset = ring_numbers()
+            .arena_offset
             .unwrap_or_else(|| geom.slot_off(geom.slot_count));
 
         // The staged launch directory is a second spelling of root 0, not a
@@ -1226,30 +1194,10 @@ pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
 /// without writing to the process environment — which is global mutable state
 /// every other test in this binary shares.
 fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
-    let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];
-    let Some(extra) = spec else {
-        return out;
-    };
-    for entry in extra.split(';') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let Some((id, path)) = entry.split_once('=') else {
-            continue;
-        };
-        let (Ok(id), path) = (id.trim().parse::<u32>(), path.trim()) else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
-        }
-        match out.iter_mut().find(|(r, _)| r.0 == id) {
-            Some(slot) => slot.1 = path.to_string(),
-            None => out.push((RootId(id), path.to_string())),
-        }
-    }
-    out
+    aether_env::session::roots(virtual_dir, spec)
+        .into_iter()
+        .map(|(id, path)| (RootId(id), path))
+        .collect()
 }
 
 /// Each root's backing directory where it differs from the root's location
@@ -1260,14 +1208,9 @@ pub(crate) fn backings_from_env() -> Vec<(RootId, String)> {
 
 /// The parsing half of [`backings_from_env`].
 fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
-    spec.unwrap_or_default()
-        .split(';')
-        .filter_map(|entry| {
-            let (id, path) = entry.trim().split_once('=')?;
-            let id = id.trim().parse::<u32>().ok()?;
-            let path = path.trim();
-            (!path.is_empty()).then(|| (RootId(id), normalize_path_for_root(path)))
-        })
+    aether_env::session::backings(spec)
+        .into_iter()
+        .map(|(id, path)| (RootId(id), path))
         .collect()
 }
 
@@ -1291,13 +1234,11 @@ fn stage_root_from_env() -> Option<String> {
 }
 
 pub fn strip_nt_device(p: &str) -> &str {
-    p.strip_prefix(r"\??\")
-        .or_else(|| p.strip_prefix(r"\\?\"))
-        .unwrap_or(p)
+    aether_env::session::strip_nt_device(p)
 }
 
 pub fn normalize_path_for_root(p: &str) -> String {
-    strip_nt_device(p).replace('/', "\\").to_ascii_lowercase()
+    aether_env::session::normalize_path_for_root(p)
 }
 
 #[cfg(test)]

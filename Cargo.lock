@@ -72,9 +72,11 @@ name = "aether-fuzz"
 version = "0.1.0"
 dependencies = [
  "aether-casefold",
+ "aether-env",
  "aether-ipc",
  "aether-ntlayout",
  "aether-protocol",
+ "aether-redirect",
  "proptest",
 ]
 

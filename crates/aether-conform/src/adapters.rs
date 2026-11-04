@@ -87,6 +87,11 @@ pub enum Break {
     /// Every bulk READ reply is written into bank 0, whatever slot it answers
     /// (wire.md 2.6: "Slot `s` owns bank `s % banks`").
     BankZero,
+    /// Not a broken rule: handles are numbered down from `u64::MAX` (the
+    /// reference's 1 is `u64::MAX`, its 2 is `u64::MAX - 1`), which wire.md
+    /// 3.4.3 allows ("any u64 the director chooses"). A run must pass it,
+    /// whatever numbers it sends for handles it has no number of its own for.
+    DownwardFh,
 }
 
 impl Break {
@@ -101,6 +106,7 @@ impl Break {
             "per-slot-fh" => Some(Break::PerSlotFh),
             "slot-zero-only" => Some(Break::SlotZeroOnly),
             "bank-zero" => Some(Break::BankZero),
+            "downward-fh" => Some(Break::DownwardFh),
             _ => None,
         }
     }
@@ -428,7 +434,10 @@ fn interposed(
         next = a.wrapping_add(1);
         let mut taken = vec![a];
         if how == Break::SwapReplies {
-            // Another request in flight with this one, if one comes soon.
+            // Another request in flight with this one, if one comes soon. A
+            // fixed busy-wait, not an event: nothing can signal "another
+            // request is about to be published", and 300 µs per request is
+            // nothing to a test break.
             let since = std::time::Instant::now();
             while since.elapsed() < std::time::Duration::from_micros(300) {
                 if let Some(b) = ring::server_take_from(seg, &geom, next) {
@@ -606,6 +615,25 @@ struct Served {
     broken: Option<Break>,
 }
 
+impl Served {
+    /// The number the client is given for the reference's handle `fh`.
+    fn fh_out(&self, fh: u64) -> u64 {
+        match self.broken {
+            Some(Break::DownwardFh) => u64::MAX - (fh - 1),
+            _ => fh,
+        }
+    }
+
+    /// The reference's handle for the number `fh` a client sent.
+    fn fh_in(&self, fh: u64) -> u64 {
+        match self.broken {
+            // 0 becomes the reference's 2^64, which wraps to 0: never issued.
+            Some(Break::DownwardFh) => (u64::MAX - fh).wrapping_add(1),
+            _ => fh,
+        }
+    }
+}
+
 impl Director for Served {
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
         let mut a = self.reference.get_attr(root, path)?;
@@ -625,6 +653,7 @@ impl Director for Served {
         {
             o.immutable = true;
         }
+        o.fh = self.fh_out(o.fh);
         Ok(o)
     }
     fn read(
@@ -639,13 +668,14 @@ impl Director for Served {
             Some(Break::BankZero) => ReadSlot { slot: 0, ..at },
             _ => at,
         };
+        let fh = self.fh_in(fh);
         self.reference.read(at, slot_flags, fh, offset, len)
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
-        self.reference.write(fh, offset, data)
+        self.reference.write(self.fh_in(fh), offset, data)
     }
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
-        self.reference.set_attr(fh, size)
+        self.reference.set_attr(self.fh_in(fh), size)
     }
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
         self.reference.rename(root, from, to)
@@ -657,7 +687,7 @@ impl Director for Served {
         self.reference.mkdir(root, mode, path)
     }
     fn close(&mut self, fh: u64) -> Result<(), Status> {
-        self.reference.close(fh)
+        self.reference.close(self.fh_in(fh))
     }
     fn heartbeat(&mut self) -> Result<(), Status> {
         self.reference.heartbeat()

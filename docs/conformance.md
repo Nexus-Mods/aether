@@ -256,9 +256,13 @@ its own HEARTBEAT, its own comparison session and its own registry
 generation rules. Each sends its steps one at a time, claiming from the next
 slot of a cursor the clients share. Data requests (READ, WRITE, SETATTR and
 write OPENs) stay below 2.8's limit, `data_limit(worker_hint, slot_count)`,
-as the shim keeps them. A closed handle, or one never issued, is always sent
-as a stand-in near `u64::MAX`, never as the number the director closed,
-since the director may have issued that number to another client already.
+as the shim keeps them. A case's steps that present a closed handle, or a
+number never issued, are left out of its round (the generated cases send
+them): a client knows only its own handles, and a director may issue any
+u64 (3.4.3), so any number one client sent for a handle it does not have
+could be another client's live handle, which would answer it, or which a
+CLOSE would close. Such a step expects `ST_BAD_FH` and changes nothing, so
+the other steps' answers stay the same.
 Then the sweep, which gives every slot and bank work:
 
 - an OPEN of each sweep file, each claimed from its own slot, so every slot

@@ -140,6 +140,11 @@ pub fn scenario_files(dir: &Path) -> Result<Vec<PathBuf>, LoadError> {
 }
 
 /// Runs every scenario in `opts.scenarios` against the adapter.
+///
+/// A scenario's clients other than 0 are processes of this program
+/// (`std::env::current_exe()`, run as `client-worker`), so a caller of this
+/// function other than the `aether-conform` binary can play only scenarios
+/// whose steps are all client 0's.
 pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
     let files = scenario_files(&opts.scenarios).map_err(|e| RunError::Scenarios(e.to_string()))?;
     let scenarios: Vec<(PathBuf, Scenario)> = files
@@ -317,7 +322,6 @@ fn play(
                 Err(e) => (Err(e), 0, 0),
             },
         };
-        let gen_broken = reg_gen.before(&step.request, gen_before);
         let sent = match sent {
             Ok(sent) => sent,
             Err(e) => {
@@ -332,6 +336,9 @@ fn play(
                 return Err(format!("step {i}: the ring gave no answer: {e}"));
             }
         };
+        // Only once there is an answer: without one there are no generations
+        // read either.
+        let gen_broken = reg_gen.before(&step.request, gen_before);
         let (got, mut passed) = match &sent {
             Sent::Answer(got) => {
                 let r = session.check(i, &step.request, &step.expect, got);

@@ -699,7 +699,17 @@ fn a_director_numbering_handles_per_slot_fails_only_with_several_clients() {
 /// clients, at the timeout.
 #[test]
 fn a_director_serving_only_slot_zero_fails_every_second_client() {
-    let (entries, all) = committed_with("slot-zero-only", "2");
+    // The failures come at the timeout, so it is short; it bounds only the
+    // runs expected to fail. The single-client suite is played on its own,
+    // with the usual timeout, so a slow machine cannot fail it.
+    let dir = multi_scenarios();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave slot-zero-only",
+        dir.path(),
+        "2",
+        &CONCURRENT_FEW,
+    );
+    assert_eq!(code, Some(1), "{all}");
     assert_eq!(
         failed(&entries),
         [
@@ -716,6 +726,30 @@ fn a_director_serving_only_slot_zero_fails_every_second_client() {
         assert!(error.contains("no answer within 2 s"), "{e:?}");
         assert!(error.contains("wire.md 2.5"), "{e:?}");
     }
+    let single = single_client_scenarios();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave slot-zero-only",
+        single.path(),
+        "20",
+        &[],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// A folder holding the committed scenarios but the `multi-*` ones: every
+/// step of them sent by client 0.
+fn single_client_scenarios() -> TempDir {
+    let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let dir = aether_testkit::tempdir().unwrap();
+    for e in std::fs::read_dir(&from).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.starts_with("multi-") && name.ends_with(".json") {
+            std::fs::copy(&p, dir.path().join(&name)).unwrap();
+        }
+    }
+    dir
 }
 
 /// wire.md 2.6: slot `s` owns bank `s % banks`. A director that writes every
@@ -753,6 +787,49 @@ fn a_director_writing_every_bulk_reply_into_bank_zero_fails_on_other_slots() {
 fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients() {
     let (entries, all) = committed_with("swap-replies", "20");
     assert_eq!(failed(&entries), ["concurrent"], "{all}");
+    // Failed for a reply in the wrong slot: a client's comparison (another
+    // client's answer), or the sweep's GETATTR or READ wave, not a timeout.
+    let concurrent = entry(&entries, "concurrent");
+    let error = concurrent.2.as_deref().unwrap_or("");
+    assert!(!error.contains("no answer within"), "{concurrent:?}");
+    assert!(
+        error.contains("wire.md 2.5")
+            || concurrent
+                .3
+                .iter()
+                .any(|n| n.starts_with("a different") || n.starts_with("none of the allowed")),
+        "{concurrent:?}"
+    );
+}
+
+/// wire.md 3.4.3: "`fh` is any u64 the director chooses". A director that
+/// numbers handles down from `u64::MAX` passes everything, the concurrent
+/// clients included: no client sends a number of its own choosing for a
+/// handle it has none for, which could be another client's live handle.
+#[test]
+fn a_director_numbering_handles_down_from_u64_max_passes_everything() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let failures = aether_testkit::tempdir().unwrap();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave downward-fh",
+        &dir,
+        "20",
+        &[
+            "--generate",
+            "--cases",
+            "64",
+            "--concurrent",
+            "4",
+            "--concurrent-cases",
+            "48",
+            "--seed",
+            "11",
+            "--failures",
+            failures.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
 }
 
 /// wire.md 2.8.1: "a process that is killed never sends CLOSE for its open

@@ -74,6 +74,8 @@ pub struct Attached {
     ring_bytes: usize,
     arena_len: usize,
     arena_offset: usize,
+    /// Whether `VFS_ARENA_OFFSET` gave `arena_offset`, or it was assumed.
+    arena_offset_given: bool,
     #[cfg(windows)]
     server_ev: Option<crate::job::WakeEvent>,
     deadline: Duration,
@@ -156,6 +158,7 @@ impl Attached {
             ring_bytes,
             arena_len,
             arena_offset,
+            arena_offset_given: given_offset.is_some(),
             #[cfg(windows)]
             server_ev,
             deadline,
@@ -219,6 +222,16 @@ impl Attached {
     /// after the last slot (wire.md 2.1).
     pub fn arena_offset(&self) -> usize {
         self.arena_offset
+    }
+
+    /// Whether `VFS_ARENA_OFFSET` named the arena's start. Without it the
+    /// start is assumed (after the last slot, where both directors put it,
+    /// wire.md 2.1), and the shim, which takes data offsets from bulk replies
+    /// and never needs the start (5.3: "Informational"), would accept an
+    /// arena elsewhere; so the bank a bulk reply lies in is checked only
+    /// when this is true.
+    pub fn arena_offset_given(&self) -> bool {
+        self.arena_offset_given
     }
 
     /// The arena bank `offset .. offset + len` lies in, if it lies in one:

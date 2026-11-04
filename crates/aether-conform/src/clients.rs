@@ -236,10 +236,18 @@ fn decode(
             let banks = ring.geom().slot_count.max(1);
             let own = slot % banks;
             let end = arena_offset.saturating_add(u64::from(len));
-            match ring.bank_of(arena_offset, len) {
+            // Without VFS_ARENA_OFFSET the banks' places are only assumed, so
+            // the data need only lie in the mapping (`Attached::arena_offset_given`).
+            let given = ring.arena_offset_given();
+            let placed = if given {
+                ring.bank_of(arena_offset, len)
+            } else {
+                Some(own)
+            };
+            match placed {
                 Some(b) if b == own && end <= ring.ring_bytes() as u64 => {
                     match ring.seg().read_bytes(arena_offset as usize, len as usize) {
-                        Some(data) => (Answer::Got(Ok(OwnedReply::Read(data))), Some(b)),
+                        Some(data) => (Answer::Got(Ok(OwnedReply::Read(data))), given.then_some(b)),
                         None => (
                             Answer::Bad(format!(
                                 "a bulk reply of {len} bytes at {arena_offset}, outside the \
@@ -375,7 +383,16 @@ impl ProcessClient {
         if let Some(e) = line.get("error") {
             return Err(format!("client {k}: {}", e.as_str().unwrap_or("")));
         }
-        let slot = line["slot"].as_u64().unwrap_or(0) as u32;
+        // A line without these is the worker's fault, never a slot 0 or a
+        // generation 0 (which would read as one that went backward).
+        let number = |field: &str| {
+            line[field].as_u64().ok_or_else(|| {
+                format!("client {k}: an answer line without a number \"{field}\": {line}")
+            })
+        };
+        let slot = u32::try_from(number("slot")?)
+            .map_err(|_| format!("client {k}: a slot past u32 in {line}"))?;
+        let (gen_before, gen_after) = (number("gen_before")?, number("gen_after")?);
         let bank = line["bank"].as_u64().map(|b| b as u32);
         let answer = if let Some(bad) = line.get("bad") {
             Answer::Bad(bad.as_str().unwrap_or("").to_string())
@@ -387,8 +404,8 @@ impl ProcessClient {
         };
         Ok(Remote {
             outcome: Outcome { answer, slot, bank },
-            gen_before: line["gen_before"].as_u64().unwrap_or(0),
-            gen_after: line["gen_after"].as_u64().unwrap_or(0),
+            gen_before,
+            gen_after,
         })
     }
 

@@ -223,6 +223,52 @@ fn confine(input: &mut CaseInput) {
     input.tree.registry = None;
 }
 
+/// `steps` without the ones that present a handle number the case has no
+/// open handle for (a use after CLOSE, a number never issued). Sent, such a
+/// step needs a stand-in number, and a client knows only its own handles:
+/// wire.md 3.4.3 lets a director issue "any u64", so whatever number one
+/// client picks may be another client's live handle, which would answer it
+/// (and a CLOSE would close it). The sequential cases send these steps; here
+/// they are left out. A handle counts as open from an OPEN that may succeed
+/// (a `one_of` with a reply among its answers) to a CLOSE that does. A step
+/// left out is one whose expectation is `ST_BAD_FH`, which changes nothing,
+/// so the answers of the steps kept are the same.
+fn without_stand_ins(steps: &[Step]) -> Vec<&Step> {
+    fn opened(e: &Expect) -> Vec<u64> {
+        match e {
+            Expect::Reply(OwnedReply::Open(o)) => vec![o.fh],
+            Expect::OneOf(alts) => alts.iter().flat_map(opened).collect(),
+            _ => Vec::new(),
+        }
+    }
+    fn may_succeed(e: &Expect) -> bool {
+        match e {
+            Expect::Reply(OwnedReply::Empty) => true,
+            Expect::OneOf(alts) => alts.iter().any(may_succeed),
+            _ => false,
+        }
+    }
+    let mut open = std::collections::BTreeSet::new();
+    let mut kept = Vec::new();
+    for st in steps {
+        use OwnedRequest as O;
+        match &st.request {
+            O::Read { fh, .. } | O::Write { fh, .. } | O::SetAttr { fh, .. } | O::Close { fh }
+                if !open.contains(fh) =>
+            {
+                continue
+            }
+            O::Close { fh } if may_succeed(&st.expect) => {
+                open.remove(fh);
+            }
+            O::Open { .. } => open.extend(opened(&st.expect)),
+            _ => {}
+        }
+        kept.push(st);
+    }
+    kept
+}
+
 /// One round: the combined scenario (its steps marked with their clients)
 /// and each client's steps with their places in it.
 struct Round {
@@ -312,7 +358,7 @@ fn round(
     for (k, s) in cases.iter().enumerate() {
         let (p, off) = (prefix(k), FH_STRIDE * (k as u64 + 1));
         let mut mine = Vec::new();
-        for st in &s.steps {
+        for st in without_stand_ins(&s.steps) {
             let step = Step {
                 request: relocate(&st.request, &p, off),
                 expect: relocate_expect(&st.expect, off),

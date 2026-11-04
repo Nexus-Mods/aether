@@ -112,17 +112,14 @@ fn main() -> ExitCode {
                 Some("refuse") => code(test_adapter(Misbehave::Refuse)),
                 // The reference breaking a rule only checks across steps or
                 // across clients find (`adapters::Break`).
-                Some(
-                    b @ ("stale-immutable" | "frozen-reg-gen" | "swap-replies" | "per-slot-fh"
-                    | "slot-zero-only" | "bank-zero"),
-                ) => match Break::parse(b) {
+                Some(b) => match Break::parse(b) {
                     Some(b) => code(test_adapter(Misbehave::Director(b))),
-                    None => usage(&format!("unknown --misbehave {b:?}")),
+                    None => usage(&format!(
+                        "unknown --misbehave {b:?}: exit, garbage, hang, hang-grandchild, \
+                         refuse, or a reference-adapter --break rule"
+                    )),
                 },
-                _ => usage(
-                    "--misbehave exit|garbage|hang|hang-grandchild|refuse|stale-immutable|\
-                     frozen-reg-gen|swap-replies|per-slot-fh|slot-zero-only|bank-zero",
-                ),
+                None => usage("test-adapter needs --misbehave"),
             },
             Err(e) => usage(&e),
         },

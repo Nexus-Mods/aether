@@ -39,7 +39,7 @@
 //!   differ "by a constant", and "a REG_CHANGED `since` is in the numbering
 //!   of the director it is sent to"). Compared up to one offset per session,
 //!   fixed by the first registry reply; a REG_CHANGED `since` is sent shifted
-//!   by it.
+//!   by it, except `u64::MAX`, the shim's probe for the current version.
 //! - **`last_write`** of a REG_KEY node (wire.md 4.3: a FILETIME the overlay
 //!   stamps with the director's clock). Not compared.
 //!
@@ -155,7 +155,10 @@ impl Session {
             | OwnedRequest::SetAttr { fh: n, .. }
             | OwnedRequest::Close { fh: n } => *n = self.director_fh(*n),
             OwnedRequest::RegChanged { since, .. } => {
-                if let Some(off) = self.reg_offset {
+                // `u64::MAX` is the probe the shim sends to learn the current
+                // version (`crates/aether-hooks/src/regnotify.rs`): "after
+                // every version", in any numbering, so it is not shifted.
+                if let (Some(off), false) = (self.reg_offset, *since == u64::MAX) {
                     *since = (i128::from(*since) + off).clamp(0, i128::from(u64::MAX)) as u64;
                 }
             }
@@ -610,5 +613,37 @@ mod tests {
         open_read_close(&mut sess, "a", 1, opened(7, 3, true, 0), b"abc").unwrap();
         // The same expected fh, now for a mutable open of the same path.
         open_read_close(&mut sess, "a", 1, opened(7, 3, false, 0), b"xyz").unwrap();
+    }
+
+    fn changed(since: u64) -> OwnedRequest {
+        OwnedRequest::RegChanged {
+            path: r"\Registry\Machine\Software\T".into(),
+            subtree: true,
+            since,
+        }
+    }
+
+    /// wire.md 4.3: `since` is in the numbering of the director it is sent
+    /// to, so it is shifted by the session's offset; but `u64::MAX` is the
+    /// probe the shim sends to learn the current version
+    /// (`regnotify.rs`), in every numbering, and goes as it is.
+    #[test]
+    fn a_reg_changed_probe_of_u64_max_is_sent_unshifted() {
+        for off in [-5i128, 5] {
+            let mut sess = Session {
+                reg_offset: Some(off),
+                ..Session::default()
+            };
+            assert_eq!(
+                sess.translate(&changed(u64::MAX)),
+                changed(u64::MAX),
+                "{off}"
+            );
+            assert_eq!(
+                sess.translate(&changed(10)),
+                changed((10 + off) as u64),
+                "{off}"
+            );
+        }
     }
 }

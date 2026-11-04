@@ -244,6 +244,21 @@ fn assert_read(served: &Served, h: HANDLE, offset: usize, want: &[u8], cost: &[R
     assert_eq!(reads(served, mark), cost, "the read at {offset}");
 }
 
+/// One `NtReadFile` of [`SMALL`] bytes at `offset` that the director failed:
+/// it crossed the ring as one inline READ, answered `ST_IO_ERROR`, and the
+/// program got `STATUS_UNSUCCESSFUL` (`docs/wire.md` 3.7).
+fn assert_read_fails(served: &Served, h: HANDLE, offset: usize) {
+    let mark = served.recorder.mark();
+    let mut buf = vec![0u8; SMALL];
+    let (st, _) = ntapi::nt_read_at(h, offset as i64, &mut buf);
+    assert_eq!(st as u32, 0xC000_0001, "NtReadFile at {offset}: {st:#x}");
+    let failed = Rd {
+        status: Status::IoError.code(),
+        ..through(offset)
+    };
+    assert_eq!(reads(served, mark), [failed], "the read at {offset}");
+}
+
 #[test]
 fn a_small_read_of_an_immutable_file_fetches_one_block_then_hits_at_zero_round_trips() {
     isolate!();
@@ -469,18 +484,20 @@ fn delete_and_rename_through_this_process_drop_the_file() {
     let (old, new) = (pattern(MIB), other(MIB));
     let mods = root.join("mods");
 
-    // A delete: the open handle's blocks go. The director then puts other
-    // bytes at the path, which the open handle reads (the reference reads
-    // a handle by its path): served from the old blocks it would be the
-    // old bytes, at no cost.
+    // A delete: the open handle's blocks go. Its next read crosses the ring
+    // and gets the director's answer for a deleted file (the reference
+    // fails it, `docs/wire.md` 3.4.8): served from the old blocks it would
+    // be the old bytes, at no cost.
     let h = open_read(&mods.join("m.esp"));
     assert_read(served, h, 0, &old, &[fetch(0)]);
     let w = wide(&mods.join("m.esp"));
     // SAFETY: a NUL-terminated name.
     assert_ne!(unsafe { DeleteFileW(w.as_ptr()) }, 0, "{}", last_error());
+    assert_read_fails(served, h, 0);
+    // A file later put at the name is another file: the old handle never
+    // reads it, and an immutable open of it is not believed.
     served.fake.replace_content("mods/m.esp", new.clone());
-    assert_read(served, h, 0, &new, &[through(0)]);
-    // And an immutable open of the path after the delete is not believed.
+    assert_read_fails(served, h, 0);
     let again = open_read(&mods.join("m.esp"));
     for at in [0, 0] {
         assert_read(served, again, at, &new, &[through(at)]);
@@ -489,7 +506,9 @@ fn delete_and_rename_through_this_process_drop_the_file() {
     close(h);
 
     // A rename of a file: the source's blocks go, and the target is not
-    // cached either.
+    // cached either. The handle follows its file (wire.md 3.4.7), whose
+    // bytes the director then changes: served from the old blocks it would
+    // be the old bytes, at no cost.
     let h = open_read(&mods.join("n.esp"));
     assert_read(served, h, 0, &old, &[fetch(0)]);
     let (from, to) = (wide(&mods.join("n.esp")), wide(&mods.join("n2.esp")));
@@ -500,11 +519,11 @@ fn delete_and_rename_through_this_process_drop_the_file() {
         "{}",
         last_error()
     );
-    served.fake.replace_content("mods/n.esp", new.clone());
+    served.fake.replace_content("mods/n2.esp", new.clone());
     assert_read(served, h, 0, &new, &[through(0)]);
     let target = open_read(&mods.join("n2.esp"));
     for at in [0, 0] {
-        assert_read(served, target, at, &old, &[through(at)]);
+        assert_read(served, target, at, &new, &[through(at)]);
     }
     close(target);
     close(h);
@@ -520,7 +539,7 @@ fn delete_and_rename_through_this_process_drop_the_file() {
         "{}",
         last_error()
     );
-    served.fake.replace_content("mods/dir/x.bin", new.clone());
+    served.fake.replace_content("mods/moved/x.bin", new.clone());
     assert_read(served, h, 0, &new, &[through(0)]);
     close(h);
 }

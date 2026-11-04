@@ -231,13 +231,15 @@ pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
 pub(super) static DELETE_ON_CLOSE_REFUSED: AtomicU64 = AtomicU64::new(0);
 pub(super) static DELETE_ON_CLOSE_REFUSED_PATHS: BoundedTally<String> = BoundedTally::new(2000);
 
-/// A delete-on-close of `path` was refused by the director with `status`.
-pub(crate) fn note_delete_on_close_refused(path: &str, status: aether_protocol::Status) {
+/// A delete-on-close of `path` was refused by the director with the status
+/// word `code`: the number the director sent, whether or not the table has it
+/// (`director::wire_code`).
+pub(crate) fn note_delete_on_close_refused(path: &str, code: i32) {
     DELETE_ON_CLOSE_REFUSED.fetch_add(1, Ordering::Relaxed);
     if !enabled() {
         return;
     }
-    DELETE_ON_CLOSE_REFUSED_PATHS.add(format!("{path} (status {})", status.code()));
+    DELETE_ON_CLOSE_REFUSED_PATHS.add(delete_on_close_refused_entry(path, code));
     note_trace("delete-on-close", path, "REFUSED");
 }
 
@@ -253,6 +255,11 @@ pub(crate) fn note_link_refused(path: &str) {
         return;
     }
     note_trace("link", path, "REFUSED");
+}
+
+/// The refused-paths entry for a delete-on-close of `path` refused with `code`.
+pub(crate) fn delete_on_close_refused_entry(path: &str, code: i32) -> String {
+    format!("{path} (status {code})")
 }
 
 /// How many hard links the shim has refused so far.

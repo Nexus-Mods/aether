@@ -499,6 +499,9 @@ impl FuseClient {
     /// `aether_ipc::submit_data`, which `aether_rpc::Client` has no
     /// counterpart of. The request is encoded into `payload` (cleared first)
     /// and sent from there; a caller sending several reuses one buffer.
+    ///
+    /// Its failures are the `CallError`s `Client::call` gives, so both kinds
+    /// of call are mapped to a status by the one [`failed`].
     fn call_data<T>(
         &self,
         req: &Request<'_>,
@@ -508,18 +511,22 @@ impl FuseClient {
         payload.clear();
         req.encode(payload);
         let op = req.opcode();
-        let r =
+        let answer =
             aether_ipc::submit_data(&self.client(), &self.gate, op as u32, req.flags(), payload)
-                .map_err(|_| Status::IoError)?;
-        match Status::try_from(r.status) {
-            Ok(Status::Ok) => {}
-            Ok(st) => return Err(st),
-            Err(_) => return Err(Status::IoError),
-        }
-        Reply::decode(op, req.flags(), &r.payload)
-            .ok()
-            .and_then(read)
-            .ok_or(Status::BadRequest)
+                .map_err(CallError::Ipc)
+                .and_then(|r| {
+                    if r.status != Status::Ok.code() {
+                        return Err(match Status::try_from(r.status) {
+                            Ok(st) => CallError::Status(st),
+                            Err(_) => CallError::UnknownStatus(r.status),
+                        });
+                    }
+                    Reply::decode(op, req.flags(), &r.payload)
+                        .ok()
+                        .and_then(read)
+                        .ok_or(CallError::Undecodable)
+                });
+        answer.map_err(failed)
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {
@@ -689,8 +696,12 @@ impl FuseClient {
     }
 
     /// Delete (whiteout) a virtual path via the director overlay (`Opcode::Delete`).
-    pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), Status> {
-        self.call_empty(&Request::Delete { root, path: vpath })
+    ///
+    /// The failure is the call's own, not yet a [`Status`]: a delete on close
+    /// that is refused is recorded with the number the director sent
+    /// ([`wire_code`]), and the delete hook acts on [`failed`] of it.
+    pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), CallError> {
+        self.call(&Request::Delete { root, path: vpath }, |_| Some(()))
     }
 
     /// Rename a virtual path to another virtual path (`Opcode::Rename`).
@@ -947,6 +958,17 @@ pub(crate) fn failed(e: CallError) -> Status {
         CallError::Status(st) => st,
         CallError::Undecodable => Status::BadRequest,
         CallError::UnknownStatus(_) | CallError::Ipc(_) | CallError::BulkRead => Status::IoError,
+    }
+}
+
+/// The status word a failed call stands for, as a number: the one the
+/// director sent, in the table or not (the ring's overflow sentinel among
+/// them), and [`failed`]'s otherwise (a ring that gave no answer is
+/// `Status::IoError`'s). What the hook stats record for a refusal.
+pub(crate) fn wire_code(e: &CallError) -> i32 {
+    match e {
+        CallError::UnknownStatus(code) => *code,
+        e => failed(e.clone()).code(),
     }
 }
 
@@ -1401,5 +1423,62 @@ mod tests {
             ring_source(Some(String::new()), Some("sect".into())),
             Some(RingSource::Section("sect".to_string()))
         );
+    }
+
+    /// A ring on a named section whose one server answers each request with
+    /// the next of `codes` and an empty payload.
+    fn answering(codes: &'static [i32]) -> FuseClient {
+        let name = format!(
+            r"Local\aether-hooks-codes-{}-{}",
+            std::process::id(),
+            codes[0]
+        );
+        let bytes = 256 * 1024;
+        let mapping: &'static SharedMapping = Box::leak(Box::new(
+            SharedMapping::create(&name, bytes).expect("section"),
+        ));
+        aether_ipc::ring::init(mapping.seg(), 4, 4096).expect("ring init");
+        std::thread::spawn(move || {
+            let server =
+                aether_ipc::RingServer::new(mapping.seg(), aether_ipc::SpinNotifier).unwrap();
+            let mut next = codes.iter();
+            let mut code = next.next();
+            while let Some(&c) = code {
+                if server.serve_one(|_| (c, Vec::new())).unwrap_or(false) {
+                    code = next.next();
+                }
+            }
+        });
+        FuseClient::connect(
+            &name,
+            &[(RootId::DEFAULT, r"C:\aether-codes-root".to_string())],
+            4096,
+            bytes,
+            0,
+        )
+        .expect("client")
+    }
+
+    /// A DELETE refused with a status outside the table (or the ring's
+    /// overflow sentinel) is recorded with the number the director sent, as
+    /// it always was, while the shim acts on it as `Status::IoError`. A
+    /// status in the table is recorded as its own number.
+    #[test]
+    fn a_refused_delete_is_recorded_with_the_code_the_director_sent() {
+        const CODES: &[i32] = &[-77, i32::MIN, -9];
+        let fc = answering(CODES);
+        for &code in CODES {
+            let e = fc.delete(RootId::DEFAULT, "a.txt").unwrap_err();
+            assert_eq!(
+                crate::hookstats::delete_on_close_refused_entry(r"C:\r\a.txt", wire_code(&e)),
+                format!(r"C:\r\a.txt (status {code})")
+            );
+            let want = if code == -9 {
+                Status::ReadOnly
+            } else {
+                Status::IoError
+            };
+            assert_eq!(failed(e), want);
+        }
     }
 }

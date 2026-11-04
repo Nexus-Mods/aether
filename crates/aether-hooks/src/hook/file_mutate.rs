@@ -71,7 +71,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
             crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {
                 Ok(()) => STATUS_SUCCESS,
-                Err(st) => delete_status_for(st),
+                Err(e) => delete_status_for(crate::director::failed(e)),
             };
         }
     }

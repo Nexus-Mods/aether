@@ -1,0 +1,17 @@
+{
+  "name": "readdir-large",
+  "description": "READDIR of two folders of 5,000 entries each, from two threads",
+  "tree": {
+    "roots": [
+      {"id": 0}
+    ]
+  },
+  "generate": [
+    {"dir": "Data/Textures/Terrain", "count": 5000, "name": "Tile{n}.dds", "pad": 4, "size": 64, "seed": 1},
+    {"dir": "Data/Meshes/Terrain", "count": 5000, "name": "Tile{n}.nif", "pad": 4, "size": 64, "seed": 10000}
+  ],
+  "phases": [
+    {"name": "textures", "threads": 2, "repeat": 50, "kind": "readdir", "path": "Data/Textures/Terrain"},
+    {"name": "meshes", "threads": 2, "repeat": 50, "kind": "readdir", "path": "Data/Meshes/Terrain"}
+  ]
+}

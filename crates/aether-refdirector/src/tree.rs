@@ -33,7 +33,7 @@
 use aether_rpc::Director;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::reference::{ReadStyle, Reference, MAX_FILE_LEN};
+use crate::reference::{ReadStyle, Reference, MAX_MOUNTED_LEN};
 
 /// What a scenario mounts.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -175,9 +175,9 @@ impl Tree {
                     ));
                 }
                 if let Contents::Fill { size, .. } = f.contents {
-                    if size > MAX_FILE_LEN as u64 {
+                    if size > MAX_MOUNTED_LEN as u64 {
                         return Err(format!(
-                            "root {} file {:?}: larger than {MAX_FILE_LEN} bytes",
+                            "root {} file {:?}: larger than {MAX_MOUNTED_LEN} bytes",
                             r.id, f.path
                         ));
                     }
@@ -356,7 +356,7 @@ impl Reference {
 
 #[cfg(feature = "scenario")]
 mod de {
-    use super::{Contents, MAX_FILE_LEN};
+    use super::{Contents, MAX_MOUNTED_LEN};
     use serde::de::{self, Deserializer, MapAccess, Visitor};
     use std::fmt;
 
@@ -394,9 +394,9 @@ mod de {
                     .map(Contents::Hex)
                     .map_err(|e| de::Error::custom(format!("hex {h:?}: {e}"))),
                 (None, Some(size), seed) => {
-                    if size > MAX_FILE_LEN as u64 {
+                    if size > MAX_MOUNTED_LEN as u64 {
                         return Err(de::Error::custom(format!(
-                            "size {size}: larger than {MAX_FILE_LEN}"
+                            "size {size}: larger than {MAX_MOUNTED_LEN}"
                         )));
                     }
                     Ok(Contents::Fill {

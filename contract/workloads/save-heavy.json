@@ -1,0 +1,23 @@
+{
+  "name": "save-heavy",
+  "description": "A game's save: an 8 MiB file written in 64 KiB chunks under a temporary name, closed and renamed over the old save; by one thread, then by two saving at once",
+  "tree": {
+    "roots": [
+      {
+        "id": 0,
+        "files": [
+          {"path": "Saves/Save1.ess", "contents": {"size": 8388608, "seed": 21}}
+        ],
+        "writable": ["Saves"]
+      }
+    ]
+  },
+  "phases": [
+    {"name": "save", "threads": 1, "repeat": 8, "kind": "write",
+     "path": "Saves/Save1.ess.tmp", "chunk": 65536, "total": 8388608,
+     "then_close": true, "rename_to": "Saves/Save1.ess"},
+    {"name": "two-savers", "threads": 2, "repeat": 4, "kind": "write",
+     "path": "Saves/Save1.ess.tmp", "chunk": 65536, "total": 8388608,
+     "then_close": true, "rename_to": "Saves/Save1.ess"}
+  ]
+}

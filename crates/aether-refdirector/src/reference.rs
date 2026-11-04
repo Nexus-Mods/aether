@@ -103,6 +103,12 @@ pub const BULK_THRESHOLD: u32 = 64 * 1024;
 /// SETATTR to a larger size, is `Status::NoSpace`.
 pub const MAX_FILE_LEN: usize = 64 * 1024 * 1024;
 
+/// The longest file a mounted tree may hold ([`crate::tree::Tree`]): larger
+/// than [`MAX_FILE_LEN`], so a benchmark can read an archive of a game's
+/// size. Such a file is read like any other; a WRITE ending past
+/// [`MAX_FILE_LEN`] is still `Status::NoSpace`.
+pub const MAX_MOUNTED_LEN: usize = 512 * 1024 * 1024;
+
 /// How the reference answers READ for one file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReadStyle {

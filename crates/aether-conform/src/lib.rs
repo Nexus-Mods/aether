@@ -22,6 +22,7 @@
 //! file. [`clients`] sends requests from a slot the caller picks and runs
 //! a scenario's other clients as processes of their own; [`concurrent`]
 //! plays rounds of generated cases from several clients at once.
+//! [`workload`] reads the benchmark workloads (`contract/workloads/`).
 //! `docs/conformance.md` is the user's guide.
 //!
 //! Unsafe is confined to [`job`] (Windows only): the Job Object an adapter
@@ -45,6 +46,7 @@ pub mod report;
 pub mod run;
 pub mod scenario;
 pub mod shape;
+pub mod workload;
 
 pub use aether_refdirector::tree;
 pub use compare::{Mismatch, Session};

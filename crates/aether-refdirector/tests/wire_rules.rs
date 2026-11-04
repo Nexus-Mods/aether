@@ -511,3 +511,107 @@ fn rename_moves_a_directory_and_what_is_under_it() {
     let mut ro = Reference::new().with_dir("sealed");
     assert_eq!(ro.rename(R0, "sealed", "x"), Err(Status::ReadOnly));
 }
+
+/// 3.4.7: a handle follows its file through a RENAME, its own or one of a
+/// directory above it, and never reaches a file later created at the old
+/// name. The shim's save pattern writes, renames into place, then writes
+/// through the same handle.
+#[test]
+fn a_handle_follows_its_file_through_a_rename() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("saves")
+        .with("saves/final.sav", b"OLD".to_vec(), ReadStyle::Whole)
+        .with_dir("dir")
+        .with("dir/f.txt", b"abc".to_vec(), ReadStyle::Whole);
+    let tmp = d
+        .open(R0, RW | OpenFlags::CREATE, "saves/final.tmp")
+        .unwrap()
+        .fh;
+    assert_eq!(d.write(tmp, 0, b"NEWDATA"), Ok(7));
+    assert_eq!(d.rename(R0, "saves/final.tmp", "saves/Final.sav"), Ok(()));
+    assert_eq!(d.write(tmp, 7, b"!"), Ok(1), "the handle follows its file");
+    assert_eq!(d.set_attr(tmp, 8), Ok(()));
+    assert_eq!(read_inline(&mut d, tmp, 0, 16), Ok(b"NEWDATA!".to_vec()));
+    assert_eq!(d.contents("saves/final.sav"), Some(b"NEWDATA!".to_vec()));
+    // A file created at the old name is not the handle's.
+    let again = d
+        .open(
+            R0,
+            RW | OpenFlags::CREATE | OpenFlags::EXCL,
+            "saves/final.tmp",
+        )
+        .unwrap()
+        .fh;
+    assert_eq!(d.write(tmp, 0, b"n"), Ok(1));
+    assert_eq!(d.contents("saves/final.tmp"), Some(Vec::new()));
+    assert_eq!(d.contents("saves/final.sav"), Some(b"nEWDATA!".to_vec()));
+    assert_eq!(d.close(again), Ok(()));
+    assert_eq!(d.close(tmp), Ok(()));
+
+    // A file under a renamed directory.
+    let f = d.open(R0, OpenFlags::READ, "dir/f.txt").unwrap().fh;
+    assert_eq!(d.rename(R0, "dir", "Moved"), Ok(()));
+    assert_eq!(read_inline(&mut d, f, 0, 16), Ok(b"abc".to_vec()));
+    assert_eq!(d.mkdir(R0, 0o755, "dir"), Ok(()));
+    let new = d.open(R0, RW | OpenFlags::CREATE, "dir/f.txt").unwrap().fh;
+    assert_eq!(d.write(new, 0, b"zz"), Ok(2));
+    assert_eq!(read_inline(&mut d, f, 0, 16), Ok(b"abc".to_vec()));
+    assert_eq!(d.close(f), Ok(()));
+    assert_eq!(d.close(new), Ok(()));
+}
+
+/// 3.4.8: a handle whose file was deleted, or replaced by a RENAME onto its
+/// name, fails its READ, WRITE and SETATTR (as the reference chooses), never
+/// reaches a file later created at or moved to that name, and closes OK.
+#[test]
+fn a_handle_whose_file_is_gone_never_reaches_a_new_file_at_its_name() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("a.txt", b"old!".to_vec(), ReadStyle::Whole)
+        .with("b.txt", b"OLD".to_vec(), ReadStyle::Whole)
+        .with("c.txt", b"CCC".to_vec(), ReadStyle::Whole);
+    let gone = d.open(R0, RW, "a.txt").unwrap().fh;
+    assert_eq!(d.delete(R0, "a.txt"), Ok(()));
+    let new = d
+        .open(R0, RW | OpenFlags::CREATE | OpenFlags::EXCL, "A.txt")
+        .unwrap()
+        .fh;
+    assert_eq!(d.write(new, 0, b"new"), Ok(3));
+    assert_eq!(read_inline(&mut d, gone, 0, 16), Err(Status::IoError));
+    assert_eq!(d.write(gone, 0, b"Z"), Err(Status::NotFound));
+    assert_eq!(d.set_attr(gone, 0), Err(Status::NotFound));
+    assert_eq!(d.contents("a.txt"), Some(b"new".to_vec()));
+    assert_eq!(d.close(gone), Ok(()));
+    assert_eq!(d.close(new), Ok(()));
+
+    // Replaced by a rename onto its name: the handle does not read the file
+    // that replaced its own.
+    let replaced = d.open(R0, OpenFlags::READ, "b.txt").unwrap().fh;
+    assert_eq!(d.rename(R0, "c.txt", "b.txt"), Ok(()));
+    assert_eq!(read_inline(&mut d, replaced, 0, 16), Err(Status::IoError));
+    assert_eq!(d.write(replaced, 0, b"x"), Err(Status::NotFound));
+    assert_eq!(d.contents("b.txt"), Some(b"CCC".to_vec()));
+    assert_eq!(d.close(replaced), Ok(()));
+}
+
+/// 3.4.7, 3.4.13: after a RENAME_X the reference's handle follows the file
+/// to its new root.
+#[test]
+fn a_handle_follows_its_file_to_another_root() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("a.bin", b"abcd".to_vec(), ReadStyle::Whole)
+        .with_root(1);
+    let fh = d.open(R0, RW, "a.bin").unwrap().fh;
+    assert_eq!(d.rename_x(R0, r1, "a.bin", "A.bin"), Ok(()));
+    assert_eq!(read_inline(&mut d, fh, 0, 16), Ok(b"abcd".to_vec()));
+    assert_eq!(d.write(fh, 4, b"e"), Ok(1));
+    assert_eq!(d.contents(&key(1, "a.bin")), Some(b"abcde".to_vec()));
+    let o = d.open(R0, RW | OpenFlags::CREATE, "a.bin").unwrap().fh;
+    assert_eq!(d.write(fh, 0, b"Z"), Ok(1));
+    assert_eq!(d.contents("a.bin"), Some(Vec::new()));
+    assert_eq!(d.close(o), Ok(()));
+    assert_eq!(d.close(fh), Ok(()));
+}

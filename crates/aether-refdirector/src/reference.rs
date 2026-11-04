@@ -113,6 +113,10 @@ pub enum ReadStyle {
 }
 
 struct Entry {
+    /// The file's identity, which its handles hold: it moves with the file
+    /// through RENAME and RENAME_X, and a file created later at the same
+    /// name has another (`docs/wire.md` 3.4.7, 3.4.8).
+    id: u64,
     bytes: Vec<u8>,
     style: ReadStyle,
     /// The vpath as it was spelled when the name was created, without the
@@ -276,6 +280,8 @@ struct Graph {
     dirs: Mutex<HashMap<String, String>>,
     handles: Mutex<HashMap<u64, Handle>>,
     next_fh: AtomicU64,
+    /// The next file identity ([`Entry::id`]).
+    next_id: AtomicU64,
     writable: Vec<String>,
     /// Prefixes under which a write open fails with `Status::IoError`: a
     /// provider that broke, not one that refused.
@@ -336,15 +342,36 @@ impl Graph {
         Ok(key(root.0, path))
     }
 
-    fn issue(&self, vpath: String, append: bool, tally: &Tally) -> u64 {
+    fn issue(&self, vpath: String, file: Option<u64>, append: bool, tally: &Tally) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         Tally::bump(&tally.opened, &vpath);
-        self.handles
-            .lock()
-            .unwrap()
-            .insert(fh, Handle { vpath, append });
+        self.handles.lock().unwrap().insert(
+            fh,
+            Handle {
+                vpath,
+                file,
+                append,
+            },
+        );
         fh
     }
+
+    fn new_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// The table key the file with identity `id` is at now: `hint` (where its
+/// handle was opened) while it is still there, else wherever a RENAME or
+/// RENAME_X moved it. `None` once it was deleted or replaced.
+fn locate(files: &HashMap<String, Entry>, hint: &str, id: u64) -> Option<String> {
+    if files.get(hint).is_some_and(|e| e.id == id) {
+        return Some(hint.to_string());
+    }
+    files
+        .iter()
+        .find(|(_, e)| e.id == id)
+        .map(|(k, _)| k.clone())
 }
 
 /// Whether table key `k` names a root itself (`"."` on the wire).
@@ -439,11 +466,15 @@ fn escapes(path: &str) -> bool {
     false
 }
 
-/// An open handle: the file it names and whether it was opened
-/// `OpenFlags::APPEND`.
+/// An open handle: the table key it was opened at (its tallies are kept
+/// under it), the identity of the file it holds (`None` for a directory
+/// handle), and whether it was opened `OpenFlags::APPEND`. A file handle
+/// acts on its file wherever the file is now, and on nothing once the file
+/// is gone (`docs/wire.md` 3.4.7, 3.4.8).
 #[derive(Clone)]
 struct Handle {
     vpath: String,
+    file: Option<u64>,
     append: bool,
 }
 
@@ -475,6 +506,7 @@ impl Reference {
                 dirs: Mutex::new(HashMap::new()),
                 handles: Mutex::new(HashMap::new()),
                 next_fh: AtomicU64::new(1),
+                next_id: AtomicU64::new(1),
                 writable: Vec::new(),
                 failing: Vec::new(),
                 registry: None,
@@ -610,11 +642,16 @@ impl Reference {
     pub fn with(mut self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Reference {
         self.note_root(vpath);
         let name = spelling(vpath);
-        self.graph
-            .files
-            .lock()
-            .unwrap()
-            .insert(fold(vpath), Entry { bytes, style, name });
+        let id = self.graph.new_id();
+        self.graph.files.lock().unwrap().insert(
+            fold(vpath),
+            Entry {
+                id,
+                bytes,
+                style,
+                name,
+            },
+        );
         self
     }
 
@@ -862,7 +899,7 @@ impl Director for Reference {
                     Status::IoError
                 });
             }
-            let fh = g.issue(vpath, append, &self.tally);
+            let fh = g.issue(vpath, None, append, &self.tally);
             return Ok(OpenResp {
                 fh,
                 size: 0,
@@ -896,6 +933,7 @@ impl Director for Reference {
                 files.insert(
                     vpath.clone(),
                     Entry {
+                        id: g.new_id(),
                         bytes: Vec::new(),
                         style: ReadStyle::Whole,
                         name,
@@ -909,6 +947,7 @@ impl Director for Reference {
             return Err(Status::NotFound);
         };
         let size = e.bytes.len() as u64;
+        let id = e.id;
         drop(files);
         drop(dirs);
         // A read open of a file a read-only provider holds is immutable
@@ -919,7 +958,7 @@ impl Director for Reference {
         // stays 0. Never on a write open, a directory, or a file the
         // writable provider holds.
         let immutable = !write && !g.is_writable(&vpath);
-        let fh = g.issue(vpath, append, &self.tally);
+        let fh = g.issue(vpath, Some(id), append, &self.tally);
         Ok(OpenResp {
             fh,
             size,
@@ -937,16 +976,17 @@ impl Director for Reference {
         offset: u64,
         len: u32,
     ) -> Result<ReadReply<'_>, Status> {
-        let Some(Handle { vpath, .. }) = self.graph.handle(fh) else {
+        let Some(Handle { vpath, file, .. }) = self.graph.handle(fh) else {
             return Err(Status::BadFh);
         };
         Tally::bump(&self.tally.reads, &vpath);
-        if self.graph.is_dir(&vpath) {
+        let Some(id) = file else {
             return Err(Status::IsDir);
-        }
+        };
         let files = self.graph.files.lock().unwrap();
-        // A file deleted or renamed under an open handle.
-        let Some(e) = files.get(&vpath) else {
+        // A file deleted, or replaced by a rename onto its name, under an
+        // open handle (wire.md 3.4.8).
+        let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get(&k)) else {
             return Err(Status::IoError);
         };
         let limit = match e.style {
@@ -990,20 +1030,26 @@ impl Director for Reference {
 
     /// On an append handle the offset is ignored (`docs/wire.md` 3.4.3).
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
-        let Some(Handle { vpath, append }) = self.graph.handle(fh) else {
+        let Some(Handle {
+            vpath,
+            file,
+            append,
+        }) = self.graph.handle(fh)
+        else {
             return Err(Status::BadFh);
         };
         Tally::bump(&self.tally.writes, &vpath);
-        if self.graph.is_dir(&vpath) {
+        let Some(id) = file else {
             return Err(Status::IsDir);
-        }
+        };
         // Only a read open reaches a file no writable provider holds, and
-        // its bytes stay as they are: OPEN called them immutable.
+        // its bytes stay as they are: OPEN called them immutable. Such a
+        // file never moves, so the key it was opened at says.
         if !self.graph.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
         let mut files = self.graph.files.lock().unwrap();
-        let Some(e) = files.get_mut(&vpath) else {
+        let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get_mut(&k)) else {
             return Err(Status::NotFound);
         };
         let at = if append { e.bytes.len() as u64 } else { offset };
@@ -1021,12 +1067,12 @@ impl Director for Reference {
 
     /// Truncate or extend: how the shim's `truncate` reaches the director.
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
-        let Some(Handle { vpath, .. }) = self.graph.handle(fh) else {
+        let Some(Handle { vpath, file, .. }) = self.graph.handle(fh) else {
             return Err(Status::BadFh);
         };
-        if self.graph.is_dir(&vpath) {
+        let Some(id) = file else {
             return Err(Status::IsDir);
-        }
+        };
         if !self.graph.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
@@ -1034,7 +1080,7 @@ impl Director for Reference {
             return Err(Status::NoSpace);
         }
         let mut files = self.graph.files.lock().unwrap();
-        let Some(e) = files.get_mut(&vpath) else {
+        let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get_mut(&k)) else {
             return Err(Status::NotFound);
         };
         e.bytes.resize(size as usize, 0);

@@ -150,6 +150,21 @@ pub enum Break {
     /// STAGE_EXEC copies the file with its first byte changed (wire.md
     /// 3.4.14: the child is started from the copy, so it must be the file).
     StageWrongBytes,
+    /// READ through a handle opened with `OPEN_WRITE` and not `OPEN_READ` is
+    /// `ST_IO_ERROR` (wire.md 3.4.4: a handle serves READ whatever access it
+    /// was opened with; the shim's write opens send `OPEN_WRITE` alone).
+    WriteOnlyUnreadable,
+    /// A WRITE past the end, or a SETATTR that grows a file, leaves `0xAA`
+    /// in the gap (wire.md 3.4.5, 3.4.6: the gap reads as zeros).
+    GrowthGarbage,
+    /// A path with a stream suffix (`a.esp:s`) is served as its base file
+    /// (wire.md 3.2: a stream the director does not hold is not the base
+    /// file).
+    StreamBase,
+    /// Registry keys under the `User` hive are refused, `ST_BAD_REQUEST`
+    /// (wire.md 4.2: the current user's hives are `<CurrentUser>` and
+    /// `<CurrentUser>_Classes`, keys like any other).
+    MachineOnlyRegistry,
 }
 
 impl Break {
@@ -179,6 +194,10 @@ impl Break {
             "open-flag-bits" => Some(Break::OpenFlagBits),
             "stage-copy" => Some(Break::StageCopy),
             "stage-wrong-bytes" => Some(Break::StageWrongBytes),
+            "write-only-unreadable" => Some(Break::WriteOnlyUnreadable),
+            "growth-garbage" => Some(Break::GrowthGarbage),
+            "stream-base" => Some(Break::StreamBase),
+            "machine-only-registry" => Some(Break::MachineOnlyRegistry),
             _ => None,
         }
     }
@@ -283,6 +302,7 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
         banks: Arc::default(),
         staged: String::new(),
         staged_files: staged.clone(),
+        write_only: Arc::default(),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -464,6 +484,7 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 banks: banks.clone(),
                 staged: String::new(),
                 staged_files: d.staged_files.clone(),
+                write_only: d.write_only.clone(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
@@ -771,6 +792,8 @@ struct Served {
     /// The last STAGE_EXEC answer, and every copy made, for the unmount.
     staged: String,
     staged_files: Arc<Mutex<Vec<PathBuf>>>,
+    /// [`Break::WriteOnlyUnreadable`]'s handles opened without `OPEN_READ`.
+    write_only: Arc<Mutex<std::collections::BTreeSet<u64>>>,
 }
 
 impl Served {
@@ -781,6 +804,47 @@ impl Served {
             Some(Break::FhFromZero) => fh - 1,
             _ => fh,
         }
+    }
+
+    /// [`Break::StreamBase`]: `path` without a stream suffix.
+    fn base<'p>(&self, path: &'p str) -> &'p str {
+        match self.broken {
+            Some(Break::StreamBase) => path.split(':').next().unwrap_or(path),
+            _ => path,
+        }
+    }
+
+    /// [`Break::MachineOnlyRegistry`]: refuses the user's hives.
+    fn hive(&self, path: &str) -> Result<(), Status> {
+        let user = aether_casefold::fold(path).starts_with("\\registry\\user\\");
+        if self.broken == Some(Break::MachineOnlyRegistry) && user {
+            return Err(Status::BadRequest);
+        }
+        Ok(())
+    }
+
+    /// The length of the reference's file behind handle `fh`.
+    fn length(&mut self, fh: u64) -> Result<u64, Status> {
+        let at = ReadSlot {
+            slot: 0,
+            arena: None,
+        };
+        match self
+            .reference
+            .read(at, RequestFlags::empty(), fh, 0, u32::MAX)?
+        {
+            ReadReply::Inline(d) => Ok(d.len() as u64),
+            ReadReply::Bulk { len, .. } => Ok(u64::from(len)),
+        }
+    }
+
+    /// [`Break::GrowthGarbage`]: `0xAA` over `from..to` of handle `fh`.
+    fn garbage(&mut self, fh: u64, from: u64, to: u64) -> Result<(), Status> {
+        if to > from {
+            self.reference
+                .write(fh, from, &vec![0xAA; (to - from) as usize])?;
+        }
+        Ok(())
     }
 
     /// The reference's handle for the number `fh` a client sent.
@@ -796,6 +860,7 @@ impl Served {
 
 impl Director for Served {
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
+        let path = self.base(path);
         let mut a = self.reference.get_attr(root, path)?;
         if self.broken == Some(Break::FoundForMissing) && !a.found {
             a.found = true;
@@ -836,7 +901,17 @@ impl Director for Served {
         Ok(())
     }
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
+        let path = self.base(path);
         let mut o = self.reference.open(root, flags, path)?;
+        if self.broken == Some(Break::WriteOnlyUnreadable)
+            && flags.contains(OpenFlags::WRITE)
+            && !flags.contains(OpenFlags::READ)
+        {
+            self.write_only
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(o.fh);
+        }
         if self.broken == Some(Break::StaleImmutable)
             && !o.is_dir
             && !flags.contains(OpenFlags::WRITE)
@@ -859,6 +934,15 @@ impl Director for Served {
             _ => at,
         };
         let fh = self.fh_in(fh);
+        if self.broken == Some(Break::WriteOnlyUnreadable)
+            && self
+                .write_only
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&fh)
+        {
+            return Err(Status::IoError);
+        }
         if let (Some(Break::LateBank), Some(arena)) = (self.broken, at.arena) {
             let mut banks = self.banks.lock().unwrap_or_else(|e| e.into_inner());
             for (slot, n) in banks.drain(..).filter(|&(s, _)| s != at.slot) {
@@ -889,10 +973,24 @@ impl Director for Served {
         }
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
-        self.reference.write(self.fh_in(fh), offset, data)
+        let fh = self.fh_in(fh);
+        if self.broken == Some(Break::GrowthGarbage) {
+            let end = self.length(fh)?;
+            self.garbage(fh, end, offset)?;
+        }
+        self.reference.write(fh, offset, data)
     }
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
-        self.reference.set_attr(self.fh_in(fh), size)
+        let fh = self.fh_in(fh);
+        let end = match self.broken {
+            Some(Break::GrowthGarbage) => Some(self.length(fh)?),
+            _ => None,
+        };
+        self.reference.set_attr(fh, size)?;
+        match end {
+            Some(end) => self.garbage(fh, end, size),
+            None => Ok(()),
+        }
     }
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
         self.reference.rename(root, from, to)
@@ -904,7 +1002,13 @@ impl Director for Served {
         self.reference.mkdir(root, mode, path)
     }
     fn close(&mut self, fh: u64) -> Result<(), Status> {
-        self.reference.close(self.fh_in(fh))
+        let fh = self.fh_in(fh);
+        self.reference.close(fh)?;
+        self.write_only
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&fh);
+        Ok(())
     }
     fn heartbeat(&mut self) -> Result<(), Status> {
         self.reference.heartbeat()
@@ -913,9 +1017,11 @@ impl Director for Served {
         self.reference.stored_names(root, skip, path)
     }
     fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {
+        self.hive(path)?;
         self.reference.reg_lookup(path)
     }
     fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
+        self.hive(path)?;
         self.reference.reg_key(path)
     }
     fn reg_set_value(

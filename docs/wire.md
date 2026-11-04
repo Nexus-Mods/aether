@@ -484,6 +484,10 @@ STAGE_EXEC:
   name (a write OPEN, MKDIR, RENAME targets), which keeps the caller's
   spelling so that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
+  Neither Cairn's read-only sources nor the reference holds named streams:
+  to both, `file.esp:stream` is a name they do not have (GETATTR `found =
+  0`, OPEN `ST_NOT_FOUND`), and a director that holds no stream of that
+  name must never answer it with the base file's attributes or bytes.
 
 A director must look paths up case-insensitively under the same fold, and must
 treat a path that would leave its root (`..` above the root) as an error.
@@ -793,6 +797,13 @@ Bulk reply (`ReadReply::Bulk`), 16 bytes, `n <= min(len, bank_size)`:
 | 4 | 4 | — | zero |
 | 8 | 8 | u64 | `arena_offset`: mapping offset of the data (the slot's bank) |
 
+A handle serves READ whatever access it was opened with: the shim's write
+opens send `OPEN_WRITE` and the create bits but never `OPEN_READ`
+(`FuseClient::open_write`), and a program reads its save back through the
+handle that wrote it. Cairn opens every file it serves for reading
+(`provider/disk.clj`, `options`; its write layer's handles read whatever
+their access), and the reference does not look at the access.
+
 The client tells the forms apart by bit 31 of the first word
 (`ReadReply`'s decoder), so it must accept either whatever flag it sent. `n <
 len` means end of file; the shim stops there. Errors: unknown `fh`
@@ -829,6 +840,12 @@ fails it: on `ST_OK`, `written` is `len` (Cairn and the reference: Cairn's
 write layer and disk provider loop to the end, `provider/layer.clj` and
 `provider/disk.clj`, `write-from`).
 
+A WRITE past the end of the file grows it, and the bytes between the old end
+and the WRITE's offset read as zeros, as NTFS fills them (Cairn's write layer
+reads a grown block it holds no data for as zeros, `provider/layer.clj`,
+`read-into`; its disk provider's file system fills the gap; the reference
+fills it with zeros). The same holds for SETATTR (3.4.6).
+
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
 
@@ -842,7 +859,10 @@ does (`source/tree.clj`, `DirHandle`).
 
 Request (`Request::SetAttr`), 16 bytes: `fh:u64 | size:u64`. Sets the file's
 length (truncate or extend) on an open handle; there is no path-keyed form.
-Reply: status only. Unknown `fh` `ST_BAD_FH`.
+Reply: status only. Unknown `fh` `ST_BAD_FH`. An extension reads as zeros,
+bytes a truncation cut off included when the file grows again (Cairn's
+write layer zeroes them, `provider/layer.clj`, `truncate!`; its disk provider
+truncates the file; the reference resizes with zeros).
 
 #### 3.4.7 RENAME (8)
 

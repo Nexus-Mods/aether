@@ -157,7 +157,7 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `open-read`, `open-flags-zero`, `open-errors`, `open-write-existing-readonly-path` | OPEN: handles, `oflags == 0`, the statuses of 3.4.3 and 3.5 |
 | `read-inline`, `read-eof`, `read-bulk`, `read-bulk-threshold` | READ: offsets, short reads, end of file, inline and bulk (3.4.4, 3.6) |
 | `handles-*` | handles unique while open, unknown and closed handles (3.4.3, 3.4.10, 3.5) |
-| `write-*` | write opens (create, excl, trunc, append), WRITE, SETATTR, spelling kept (3.4.3 to 3.4.6, 3.2) |
+| `write-*` | write opens (create, excl, trunc, append), WRITE, SETATTR, spelling kept, the gap a WRITE past the end or a SETATTR leaves read as zeros (`write-growth`), READ through a handle opened for writing alone (`write-only-read`) (3.4.3 to 3.4.6, 3.2) |
 | `rename-*` | RENAME: replace, respell, directories, refusals, unknown root (3.4.7, 3.5.1) |
 | `rename-x-*` | RENAME_X: files across roots, directories `ST_CROSS_ROOT`, equal roots, errors (3.4.13) |
 | `mkdir-*`, `delete-*` | MKDIR and DELETE: spelling, existing names, non-empty directories, read-only, errors (3.4.8, 3.4.9) |
@@ -166,13 +166,15 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `readdir-*` | READDIR: listing, case, changes, unknown root (3.4.2) |
 | `stored-names-*` | STORED_NAMES: stored spelling, `skip`, unknown names, after changes (3.4.12) |
 | `case-fold-*` | the fold: ASCII, Unicode (`Σ`, `İ`, composed and decomposed), fold-equal names are one entry (3.2) |
+| `names-stream` | a path with a named stream suffix is a name the director does not have, never its base file (3.2) |
 | `roots-*` | several roots kept apart, unserved roots (3.2, 3.5.1) |
 | `stage-exec` | STAGE_EXEC: `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` or a path (3.4.14) |
 | `registry-none` | no registry layer: all eight opcodes `ST_NOT_SUPPORTED` (4) |
 | `registry-lookup`, `-case`, `-bad-path` | REG_LOOKUP states, case-insensitive keys, non-canonical paths (4.2, 4.3) |
 | `registry-values`, `-delete-value` | REG_SET_VALUE, REG_KEY values, value tombstones (4.3) |
 | `registry-create-key`, `-delete-key`, `-rename-key` | key create, delete, rename, children (4.3) |
-| `registry-changed` | REG_CHANGED, with `since` in the director's numbering (4.3) |
+| `registry-changed` | REG_CHANGED, with `since` in the director's numbering, and the shim's `u64::MAX` probe (4.3) |
+| `registry-current-user` | keys under `\Registry\User\<CurrentUser>` and `<CurrentUser>_Classes`, apart from HKLM and from each other (4.2, 4.3) |
 | `registry-limits`, `-key-too-large` | name, depth and reply limits; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
 | `multi-handle-shared` | a handle opened by one process read, written and closed by another; closed for all once one closes it; a bulk READ from slot 1 in bank 1 (2.6, 2.8.1, 3.4.3) |
 | `multi-handles-unique` | three processes' handles, all open at once, unique across them (2.8.1, 3.4.3) |
@@ -183,8 +185,11 @@ over a section (`cargo test -p aether-conform` and CI run both).
 asserts it: READDIR of a path that is not a directory; a path below a file
 (accepted as found=0, `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`); a write open,
 DELETE or RENAME of a missing path outside every writable provider; a create
-whose parent directory is missing; what a write past the end puts in the gap;
-WRITE or SETATTR on a handle opened read-only; `ST_NO_SPACE`.
+whose parent directory is missing; WRITE or SETATTR on a handle opened
+read-only; `ST_NO_SPACE`. (What a write past the end, or a SETATTR, puts in
+the gap is zeros, and a handle opened for writing alone serves READ: wire.md
+3.4.4 to 3.4.6 now say so, and `write-growth` and `write-only-read` check
+them.)
 
 **Left out because a scenario cannot send or receive it.** A scenario names
 opcodes and fields of the table and the statuses in `protocol.json`, so these
@@ -451,7 +456,7 @@ shrunk case valid and plays each through the adapter's own mount.
 | MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
 | STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
 | STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` (a stager that does not stage it), a path (3.4.14) |
-| The eight registry requests | keys of the tree and below them in any spelling under `\Registry\Machine`, values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
+| The eight registry requests | keys of the tree and below them in any spelling below the hive, under a base key in each of `\Registry\Machine`, `\Registry\User\<CurrentUser>` and `\Registry\User\<CurrentUser>_Classes` (4.2), values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
 
 **What is not generated, and why:**
 
@@ -463,11 +468,13 @@ shrunk case valid and plays each through the adapter's own mount.
   DELETE or RENAME of a missing name outside every writable provider in a
   root that has one; a create whose parent is missing; READDIR of a missing
   path or a file; a path below a file; a write open of a directory.
-- Bytes wire.md does not fix: a WRITE starts at most at the end of the bytes
-  that are fixed, and after a SETATTR extends a file only the bytes before the
-  old end are read (what the extension holds is the director's).
-- WRITE and SETATTR on a handle opened without `write`, READ on one opened
-  without `read`: wire.md says nothing of them.
+- Growth: a WRITE starts at most at the end of the bytes that are fixed, and
+  after a SETATTR extends a file only the bytes before the old end are read.
+  wire.md 3.4.5 and 3.4.6 now fix the gap as zeros (`write-growth` checks
+  it); the generator has not been taught it yet.
+- WRITE and SETATTR on a handle opened without `write`: wire.md says nothing
+  of them. READ on one opened without `read`, which wire.md 3.4.4 now says a
+  handle serves (`write-only-read` checks it), is not generated yet.
 - A handle whose file changed through another handle or a path (a WRITE or
   SETATTR through another handle, a truncating open, a RENAME, RENAME_X or
   DELETE of it or of a directory above it) is only closed afterwards: what it

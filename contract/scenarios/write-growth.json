@@ -1,0 +1,28 @@
+{
+  "name": "write-growth",
+  "description": "A file grown by a WRITE past its end, or by SETATTR, reads zeros where nothing was written (wire.md 3.4.5, 3.4.6: the gap is zeros, as NTFS fills it, in Cairn and the reference), and bytes cut off by a SETATTR do not come back when it grows again.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/g.bin", "contents": "abc"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/g.bin"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 6, "data": "XY"}, "expect": {"reply": {"written": 2}}, "note": "three bytes past the end"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/g.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 8, "mtime": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"hex": "6162630000005859"}}}, "note": "the gap is zeros"},
+    {"request": {"op": "setattr", "fh": 1, "size": 12}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"hex": "616263000000585900000000"}}}, "note": "and so is the extension"},
+    {"request": {"op": "setattr", "fh": 1, "size": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "setattr", "fh": 1, "size": 5}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"hex": "6162000000"}}}, "note": "what was cut off stays cut off"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write", "create"], "path": "saves/sparse.bin"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 70000, "data": "Z"}, "expect": {"reply": {"written": 1}}, "note": "a new file written first far past its end"},
+    {"request": {"op": "read", "fh": 2, "offset": 69990, "len": 64}, "expect": {"reply": {"data": {"hex": "000000000000000000005a"}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 8}, "expect": {"reply": {"data": {"hex": "0000000000000000"}}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

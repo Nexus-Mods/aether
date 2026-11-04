@@ -14,11 +14,17 @@
 //! figures).
 //!
 //! Then the same requests go to the floor: by default this program's
-//! `null-adapter`, which answers every request OK with the smallest reply
-//! ([`aether_refdirector::Null`]), on a ring of the same kind and the same
-//! geometry as the director's (slots, payload cap, arena, worker threads).
-//! What the floor costs is the ring's share of a round trip; each opcode's
-//! p50, p99 and p99.9 are reported for both and as the director's minus the
+//! `null-adapter`, on a ring of the same kind and the same geometry as the
+//! director's (slots, payload cap, arena, worker threads). It answers every
+//! request OK with the smallest reply ([`aether_refdirector::Null`]), except
+//! READ: each recorded READ goes to the floor asking for the bytes the
+//! director's reply to it gave, with `FLAG_READ_BULK` set exactly when that
+//! reply came in bulk, and the floor answers that many bytes in that form
+//! (zeros, written into the slot or into its bank, and copied out by the
+//! bench as the director's were). So the floor includes the ring's round
+//! trip, the request's and reply's slot copies and a READ's data movement,
+//! and leaves out only what the director does to answer: each opcode's p50,
+//! p99 and p99.9 are reported for both and as the director's minus the
 //! floor's.
 //!
 //! A workload whose director answers a request with anything but what the
@@ -33,12 +39,14 @@
 //! ```text
 //! { "machine": { "cpu", "cores", "os", "build": { "profile", "rustc", "git" } },
 //!   "director": "<cmd>", "floor": "<cmd>", "clients": 1, "quick": false,
-//!   "geometry": { "ring": "file", "slots", "payload_cap", "arena_len", "worker_hint" },
-//!   "floor_geometry": { ... },
 //!   "workloads": [
-//!     { "name", "phases": [
-//!         { "name", "threads", "requests", "seconds", "requests_per_s", "bulk_mib_s",
-//!           "floor": { "seconds", "requests_per_s" },
+//!     { "name",
+//!       "geometry": { "ring": "file", "slots", "payload_cap", "arena_len", "worker_hint" },
+//!       "floor": "<cmd>", "floor_geometry": { ... },
+//!       "phases": [
+//!         { "name", "threads", "requests", "seconds", "requests_per_s", "read_bytes",
+//!           "bulk_bytes", "bulk_mib_s",
+//!           "floor": { "seconds", "requests_per_s", "read_bytes", "bulk_bytes" },
 //!           "per_op": { "<op>": { "count", "p50_us", "p99_us", "p999_us", "max_us",
 //!                                 "mean_us", "floor_p50_us", "floor_p99_us",
 //!                                 "floor_p999_us", "floor_max_us", "over_floor_p50_us",
@@ -46,8 +54,15 @@
 //!     { "name", "error": "..." } ] }
 //! ```
 //!
-//! `bulk_mib_s` is the bytes bulk READs returned over the phase's seconds
-//! (null when the phase sent none). Timed numbers are this machine's: a
+//! Each workload is mounted on a ring of its own, so the geometry, the
+//! floor's command line and the floor's geometry are the workload's; the
+//! top-level `floor` is the command line asked for (`--floor`, or the
+//! null adapter). A workload whose floor failed still names the director's
+//! geometry and the floor it ran.
+//!
+//! `read_bytes` is the bytes READs returned, `bulk_bytes` those that came in
+//! bulk, and `bulk_mib_s` the bulk bytes over the phase's seconds (null when
+//! the phase sent none); the floor's are the same counts on its side. Timed numbers are this machine's: a
 //! comparison ([`compare`]) refuses a baseline from another machine, and
 //! nothing fails a run on them unless `--fail-over` asks.
 
@@ -117,51 +132,51 @@ pub fn run(opts: &BenchOptions) -> Result<Value, String> {
     }
     let scratch = Scratch::new()?;
     let mut director = Adapter::start(&opts.director, opts.timeout).map_err(|e| e.to_string())?;
-    let mut geometry = Value::Null;
-    let mut floor_geometry = Value::Null;
-    let mut floor_cmd = opts.floor.clone();
     let mut workloads = Vec::new();
     for w in &all {
         let file = scratch.path().join(format!("{}.json", w.name));
         std::fs::write(&file, crate::scenario::to_json_string(&as_scenario(w)))
             .map_err(|e| format!("write {}: {e}", file.display()))?;
         eprintln!("aether-conform: bench {}", w.name);
-        let measured = match side(&mut director, &file, w, opts, true).map_err(|e| e.to_string())? {
+        let measured = match side(&mut director, &file, w, opts, None).map_err(|e| e.to_string())? {
             Ok(m) => m,
             Err(e) => {
                 workloads.push(json!({ "name": w.name, "error": e }));
                 continue;
             }
         };
-        geometry = measured.geometry.clone();
         // A floor of its own per workload, on a ring shaped as the one the
-        // director just answered on.
+        // director just answered on, sent the READs as the director answered
+        // them.
         let cmd = opts
             .floor
             .clone()
             .unwrap_or_else(|| default_floor(&opts.exe, &measured.geometry));
         let mut floor = Adapter::start(&cmd, opts.timeout).map_err(|e| format!("floor {e}"))?;
-        let floored = side(&mut floor, &file, w, opts, false).map_err(|e| format!("floor {e}"))?;
+        let floored =
+            side(&mut floor, &file, w, opts, Some(&measured)).map_err(|e| format!("floor {e}"))?;
         floor.finish();
-        floor_cmd = Some(cmd);
         match floored {
-            Ok(f) => {
-                floor_geometry = f.geometry.clone();
-                workloads.push(workload_json(w, &measured, &f));
-            }
-            Err(e) => workloads.push(json!({ "name": w.name, "error": format!("floor: {e}") })),
+            Ok(f) => workloads.push(workload_json(w, &cmd, &measured, &f)),
+            Err(e) => workloads.push(json!({
+                "name": w.name,
+                "geometry": measured.geometry,
+                "floor": cmd,
+                "error": format!("floor: {e}"),
+            })),
         }
     }
     director.finish();
-    let floor = floor_cmd.unwrap_or_else(|| format!("\"{}\" null-adapter", opts.exe.display()));
+    let floor = opts
+        .floor
+        .clone()
+        .unwrap_or_else(|| format!("\"{}\" null-adapter", opts.exe.display()));
     Ok(json!({
         "machine": machine::machine(),
         "director": opts.director,
         "floor": floor,
         "clients": opts.clients,
         "quick": opts.quick,
-        "geometry": geometry,
-        "floor_geometry": floor_geometry,
         "workloads": workloads,
     }))
 }
@@ -227,24 +242,33 @@ struct Measured {
 }
 
 /// A phase's numbers: a histogram per opcode, the wall time, the requests
-/// and the bytes bulk READs returned.
+/// and the bytes bulk READs returned, and each thread's READ replies.
 struct PhaseOut {
     ops: BTreeMap<&'static str, Histogram<u64>>,
     seconds: f64,
     requests: u64,
     bulk_bytes: u64,
     threads: u32,
+    reads: Vec<Shape>,
 }
 
+/// One thread's READ replies in the order sent: the bytes each gave and
+/// whether it came in bulk.
+type Shape = Vec<(u32, bool)>;
+
 /// Mounts `file` in `adapter`, plays every phase of `w` (warm-up, then
-/// recorded) and unmounts. The outer `Err` is an adapter that can be asked
+/// recorded) and unmounts. `floor_of` is `None` for the director, whose
+/// replies are checked (`strict`), and for the floor the director's
+/// measurements: each recorded READ goes to the floor with the length and
+/// the form the director's reply to it had, so the floor moves the same
+/// bytes the same way. The outer `Err` is an adapter that can be asked
 /// nothing more; the inner one a workload that failed.
 fn side(
     adapter: &mut Adapter,
     file: &Path,
     w: &Workload,
     opts: &BenchOptions,
-    strict: bool,
+    floor_of: Option<&Measured>,
 ) -> Result<Result<Measured, String>, AdapterError> {
     let env = match adapter.mount(file)? {
         Ok(env) => env,
@@ -252,7 +276,7 @@ fn side(
     };
     let result = match Attached::from_env(&env, opts.timeout) {
         Ok(ring) => {
-            let r = play_all(&ring, &env, w, opts, strict);
+            let r = play_all(&ring, &env, w, opts, floor_of);
             // Detached before the unmount, so the adapter can remove the
             // ring (a mapped file cannot be removed on Windows).
             drop(ring);
@@ -269,8 +293,9 @@ fn play_all(
     env: &Env,
     w: &Workload,
     opts: &BenchOptions,
-    strict: bool,
+    floor_of: Option<&Measured>,
 ) -> Result<Measured, String> {
+    let strict = floor_of.is_none();
     let geometry = geometry(ring, env);
     fits(ring, w)?;
     for p in &w.phases {
@@ -278,10 +303,10 @@ fn play_all(
             repeat: 1,
             ..p.clone()
         };
-        run_phase(ring, w, &warm, opts, strict).map_err(|e| format!("warm-up: {e}"))?;
+        run_phase(ring, w, &warm, opts, strict, None).map_err(|e| format!("warm-up: {e}"))?;
     }
     let mut phases = Vec::new();
-    for p in &w.phases {
+    for (i, p) in w.phases.iter().enumerate() {
         let p = if opts.quick {
             Phase {
                 repeat: 1,
@@ -290,7 +315,8 @@ fn play_all(
         } else {
             p.clone()
         };
-        phases.push(run_phase(ring, w, &p, opts, strict)?);
+        let shape = floor_of.and_then(|d| d.phases.get(i)).map(|d| &d.reads[..]);
+        phases.push(run_phase(ring, w, &p, opts, strict, shape)?);
     }
     Ok(Measured { geometry, phases })
 }
@@ -317,7 +343,8 @@ fn fits(ring: &Attached, w: &Workload) -> Result<(), String> {
     let cap = u64::from(ring.geom().payload_cap);
     for p in &w.phases {
         let why = match &p.kind {
-            PhaseKind::Write { chunk, .. } if u64::from(*chunk) + 16 > cap => Some(format!(
+            // wire.md 3.4.5: a WRITE request is 24 bytes and its data.
+            PhaseKind::Write { chunk, .. } if u64::from(*chunk) + 24 > cap => Some(format!(
                 "its WRITEs of {chunk} bytes do not fit the payload cap {cap}"
             )),
             PhaseKind::SequentialRead { chunk, bulk, .. } if *bulk && ring.arena_len() == 0 => {
@@ -344,12 +371,14 @@ fn fits(ring: &Attached, w: &Workload) -> Result<(), String> {
 }
 
 /// Plays one phase on `threads x clients` threads and gathers their numbers.
+/// With `shape`, thread `t` sends its READs as `shape[t]` says.
 fn run_phase(
     ring: &Attached,
     w: &Workload,
     p: &Phase,
     opts: &BenchOptions,
     strict: bool,
+    shape: Option<&[Shape]>,
 ) -> Result<PhaseOut, String> {
     let total = p.threads.saturating_mul(opts.clients.max(1));
     let streams: Vec<Vec<OwnedRequest>> = (0..total)
@@ -365,9 +394,11 @@ fn run_phase(
     let outs: Vec<Result<ThreadOut, String>> = std::thread::scope(|s| {
         let handles: Vec<_> = streams
             .iter()
-            .map(|reqs| {
+            .enumerate()
+            .map(|(t, reqs)| {
                 let barrier = &barrier;
-                s.spawn(move || play(ring, w, reqs, strict, barrier))
+                let shape = shape.and_then(|s| s.get(t)).map(|s| &s[..]);
+                s.spawn(move || play(ring, w, reqs, strict, shape, barrier))
             })
             .collect();
         handles
@@ -383,8 +414,10 @@ fn run_phase(
     let mut ops: BTreeMap<&'static str, Histogram<u64>> = BTreeMap::new();
     let (mut start, mut end) = (None::<Instant>, None::<Instant>);
     let (mut requests, mut bulk_bytes) = (0, 0);
+    let mut reads = Vec::new();
     for o in outs {
         let o = o?;
+        reads.push(o.reads);
         for (op, h) in o.ops {
             ops.entry(op.name())
                 .or_insert_with(histogram)
@@ -406,6 +439,7 @@ fn run_phase(
         requests,
         bulk_bytes,
         threads: total,
+        reads,
     })
 }
 
@@ -444,6 +478,7 @@ struct ThreadOut {
     end: Instant,
     requests: u64,
     bulk_bytes: u64,
+    reads: Shape,
 }
 
 /// What a reply said, as much as the checks need.
@@ -456,12 +491,15 @@ enum Answer {
     Other,
 }
 
-/// Plays `reqs` from one thread, after every thread is ready.
+/// Plays `reqs` from one thread, after every thread is ready. With `shape`,
+/// the `j`-th READ asks for `shape[j].0` bytes, with `FLAG_READ_BULK` set
+/// exactly when `shape[j].1` is.
 fn play(
     ring: &Attached,
     w: &Workload,
     reqs: &[OwnedRequest],
     strict: bool,
+    shape: Option<&[(u32, bool)]>,
     barrier: &Barrier,
 ) -> Result<ThreadOut, String> {
     let client = ring.client();
@@ -480,6 +518,7 @@ fn play(
     let mut handles: Vec<(u64, u64)> = Vec::new();
     let mut ops: Vec<(Opcode, Histogram<u64>)> = Vec::new();
     let mut bulk_bytes = 0u64;
+    let mut reads: Shape = Vec::new();
     let fh_of = |handles: &[(u64, u64)], local: u64| -> (u64, u64) {
         local
             .checked_sub(1)
@@ -490,7 +529,19 @@ fn play(
     barrier.wait();
     let start = Instant::now();
     for (i, r) in reqs.iter().enumerate() {
-        let request = mapped(r, |l| fh_of(&handles, l).0);
+        let mut request = mapped(r, |l| fh_of(&handles, l).0);
+        if let (
+            Some(shape),
+            Request::Read {
+                slot_flags, len, ..
+            },
+        ) = (shape, &mut request)
+        {
+            if let Some(&(n, bulk)) = shape.get(reads.len()) {
+                *len = n;
+                slot_flags.set(aether_protocol::RequestFlags::READ_BULK, bulk);
+            }
+        }
         let op = request.opcode();
         let at = || format!("request {i} ({} {})", op.name(), describe(r));
         let t0 = Instant::now();
@@ -518,6 +569,7 @@ fn play(
                     fh, offset, len, ..
                 },
             ) => {
+                reads.push((n, bulk));
                 if bulk {
                     bulk_bytes += u64::from(n);
                 }
@@ -558,6 +610,7 @@ fn play(
         end,
         requests: reqs.len() as u64,
         bulk_bytes,
+        reads,
     })
 }
 
@@ -685,14 +738,20 @@ fn us(ns: u64) -> f64 {
     ns as f64 / 1000.0
 }
 
-fn workload_json(w: &Workload, d: &Measured, f: &Measured) -> Value {
+fn workload_json(w: &Workload, floor: &str, d: &Measured, f: &Measured) -> Value {
     let phases: Vec<Value> = w
         .phases
         .iter()
         .zip(d.phases.iter().zip(&f.phases))
         .map(|(p, (d, f))| phase_json(p, d, f))
         .collect();
-    json!({ "name": w.name, "phases": phases })
+    json!({
+        "name": w.name,
+        "geometry": d.geometry,
+        "floor": floor,
+        "floor_geometry": f.geometry,
+        "phases": phases,
+    })
 }
 
 fn phase_json(p: &Phase, d: &PhaseOut, f: &PhaseOut) -> Value {
@@ -724,15 +783,24 @@ fn phase_json(p: &Phase, d: &PhaseOut, f: &PhaseOut) -> Value {
         }
         per_op.insert((*op).to_string(), v);
     }
+    let read_bytes =
+        |o: &PhaseOut| -> u64 { o.reads.iter().flatten().map(|&(n, _)| u64::from(n)).sum() };
     json!({
         "name": p.name,
         "threads": d.threads,
         "requests": d.requests,
         "seconds": d.seconds,
         "requests_per_s": per_s(d),
+        "read_bytes": read_bytes(d),
+        "bulk_bytes": d.bulk_bytes,
         "bulk_mib_s": (d.bulk_bytes > 0 && d.seconds > 0.0)
             .then(|| d.bulk_bytes as f64 / (1024.0 * 1024.0) / d.seconds),
-        "floor": { "seconds": f.seconds, "requests_per_s": per_s(f) },
+        "floor": {
+            "seconds": f.seconds,
+            "requests_per_s": per_s(f),
+            "read_bytes": read_bytes(f),
+            "bulk_bytes": f.bulk_bytes,
+        },
         "per_op": per_op,
     })
 }
@@ -741,10 +809,9 @@ fn phase_json(p: &Phase, d: &PhaseOut, f: &PhaseOut) -> Value {
 /// p50 and p99, the floor's p50 and what the director adds over it.
 pub fn summary(report: &Value) -> String {
     let mut out = format!(
-        "director {}\nfloor {}\nring {}, {} client(s) per thread{}; microseconds per request\n",
+        "director {}\nfloor {}\n{} client(s) per thread{}; microseconds per request\n",
         report["director"].as_str().unwrap_or("?"),
         report["floor"].as_str().unwrap_or("?"),
-        report["geometry"],
         report["clients"],
         if report["quick"] == true {
             ", --quick (one repeat, capped): counts, not timings"
@@ -758,6 +825,7 @@ pub fn summary(report: &Value) -> String {
             out.push_str(&format!("{name}: error: {e}\n"));
             continue;
         }
+        out.push_str(&format!("{name}: ring {}\n", w["geometry"]));
         for p in w["phases"].as_array().into_iter().flatten() {
             out.push_str(&format!(
                 "{name}/{}: {} threads, {} requests in {:.3} s, {:.0} req/s (floor {:.0} req/s){}\n",
@@ -803,15 +871,38 @@ pub struct Comparison {
 }
 
 /// `now` against `base`, which must come from the same machine
-/// ([`machine::same_machine`]), the same director, ring geometry, client
-/// count and `--quick`.
+/// ([`machine::same_machine`]), the same director, client count and
+/// `--quick`, and in every workload both have, the same ring geometry.
 pub fn compare(now: &Value, base: &Value) -> Result<Comparison, String> {
     machine::same_machine(now, base)?;
-    for k in ["director", "geometry", "clients", "quick"] {
+    for k in ["director", "clients", "quick"] {
         if now[k] != base[k] {
             return Err(format!(
                 "the baseline was recorded with another {k} ({} here, {} there)",
                 now[k], base[k]
+            ));
+        }
+    }
+    for w in now["workloads"].as_array().into_iter().flatten() {
+        let found = base["workloads"].as_array().into_iter().flatten();
+        let Some(b) = found.into_iter().find(|b| b["name"] == w["name"]) else {
+            continue;
+        };
+        if w.get("error").is_some() || b.get("error").is_some() {
+            continue;
+        }
+        let (g, bg) = (&w["geometry"], &b["geometry"]);
+        if bg.is_null() {
+            return Err(format!(
+                "the baseline's {} names no ring geometry (a report from before workloads had \
+                 their own)",
+                w["name"]
+            ));
+        }
+        if g != bg {
+            return Err(format!(
+                "the baseline's {} was recorded on another ring geometry ({g} here, {bg} there)",
+                w["name"]
             ));
         }
     }

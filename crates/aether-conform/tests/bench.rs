@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use aether_conform::adapter::Adapter;
 use aether_conform::attach::Attached;
-use aether_protocol::{Reply, Request, RootId};
+use aether_protocol::{Opcode, ReadReply, Reply, Request, RequestFlags, RootId};
 use serde_json::{json, Value};
 
 const EXE: &str = env!("CARGO_BIN_EXE_aether-conform");
@@ -170,15 +170,16 @@ fn bench_against_the_reference_writes_every_opcode_the_workload_sends() {
 #[test]
 fn the_floor_is_measured_and_subtracted() {
     let (_dir, r) = every_kind_report();
+    let w = &r["workloads"][0];
     assert!(
-        r["floor"].as_str().unwrap().contains("null-adapter"),
+        w["floor"].as_str().unwrap().contains("null-adapter"),
         "{}",
-        r["floor"]
+        w["floor"]
     );
     // The floor's ring is the director's: same kind and shape.
-    assert_eq!(r["floor_geometry"], r["geometry"]);
-    assert_eq!(r["geometry"]["ring"], "file");
-    for p in r["workloads"][0]["phases"].as_array().unwrap() {
+    assert_eq!(w["floor_geometry"], w["geometry"]);
+    assert_eq!(w["geometry"]["ring"], "file");
+    for p in w["phases"].as_array().unwrap() {
         assert!(p["floor"]["requests_per_s"].as_f64().unwrap() > 0.0);
         for (op, v) in p["per_op"].as_object().unwrap() {
             for k in ["p50", "p99", "p999"] {
@@ -203,8 +204,190 @@ fn the_floor_of_a_section_ring_is_a_section_ring() {
     let (o, r) = bench(dir.path(), &director, &[]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     let r = r.unwrap();
-    assert_eq!(r["geometry"]["ring"], "section");
-    assert_eq!(r["floor_geometry"], r["geometry"]);
+    let w = &r["workloads"][0];
+    assert_eq!(w["geometry"]["ring"], "section");
+    assert_eq!(w["floor_geometry"], w["geometry"]);
+}
+
+/// The floor's READs move what the director's did, in the same form: the
+/// same bytes in all and the same in bulk, phase by phase. A floor that
+/// answered READs with nothing (or every one inline) would count the data
+/// movement as the director's cost.
+///
+/// The second workload's READs of 128 KiB set no bulk flag, and the
+/// reference answers them in bulk (wire.md 3.4.4: `len >= 65536` with an
+/// arena), so the floor is sent them flagged.
+#[test]
+fn the_floor_reads_the_bytes_the_director_read_in_the_same_form() {
+    let unflagged = json!({
+        "name": "unflagged",
+        "description": "READs of 128 KiB with no bulk flag",
+        "tree": {"roots": [{"id": 0,
+            "files": [{"path": "Data/Big.bsa", "contents": {"size": 300000, "seed": 1}}]}]},
+        "phases": [{"name": "unflagged", "threads": 1, "repeat": 1, "kind": "sequential_read",
+                    "path": "Data/Big.bsa", "chunk": 131072, "bulk": false}]
+    });
+    let dir = workloads(&[every_kind(), unflagged]);
+    let (o, r) = bench(dir.path(), &reference(), &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let r = r.unwrap();
+    for w in r["workloads"].as_array().unwrap() {
+        for p in w["phases"].as_array().unwrap() {
+            for k in ["read_bytes", "bulk_bytes"] {
+                assert_eq!(p["floor"][k], p[k], "{} {k}: {p:#}", p["name"]);
+            }
+        }
+    }
+    assert_eq!(phase(&r, "bulk")["bulk_bytes"], 3_000_000);
+    assert_eq!(phase(&r, "bulk")["read_bytes"], 3_000_000);
+    assert_eq!(phase(&r, "random")["read_bytes"], 2 * 8 * 4096);
+    assert_eq!(phase(&r, "random")["bulk_bytes"], 0);
+    // Two READs of 128 KiB in bulk, and the 37 856 bytes left inline.
+    let p = &r["workloads"][1]["phases"][0];
+    assert_eq!(p["read_bytes"], 300_000);
+    assert_eq!(p["bulk_bytes"], 2 * 131_072);
+}
+
+/// A workload a director answers whatever its tree: OPENs and CLOSEs of
+/// the generated names.
+fn opens_only() -> Value {
+    json!({
+        "name": "opens",
+        "description": "OPEN and CLOSE only",
+        "tree": {"roots": [{"id": 0, "files": []}]},
+        "generate": [{"dir": "Data", "count": 2, "name": "F{n}.esp", "size": 8, "seed": 1}],
+        "phases": [{"name": "opens", "threads": 1, "repeat": 1, "kind": "storm",
+                    "ops": ["open", "close"], "paths": {"prefix": "Data/"}}]
+    })
+}
+
+/// The null adapter on a ring unlike its default in every number.
+fn small_null() -> String {
+    format!(
+        "{} null-adapter --slots 4 --payload-cap 65536 --arena-len 1048576 --workers 2",
+        quoted_exe()
+    )
+}
+
+/// The floor is built on the director's ring in every number, not on the
+/// null adapter's default one: here the director's slots, payload cap,
+/// arena and workers all differ from that default.
+#[test]
+fn the_floor_s_ring_has_the_director_s_shape_whatever_it_is() {
+    let dir = workloads(&[opens_only()]);
+    let (o, r) = bench(dir.path(), &small_null(), &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let r = r.unwrap();
+    let w = &r["workloads"][0];
+    assert_eq!(
+        w["geometry"],
+        json!({"ring": "file", "slots": 4, "payload_cap": 65536,
+               "arena_len": 1048576, "worker_hint": 2})
+    );
+    assert_eq!(w["floor_geometry"], w["geometry"]);
+}
+
+/// One phase run against `director`: the workload's error, which a strict
+/// check gave.
+fn error_of(director: &str, workload: Value) -> String {
+    let dir = workloads(&[workload]);
+    let (o, r) = bench(dir.path(), director, &[]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    let r = r.unwrap();
+    r["workloads"][0]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error: {r:#}"))
+        .to_string()
+}
+
+#[test]
+fn a_handle_0_is_an_error() {
+    let director = format!("{} reference-adapter --break fh-from-zero", quoted_exe());
+    let e = error_of(&director, one_bulk_read());
+    assert!(e.contains("handle 0"), "{e}");
+}
+
+#[test]
+fn found_0_for_a_file_of_the_tree_is_an_error() {
+    let w = json!({
+        "name": "stats",
+        "description": "GETATTR of files the tree has",
+        "tree": {"roots": [{"id": 0, "files": []}]},
+        "generate": [{"dir": "Data", "count": 2, "name": "F{n}.esp", "size": 8, "seed": 1}],
+        "phases": [{"name": "stats", "threads": 1, "repeat": 1, "kind": "storm",
+                    "ops": ["getattr"], "paths": {"prefix": "Data/"}}]
+    });
+    let e = error_of(&small_null(), w);
+    assert!(e.contains("found = 0"), "{e}");
+}
+
+#[test]
+fn a_short_write_is_an_error() {
+    let w = json!({
+        "name": "save",
+        "description": "a save written in chunks",
+        "tree": {"roots": [{"id": 0, "files": [], "writable": ["Saves"]}]},
+        "phases": [{"name": "save", "threads": 1, "repeat": 1, "kind": "write",
+                    "path": "Saves/New.ess", "chunk": 1000, "total": 2500,
+                    "then_close": true}]
+    });
+    let director = format!("{} reference-adapter --break short-write", quoted_exe());
+    let e = error_of(&director, w);
+    assert!(e.contains("wrote 500 of 1000 bytes"), "{e}");
+}
+
+#[test]
+fn a_listing_of_another_length_is_an_error() {
+    let w = json!({
+        "name": "list",
+        "description": "a listing of three files",
+        "tree": {"roots": [{"id": 0, "files": []}]},
+        "generate": [{"dir": "Data", "count": 3, "name": "F{n}.esp", "size": 8, "seed": 1}],
+        "phases": [{"name": "list", "threads": 1, "repeat": 1, "kind": "readdir", "path": "Data"}]
+    });
+    // The null director lists nothing.
+    let e = error_of(&small_null(), w);
+    assert!(e.contains("0 entries, where the tree has 3"), "{e}");
+}
+
+/// A save written in chunks of `chunk` bytes.
+fn saves_in(chunk: u32) -> Value {
+    json!({
+        "name": "save",
+        "description": "a save written in chunks",
+        "tree": {"roots": [{"id": 0, "files": [], "writable": ["Saves"]}]},
+        "phases": [{"name": "save", "threads": 1, "repeat": 1, "kind": "write",
+                    "path": "Saves/New.ess", "chunk": chunk, "total": chunk,
+                    "then_close": true}]
+    })
+}
+
+/// wire.md 3.4.5: a WRITE request is 24 bytes and its data, so on a 64 KiB
+/// payload cap a chunk of `65536 - 24` fits and one byte more does not; the
+/// one that does not is refused before anything is sent.
+#[test]
+fn a_write_chunk_fits_the_payload_cap_with_its_24_byte_header() {
+    let dir = workloads(&[saves_in(65536 - 24)]);
+    let (o, _) = bench(dir.path(), &small_null(), &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let e = error_of(&small_null(), saves_in(65536 - 23));
+    assert!(
+        e.contains("WRITEs of 65513 bytes do not fit the payload cap 65536"),
+        "{e}"
+    );
+}
+
+/// `--clients N` runs N client threads for each of a phase's threads.
+#[test]
+fn clients_multiplies_each_phase_s_threads() {
+    let dir = workloads(&[every_kind()]);
+    let (o, r) = bench(dir.path(), &reference(), &["--clients", "2"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let r = r.unwrap();
+    assert_eq!(r["clients"], 2);
+    assert_eq!(phase(&r, "storm")["threads"], 2 * 2);
+    assert_eq!(phase(&r, "storm")["per_op"]["getattr"]["count"], 2 * 2 * 3);
+    assert_eq!(phase(&r, "random")["per_op"]["read"]["count"], 2 * 2 * 8);
 }
 
 #[test]
@@ -262,7 +445,7 @@ fn a_baseline_from_another_machine_is_refused() {
     assert!(text(&o).contains("another machine"), "{}", text(&o));
     // A comparison refuses another geometry too.
     let mut moved = r.clone();
-    moved["geometry"]["slots"] = json!(99);
+    moved["workloads"][0]["geometry"]["slots"] = json!(99);
     let e = aether_conform::bench::compare(&r, &moved).unwrap_err();
     assert!(e.contains("geometry"), "{e}");
     assert!(aether_conform::bench::compare(&r, &r).is_ok());
@@ -323,6 +506,34 @@ fn null_adapter_round_trip(args: &str) -> Value {
         matches!(&attr, Ok(Reply::GetAttr(a)) if !a.found),
         "{attr:?}"
     );
+    // A READ moves the bytes it asks for: inline unflagged, in bulk flagged
+    // when the ring has an arena.
+    let read = |flags: RequestFlags, len: u32| {
+        let mut body = Vec::new();
+        Request::Read {
+            slot_flags: flags,
+            fh: 1,
+            offset: 0,
+            len,
+        }
+        .encode(&mut body);
+        let (mut replies, slots) = client
+            .ring()
+            .submit_many_held(&[(Opcode::Read as u32, flags.bits(), body)])
+            .unwrap();
+        let r = replies.pop().unwrap();
+        let got = match Reply::decode(Opcode::Read, flags.bits(), &r.payload) {
+            Ok(Reply::Read(ReadReply::Inline(b))) => (b.len() as u32, false),
+            Ok(Reply::Read(ReadReply::Bulk { len, .. })) => (len, true),
+            other => panic!("{other:?}"),
+        };
+        client.ring().release_slots(&slots);
+        got
+    };
+    assert_eq!(read(RequestFlags::empty(), 4096), (4096, false));
+    if ring.arena_len() > 0 {
+        assert_eq!(read(RequestFlags::READ_BULK, 65536), (65536, true));
+    }
     let g = ring.geom();
     let shape = json!({
         "file": env.contains_key(aether_env::RING_PATH),

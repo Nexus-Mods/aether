@@ -159,10 +159,14 @@ target/release/aether-conform bench --director "<your adapter command>" \
 
 Each phase of each workload is played once as a warm-up and then recorded,
 and every request is timed from before it is sent until its reply is decoded.
-The same requests then go to a floor, `aether-conform null-adapter`, which
-answers every request at once with the smallest reply on a ring of the same
-shape. The report gives the director's p50, p99 and p99.9 per opcode, the
-floor's, and the difference: what the director costs over the ring. The
+The same requests then go to a floor, `aether-conform null-adapter`, on a
+ring of the same shape. It answers every request at once with the smallest
+reply, except READ: each READ asks it for the bytes the director's reply gave,
+in the form that reply came in (inline or bulk), and it moves that many. So
+the floor includes the round trip, the slot copies and a READ's data
+movement, and leaves out only what the director does to answer. The report
+gives the director's p50, p99 and p99.9 per opcode, the floor's, and the
+difference: what the director costs over the ring. The
 workloads, the options, the report format and the checks a reply must pass
 are in `docs/conformance.md` ("Benchmarks") and `contract/workloads/README.md`.
 

@@ -225,11 +225,9 @@ impl Attached {
     }
 
     /// Whether `VFS_ARENA_OFFSET` named the arena's start. Without it the
-    /// start is assumed (after the last slot, where a director usually puts
-    /// it, wire.md 2.1), and the shim, which takes data offsets from bulk replies
-    /// and never needs the start (5.3: "Informational"), would accept an
-    /// arena elsewhere; so the bank a bulk reply lies in is checked only
-    /// when this is true.
+    /// start is assumed to be after the last slot (wire.md 2.1, 5.3), as the
+    /// shim assumes it; the bank a bulk reply lies in is checked only when
+    /// this is true.
     pub fn arena_offset_given(&self) -> bool {
         self.arena_offset_given
     }
@@ -324,8 +322,8 @@ fn open_server_event(env: &Env) -> Option<crate::job::WakeEvent> {
 /// (`backings_from_env`, `parse_backings`) and hands them all to
 /// `RootMap::with_roots`, whose error fails the load ("managed root is not a
 /// usable path"). That last call is the shim's own, from `aether-redirect`;
-/// the parsing before it is `aether_env::session`, the shim's own. The volume map is left empty: it adds aliases, never
-/// refuses a root.
+/// the parsing before it is `aether_env::session`, the shim's own. The
+/// volume map is left empty: it adds aliases, never refuses a root.
 pub fn shim_roots(env: &Env) -> Result<(), String> {
     let get = |k: &str| env.get(k).map(String::as_str);
     let Some(virtual_dir) = get(aether_env::VIRTUAL_DIR) else {

@@ -20,6 +20,10 @@ use windows_sys::Win32::Foundation::NTSTATUS;
 /// `Some(...)` means the path is under the managed root — caller must not tramp
 /// to the Steam tree on NOT_FOUND (seal under-root).
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), Status>> {
+    // A child's backing directory while the host starts it there: real.
+    if super::child_start::is_real_dir(path) {
+        return None;
+    }
     let client = crate::director::global()?;
     let (root, vp) = client.route(path)?;
     Some(match client.getattr(root, &vp) {

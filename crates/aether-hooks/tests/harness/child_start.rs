@@ -39,6 +39,9 @@ use windows_sys::Win32::System::Threading::{
 /// The served image's name under root 0.
 pub(crate) const IMAGE: &str = "aether-probe.exe";
 
+/// An image on disk under root 0 that the director does not serve.
+const HIDDEN: &str = "hidden-probe.exe";
+
 /// How long a child the hook killed may take to be gone.
 const GONE_MS: u32 = 10_000;
 
@@ -177,6 +180,8 @@ pub(crate) fn setup(
         std::fs::remove_dir(&backing).unwrap();
     }
     std::fs::copy(probe, root.join(IMAGE)).unwrap();
+    // A real file under the root that the VFS does not hold.
+    std::fs::copy(probe, root.join(HIDDEN)).unwrap();
     let staged = stage.join(IMAGE);
     std::fs::copy(probe, &staged).unwrap();
 
@@ -228,8 +233,15 @@ fn wide(s: &str) -> Vec<u16> {
 /// `CreateProcessW(app, "\"app\"")`: the process id, or the call's error.
 /// A child that did start is killed and waited for.
 pub(crate) fn create(app: &Path) -> Result<u32, u32> {
-    let app_w = wide(&app.to_string_lossy());
-    let mut cmd = wide(&format!("\"{}\"", app.display()));
+    start(Some(app), &format!("\"{}\"", app.display()), None)
+}
+
+/// `CreateProcessW(app, cmd)` in `cwd` (the caller's own when `None`), as
+/// [`create`].
+fn start(app: Option<&Path>, cmd: &str, cwd: Option<&Path>) -> Result<u32, u32> {
+    let app_w = app.map(|a| wide(&a.to_string_lossy()));
+    let cwd_w = cwd.map(|d| wide(&d.to_string_lossy()));
+    let mut cmd = wide(cmd);
     // SAFETY: zeroed is a valid STARTUPINFOW once `cb` is set.
     let mut si: STARTUPINFOW = unsafe { core::mem::zeroed() };
     si.cb = core::mem::size_of::<STARTUPINFOW>() as u32;
@@ -239,14 +251,14 @@ pub(crate) fn create(app: &Path) -> Result<u32, u32> {
     // the caller's environment and directory.
     let ok = unsafe {
         CreateProcessW(
-            app_w.as_ptr(),
+            app_w.as_ref().map_or(core::ptr::null(), |a| a.as_ptr()),
             cmd.as_mut_ptr(),
             core::ptr::null(),
             core::ptr::null(),
             0,
             0,
             core::ptr::null(),
-            core::ptr::null(),
+            cwd_w.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
             &si,
             &mut pi,
         )
@@ -361,6 +373,66 @@ fn a_missing_backing_directory_is_made_on_disk() {
     assert_eq!(
         s.served.recorder.ops_since(mark),
         [Some(Opcode::GetAttr), Some(Opcode::StageExec)]
+    );
+}
+
+/// A child started in a root and named only by its command line: the
+/// host's search for the image sees what the VFS sees. `PATH` names the
+/// root, whose real folder holds `hidden-probe.exe`, which the director does
+/// not serve, so the start fails as it would for a file that is not there
+/// and nothing is started from the real folder.
+#[test]
+fn an_image_search_never_finds_a_file_the_vfs_does_not_hold() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let (s, _) = setup(
+        &probe,
+        Given {
+            stages: true,
+            backed: true,
+            missing_backing: false,
+            fault: None,
+        },
+    );
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    let mut path = s.root.as_os_str().to_owned();
+    path.push(";");
+    path.push(&old);
+    std::env::set_var("PATH", &path);
+    let r = start(None, HIDDEN, Some(&s.root));
+    std::env::set_var("PATH", old);
+    let images = created();
+    assert!(images.is_empty(), "nothing may start: {images:?}");
+    assert_eq!(r, Err(ERROR_FILE_NOT_FOUND), "refused as file not found");
+}
+
+/// The same start for an image the VFS holds: the host is handed the staged
+/// copy's absolute path, and that copy runs, never the real file at the root.
+#[test]
+fn an_image_named_by_the_command_line_in_a_root_runs_the_staged_copy() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let (s, _) = setup(
+        &probe,
+        Given {
+            stages: true,
+            backed: true,
+            missing_backing: false,
+            fault: None,
+        },
+    );
+    let r = start(None, IMAGE, Some(&s.root));
+    assert!(
+        matches!(r, Ok(_) | Err(ERROR_PROCESS_ABORTED)),
+        "started, then refused only for its injection: {r:?}"
+    );
+    let images = created();
+    assert_eq!(images.len(), 1, "one child: {images:?}");
+    assert!(
+        same_path(&images[0], &s.staged),
+        "the child runs {:?}, not the staged copy {:?}",
+        images[0],
+        s.staged
     );
 }
 

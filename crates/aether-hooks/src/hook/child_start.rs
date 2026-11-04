@@ -33,6 +33,9 @@ pub(super) struct ChildStart {
     pub app: Option<Vec<u16>>,
     /// The real working directory to create it in, NUL-terminated.
     pub cwd: Option<Vec<u16>>,
+    /// That directory as a path: the one name the host's own check of it
+    /// finds on the real disk ([`RealDirScope`]).
+    pub backing: Option<String>,
     /// The virtual working directory to tell it, once created.
     pub virtual_cwd: Option<String>,
     /// The environment block to create it with (Unicode), when the caller
@@ -41,6 +44,64 @@ pub(super) struct ChildStart {
     /// The caller named an image under a root that the VFS does not have:
     /// refused rather than started from whatever is really on disk there.
     pub refuse: bool,
+}
+
+thread_local! {
+    /// The backing directory a child is being started in on this thread,
+    /// while [`RealDirScope`] holds it.
+    static REAL_DIR: core::cell::RefCell<Option<String>> = const { core::cell::RefCell::new(None) };
+}
+
+/// While held, an attribute query of exactly `dir` on this thread goes to
+/// the real disk ([`is_real_dir`]). The process hook holds one around the
+/// host's `CreateProcessInternalW` for a child started in a backing
+/// directory: the host checks its working directory (`GetFileAttributesW`),
+/// a real folder that routes to the root itself. Every other hooked call in
+/// the host's call, the image search and registry reads included, stays
+/// virtualised.
+pub(super) struct RealDirScope(());
+
+impl RealDirScope {
+    pub(super) fn enter(dir: &str) -> RealDirScope {
+        let _ = REAL_DIR.try_with(|d| {
+            if let Ok(mut d) = d.try_borrow_mut() {
+                *d = Some(dir.to_string());
+            }
+        });
+        RealDirScope(())
+    }
+}
+
+impl Drop for RealDirScope {
+    fn drop(&mut self) {
+        let _ = REAL_DIR.try_with(|d| {
+            if let Ok(mut d) = d.try_borrow_mut() {
+                *d = None;
+            }
+        });
+    }
+}
+
+/// Whether `path` (NT or DOS spelling, any case, trailing separators apart)
+/// is the directory a [`RealDirScope`] on this thread names.
+pub(super) fn is_real_dir(path: &str) -> bool {
+    fn bare(p: &str) -> &str {
+        p.strip_prefix(r"\??\")
+            .or_else(|| p.strip_prefix(r"\\?\"))
+            .unwrap_or(p)
+            .trim_end_matches(['\\', '/'])
+    }
+    REAL_DIR
+        .try_with(|d| {
+            d.try_borrow()
+                .ok()
+                .and_then(|d| {
+                    d.as_deref()
+                        .map(|dir| bare(dir).eq_ignore_ascii_case(bare(path)))
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 /// A NUL-terminated UTF-16 string, or `None` for a null pointer.
@@ -176,14 +237,30 @@ pub(super) unsafe fn plan(
                 // A real folder: made on disk by the shim's own I/O. Through the
                 // hooks the backing routes to the root itself, so the director
                 // would be asked about it and a missing folder never made.
-                {
+                let made = {
                     let _io = super::ShimIoGuard::enter();
-                    let _ = std::fs::create_dir_all(backing);
+                    std::fs::create_dir_all(backing)
+                };
+                if let Err(e) = made {
+                    // The host then fails the start on its working directory.
+                    crate::loadlog::note(&format!(
+                        "child start: backing directory {backing} not made: {e}"
+                    ));
                 }
                 out.cwd = Some(nul(backing));
+                out.backing = Some(backing.clone());
                 out.virtual_cwd = Some(dir);
             }
         }
+    }
+    // A child started in a backing directory is handed its image as an
+    // absolute path (the staged copy) or not started, so the host never
+    // searches for it. The search above covers a relative name whenever the
+    // working directory is under a root: the name in that directory is a
+    // candidate, so it was staged, or refused, before here.
+    if out.cwd.is_some() && out.app.is_none() && !named.is_empty() && !is_absolute(&named) {
+        out.refuse = true;
+        return Some(out);
     }
 
     // The environment, when the caller handed one in: theirs, with each of
@@ -270,6 +347,27 @@ pub(super) fn flags_for(plan: Option<&ChildStart>, flags: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_real_dir_scope_names_one_directory_on_this_thread_while_held() {
+        assert!(!is_real_dir(r"C:\Games\Backing"));
+        {
+            let _scope = RealDirScope::enter(r"C:\Games\Backing");
+            for p in [
+                r"C:\Games\Backing",
+                r"\??\c:\games\backing\",
+                r"\\?\C:\Games\Backing",
+            ] {
+                assert!(is_real_dir(p), "{p}");
+            }
+            assert!(!is_real_dir(r"C:\Games\Backing\file.txt"));
+            assert!(!is_real_dir(r"C:\Games"));
+            assert!(!std::thread::spawn(|| is_real_dir(r"C:\Games\Backing"))
+                .join()
+                .unwrap());
+        }
+        assert!(!is_real_dir(r"C:\Games\Backing"));
+    }
 
     #[test]
     fn the_first_argument_is_the_program() {

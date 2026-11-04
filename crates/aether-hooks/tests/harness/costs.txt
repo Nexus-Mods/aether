@@ -8,7 +8,7 @@ attributes_in_root round_trips=1 ring_bytes=32 allocs<=7
 attributes_outside_root round_trips=0 ring_bytes=0 allocs<=0
 close round_trips=1 ring_bytes=8 allocs<=0
 create_directory round_trips=2 ring_bytes=50 allocs<=79
-create_process round_trips=2 ring_bytes=58 allocs<=116
+create_process round_trips=2 ring_bytes=58 allocs<=135
 delete round_trips=3 ring_bytes=68 allocs<=74
 final_path_name_cold round_trips=1 ring_bytes=36 allocs<=26
 final_path_name_not_stored round_trips=1 ring_bytes=22 allocs<=11

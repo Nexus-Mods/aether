@@ -31,11 +31,15 @@ mod ntapi;
 mod reg;
 
 mod bugs_files;
+mod caches_handles;
+mod caches_names;
 mod caches_read;
 mod caches_registry;
 mod child_start;
+mod fileops;
 mod geometry;
 mod idle;
+mod overlay_answers;
 mod reads_large;
 mod recording;
 mod sections;

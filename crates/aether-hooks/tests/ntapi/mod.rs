@@ -581,3 +581,88 @@ pub(crate) fn nt_set_info_raw(h: *mut c_void, buf: &mut [u8], class: u32) -> i32
         )
     }
 }
+
+/// `NtQueryFullAttributesFile` of an absolute path: its status and the whole
+/// record.
+pub(crate) fn nt_query_full_attributes_abs(path: &str) -> (i32, FileNetworkOpenInformation) {
+    let Some(p) = ntdll_proc("NtQueryFullAttributesFile") else {
+        return (-1, FileNetworkOpenInformation::default());
+    };
+    let f: NtQueryFullAttributesFileFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    let mut info = FileNetworkOpenInformation::default();
+    let st = unsafe { f(&n.oa, &mut info) };
+    (st, info)
+}
+
+/// One `FILE_DIRECTORY_INFORMATION` record's name and the fields a test
+/// compares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirRecord {
+    pub(crate) name: String,
+    pub(crate) last_write_time: i64,
+    pub(crate) end_of_file: i64,
+    pub(crate) allocation_size: i64,
+    pub(crate) file_attributes: u32,
+}
+
+/// Every record of `dir` through `NtQueryDirectoryFile(FileDirectoryInformation)`.
+pub(crate) fn nt_enum_records(dir: *mut c_void) -> Vec<DirRecord> {
+    const FILE_DIRECTORY_INFORMATION: u32 = 1;
+    let Some(p) = ntdll_proc("NtQueryDirectoryFile") else {
+        return Vec::new();
+    };
+    let f: NtQueryDirectoryFileFn = unsafe { core::mem::transmute(p) };
+    let at = |b: &[u8], o: usize| i64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut restart = 1u8;
+    loop {
+        let mut iosb = [0u8; 16];
+        let st = unsafe {
+            f(
+                dir,
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                core::ptr::null(),
+                iosb.as_mut_ptr() as *mut c_void,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                FILE_DIRECTORY_INFORMATION,
+                0,
+                core::ptr::null(),
+                restart,
+            )
+        };
+        restart = 0;
+        if st < 0 {
+            break;
+        }
+        // NextEntryOffset@0, LastWriteTime@24, EndOfFile@40,
+        // AllocationSize@48, FileAttributes@56, FileNameLength@60, FileName@64.
+        let mut off = 0usize;
+        loop {
+            let r = &buf[off..];
+            let next = u32::from_le_bytes(r[0..4].try_into().unwrap()) as usize;
+            let namelen = u32::from_le_bytes(r[60..64].try_into().unwrap()) as usize;
+            let units: Vec<u16> = r[64..64 + namelen]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect();
+            out.push(DirRecord {
+                name: String::from_utf16_lossy(&units),
+                last_write_time: at(r, 24),
+                end_of_file: at(r, 40),
+                allocation_size: at(r, 48),
+                file_attributes: u32::from_le_bytes(r[56..60].try_into().unwrap()),
+            });
+            if next == 0 {
+                break;
+            }
+            off += next;
+        }
+    }
+    out
+}

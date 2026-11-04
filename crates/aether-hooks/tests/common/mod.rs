@@ -56,7 +56,8 @@ pub(crate) fn run_isolated(fn_path: &str, exit: Option<u32>) -> bool {
     let name = path.split_once("::").map_or(path, |(_, rest)| rest);
     let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let out = Command::new(std::env::current_exe().expect("current exe"))
-        .args(["--exact", name, "--test-threads=1"])
+        // `--include-ignored`: an ignored test run by name (`-- --ignored`) runs its body too.
+        .args(["--exact", name, "--test-threads=1", "--include-ignored"])
         .env(CHILD_ENV, "1")
         .output()
         .expect("spawn the isolated test");

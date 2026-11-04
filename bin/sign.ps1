@@ -1,6 +1,5 @@
 # Signs files with SSL.com's CodeSignTool (eSigner), or checks the signing
-# credential. Cairn's cairn.build.sign (build-src/cairn/build/sign.clj),
-# ported to PowerShell for a repository without Clojure.
+# credential.
 #
 #   powershell -ExecutionPolicy Bypass -File bin\sign.ps1 -Path a.exe, b.dll [-ToolDir CodeSignTool]
 #   powershell -ExecutionPolicy Bypass -File bin\sign.ps1 -CheckOnly

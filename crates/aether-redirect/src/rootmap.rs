@@ -17,11 +17,10 @@ struct Root {
 
 /// The managed VFS install roots (mount points), as normalized path components.
 ///
-/// **Several roots, not one** (stage 2b task 5). A session virtualizes more
-/// than one real filesystem location — the game directory *and*
-/// `Documents\My Games\Skyrim` — so the answer to "is this path ours?" is no
-/// longer a boolean plus a remainder: it is *which* root, plus the remainder
-/// under that root. See [`RootMap::resolve`].
+/// **Several roots, not one.** A session virtualizes more than one real
+/// filesystem location (the game directory *and* `Documents\My Games\Skyrim`),
+/// so the answer to "is this path ours?" is not a boolean plus a remainder: it
+/// is *which* root, plus the remainder under that root. See [`RootMap::resolve`].
 ///
 /// Two roots may name the same [`RootId`]. That is how an **alias** is
 /// expressed — the shim serves the staged launch directory as a second
@@ -235,9 +234,8 @@ impl RootMap {
                 // direction: an in-root short-name alias cached as "inside"
                 // would keep being treated as inside after the real target
                 // is swapped for something outside the root, which is
-                // exactly the over-eager failure class this gate exists to
-                // avoid (the same class Task 2 already found and fixed once
-                // in `VolumeMap`). Recomputing this branch on every call is
+                // the over-eager failure class (the same class `VolumeMap`
+                // guards against). Recomputing this branch on every call is
                 // the deliberate cost of staying correct; do not "fix" this
                 // by caching it — see `os_consulted_resolution_is_never_cached`.
                 result
@@ -257,7 +255,7 @@ impl RootMap {
     ///    root. No Win32 call, and a deterministic function of `nt_path` (and
     ///    `self.volumes`, itself frozen for the session) — this alone closes
     ///    the device-path and volume-GUID vectors, and every syntactic escape
-    ///    vector Task 1 closed in `canonicalise` itself. Returned as
+    ///    vector `canonicalise` handles itself. Returned as
     ///    [`Resolution::Deterministic`].
     /// 2. Only if that syntactic form does not already place the path under
     ///    the root, and only if it contains `~` — the character every
@@ -277,8 +275,7 @@ impl RootMap {
     /// loads — would pay a Win32 round trip. Every real 8.3 short name
     /// contains `~` by construction, so nothing this gate is responsible for
     /// closing is missed by requiring it. In practice this makes the
-    /// OS-consulted branch rare: see `plainly_outside_path_never_consults_the_os`
-    /// and the cost discussion in the task report.
+    /// OS-consulted branch rare: see `plainly_outside_path_never_consults_the_os`.
     fn compute_under_root(&self, nt_path: &str) -> Resolution {
         #[cfg(test)]
         self.computes.fetch_add(1, Ordering::Relaxed);
@@ -306,7 +303,7 @@ impl RootMap {
         // every root: a location may be purely virtual, so nothing at or
         // under one is opened, listed or read, and content served under a
         // root has no 8.3 names to look up anyway. So it is the spelling of a
-        // root's own ancestors (`HASKIL~1` for `Haskill`) that this resolves.
+        // root's own ancestors (`LIBRAR~1` for `Library`) that this resolves.
         let Some(expanded) = self.expand_above_roots(&canon) else {
             return Resolution::OsConsulted(None);
         };

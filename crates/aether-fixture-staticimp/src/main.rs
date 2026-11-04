@@ -20,15 +20,14 @@ extern "C" {
 // no Cargo edge to aether-fixture-vproxy, cargo is free to link this crate before
 // the cdylib that produces `vproxy.dll.lib` exists, and on a clean target dir it
 // does: LNK1181. Whoever builds this crate has to build aether-fixture-vproxy
-// first, in an earlier cargo invocation — CI does it in the "Build daemon +
-// inject artifacts" step, and `aether-inject`'s `tests/common` does it at test
+// first, in an earlier cargo invocation: CI does it in the "Build inject
+// artifacts" step, and `aether-inject`'s `tests/common` does it at test
 // runtime. build.rs warns if the lib is missing, because the linker's own error
 // names a file and not a cause.
 //
-// This comment previously claimed the ordering "comes from the Cargo dependency
-// on aether-fixture-vproxy". There is no such dependency — Cargo.toml removed it on
-// purpose. The claim survived because a developer tree always happens to have
-// the import lib lying around, so the gap only ever showed up on clean CI.
+// There is no Cargo dependency on aether-fixture-vproxy, on purpose. A developer
+// tree usually has the import lib lying around, so a missing build order shows
+// only on a clean target dir, such as CI's.
 
 #[cfg(not(windows))]
 fn main() {

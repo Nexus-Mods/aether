@@ -19,7 +19,6 @@
 # else the build reads belongs among the inputs too: Cargo configuration in a
 # .cargo/ folder would have to be added here.
 #
-# This is Cairn's formula (its bin/natives-key.ps1) over Aether's inputs.
 # .gitattributes fixes every text file's line endings (eol=lf), so a Windows
 # and a Linux checkout give the same key. Runs under Windows PowerShell 5.1
 # and PowerShell 7.

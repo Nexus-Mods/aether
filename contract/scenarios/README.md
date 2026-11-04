@@ -2,11 +2,10 @@
 
 A scenario is a tree for a director to mount and a list of steps, each a
 request and the answer it must get. `aether-conform` plays them against a
-director and against the reference (`aether_refdirector::Reference`, built
-with `Reference::from_tree`) and compares the answers by the rules below.
-Every name is `contract/protocol.json`'s: opcodes, request and reply fields,
-statuses, flags. The loader is `aether_conform::scenario::load` (one file) and
-`load_dir` (every `*.json` in a folder, in name order).
+director and against the reference director and compares the answers by
+the rules below. Every name is `contract/protocol.json`'s: opcodes, request
+and reply fields, statuses, flags. A run loads every `*.json` file in the
+scenarios folder, in name order.
 
 ## Format
 
@@ -72,8 +71,10 @@ root writable as a whole, `"."`.
 
 **Bytes** (`contents`, WRITE's `data`, a value's `data`, READ's reply
 `data`): a JSON string is its UTF-8, `{"hex": "00ff"}` is those bytes, and
-`{"size": N, "seed": S}` is N bytes generated from S
-(`aether_refdirector::tree::fill`; seed 0 is `aether_refdirector::pattern`).
+`{"size": N, "seed": S}` is N bytes generated from S: start with the 32-bit
+`x = 0x9E3779B9 ^ low32(S) ^ high32(S)`, and for each position `i` from 0,
+set `x = x * 1664525 + 1013904223` (mod 2^32) and emit the byte `(x >> 24) ^
+(i & 0xFF)`.
 
 **Requests.** `op` and every request field of that opcode in
 `protocol.json`, padding aside; nothing else, except READ's optional
@@ -121,19 +122,18 @@ step and the field (`saves.json: step 3: request.flags: unknown flag
 ## Comparison rules
 
 The rule is equality. These are the exceptions, each allowed by the wire.md
-text quoted from the section named; there are no others
-(`crates/aether-conform/src/compare.rs`).
+text quoted from the section named; there are no others.
 
 | What | Rule | wire.md |
 |---|---|---|
-| OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number (`Session::translate`): the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. Never 0 (3.4.3: the shim keeps 0 for a directory it made). | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles" |
-| OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; the directors start it differently |
+| OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number: the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. Never 0 (3.4.3: the shim keeps 0 for a directory it made). | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles" |
+| OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; where a director starts it is its own |
 | OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory" |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
-| `mtime` (GETATTR, READDIR) | Not compared (but it must be below 2^40, the year 36812, as seconds are: 3.2, "`mtime` is seconds since the Unix epoch"), and not checked for changed or unchanged after a write either (an earlier plan's idea, dropped: the time is the director's). A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
-| READ inline or bulk | Compared by data; a bulk reply is read from the arena first (`OwnedReply::resolve_bulk`). | 3.4.4: the client "must accept either whatever flag it sent" |
-| STAGE_EXEC `path` | Not compared, but an absolute Windows path, holding the served file's bytes where the run can read it (`run.rs`, `stage_check`). | 3.4.14: "the real, on-disk Windows path to start it from", wherever the director staged it |
-| Registry `version` | Compared up to one offset per session, fixed by the first registry reply; REG_CHANGED's `since` is sent shifted by it, except `u64::MAX`, the shim's probe for the current version (`regnotify.rs`), which is sent as it is. | 4.3: "The number a director's overlay starts from when it mounts a layer is the director's", versions may differ "by a constant", and "a REG_CHANGED `since` is in the numbering of the director it is sent to" |
+| `mtime` (GETATTR, READDIR) | Not compared (but it must be below 2^40, the year 36812, as seconds are: 3.2, "`mtime` is seconds since the Unix epoch"), and not checked for changed or unchanged after a write either: the time is the director's. A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
+| READ inline or bulk | Compared by data; a bulk reply is read from the arena first. | 3.4.4: the client "must accept either whatever flag it sent" |
+| STAGE_EXEC `path` | Not compared, but an absolute Windows path, holding the served file's bytes where the run can read it. | 3.4.14: "the real, on-disk Windows path to start it from", wherever the director staged it |
+| Registry `version` | Compared up to one offset per session, fixed by the first registry reply; REG_CHANGED's `since` is sent shifted by it, except `u64::MAX`, the shim's probe for the current version, which is sent as it is. | 4.3: "The number a director's overlay starts from when it mounts a layer is the director's", versions may differ "by a constant", and "a REG_CHANGED `since` is in the numbering of the director it is sent to" |
 | REG_KEY `last_write` | Not compared. | 4.3: a FILETIME, which the overlay stamps with the director's clock |
 
 A `one_of` is the only way a scenario allows several answers, and it cites
@@ -146,9 +146,9 @@ clients, and fail the step that breaks them, whatever its expectation:
 
 | What | Rule | wire.md |
 |---|---|---|
-| Read cache | Every READ through a handle whose OPEN reply set `immutable` is recorded under (root, path folded as 3.2 folds it, the reply's `size` and `mount_gen`, offset, length) for the rest of the scenario, bulk reads once read from the arena; a READ of the same key through an immutable handle that returns other bytes fails. Reads through other handles are not recorded (`compare.rs`). | 3.4.3: "two immutable opens of one path with equal size and `mount_gen` must have identical content"; "the handle's bytes cannot change while it is open" |
-| `reg_gen` | Read from the ring header before every request and after every reply (`run.rs`, `RegGen`), by the client that sends the step, in its own mapping: with a `registry` in the tree it is non-zero before the first registry request; after a successful REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or REG_RENAME_KEY it is greater than before the request; it never goes backward, across all the clients. Without a `registry` only the last applies. | 4.5: "a director that serves the registry must publish a non-zero generation before the shim attaches, and must bump it before replying to any write"; "never backward"; 2.8.1: it is how one process's write reaches the others |
-| A client's slot | A step of client `n` is claimed from slot `n`: an answer must come within the timeout, a bulk reply must lie in that slot's bank, and the slot's `ack` must be its request's (`clients.rs`). | 2.5: every taken slot is completed; 2.6: "Slot `s` owns bank `s % banks`" |
+| Read cache | Every READ through a handle whose OPEN reply set `immutable` is recorded under (root, path folded as 3.2 folds it, the reply's `size` and `mount_gen`, offset, length) for the rest of the scenario, bulk reads once read from the arena; a READ of the same key through an immutable handle that returns other bytes fails. Reads through other handles are not recorded. | 3.4.3: "two immutable opens of one path with equal size and `mount_gen` must have identical content"; "the handle's bytes cannot change while it is open" |
+| `reg_gen` | Read from the ring header before every request and after every reply, by the client that sends the step, in its own mapping: with a `registry` in the tree it is non-zero before the first registry request; after a successful REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or REG_RENAME_KEY it is greater than before the request; it never goes backward, across all the clients. Without a `registry` only the last applies. | 4.5: "a director that serves the registry must publish a non-zero generation before the shim attaches, and must bump it before replying to any write"; "never backward"; 2.8.1: it is how one process's write reaches the others |
+| A client's slot | A step of client `n` is claimed from slot `n`: an answer must come within the timeout, a bulk reply must lie in that slot's bank, and the slot's `ack` must be its request's. | 2.5: every taken slot is completed; 2.6: "Slot `s` owns bank `s % banks`" |
 
 To play scenarios against a director, see `docs/conformance.md`. A generated
 case that fails (`aether-conform run --generate`) is written in this format

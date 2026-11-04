@@ -9,10 +9,8 @@
 //! A server thread runs one request start to finish, so a read whose provider
 //! blocks (a block still coming from the network) holds its thread for as long
 //! as that takes. If every server thread holds one, nothing is answered: not a
-//! stat, not an open, not a read the RAM tier could serve at once. The old
-//! process-wide lock hid this by never letting more than one call's pipeline
-//! in flight. [`DataGate`] replaces it with the bound that is actually
-//! wanted: reads and writes in flight stay below the server's worker count
+//! stat, not an open, not a read the RAM tier could serve at once.
+//! [`DataGate`] is the bound that is wanted: reads and writes in flight stay below the server's worker count
 //! ([`data_limit`]), which leaves a worker for everything else.
 //!
 //! Process-local on purpose. The gate lives in the client process and is made

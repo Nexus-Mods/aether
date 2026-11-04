@@ -7,16 +7,13 @@
 //! an error. Nothing reports a problem; the caller simply concludes the
 //! directory holds almost nothing.
 //!
-//! This is not hypothetical: the classic detour was once created but never
-//! enabled, and a detour that is never enabled looks exactly like an API the
+//! A detour that is created but never enabled looks exactly like an API the
 //! process never calls. A functional test per entry point is the only thing
 //! that can tell those apart, so this compares the two directly.
 //!
-//! The listing is the director's (task C8 converted this from a no-director harness, where a
-//! `Data` open had to be overlay-backed just to be openable and was then a plain OS listing of
-//! the overlay directory, never the shim's own enumeration branch). Through the fake director
-//! `Data` is a synthetic directory handle, both entry points reach `serve_dir_query`'s director
-//! branch, and the expectations are the merged view's again: a served file the real directory
+//! The listing is the director's. Through the fake director `Data` is a synthetic directory
+//! handle, both entry points reach `serve_dir_query`'s director branch, and the expectations
+//! are the director's view: a served file the real directory
 //! does not hold is listed, and a real file the director does not serve is not.
 
 use std::ffi::c_void;

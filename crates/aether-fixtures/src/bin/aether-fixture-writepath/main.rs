@@ -4,17 +4,16 @@
 //! `write-probe.txt`, writes "hello", reopens for append, appends "world",
 //! reads the whole file back and checks it is exactly "helloworld", then
 //! renames it and exercises create+delete of a second file. It then proves
-//! two behavioural fixes that are only reachable once writes cross the ring
-//! instead of falling through to a real file: a same-handle write-then-seek-
-//! then-read (the synthetic size must track a write within one open handle,
-//! not only across a close+reopen), and `CREATE_NEW` exclusivity against an
-//! already-existing path (must fail, not silently "succeed" via the
-//! shim-local overlay bypass).
+//! two behaviours that only writes across the ring exercise: a same-handle
+//! write-then-seek-then-read (the synthetic size must track a write within
+//! one open handle, not only across a close+reopen), and `CREATE_NEW`
+//! exclusivity against an already-existing path (must fail, not silently
+//! "succeed").
 //!
 //! With `VFS_FIXTURE_COW_PATH` set it first edits that path **in place** —
 //! the copy-on-write case, see [`COW_PATH_ENV`] — which is the only step here
-//! that needs the session to have a write layer. Unset, the step is skipped
-//! and this fixture is exactly what it was before gate 4 Task 6b.
+//! that needs the session to have a write layer. Unset, the step is
+//! skipped.
 //!
 //! Every failure exits a distinct non-zero code so the host can tell which
 //! step failed without guessing: 2 create, 3 write, 4 append-open, 5
@@ -36,9 +35,8 @@ use std::process::exit;
 /// source and this fixture edits it in place first: `OPEN_EXISTING` +
 /// read/write, no create and no truncate — `fopen(…, "r+b")`, what a mod tool
 /// or an INI writer does. Nothing writable holds that path, so only the
-/// director's copy-up can answer it. Unset (every scenario that predates gate
-/// 4 Task 6b) the step is skipped entirely and this fixture behaves exactly as
-/// before. Exit codes 17-20.
+/// director's copy-up can answer it. Unset, the step is skipped entirely.
+/// Exit codes 17-20.
 ///
 /// Several paths may be given, separated by `;`, and each is edited in turn.
 /// A host proving copy-up over a *layered* base needs at least two: one the
@@ -225,11 +223,8 @@ fn main() {
 
     // 9. CREATE_NEW (OpenFlags::EXCL) exclusivity. The first create-new against a
     // fresh path must succeed; a second create-new against the now-existing
-    // path must fail. Before the fix, the director's write-open error for an
-    // existing path had no distinct status, so the shim treated it like any
-    // other director refusal and fell through to the shim-local overlay —
-    // which created the file there and reported success, so an exclusive
-    // create against an existing file silently "succeeded".
+    // path must fail with the collision, not silently "succeed" as a create
+    // somewhere else would.
     match OpenOptions::new()
         .write(true)
         .create_new(true)

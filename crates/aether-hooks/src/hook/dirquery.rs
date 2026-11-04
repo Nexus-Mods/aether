@@ -12,9 +12,8 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// Per-handle enumeration cursor over a built directory listing.
 ///
-/// The field was `merged` when a listing really was a merge of the real
-/// directory with a snapshot or overlay. Nothing merges any more: under a
-/// managed root this is the director's own `readdir`, whole and unaltered
+/// Nothing is merged: under a managed root this is the director's own
+/// `readdir`, whole and unaltered
 /// (see `serve_dir_query`), and a directory outside every root never gets an
 /// `EnumState` at all — the OS answers it directly.
 pub(super) struct EnumState {
@@ -323,8 +322,8 @@ mod tests {
     use crate::ntdef::STATUS_OBJECT_NAME_INVALID;
 
     /// `wildcard_of`: `*` and `*.*` and the empty string mean everything; a string NT's capture
-    /// would reject (odd length, NULL buffer with a length) is an `Err`, where the odd one used
-    /// to be a truncated pattern and the NULL one used to mean everything.
+    /// would reject (odd length, NULL buffer with a length) is an `Err`, never a truncated
+    /// pattern or a match of everything.
     #[test]
     fn wildcard_of_follows_the_shared_unicode_string_rule() {
         let enc = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };

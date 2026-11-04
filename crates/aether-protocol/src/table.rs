@@ -161,8 +161,7 @@ macro_rules! protocol {
         )*
 
         /// A request's opcode: the slot header's `opcode` word. Numbers 4
-        /// and 12 are reserved (once `materialize` and `register-process`)
-        /// and are not variants; nothing sends them, and a director answers
+        /// and 12 are reserved and are not variants; nothing sends them, and a director answers
         /// them, like any unknown number, [`Status::BadRequest`](crate::Status).
         /// Never renumber.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -421,8 +420,8 @@ protocol! {
             /// The director's mount generation when it opened `fh`: bumped
             /// whenever a root's provider is replaced. Two immutable opens of
             /// one path with the same generation (and size) are the same
-            /// content; across a remount they need not be. `0` from a
-            /// director that predates it.
+            /// content; across a remount they need not be. A director may
+            /// send `0`.
             mount_gen: u32 as PadBefore<2, u32>,
         }
 

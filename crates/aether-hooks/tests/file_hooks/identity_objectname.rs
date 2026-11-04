@@ -6,9 +6,8 @@
 //! only answers the first is right on one host and wrong on the other.
 //!
 //! The file is served by the (fake) director, so the handle is synthetic and the kernel has no
-//! name for it at all: the shim's answer is the only one. Before task C8 this was a snapshot
-//! redirect to a real backing file (a real handle whose name had to be replaced); the answer
-//! goes through the same `emit_object_name`, so the size-probe half is unchanged.
+//! name for it at all: the shim's answer is the only one, and it goes through
+//! `emit_object_name`, like the size-probe half.
 //!
 //! Runs in its own process: `install` patches process-global ntdll trampolines, so the
 //! untracked-handle half of this contract lives in `identity_objectname_untracked.rs`.

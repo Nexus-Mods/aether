@@ -1,12 +1,11 @@
 //! A file opened with `FILE_DELETE_ON_CLOSE` under a managed root is deleted at the director when
 //! it is closed, and the real file under the root is untouched.
 //!
-//! **Found by task C8.** Wine's `DeleteFileW` (kernelbase) is not `NtSetInformationFile`: it is
-//! an `NtCreateFile` with `FILE_DELETE_ON_CLOSE` followed by `NtClose`. The shim honoured neither
-//! half for a synthetic handle (the director has no delete-on-close, and the close only released
-//! the `fh`), so under Proton every Win32 delete of a director-served file reported success and
-//! deleted nothing. `hook_write`'s delete section, which had never run before C8, is where it
-//! showed. Windows' own `DeleteFileW` takes the disposition route, so this test drives the flag
+//! Wine's `DeleteFileW` (kernelbase) is not `NtSetInformationFile`: it is an `NtCreateFile` with
+//! `FILE_DELETE_ON_CLOSE` followed by `NtClose`. The director has no delete-on-close, so the shim
+//! keeps the flag on the synthetic handle and deletes at the close; without that, under Proton
+//! every Win32 delete of a director-served file would report success and delete nothing.
+//! Windows' own `DeleteFileW` takes the disposition route, so this test drives the flag
 //! directly as well as through `std::fs::remove_file`, which reaches `DeleteFileW` either way.
 //!
 //! The control is a plain open and close of a served file: closing must not delete.

@@ -408,8 +408,8 @@ mod tests {
     }
 
     /// After a caught panic the thread is still usable. A panic taken while the
-    /// reentrancy guard was held used to be unrecoverable in the worst possible
-    /// way — `HOOK_REENTER` stuck at 1 means every later hook call on that
+    /// reentrancy guard was held must not be unrecoverable in the worst possible
+    /// way: `HOOK_REENTER` stuck at 1 means every later hook call on that
     /// thread takes the fast path to real ntdll, so the process quietly stops
     /// being virtualized while every counter keeps reporting ordinary activity.
     #[test]
@@ -471,24 +471,17 @@ mod tests {
     /// Structural: **every** `extern "system"` function in the injected DLL must
     /// contain its own panic, by calling [`contain_panic`] in its body.
     ///
-    /// Requirement 1 of task 1 is that *every* entry point contains its panic,
-    /// and the behaviour tests above can only ever demonstrate that for the hooks
-    /// they drive. This is what makes the claim total, and what stops the next hook
-    /// from being written the old way — which would compile, install,
-    /// and abort the game exactly as before, with nothing in any test to say so.
+    /// *Every* entry point must contain its panic, and the behaviour tests above
+    /// can only ever demonstrate that for the hooks they drive. This is what makes
+    /// the claim total, and what stops the next hook from being written without
+    /// containment, which would compile, install, and abort the game, with
+    /// nothing in any test to say so.
     ///
-    /// ## Its first version had a hole, and the hole was real
+    /// ## The file list is derived, not written
     ///
-    /// The check used to be an `include_str!` of the one `hook.rs` source file (before it
-    /// became the `hook/` modules) and an assertion that the
-    /// only definition found was the macro's `$wrapper`. That is a *hand-written
-    /// file list of one*, and it missed `lazy_section.rs`'s `veh_handler` — an
-    /// uncontained `extern "system"` entry point which additionally carried a raw
-    /// `IN_VEH.set(true)` / `set(false)` pair, the exact latch defect task 1
-    /// removed everywhere else. It went unseen through the whole of stage 4
-    /// *because the guard was believed*.
-    ///
-    /// So the enumeration is derived, not written:
+    /// A hand-written file list misses an entry point outside it, such as
+    /// `lazy_section.rs`'s `veh_handler`, an `extern "system"` function that is
+    /// not an ntdll detour. So the enumeration is derived:
     ///
     ///  * the **directories** are the two crates that compose the injected DLL —
     ///    this one and `aether-shim`;

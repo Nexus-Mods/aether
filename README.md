@@ -10,9 +10,8 @@ Windows programs do it:
   operation on a managed path from a director over a shared-memory ring.
 
 The director, the program that decides what the game sees, is not here: it is
-whatever speaks the wire contract (`aether-ipc`, `aether-protocol`). Cairn's
-director (Clojure, [Nexus-Mods/cairn](https://github.com/Nexus-Mods/cairn)) is
-one. Running a Windows game on Linux or macOS (Proton, Wine prefixes,
+whatever speaks the wire contract (`aether-ipc`, `aether-protocol`), in any
+language. Running a Windows game on Linux or macOS (Proton, Wine prefixes,
 CrossOver) is the director's job too; the injector and the shim are the same
 Windows binaries everywhere, running inside Wine there.
 
@@ -24,9 +23,7 @@ runtime. They are staged as `aether-injector.exe`, `aether_shim.dll`,
 
 Writing a director: [docs/wire.md](docs/wire.md), the wire contract byte by
 byte. How it fits together: [docs/architecture.md](docs/architecture.md); the
-rules the hooks keep: [docs/shim-invariants.md](docs/shim-invariants.md). The code
-here was split from Cairn's `rust/` on 2026-11-03, with its history; before
-that it lived in [halgari/aether-vfs](https://github.com/halgari/aether-vfs).
+rules the hooks keep: [docs/shim-invariants.md](docs/shim-invariants.md).
 
 ## Build
 
@@ -116,7 +113,7 @@ any OS, the Wine arrangement of `docs/wire.md` 2.10 for a native tool.
 
 `panic = "unwind"` throughout (`aether-protocol/tests/unwind.rs` pins it). The
 vendored `retour` in `vendor/` limits its "win64" hooks to x86-64 so the shim
-builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history.
+builds for i686. [CHANGELOG.md](CHANGELOG.md) lists what each release changes.
 
 ## Releases
 

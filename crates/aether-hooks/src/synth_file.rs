@@ -119,8 +119,8 @@ pub(crate) fn open_dir_unissued() -> Option<isize> {
 /// with NT append-only access
 /// (`FILE_APPEND_DATA` without `FILE_WRITE_DATA`): the tracked position seeds
 /// at the file's *current* size (end of file), matching what the kernel
-/// would enforce for a real handle opened the same way. Seeding at `0` — what
-/// every caller did before this existed — makes the first append on a
+/// would enforce for a real handle opened the same way. Seeding at `0` would
+/// make the first append on a
 /// reopened handle overwrite from the start instead, which is silent data
 /// corruption disguised as a successful append.
 pub(crate) fn open_fuse_at_ex(

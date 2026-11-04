@@ -1,6 +1,6 @@
 {
   "name": "write-growth",
-  "description": "A file grown by a WRITE past its end, or by SETATTR, reads zeros where nothing was written (wire.md 3.4.5, 3.4.6: the gap is zeros, as NTFS fills it, in Cairn and the reference), and bytes cut off by a SETATTR do not come back when it grows again.",
+  "description": "A file grown by a WRITE past its end, or by SETATTR, reads zeros where nothing was written (wire.md 3.4.5, 3.4.6: the gap is zeros, as NTFS fills it), and bytes cut off by a SETATTR do not come back when it grows again.",
   "tree": {
     "roots": [
       {"id": 0,

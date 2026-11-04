@@ -61,7 +61,7 @@ const WARM_BYTES: usize = 2 * 1024 * 1024;
 /// Largest file we back with a demand-paged section. Only address space is
 /// reserved up front, so this is bounded by 64-bit VA, not by RAM — it exists
 /// to keep a corrupt size from reserving something absurd. Heavily modded load
-/// orders ship BSAs well past the old 3 GiB ceiling, and returning
+/// orders ship BSAs well past 3 GiB, and returning
 /// `STATUS_SECTION_TOO_BIG` for those makes the game fail the archive outright.
 pub(crate) const MAX_LAZY: u64 = 64 * 1024 * 1024 * 1024;
 
@@ -674,9 +674,9 @@ pub(crate) unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> boo
 ///
 /// **Raising the flag without holding one of these is deliberately not
 /// expressible** — the same shape `ShimIoGuard` has in [`crate::hook`], for the
-/// same reason. The pair of raw `set(true)`/`set(false)` calls this replaces was
-/// the exact defect task 1 removed from every ntdll hook: a panic (or any early
-/// return added later) between them leaves `IN_VEH` latched at `true`, and
+/// same reason. A pair of raw `set(true)`/`set(false)` calls is the latch
+/// defect no ntdll hook may have: a panic (or any early return added later)
+/// between them leaves `IN_VEH` latched at `true`, and
 /// `veh_handler`'s first check then declines **every** later fault on that
 /// thread. Demand paging silently stops for the thread's whole life, the game
 /// takes the access violation itself, and nothing in the shim reports anything.
@@ -703,12 +703,10 @@ impl Drop for VehGuard {
 /// The vectored exception handler: an `extern "system"` entry point Windows
 /// calls, and therefore one that must contain its own panic.
 ///
-/// It is not an ntdll detour, so `hook_entry_points!` does not generate it — and
-/// that is exactly why it was missed. Task 1's structural guard read
-/// `include_str!` of the one hook source file and nothing else, so this file was outside the check
-/// for the whole of stage 4 while holding an uncontained entry point. The guard
-/// now derives its file set from `src/`; see
-/// `no_extern_hook_bypasses_the_panic_containment_macro` in [`crate::hook`].
+/// It is not an ntdll detour, so `hook_entry_points!` does not generate it. The
+/// structural guard derives its file set from `src/`, so it checks this file
+/// too; see `no_extern_hook_bypasses_the_panic_containment_macro` in
+/// [`crate::hook`].
 ///
 /// `EXCEPTION_CONTINUE_SEARCH` is the right answer on a panic for the same
 /// reason `STATUS_UNSUCCESSFUL` is right for a hook: it says "not mine" and lets
@@ -1254,7 +1252,7 @@ mod tests {
     #[test]
     fn oversized_files_are_still_mappable() {
         let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Well past the old 3 GiB ceiling; reservation only, so this is cheap.
+        // Well past 3 GiB; reservation only, so this is cheap.
         // A const assertion — the value is known at compile time, so a runtime
         // `assert!` would never have been able to fail.
         const _: () = assert!(MAX_LAZY > 8 * 1024 * 1024 * 1024);

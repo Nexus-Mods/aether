@@ -164,10 +164,10 @@ mod tests {
             r(0, r"C:\data\state\roots\0"),
             r(2, r"C:\data\state\roots\2"),
         ];
-        let locations = [r(0, r"C:\Haskill\list\game"), r(2, r"C:\Users\u\My Games")];
+        let locations = [r(0, r"C:\Library\list\game"), r(2, r"C:\Users\u\My Games")];
         assert_eq!(
             to_virtual(r"c:\DATA\state\roots\0\SkyrimSE.exe", &backings, &locations).as_deref(),
-            Some(r"C:\Haskill\list\game\SkyrimSE.exe")
+            Some(r"C:\Library\list\game\SkyrimSE.exe")
         );
         assert_eq!(
             to_virtual(r"C:\data\state\roots\2", &backings, &locations).as_deref(),
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn a_path_under_no_backing_is_left_alone() {
         let backings = [r(0, r"C:\data\state\roots\0")];
-        let locations = [r(0, r"C:\Haskill\game")];
+        let locations = [r(0, r"C:\Library\game")];
         // A sibling whose name only starts with the backing's.
         assert_eq!(
             to_virtual(r"C:\data\state\roots\00\x.exe", &backings, &locations),

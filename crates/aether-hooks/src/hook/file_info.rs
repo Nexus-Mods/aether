@@ -94,8 +94,8 @@ fn handle_time(handle: HANDLE) -> i64 {
 
 /// The file id a synthetic handle reports: one per *file*, so that two
 /// handles to one file agree (`std::filesystem::equivalent` and every "is
-/// this the same file" check compare ids). It used to be the handle's own
-/// value, which made a file unequal to itself.
+/// this the same file" check compare ids). The handle's own value would make
+/// a file unequal to itself.
 ///
 /// From the root and the folded path under it — what the ring is asked for —
 /// so every spelling of one file, through an alias of the root included,
@@ -306,9 +306,8 @@ unsafe fn fuse_query_information(
             // (`qobj_hook_body`), and all three must describe one path — see
             // `qif_hook_body`. They are all cut from `synth_final_path`.
             //
-            // There used to be no arm for either, on the reasoning that only
-            // redirected real handles were ever asked for a name. They fell to
-            // the catch-all below: success, nothing written.
+            // Without an arm here they would fall to the catch-all below:
+            // success, nothing written.
             let Some(path) = synth_final_path(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
@@ -349,13 +348,12 @@ unsafe fn fuse_query_information(
             STATUS_SUCCESS
         }
         FILE_STAT_INFORMATION => {
-            // What `GetFileInformationByHandle` asks under current Wine
-            // (GE-Proton 10), where it used to ask `FileAllInformation` — so
-            // this is what Rust's `File::metadata` and `std::fs::read`'s size
-            // hint now reach. Unanswered, it fell to the arm below, which
-            // reports success without writing the buffer: the caller read its
-            // own uninitialised stack as a file size and, in `fs::read`,
-            // failed "out of memory" reserving that many bytes.
+            // What `GetFileInformationByHandle` asks under Wine (GE-Proton
+            // 10), so this is what Rust's `File::metadata` and `std::fs::read`'s size hint
+            // reach. Unanswered, it would fall to the arm below, which reports
+            // success without writing the buffer: the caller would read its
+            // own uninitialised stack as a file size and, in `fs::read`, fail
+            // "out of memory" reserving that many bytes.
             //
             // Layout: FileId 0 | Creation 8 | LastAccess 16 | LastWrite 24 |
             // Change 32 | AllocationSize 40 | EndOfFile 48 | FileAttributes 56
@@ -543,8 +541,8 @@ fn device_for_drive(drive: &str) -> Option<String> {
 ///
 /// The convention is discovered, not assumed (Windows answers
 /// `\Device\HarddiskVolumeN\...`, Wine `\??\C:\...`): the trampoline runs first
-/// and its answer's prefix is reused. This also closes a leak on Windows: a caller
-/// reaching `NtQueryObject` directly used to get the backing path.
+/// and its answer's prefix is reused. On Windows too, a caller reaching
+/// `NtQueryObject` directly gets the virtual path, not the backing one.
 /// See docs/shim-invariants.md, "Name-query consistency".
 ///
 /// # The too-small-buffer contract (measured 2026-09-01, both hosts)
@@ -623,12 +621,11 @@ pub(super) unsafe fn qobj_hook_body(
     }
     // A synthetic handle — every file and directory the director serves — is
     // not a kernel object: the host has no name for it and the trampoline
-    // fails on it. This used to fall through to exactly that failure, on the
-    // reasoning that a convention must be measured, not guessed; and so
+    // fails on it. Falling through would fail
     // `GetFinalPathNameByHandleW`, which on Wine is this call and nothing
-    // else, failed for every virtual file and directory, and
-    // `std::filesystem::canonical` threw on them. The name is the handle's
-    // final path, in the convention the host uses for real files.
+    // else, for every virtual file and directory, and
+    // `std::filesystem::canonical` would throw on them. The name is the
+    // handle's final path, in the convention the host uses for real files.
     if crate::synth_file::is_fuse_synth(handle as isize) {
         let Some(path) = synth_final_path(handle) else {
             return STATUS_INVALID_HANDLE;

@@ -443,8 +443,8 @@ fn reads_held_at_the_gate_leave_a_worker_for_other_requests() {
 /// three. A fourth read must not be sent — it would take the last worker —
 /// and a request that is not data must still be answered.
 ///
-/// The gate used to give a timed-out read's permit straight back. Then the
-/// fourth read was sent, every worker was held, and the echo below got no
+/// A gate that gave a timed-out read's permit straight back would send the
+/// fourth read, every worker would be held, and the echo below would get no
 /// answer for as long as the provider stayed stuck.
 #[test]
 fn reads_that_timed_out_keep_their_permits_until_the_director_is_done() {
@@ -518,11 +518,10 @@ fn reads_that_timed_out_keep_their_permits_until_the_director_is_done() {
 /// chunks of a blocked file and another four. Then a third thread reads one
 /// byte of a file that is served at once.
 ///
-/// The two pipelines used to be given 8 and 4 permits — all twelve — and the
-/// third thread's read waited at the gate for as long as they ran. Now one
-/// call holds at most half the gate and stops at the reserve, so they hold 6
-/// and 3, and the small read goes straight through while both are still
-/// blocked.
+/// Given 8 and 4 permits (all twelve), the third thread's read would wait at
+/// the gate for as long as they ran. One call holds at most half the gate and
+/// stops at the reserve, so they hold 6 and 3, and the small read goes
+/// straight through while both are still blocked.
 #[test]
 fn two_deep_reads_of_blocked_content_leave_room_for_a_small_read() {
     let fx = Fixture::new(32);
@@ -776,8 +775,8 @@ fn a_late_response_is_waited_for_off_the_processor() {
 }
 
 /// A full ring is waited for the way a response is — spin, then idle — and
-/// for no longer than the deadline. It used to be fifty million bare passes:
-/// seconds of a core at full tilt.
+/// for no longer than the deadline, not a fixed count of bare passes that
+/// would burn seconds of a core at full tilt.
 #[test]
 fn a_full_ring_is_waited_for_off_the_processor_and_not_for_ever() {
     let fx = Fixture::new(2);

@@ -1,17 +1,17 @@
-//! The numeric API is gone: `aether-protocol` exports no `OP_*`, `ST_*` or
+//! There is no numeric API: `aether-protocol` exports no `OP_*`, `ST_*` or
 //! `OPEN_*` constant, no `OPCODES`/`STATUSES` table and no `encode_*` or
 //! `decode_*` free function for ring messages. Opcodes, statuses and flags are
 //! [`Opcode`], [`Status`], [`OpenFlags`] and [`RequestFlags`]; messages are
 //! [`Request`] and [`Reply`].
 //!
 //! Absence cannot be shown by compiling, so the crate's sources are read:
-//! every `pub` item they declare is checked against the old names. The shim
+//! every `pub` item they declare is checked against those names. The shim
 //! configuration (`shimcfg.rs`) is not a ring message and keeps its
 //! `encode_config`/`decode_config`.
 
 use aether_protocol::{Opcode, OpenFlags, Reply, Request, RequestFlags, RootId, Status};
 
-/// The old API's names, as a `pub` declaration would start them.
+/// The numeric API's names, as a `pub` declaration would start them.
 const RETIRED: &[&str] = &[
     "pub const OP_",
     "pub const ST_",
@@ -57,7 +57,7 @@ fn the_numeric_api_is_not_declared() {
     );
 }
 
-/// What took the old API's place, named once so a rename shows up here.
+/// The typed API, named once so a rename shows up here.
 #[test]
 fn the_typed_api_names_what_the_numbers_did() {
     let req = Request::Open {

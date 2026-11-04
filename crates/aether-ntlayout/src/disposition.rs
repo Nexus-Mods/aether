@@ -36,11 +36,8 @@ pub const FILE_OVERWRITTEN: usize = 3;
 /// `FILE_CREATE`/`FILE_SUPERSEDE` in that respect), so a caller that asks
 /// for it with only read access must still route through the write path —
 /// otherwise a create-if-absent read open is treated as a plain read, which
-/// reports `Status::NotFound` instead of creating the file, on an absent path.
-/// (Before gate 4's Task 5 that miss also *fell through* to the shim-local
-/// overlay, so the misclassification silently "worked"; now it is a sealed
-/// failure, which is the same reason getting this predicate right matters
-/// more, not less.)
+/// reports `Status::NotFound` instead of creating the file, on an absent path,
+/// and under a sealed root that is a failure the caller sees.
 pub fn is_write_open(access: u32, disposition: u32) -> bool {
     (access & WRITE_ACCESS) != 0
         || matches!(
@@ -77,15 +74,12 @@ pub fn is_append_only(access: u32) -> bool {
 
 /// Map an NT create-disposition to the ring's `OpenFlags::CREATE`/`OpenFlags::EXCL`/
 /// `OpenFlags::TRUNC` bits (`OpenFlags::WRITE` itself is added by the caller). Forwarding
-/// this is what closes the gap Task 6 found: without it every brand-new file
-/// gets `Status::NotFound` from the director regardless of disposition. That used
-/// to fall through to the shim-local overlay redirect and so merely misplace
-/// the bytes; since gate 4's Task 5 sealed that fall-through it would instead
-/// fail every create outright, so a mistake in this mapping is now a game that
-/// cannot write at all rather than one that writes to the wrong place.
+/// this matters: without it every brand-new file gets `Status::NotFound` from
+/// the director regardless of disposition, and under a sealed root that fails
+/// every create outright, so a mistake in this mapping is a game that cannot
+/// write at all.
 ///
-/// Verified against NT `CreateDisposition` semantics one value at a time
-/// (a prior draft of this mapping under-specified two of the six):
+/// Verified against NT `CreateDisposition` semantics one value at a time:
 /// - `FILE_SUPERSEDE` (0): create if absent, replace if present -> needs
 ///   **both** `OpenFlags::CREATE` and `OpenFlags::TRUNC` — a `OpenFlags::TRUNC`-only mapping
 ///   fails `Status::NotFound` on an absent file, which is exactly the bug this
@@ -100,13 +94,7 @@ pub fn is_append_only(access: u32) -> bool {
 ///   (no `OpenFlags::CREATE`, so an absent file still fails `Status::NotFound`, matching
 ///   "fail if it does not exist").
 /// - `FILE_OVERWRITE_IF` (5): overwrite if present, create if absent -> needs
-///   **both**, same as `FILE_SUPERSEDE` — this is the case the brief already
-///   flagged for a re-check.
-///
-/// Cross-checked against the old Rust director's `DiskProvider::open`, which
-/// folded these straight into `OpenOptions::create/create_new/truncate`, and
-/// its conformance fixture's `open`, which create-if-absent-then-truncate in
-/// that order (both removed) — both agreed with the mapping above.
+///   **both**, same as `FILE_SUPERSEDE`.
 pub fn open_create_flags(disposition: u32) -> OpenFlags {
     match disposition {
         FILE_SUPERSEDE | FILE_OVERWRITE_IF => OpenFlags::CREATE | OpenFlags::TRUNC,
@@ -126,9 +114,8 @@ pub fn open_create_flags(disposition: u32) -> OpenFlags {
 /// `FILE_WRITE_DATA`/`FILE_APPEND_DATA`. The bits are identical and nothing
 /// in the mask distinguishes them, so every `FILE_FLAG_BACKUP_SEMANTICS` open
 /// asking for write access on a directory arrives as a write, gets routed to
-/// `Provider::open(OpenFlags::WRITE)`, and fails: `DiskProvider::open` opens
-/// read+write, which a directory refuses. Since gate 4's Task 5 that failure
-/// is no longer papered over by the fall-through — the caller now gets
+/// a write open at the director, and fails: a disk-backed provider opens
+/// read+write, which a directory refuses. The caller would get
 /// `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) for an operation NTFS answers
 /// without complaint.
 ///
@@ -159,10 +146,8 @@ pub fn disposition_needs_existence_probe(disposition: u32) -> bool {
 /// given the NT create-disposition and (for the three dispositions where it
 /// matters) whether the path existed before the call.
 ///
-/// `create_hook` used to hardcode `FILE_OPENED` here unconditionally, which
-/// was invisible while every write fell through to a real file (whose kernel
-/// FCB reports this correctly on its own) — only reachable now that writes
-/// succeed through the director. Kernel32's `ERROR_ALREADY_EXISTS` signalling
+/// A director-served open has no kernel FCB to report this, so the shim must.
+/// Kernel32's `ERROR_ALREADY_EXISTS` signalling
 /// for `CREATE_ALWAYS` (`FILE_SUPERSEDE`) / `OPEN_ALWAYS` (`FILE_OPEN_IF`)
 /// reads exactly this field, so getting it wrong is not cosmetic.
 ///
@@ -283,7 +268,7 @@ mod tests {
         );
     }
 
-    /// Gate 4, Task 6. Only the two non-creating dispositions may hand back a
+    /// Only the two non-creating dispositions may hand back a
     /// directory handle when a write-flavoured open turns out to name a
     /// directory. Widening this to the creating four would turn "you cannot
     /// create a file where a directory already is" — which NT answers with a

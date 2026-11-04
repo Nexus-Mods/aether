@@ -1,24 +1,24 @@
 {
   "name": "registry-delete-value",
-  "description": "REG_DELETE_VALUE removes a value and records the folded name as a value tombstone, which hides a real value of that name; setting it again clears the tombstone; deleting a name the overlay lacks still records the tombstone (wire.md 4.3, overlay.rs `delete_value`); deleting in a tombstoned key is ST_NOT_FOUND.",
+  "description": "REG_DELETE_VALUE removes a value and records the folded name as a value tombstone, which hides a real value of that name; setting it again clears the tombstone; deleting a name the overlay lacks still records the tombstone (wire.md 4.3); deleting in a tombstoned key is ST_NOT_FOUND.",
   "tree": {
     "roots": [
       {"id": 0,
        "files": [{"path": "a.txt", "contents": "a"}]}
     ],
     "registry": {"keys": [
-      {"path": "\\Registry\\Machine\\Software\\Cairn", "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}, {"name": "Gone", "ty": 1, "data": {"hex": "6100"}}]}
+      {"path": "\\Registry\\Machine\\Software\\Cabin", "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}, {"name": "Gone", "ty": 1, "data": {"hex": "6100"}}]}
     ]}
   },
   "steps": [
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 3, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}, {"name": "Gone", "ty": 1, "data": {"hex": "6100"}}], "value_tombstones": [], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "GONE", "op": "reg-delete-value"}, "expect": {"reply": {"version": 4}}},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": ["gone"], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Never Was", "op": "reg-delete-value"}, "expect": {"reply": {"version": 5}}, "note": "a real value may exist below the overlay: the tombstone hides it"},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": ["gone", "never was"], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "gone", "ty": 4, "data": {"hex": "02000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 6}}},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}, {"name": "gone", "ty": 4, "data": {"hex": "02000000"}}], "value_tombstones": ["never was"], "children": []}}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "op": "reg-delete-key"}, "expect": {"reply": {"version": 7}}},
-    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "Keep", "op": "reg-delete-value"}, "expect": {"status": "not-found"}, "note": "the key is tombstoned"}
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 3, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}, {"name": "Gone", "ty": 1, "data": {"hex": "6100"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "GONE", "op": "reg-delete-value"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": ["gone"], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Never Was", "op": "reg-delete-value"}, "expect": {"reply": {"version": 5}}, "note": "a real value may exist below the overlay: the tombstone hides it"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": ["gone", "never was"], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "gone", "ty": 4, "data": {"hex": "02000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 6}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Keep", "ty": 4, "data": {"hex": "01000000"}}, {"name": "gone", "ty": 4, "data": {"hex": "02000000"}}], "value_tombstones": ["never was"], "children": []}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "op": "reg-delete-key"}, "expect": {"reply": {"version": 7}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "name": "Keep", "op": "reg-delete-value"}, "expect": {"status": "not-found"}, "note": "the key is tombstoned"}
   ]
 }

@@ -135,7 +135,7 @@ impl Attached {
         check_arena(arena_len, geom.slot_count)?;
         let given_offset = get(aether_env::ARENA_OFFSET).and_then(|s| s.parse::<usize>().ok());
         // Without `VFS_ARENA_OFFSET` the arena follows the last slot, where
-        // both directors put it (wire.md 2.1).
+        // a director usually puts it (wire.md 2.1).
         let arena_offset = given_offset.unwrap_or(ring_end);
         if let Some(off) = given_offset {
             if arena_len > 0 && off.saturating_add(arena_len) > ring_bytes {
@@ -225,8 +225,8 @@ impl Attached {
     }
 
     /// Whether `VFS_ARENA_OFFSET` named the arena's start. Without it the
-    /// start is assumed (after the last slot, where both directors put it,
-    /// wire.md 2.1), and the shim, which takes data offsets from bulk replies
+    /// start is assumed (after the last slot, where a director usually puts
+    /// it, wire.md 2.1), and the shim, which takes data offsets from bulk replies
     /// and never needs the start (5.3: "Informational"), would accept an
     /// arena elsewhere; so the bank a bulk reply lies in is checked only
     /// when this is true.

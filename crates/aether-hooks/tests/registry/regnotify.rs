@@ -1,5 +1,5 @@
 //! Registry change notifications, the out-of-scope calls, key security, handle flags and the
-//! registry stats (registry overlay spec sections 3.4, 3.6 and 6), through the real ntdll entry
+//! registry stats, through the real ntdll entry
 //! points with the shim's detours installed and the fake director's registry behind the ring
 //! (`fakedirector` with [`Fake::with_registry`]).
 //!

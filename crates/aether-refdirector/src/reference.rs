@@ -797,8 +797,8 @@ impl Reference {
     /// paths are resolved. A source with no entry is `Status::NotFound`;
     /// either end outside every writable prefix `Status::ReadOnly`.
     ///
-    /// Within a root (`across` false) it does what Cairn's writable layer
-    /// does (`docs/wire.md` 3.4.7): the root at either end, or a target
+    /// Within a root (`across` false) it does what `docs/wire.md` 3.4.7
+    /// says: the root at either end, or a target
     /// inside the source, is `Status::BadRequest`; a directory moves with
     /// everything under it; a non-empty directory at the target is
     /// `Status::IoError`, and an empty one or a file is replaced. Across
@@ -1250,8 +1250,8 @@ impl Director for Reference {
         self.move_entry(from_key, root, to, false)
     }
 
-    /// A file, or a directory with nothing under it, as Cairn's writable
-    /// layer deletes them (`docs/wire.md` 3.4.8): a directory with anything
+    /// A file, or a directory with nothing under it, as `docs/wire.md` 3.4.8
+    /// deletes them: a directory with anything
     /// under it is `Status::IoError`, the root `Status::BadRequest`.
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
         Tally::bump(&self.tally.deletes, &key(root.0, path));
@@ -1289,12 +1289,12 @@ impl Director for Reference {
     }
 
     /// Creates the directory with the caller's spelling (`docs/wire.md`
-    /// 3.2, 3.4.9); the mode is ignored, as both directors ignore it. A
+    /// 3.2, 3.4.9); the mode is ignored, as a director ignores it. A
     /// broken provider's prefix is `Status::IoError`; an existing directory
     /// `Status::Exists` (wire.md 3.4.9 lets a director answer OK or
     /// `ST_EXISTS`); an existing file `Status::IoError` where a writable
-    /// provider serves it and `Status::Exists` where none does, as Cairn's
-    /// providers answer; outside every writable prefix it refuses as a write
+    /// provider serves it and `Status::Exists` where none does (3.4.9);
+    /// outside every writable prefix it refuses as a write
     /// open does (3.4.3). Parents are not checked, as a creating OPEN does
     /// not check them.
     fn mkdir(&mut self, root: RootId, _: u32, path: &str) -> Result<(), Status> {
@@ -1361,7 +1361,7 @@ impl Director for Reference {
     /// joined by `/` (`docs/wire.md` 3.4.12). A component with no entry comes
     /// back as sent (the SHOULD), so the reply always has as many names as
     /// components past `skip`. A `skip` past the last component is an empty
-    /// reply, as Cairn's is (wire.md does not say).
+    /// reply (wire.md does not say).
     fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
         self.graph.resolve(root, path)?;
         let dirs = self.graph.dirs.lock().unwrap();

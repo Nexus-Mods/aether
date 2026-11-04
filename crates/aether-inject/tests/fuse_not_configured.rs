@@ -1,8 +1,8 @@
-//! Task 3 (gate 3): a launch that names no director ring at all
-//! (`VFS_RING_SECTION` unset — `FuseInitError::NotConfigured`) must abort just
-//! like one whose named ring failed to attach — not run the game completely
-//! un-virtualised while looking like a normal launch. That standalone mode is
-//! retired: see `bootstrap.rs`'s comment in `bootstrap_from_config_path`.
+//! A launch that names no director ring at all (`VFS_RING_SECTION` unset,
+//! `FuseInitError::NotConfigured`) must abort just like one whose named ring
+//! failed to attach, not run the game completely un-virtualised while looking
+//! like a normal launch: see `bootstrap.rs`'s comment in
+//! `bootstrap_from_config_path`.
 //!
 //! Single-test binary, like `fuse_init_failure.rs`: `run_target_with_shim`
 //! mutates process-global env vars (`SHIM_CONFIG`/`SHIM_READY`/…) itself, so a

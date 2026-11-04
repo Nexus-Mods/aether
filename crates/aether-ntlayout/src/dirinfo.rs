@@ -259,11 +259,10 @@ mod tests {
     }
 
     /// Every timestamp of a listed entry is its provider's mtime, as a
-    /// `FILETIME`. They used to be left zero, 1 January 1601 for every file
-    /// `FindFirstFile` found: Skyrim, listing its saves so, offered no
-    /// Continue or Load over the saves the last session wrote and numbered
-    /// the next one `Save1` again. Listed with their real times, it offers
-    /// both.
+    /// `FILETIME`. Left zero (1 January 1601 for every file `FindFirstFile`
+    /// finds), Skyrim, listing its saves so, offers no Continue or Load over
+    /// the saves the last session wrote and numbers the next one `Save1`
+    /// again. Listed with their real times, it offers both.
     #[test]
     fn listed_entries_carry_the_providers_mtime() {
         // 2026-10-03T21:13:45Z.

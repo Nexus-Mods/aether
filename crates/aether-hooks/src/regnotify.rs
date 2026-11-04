@@ -1,12 +1,12 @@
 //! Registry change notifications on keys the overlay serves: `NtNotifyChangeKey` and
-//! `NtNotifyChangeMultipleKeys` (registry overlay spec section 3.4, ruling R1).
+//! `NtNotifyChangeMultipleKeys`.
 //!
 //! **Scope: overlay changes only, on every key the overlay serves.** This is a deliberate scope
 //! choice. Every notification on a key the overlay serves (a synthetic handle, or a real
 //! pass-through handle on a virtualised path, touched by the overlay or not) becomes an *overlay
 //! waiter*, completed when the overlay changes at the key (or below it, with `WatchTree`). No
 //! real notification is registered for those keys, so a change another process makes to the
-//! real registry does not complete them; spec 3.4 accepts that, because nothing else writes
+//! real registry does not complete them; that is accepted, because nothing else writes
 //! those keys during a game. What it buys: the game's own writes, which all go to the overlay,
 //! always wake its watchers, whichever handle they were made through, and every waiter has
 //! exactly one completion. A handle the overlay does not serve (not a key, or a key outside
@@ -65,7 +65,7 @@ use crate::regclient;
 use crate::regkeys::{self, Real, KEY_NOTIFY};
 use crate::sync::{lock_for_close, CloseLock};
 
-/// How often the notifier asks the director (ruling R1).
+/// How often the notifier asks the director.
 pub(crate) const POLL: Duration = Duration::from_millis(250);
 
 /// Pending waiters at most; a registration past it fails with `STATUS_INSUFFICIENT_RESOURCES`.

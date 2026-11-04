@@ -1,4 +1,4 @@
-//! **A directory opened with write access must still open** (gate 4, Task 6).
+//! **A directory opened with write access must still open.**
 //!
 //! `CreateFileW(dir, GENERIC_READ | GENERIC_WRITE, …, OPEN_EXISTING,
 //! FILE_FLAG_BACKUP_SEMANTICS, …)` is the ordinary way to get a handle to a
@@ -9,20 +9,20 @@
 //! `FILE_WRITE_DATA`/`FILE_APPEND_DATA`; nothing in the mask distinguishes
 //! them.
 //!
-//! So the shim classified those opens as writes and asked the director for
-//! `OpenFlags::WRITE`, which no provider can give for a directory —
-//! `DiskProvider::open` runs `OpenOptions::new().read(true).write(true)` on
-//! it. Until gate 4's Task 5 the resulting refusal fell through to real disk
-//! and the caller never noticed. Now it is the caller's answer:
-//! `ERROR_GEN_FAILURE` from a writable mount, `ERROR_ACCESS_DENIED` from a
-//! read-only one, for an operation NTFS answers without complaint.
+//! So such an open is classified as a write, and asking the director for
+//! `OpenFlags::WRITE` gets a refusal: no provider can give one for a
+//! directory (a disk-backed provider opens it read+write). Under a sealed
+//! root that refusal is the caller's answer, `ERROR_GEN_FAILURE` from a
+//! writable mount, `ERROR_ACCESS_DENIED` from a read-only one, for an
+//! operation NTFS answers without complaint, unless the shim opens the
+//! directory as the read open the caller meant.
 //!
 //! All three refusals a real graph produces are covered, because the fix must
 //! not be a patch for one provider's error code: `Status::ReadOnly`,
 //! `Status::IoError`, and — for `OPEN_ALWAYS`, which reaches the ring as
-//! `FILE_OPEN_IF` carrying `OpenFlags::CREATE` — the `Status::IsDir` that
-//! `OverlayProvider` now returns instead of letting a `DiskProvider` upper
-//! create a file named after the directory. `CREATE_ALWAYS` is the control:
+//! `FILE_OPEN_IF` carrying `OpenFlags::CREATE` — the `Status::IsDir` an
+//! overlay returns rather than letting a disk-backed upper create a file named
+//! after the directory. `CREATE_ALWAYS` is the control:
 //! it genuinely asks to replace the path with a file, and must still fail.
 //! Directory *creates* never arrive here at all: `try_fuse_mkdir` takes those
 //! before `try_fuse_create` runs.
@@ -115,12 +115,11 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
 
     let read_only_dir = open_directory_for_write(&root.join("Data"), OPEN_EXISTING);
     let writable_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_EXISTING);
-    // `OPEN_ALWAYS` is the case the review flagged: it reaches the ring as
-    // `FILE_OPEN_IF` *carrying* `OpenFlags::CREATE`, so the provider graph is being
-    // asked to create. `OverlayProvider` refuses with `Status::IsDir` rather than
-    // letting a `DiskProvider` upper create a file named after the directory
-    // — and the downgrade has to turn that refusal back into the directory
-    // open the caller meant.
+    // `OPEN_ALWAYS` reaches the ring as `FILE_OPEN_IF` *carrying*
+    // `OpenFlags::CREATE`, so the provider graph is being asked to create. A
+    // director refuses with `Status::IsDir` (the fake below does) rather than
+    // create a file named after the directory, and the downgrade has to turn
+    // that refusal back into the directory open the caller meant.
     let open_always_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_ALWAYS);
     // …but `CREATE_ALWAYS` (`FILE_OVERWRITE_IF`) genuinely means "replace
     // whatever is here with a file", and NT refuses that against a directory.
@@ -150,9 +149,9 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
     assert_eq!(
         open_always_dir,
         Ok(()),
-        "`OPEN_ALWAYS` on an existing directory must open it. This is the case that used to \
-         make a `DiskProvider` write layer create a file named after the directory, which \
-         then shadowed it and broke the whole subtree's listing"
+        "`OPEN_ALWAYS` on an existing directory must open it, never have a disk-backed write \
+         layer create a file named after the directory, which would shadow it and break the \
+         whole subtree's listing"
     );
     assert!(
         create_always_dir.is_err(),

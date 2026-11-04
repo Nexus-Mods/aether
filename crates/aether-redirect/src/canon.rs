@@ -99,9 +99,9 @@ const MAX_PREFIX_STEPS: usize = 16;
 /// A table from a raw NT-presented path prefix to the text that replaces it —
 /// a drive letter (`C:`) for a device/volume-GUID prefix, or an arbitrary
 /// absolute path for a junction/UNC-share alias that resolves into the
-/// managed root. Built by resolving the OS's device namespace (`Task 2`) and,
-/// since this task, the session's junction and administrative-UNC-share
-/// aliases (`resolve_volume_map`); `empty()` is for tests that exercise none
+/// managed root. Built by resolving the OS's device namespace and the
+/// session's junction and administrative-UNC-share aliases
+/// (`resolve_volume_map`); `empty()` is for tests that exercise none
 /// of this.
 ///
 /// One representation serves both needs: a device prefix is just an alias
@@ -266,15 +266,13 @@ pub fn split_stream_suffix(raw: &str) -> (&str, Option<&str>) {
 /// **Only the final component is searched.** A stream is a leaf — `dir:s\file`
 /// names nothing, because there is nothing to traverse *through* a stream — so
 /// a colon in any earlier component is not a stream separator, and cutting
-/// there does not shorten a path, it destroys it. This is not hypothetical: it
-/// is exactly how `\??\GLOBALROOT\GLOBAL??\C:\<root>\Data\a.esp` used to
-/// canonicalise to `GLOBAL??/C`. The old rule measured a fixed set of whole
-/// prefixes, found no drive letter behind the one it recognised (`GLOBALROOT`
-/// is not `C:`), and so treated the drive colon several components later as
-/// the stream separator — leaving a stub that matched no root, so the open
-/// trampolined to the real file. Scoping the search to the final component
-/// makes that class of mistake unreachable regardless of which prefix forms
-/// are recognised.
+/// there does not shorten a path, it destroys it: a rule that looked for a
+/// drive letter behind a fixed set of whole prefixes would find none behind
+/// `GLOBALROOT` and canonicalise `\??\GLOBALROOT\GLOBAL??\C:\<root>\Data\a.esp`
+/// to `GLOBAL??/C`, a stub that matches no root, so the open would trampoline
+/// to the real file. Scoping the search to the final component makes that
+/// class of mistake unreachable regardless of which prefix forms are
+/// recognised.
 ///
 /// Within that final component a *drive-letter* colon is still not a stream
 /// separator; the first colon after it is. That case is real: `C:foo` (drive-
@@ -420,9 +418,9 @@ fn is_drive_component(s: &str) -> bool {
 /// `C:\..` resolves to `C:\`, not to an error, and not to the drive letter
 /// itself being popped away. `normalize_vpath` cannot provide this: it has
 /// no notion of a drive boundary and pops every component — including a
-/// leading drive letter — exactly like any other, which is how `..` was
-/// able to climb past `C:` entirely and reappear as an ordinary,
-/// non-drive-rooted path that no longer matched any root check.
+/// leading drive letter, exactly like any other, so `..` would climb past
+/// `C:` entirely and reappear as an ordinary, non-drive-rooted path that
+/// matches no root check.
 fn clamp_dotdot(remainder: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for comp in remainder.split(['/', '\\']) {
@@ -450,8 +448,8 @@ fn clamp_dotdot(remainder: &str) -> String {
 /// identical.
 ///
 /// Case is preserved: folding case is the caller's job (`RootMap` already
-/// folds for comparison), and `DiskProvider` needs the original case to open
-/// the real file on disk.
+/// folds for comparison), and a director that keeps files on disk needs the
+/// original case to open the real file.
 pub fn canonicalise(raw: &str, volumes: &VolumeMap) -> Result<String, PathError> {
     let no_stream = strip_stream_suffix(raw);
     let resolved = resolve_aliases_and_strip_prefixes(no_stream, volumes);
@@ -493,11 +491,11 @@ mod tests {
             r"\??\C:\Games\Skyrim\Data\a.esp",
             r"\\?\C:\Games\Skyrim\Data\a.esp",
             // Every object-manager spelling that reaches the drive letter
-            // through a namespace token rather than a device name. These are
-            // the spellings the stream-suffix rule used to truncate at the
-            // drive colon (`\??\GLOBALROOT\GLOBAL??\C:\...` came out as
-            // `GLOBAL??/C`), so they matched no root and the open reached real
-            // disk. See `RootMap`'s own `NT_SPELLING_VECTORS` table for the
+            // through a namespace token rather than a device name: spellings a
+            // stream-suffix rule must not truncate at the drive colon
+            // (`\??\GLOBALROOT\GLOBAL??\C:\...` must not come out as
+            // `GLOBAL??/C`, which matches no root and sends the open to real
+            // disk). See `RootMap`'s own `NT_SPELLING_VECTORS` table for the
             // classification half.
             r"\GLOBAL??\C:\Games\Skyrim\Data\a.esp",
             r"\??\GLOBALROOT\GLOBAL??\C:\Games\Skyrim\Data\a.esp",
@@ -561,12 +559,10 @@ mod tests {
     }
 
     /// With no drive or device prefix to clamp against, an excess `..` still
-    /// has nowhere to go — this remains a hard error rather than a guess.
-    /// (Replaces the old `escaping_dotdot_is_refused`, which asserted this
-    /// for a *drive-rooted* path — see
+    /// has nowhere to go: this is a hard error rather than a guess. A
+    /// *drive-rooted* path clamps instead; see
     /// `single_dotdot_at_drive_root_keeps_the_drive` and
-    /// `dotdot_traversal_through_the_drive_root_clamps_to_the_same_file`
-    /// for why that assumption was wrong.)
+    /// `dotdot_traversal_through_the_drive_root_clamps_to_the_same_file`.
     #[test]
     fn dotdot_escaping_with_no_drive_still_errors() {
         assert!(canonicalise(r"..\Windows\System32\evil.dll", &vols()).is_err());
@@ -634,11 +630,11 @@ mod tests {
 
     /// `\\?\GLOBALROOT\Device\...` names exactly the same object as
     /// `\Device\...` — the `GLOBALROOT` object-manager symlink must not
-    /// hide a registered device prefix from `VolumeMap::resolve`. Found via
-    /// Task 6's session-based escape matrix: this exact wrapped spelling
-    /// (`aether-fixture-escape`'s vector 3) reached the real file on disk via
-    /// plain OS passthrough while going completely unclassified by
-    /// `RootMap::under_root` — reachable, but invisible to every counter.
+    /// hide a registered device prefix from `VolumeMap::resolve`. This wrapped
+    /// spelling is `aether-fixture-escape`'s vector 3: unrecognised, it would
+    /// reach the real file on disk via plain OS passthrough while going
+    /// completely unclassified by `RootMap::under_root`, reachable but
+    /// invisible to every counter.
     #[test]
     fn globalroot_wrapped_device_prefix_resolves_like_the_bare_form() {
         let bare = canonicalise(r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp", &vols());
@@ -689,7 +685,7 @@ mod tests {
     }
 
     /// An ordinary drive-letter path (no namespace token anywhere) must
-    /// resolve exactly as before — the resolve-or-strip loop must never
+    /// resolve as a plain drive path does: the resolve-or-strip loop must never
     /// disturb the common case, only the spellings that carry a wrapper.
     #[test]
     fn globalroot_fallback_does_not_disturb_an_ordinary_path() {

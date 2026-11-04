@@ -10,10 +10,10 @@ pub enum IpcError {
     RingFull,
     /// A published request was never answered within [`crate::RESPONSE_DEADLINE`].
     ///
-    /// The endpoint used to wait for a response forever. That is a latent
-    /// process hang, not merely a slow path: `wait_client` is advisory — the
-    /// shim's implementation is a bare `spin_loop()` — so a response that never
-    /// arrives left the caller looping inside whichever NT call it was serving.
+    /// Waiting for a response forever would be a latent process hang, not
+    /// merely a slow path: `wait_client` is advisory (the shim's implementation
+    /// is a bare `spin_loop()`), so a response that never arrives would leave
+    /// the caller looping inside whichever NT call it was serving.
     /// For a game that is a permanent freeze mid-read rather than an I/O error
     /// it could report or retry. `claim_slot` already bounded its sibling loop;
     /// this is the other half.
@@ -558,12 +558,12 @@ mod tests {
         assert_eq!(open(owned.seg()), Err(IpcError::Layout));
     }
 
-    /// Stage 2b task 5: the ring's *payload* layouts changed (every
-    /// path-carrying request gained a leading `root:u32`), and the injected
-    /// `aether_shim.dll` is known to go stale silently. A stale shim would
-    /// send the old shape into a current director, whose decoder would read
-    /// the first four bytes of the path as a root id and the rest as a
-    /// truncated path — a plausible-looking wrong answer, not a failure.
+    /// A payload layout change (such as every path-carrying request leading
+    /// with `root:u32`) is a version change, and an injected
+    /// `aether_shim.dll` can go stale silently. A stale shim would send another
+    /// shape into a current director, whose decoder would read the first four
+    /// bytes of the path as a root id and the rest as a truncated path: a
+    /// plausible-looking wrong answer, not a failure.
     ///
     /// The version field is the only thing standing between that and a loud
     /// error, so it gets its own test rather than riding on
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(worker_hint(owned.seg()), 0);
         set_worker_hint(owned.seg(), 16);
         assert_eq!(worker_hint(owned.seg()), 16);
-        // It lives in what used to be padding: the ring still opens.
+        // It lives in the header, at offset 20: the ring still opens.
         assert!(open(owned.seg()).is_ok());
     }
 

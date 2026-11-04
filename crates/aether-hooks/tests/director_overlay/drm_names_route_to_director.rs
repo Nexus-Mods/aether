@@ -1,20 +1,12 @@
-//! The four DRM/identity filenames are no longer excepted: under a managed
+//! The four DRM/identity filenames (`steam_appid.txt`, `SkyrimSELauncher.exe`,
+//! `steam_api{,64}.dll`, `SkyrimSE.exe`) are not excepted: under a managed
 //! root they are answered by the director like every other path, and the real
-//! file underneath is never read from or written to (gate 5, Task 4).
-//!
-//! **What used to happen.** `try_fuse_create` matched four basenames —
-//! `steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
-//! `SkyrimSE.exe` — case-insensitively at any depth, and returned `None`
-//! *before the ring was consulted*. The open then fell through to the
-//! shim-local engine (removed by task C8), which either redirected it at a
-//! real disk path or passed it straight through to the real filesystem under
-//! the managed root. That was the last hole in the invariant this stage exists
-//! to establish: *for any path under a managed root, every NT operation on it
-//! is answered by the director.*
+//! file underneath is never read from or written to. *For any path under a
+//! managed root, every NT operation on it is answered by the director.*
 //!
 //! **Why the fixture is shaped the way it is.** A test that only asserted "the
-//! open returned success" would pass against the old code too — the excepted
-//! open *did* succeed, by opening the wrong file. So every claim here is made
+//! open returned success" would pass against a shim that excepted these names
+//! too: the excepted open would succeed, by opening the wrong file. So every claim here is made
 //! about bytes and about filesystem state:
 //!
 //! - The real files under the root exist and hold `HOST_*` bytes, which are

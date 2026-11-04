@@ -1,6 +1,5 @@
 //! The registry write hooks: `NtSetValueKey`, `NtDeleteValueKey`, `NtDeleteKey`,
-//! `NtRenameKey`, `NtSetInformationKey` and `NtFlushKey` (registry overlay spec sections 3.1,
-//! 3.2 and 6).
+//! `NtRenameKey`, `NtSetInformationKey` and `NtFlushKey`.
 //!
 //! **Every write on a virtualised path goes to the director, never to the real registry.**
 //! That holds for synthetic handles and for pass-through (real) handles alike: a write through
@@ -12,7 +11,7 @@
 //! **Order of checks, as Windows makes them:** the arguments the caller passes (`NtSetValueKey`'s
 //! value name and data, `NtSetInformationKey`'s class and length), then the access the handle was
 //! granted, then whether the key is deleted, then the call's own conditions. A director that
-//! cannot be asked fails the write with `STATUS_UNSUCCESSFUL` (spec section 6).
+//! cannot be asked fails the write with `STATUS_UNSUCCESSFUL`.
 //!
 //! **Deleted keys.** `NtDeleteKey` marks the handle's record deleted: every later call through
 //! it but `NtClose` answers `STATUS_KEY_DELETED`. Any other handle on a tombstoned path (or one
@@ -73,7 +72,7 @@ unsafe fn target(real: &Real, h: isize) -> Result<KeyRef, Write> {
         KeyHandle::Key(k) => Ok(k),
         KeyHandle::NotOurs => Err(Write::Pass),
         KeyHandle::Invalid => Err(Write::Done(STATUS_INVALID_HANDLE)),
-        // It may be a key the overlay serves: a write through it fails closed (spec section 6).
+        // It may be a key the overlay serves: a write through it fails closed.
         KeyHandle::Unresolvable => Err(Write::Done(STATUS_UNSUCCESSFUL)),
     }
 }
@@ -92,10 +91,10 @@ fn live(t: &KeyRef) -> Result<Lookup, NTSTATUS> {
     }
 }
 
-/// A director write's failure as the NT status the caller gets (spec section 6).
+/// A director write's failure as the NT status the caller gets.
 fn write_status(st: Status) -> NTSTATUS {
     match st {
-        // Over the spec's limits (oversize data, a bad name).
+        // Over the registry limits (oversize data, a bad name).
         Status::BadRequest => STATUS_INVALID_PARAMETER,
         // The key is tombstoned (a delete raced this write).
         Status::NotFound => STATUS_KEY_DELETED,
@@ -142,7 +141,7 @@ pub(crate) unsafe fn set_value_key(
         if name.len() > MAX_VALUE_NAME {
             return Err(STATUS_INVALID_PARAMETER);
         }
-        // Over the spec's limit (the director would refuse it too): never copied.
+        // Over the data limit (the director would refuse it too): never copied.
         if size as usize > MAX_DATA {
             return Err(STATUS_INVALID_PARAMETER);
         }

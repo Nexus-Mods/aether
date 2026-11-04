@@ -196,8 +196,8 @@ unsafe fn fuse_create_section(
     }
     // Diagnostic: `VFS_REJECT_FUSE_DATA_SECTION=1` refuses *data* sections only,
     // so the game falls back to ReadFile for content while SEC_IMAGE (DLL
-    // loading) keeps working. Rejecting every section — the older
-    // VFS_REJECT_FUSE_SECTION — breaks the launch outright.
+    // loading) keeps working. Rejecting every section would break the launch
+    // outright.
     //
     // This is the one I/O path nothing else can observe: reads from a mapped
     // view are page faults served by the lazy-section VEH, so they appear in
@@ -310,9 +310,7 @@ unsafe fn fuse_create_section(
 
 /// `NtCreateSection` hook: a FUSE synthetic file handle becomes a synthetic
 /// section (lazy data section, or an eagerly mapped PE for `SEC_IMAGE`) via
-/// [`fuse_create_section`]. Every other handle passes through — including, as
-/// of gate 4 task 7, the zip-window synthetic file handles this hook used to
-/// also answer for, which no longer exist.
+/// [`fuse_create_section`]. Every other handle passes through.
 pub(super) unsafe fn create_section_hook_body(
     section_handle: *mut HANDLE,
     access: u32,

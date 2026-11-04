@@ -172,11 +172,7 @@ pub(super) fn render_stats(snap: &Snapshot) -> String {
 /// in one cannot hide behind another.
 ///
 /// Three classes exist: `Routed`, `FellThroughPassthrough` (the generic pass-through default) and
-/// `FellThroughWriteFallback` (a write that fell back to the real filesystem). The others the
-/// bypass-removal gates drove to zero (`FellThroughRedirect`, `FellThroughServe`,
-/// `FellThroughDrmException`, `Denied`) had no producer left once the shim-local engine went, and
-/// were removed with it. Their rows in `docs/bypass-baseline.md` are history, written against the
-/// labels, which no code renders any more.
+/// `FellThroughWriteFallback` (a write that fell back to the real filesystem).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum OpenOutcome {
@@ -219,16 +215,14 @@ pub(super) static OUTCOME_PATHS: [BoundedTally<String>; OUTCOME_N] =
 /// `PATHS_SHOWN`: this table prints one such list per outcome, so it must
 /// stay skimmable rather than repeat the full passthrough dump once per outcome.
 ///
-/// **Not purely cosmetic**: the escape matrix e2e test (`containment_test.clj`) locates each
-/// vector's own attempt in this list and asserts the list did not truncate
-/// (`... and N more`) for a run that small, because a per-vector search
-/// against a truncated list proves nothing. Raised from 20 when the matrix
-/// grew the three object-manager spellings vector 3 never covered
-/// (`3b`/`3c`/`3d`) and the write matrix's busiest bucket — one distinct raw
-/// spelling per vector, plus the handful of incidental opens every launch
-/// makes — crossed the old cap. Widen it again rather than shrinking the
-/// matrix if that happens next time: the cap exists for skimmability, the
-/// matrix's coverage does not bend to it.
+/// **Not purely cosmetic**: the escape matrix test (`docs/escape-matrix.md`)
+/// locates each vector's own attempt in this list and asserts the list did not
+/// truncate (`... and N more`) for a run that small, because a per-vector
+/// search against a truncated list proves nothing. The write matrix's busiest
+/// bucket holds one distinct raw spelling per vector, plus the handful of
+/// incidental opens every launch makes. Widen the cap rather than shrinking
+/// the matrix: the cap exists for skimmability, the matrix's coverage does
+/// not bend to it.
 pub(super) const OUTCOME_PATHS_SHOWN: usize = 40;
 
 /// Current value of one outcome's counter. `pub` (not `#[cfg(test)]`) so a
@@ -240,16 +234,14 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
 
 /// `Opcode::Open`s the shim issued that no [`OpenOutcome::Routed`] accounts for.
 ///
-/// This exists to keep one specific invariant true. Four recorded sessions
-/// have used `routed == opens_ok + opens_err` (the director's own arrived-open
-/// total) as this project's health check, on the reading that any drift means
-/// an open one side saw and the other did not — a bypass. The shim asks the
-/// director to open something *without* that open being a `Routed` decision in
-/// one place, which breaks the equality without any bypass existing: **the
-/// directory downgrade** (`hook/file_open.rs`), where a write-flavoured open of a
-/// directory is re-issued as a read open, so one `Routed` produces two
-/// `Opcode::Open`s. (The shim-local copy-up was the second such place, until task C8
-/// removed it.)
+/// This exists to keep one specific invariant true. `routed == opens_ok +
+/// opens_err` (the director's own arrived-open total) is a health check, on
+/// the reading that any drift means an open one side saw and the other did
+/// not: a bypass. The shim asks the director to open something *without* that
+/// open being a `Routed` decision in one place, which breaks the equality
+/// without any bypass existing: **the directory downgrade**
+/// (`hook/file_open.rs`), where a write-flavoured open of a directory is
+/// re-issued as a read open, so one `Routed` produces two `Opcode::Open`s.
 ///
 /// Counting them rather than tolerating them keeps the reconciliation exact:
 /// `routed + unrouted_director_opens == opens_ok + opens_err`, still an
@@ -264,12 +256,10 @@ pub(super) static UNROUTED_DIRECTOR_OPENS: AtomicU64 = AtomicU64::new(0);
 /// section so one parse of that section yields both halves of the
 /// reconciliation. Deliberately not an `OpenOutcome` variant: it does not
 /// classify a *game* open the way the others do, and giving it a discriminant
-/// would renumber `OUTCOME_COUNTS` against the audit tables in
-/// `docs/bypass-baseline.md`.
+/// would renumber `OUTCOME_COUNTS`.
 ///
-/// `test/aether/director/e2e/shim_report.clj` matches this string. A rename
-/// there without one here turns the reconciliation back into a silent
-/// inequality.
+/// A director's end-to-end tests match this string. A rename there without
+/// one here turns the reconciliation into a silent inequality.
 pub(crate) const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";
 
 /// Record an `Opcode::Open` the shim issued on its own behalf, or a re-issue of one

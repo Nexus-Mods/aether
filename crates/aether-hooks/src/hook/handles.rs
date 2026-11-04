@@ -26,8 +26,7 @@ pub(super) struct HandleInfo {
 ///
 /// Fields are set one at a time and never cleared before the entry goes: a handle value the OS
 /// reuses before its stale entry was reclaimed (a close that lost its `try_lock`) keeps whatever
-/// the old handle's fields were, exactly as the tables this replaces (`DIR_TABLE`, `PATH_TABLE`,
-/// `HANDLE_PATHS`) did one by one.
+/// the old handle's fields were.
 pub(super) struct HandleTable {
     map: BTreeMap<isize, HandleInfo>,
     /// Entries with `opened_as` set, which [`HANDLE_PATHS_MAX`] bounds.
@@ -137,9 +136,9 @@ pub(super) unsafe fn reset_handle(file_handle: *mut HANDLE, path: Option<&str>, 
 ///
 /// Takes the already-decoded `path` rather than `oa`: `create_hook`/
 /// `open_hook` decode once per invocation (`path_of_tracked`) and thread the
-/// result through every function that used to call `path_of(oa)`
-/// independently — including this one, `record_path` and `note_passthrough_outcome`. Before that, a
-/// single hooked `NtCreateFile` could re-run the decode 2-5 times over; for
+/// result through every function rather than each calling `path_of(oa)`
+/// itself, this one, `record_path` and `note_passthrough_outcome` included. Otherwise a
+/// single hooked `NtCreateFile` would re-run the decode 2-5 times over; for
 /// an unresolved handle-relative open that decode is `parent_dir_of_handle`'s
 /// OS-consulted case 4 (a `GetFinalPathNameByHandleW` call), so re-running it
 /// per caller meant several syscalls per open rather than one. Resolving once

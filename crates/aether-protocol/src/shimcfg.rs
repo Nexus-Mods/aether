@@ -41,8 +41,8 @@ pub struct ShimConfig {
 /// Why a config did not decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
-    /// No `VFSC` magic: the config predates versioning (written by an older
-    /// host). A buffer too short to hold the magic is `Malformed`.
+    /// No `VFSC` magic: not a versioned config. A buffer too short to hold
+    /// the magic is `Malformed`.
     Unversioned,
     /// A versioned config from a different build.
     Version { found: u32, expected: u32 },

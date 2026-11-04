@@ -458,7 +458,7 @@ pub(crate) struct RegGen {
     /// send registry requests (wire.md 4.5: "a director that serves the
     /// registry must publish a non-zero generation before the shim
     /// attaches"). Without one the shim sends none, and the header may stay
-    /// 0, as Cairn's does.
+    /// 0 (4.5).
     serves: bool,
     /// The last generation read.
     last: u64,
@@ -817,7 +817,7 @@ mod tests {
         assert!(why.contains("wire.md 4.5"), "{why}");
         // Once, at the first registry request.
         assert_eq!(g.before(&lookup(), 0), None);
-        // Without a registry the header may stay 0 (Cairn's does).
+        // Without a registry the header may stay 0 (4.5).
         let mut g = RegGen::new(false, 0);
         assert_eq!(g.before(&lookup(), 0), None);
     }

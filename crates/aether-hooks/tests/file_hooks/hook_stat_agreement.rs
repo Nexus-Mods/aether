@@ -17,12 +17,10 @@
 //!     the file.
 //!
 //! Under a managed root all of them are answered by the director: the name-based queries by its
-//! `getattr` (`hook/file_attr.rs::stat_by_path`), an open by its `open`. Before task C8 this
-//! binary ran with no director and the name-based assertions had been flipped to "nothing
-//! answers" while `std::fs::metadata` still went through the snapshot, so the four APIs were
-//! asserted to *disagree*. Through the fake director they agree again, in both directions: a
-//! served file is visible with its size to every API, and a real file under the root that the
-//! director does not serve (where a snapshot tombstone used to be) is invisible to every API.
+//! `getattr` (`hook/file_attr.rs::stat_by_path`), an open by its `open`. Through the fake
+//! director they agree, in both directions: a served file is visible with its size to every
+//! API, and a real file under the root that the director does not serve is invisible to every
+//! API.
 
 use std::ffi::c_void;
 

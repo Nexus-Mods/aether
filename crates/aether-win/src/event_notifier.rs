@@ -66,10 +66,9 @@ impl EventNotifier {
 
 /// How long a client thread spins for its response before sleeping.
 ///
-/// Measured service time for a ring RPC is 20–209 µs (`docs/benchmarks/
-/// c-throughput-delta.md`), so a budget a little above that covers the common
-/// case without sleeping. Tunable via `VFS_RING_SPIN_US`; `0` restores the
-/// old sleep-immediately behaviour.
+/// Measured service time for a ring RPC is 20–209 µs, so a budget a little
+/// above that covers the common case without sleeping. Tunable via
+/// `VFS_RING_SPIN_US`; `0` sleeps immediately.
 fn spin_budget() -> Duration {
     static US: OnceLock<u64> = OnceLock::new();
     Duration::from_micros(*US.get_or_init(|| {

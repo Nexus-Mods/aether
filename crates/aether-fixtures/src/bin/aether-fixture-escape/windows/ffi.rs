@@ -23,7 +23,7 @@ pub const OPEN_EXISTING: u32 = 3;
 /// write half of this matrix uses everywhere: it is both a create (so a
 /// spelling that escapes containment would leave a real file behind, which is
 /// the thing the negative canary forbids) and a preserving open (so it is the
-/// shape that asks the director for a copy-up, the branch gate 4 closed).
+/// shape that asks the director for a copy-up).
 pub const OPEN_ALWAYS: u32 = 4;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;

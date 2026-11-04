@@ -10,7 +10,7 @@
 //! | synthetic *file* (a director file handle) | [`SYNTH_FILE_TAG`], 2^47 | `synth_file` |
 //! | synthetic registry *key* | [`REG_TAG`], `0x6000_0000` | `regkeys` |
 //!
-//! 2^46 belonged to the zip-window file handles that gate 4 task 7 removed, and is unassigned.
+//! 2^46 is unassigned.
 //!
 //! **In a 32-bit (WOW64) process** handles are 32 bits, and only bits 27 and 29 are never set in a
 //! real one under `0x8000_0000` (local handles are below 2^26; Wine's global handles are a local

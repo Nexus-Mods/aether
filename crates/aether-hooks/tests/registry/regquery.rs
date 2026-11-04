@@ -1,6 +1,5 @@
 //! The registry query hooks: `NtQueryKey`, `NtEnumerateKey`, `NtQueryValueKey`,
-//! `NtEnumerateValueKey` and `NtQueryMultipleValueKey` on keys the overlay touches (registry
-//! overlay spec sections 3.2, 3.3, 3.5 and 6), through the real ntdll entry points with the
+//! `NtEnumerateValueKey` and `NtQueryMultipleValueKey` on keys the overlay touches, through the real ntdll entry points with the
 //! shim's detours installed and the fake director's registry behind the ring.
 //!
 //! Two oracles:
@@ -225,7 +224,7 @@ fn build_real_keys() {
     // Untouched: a pass-through handle.
     make("Plain", None, &[val("p", REG_DWORD, &dword(5))]);
     make(r"Plain\PSub", None, &[]);
-    // Untouched until a test writes to the overlay through regclient (Task 11's copy-on-write).
+    // Untouched until a test writes to the overlay through regclient (copy-on-write).
     make("Cow", None, &[val("c", REG_DWORD, &dword(1))]);
     make("CowQ", None, &[val("c", REG_DWORD, &dword(1))]);
     make(r"CowQ\K", None, &[]);
@@ -926,7 +925,7 @@ fn a_pass_through_handle_is_the_real_key_until_its_path_is_touched() {
     );
     NtCloseAll(&[p]);
 
-    // Touched after the open (Task 11's copy-on-write writes through such a handle): the same
+    // Touched after the open (copy-on-write writes through such a handle): the same
     // handle now answers from the merge, decided on every call.
     let c = f.open("Cow", NT_KEY_READ);
     assert!(!is_synthetic_key_handle(c));

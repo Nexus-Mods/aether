@@ -7,20 +7,20 @@
        "files": [{"path": "a.txt", "contents": "a"}]}
     ],
     "registry": {"keys": [
-      {"path": "\\Registry\\Machine\\Software\\Cairn"}
+      {"path": "\\Registry\\Machine\\Software\\Cabin"}
     ]}
   },
   "steps": [
     {"request": {"op": "reg-lookup", "path": ""}, "expect": {"status": "bad-request"}, "note": "path ''"},
     {"request": {"op": "reg-lookup", "path": "\\"}, "expect": {"status": "bad-request"}, "note": "path '\\\\'"},
-    {"request": {"op": "reg-lookup", "path": "Registry\\Machine\\Software\\Cairn"}, "expect": {"status": "bad-request"}, "note": "path 'Registry\\\\Machine\\\\Software\\\\Cairn'"},
+    {"request": {"op": "reg-lookup", "path": "Registry\\Machine\\Software\\Cabin"}, "expect": {"status": "bad-request"}, "note": "path 'Registry\\\\Machine\\\\Software\\\\Cabin'"},
     {"request": {"op": "reg-lookup", "path": "\\Machine\\Software"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Machine\\\\Software'"},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\\\Machine"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\\\\\Machine'"},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\Machine\\\\Software\\\\Cairn\\\\'"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\Machine\\\\Software\\\\Cabin\\\\'"},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\."}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\Machine\\\\.'"},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\..\\Software"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\Machine\\\\..\\\\Software'"},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\.\\Cairn"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\Machine\\\\Software\\\\.\\\\Cairn'"},
-    {"request": {"op": "reg-lookup", "path": "/Registry/Machine/Software/Cairn"}, "expect": {"status": "bad-request"}, "note": "path '/Registry/Machine/Software/Cairn'"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\.\\Cabin"}, "expect": {"status": "bad-request"}, "note": "path '\\\\Registry\\\\Machine\\\\Software\\\\.\\\\Cabin'"},
+    {"request": {"op": "reg-lookup", "path": "/Registry/Machine/Software/Cabin"}, "expect": {"status": "bad-request"}, "note": "path '/Registry/Machine/Software/Cabin'"},
     {"request": {"op": "reg-key", "path": ""}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-set-value", "path": "", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-delete-value", "path": "", "name": "v"}, "expect": {"status": "bad-request"}},
@@ -35,13 +35,13 @@
     {"request": {"op": "reg-delete-key", "path": "\\"}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-rename-key", "path": "\\", "new_leaf": "x"}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-changed", "path": "\\", "subtree": true, "since": 0}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-key", "path": "Registry\\Machine\\Software\\Cairn"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-set-value", "path": "Registry\\Machine\\Software\\Cairn", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-delete-value", "path": "Registry\\Machine\\Software\\Cairn", "name": "v"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-create-key", "path": "Registry\\Machine\\Software\\Cairn", "volatile": false}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-delete-key", "path": "Registry\\Machine\\Software\\Cairn"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-rename-key", "path": "Registry\\Machine\\Software\\Cairn", "new_leaf": "x"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-changed", "path": "Registry\\Machine\\Software\\Cairn", "subtree": true, "since": 0}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-key", "path": "Registry\\Machine\\Software\\Cabin"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-set-value", "path": "Registry\\Machine\\Software\\Cabin", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-delete-value", "path": "Registry\\Machine\\Software\\Cabin", "name": "v"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-create-key", "path": "Registry\\Machine\\Software\\Cabin", "volatile": false}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-delete-key", "path": "Registry\\Machine\\Software\\Cabin"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-rename-key", "path": "Registry\\Machine\\Software\\Cabin", "new_leaf": "x"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-changed", "path": "Registry\\Machine\\Software\\Cabin", "subtree": true, "since": 0}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-key", "path": "\\Machine\\Software"}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-set-value", "path": "\\Machine\\Software", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-delete-value", "path": "\\Machine\\Software", "name": "v"}, "expect": {"status": "bad-request"}},
@@ -56,13 +56,13 @@
     {"request": {"op": "reg-delete-key", "path": "\\Registry\\\\Machine"}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-rename-key", "path": "\\Registry\\\\Machine", "new_leaf": "x"}, "expect": {"status": "bad-request"}},
     {"request": {"op": "reg-changed", "path": "\\Registry\\\\Machine", "subtree": true, "since": 0}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Cairn\\", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Cairn\\", "name": "v"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Cairn\\", "volatile": false}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Cairn\\"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Cairn\\", "new_leaf": "x"}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\", "subtree": true, "since": 0}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 1, "state": "created", "below": false}}, "note": "nothing changed: the version is the mount's"}
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin\\"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Cabin\\", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Cabin\\", "name": "v"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Cabin\\", "volatile": false}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Cabin\\"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Cabin\\", "new_leaf": "x"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cabin\\", "subtree": true, "since": 0}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 1, "state": "created", "below": false}}, "note": "nothing changed: the version is the mount's"}
   ]
 }

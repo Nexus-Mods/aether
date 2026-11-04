@@ -1,4 +1,4 @@
-//! Registry probe for the registry overlay's end-to-end test (registry overlay spec §8.3).
+//! Registry probe for the registry overlay's end-to-end test.
 //!
 //! `aether-fixture-registry.exe <mode> [run id]` drives the registry through Win32 only, under
 //! `Software\AetherVfsRegistryTest` in both HKCU and HKLM, and prints one `reg: ` line per
@@ -11,7 +11,7 @@
 //! * no last-write times and no security descriptor sizes;
 //! * enumerations are printed **sorted by name, case-insensitively**, with the index at which
 //!   they ended. The order itself is not compared: Wine keeps values and subkeys sorted,
-//!   Windows keeps values in insertion order, and the overlay (spec §3.3) lists its own
+//!   Windows keeps values in insertion order, and the overlay lists its own
 //!   values first and its created subkeys after the real ones. Every entry, its count and
 //!   the end status are compared.
 //!

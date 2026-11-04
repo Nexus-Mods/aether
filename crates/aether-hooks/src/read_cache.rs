@@ -2,7 +2,7 @@
 //! served immutable are answered from it instead of over the ring.
 //!
 //! The cache itself, and its coherence rule, are `aether_ipc::readcache` (OS-free
-//! so the native tests and `ring-bench` run the same code). This module only
+//! so the native tests run the same code). This module only
 //! holds the one instance and says when it is off: `VFS_SHIM_READ_CACHE=0`
 //! ([`aether_env::SHIM_READ_CACHE`]), read once.
 //!

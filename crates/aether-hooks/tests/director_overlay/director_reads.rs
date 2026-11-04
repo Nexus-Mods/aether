@@ -1,14 +1,10 @@
 //! Content under a managed root comes from the director, byte for byte, over both ring
 //! transports, and never from the real file under the root.
 //!
-//! These were the copy-up tests (`cow_seed_reads_through_director.rs`): the shim-local overlay
-//! materialised a file's existing content through the director before a preserving write, and
-//! each test drove that loop through the removed shim-local `Engine::decide_open` directly. Task C8 removed the overlay,
-//! and with it the shim's own copy loop: a preserving write is now the director's (`OpenFlags::WRITE`
-//! without truncation, copy-up inside the provider graph). What the tests were really about —
-//! the client's fragmented read over awkward answers, and where the bytes come from — is the
-//! same code a read hook uses (`NtReadFile` → `FuseClient::read_fragmented`), so each claim is
-//! now made on a read through the hooks:
+//! A preserving write is the director's (`OpenFlags::WRITE` without truncation, copy-up inside
+//! the provider graph). These tests are about the client's fragmented read over awkward answers,
+//! and where the bytes come from, which is the code a read hook uses (`NtReadFile` →
+//! `FuseClient::read_fragmented`), so each claim is made on a read through the hooks:
 //!
 //! - the provider's bytes, never the real file's (`copy_up_takes_the_provider_graph_s_bytes`,
 //!   `copy_up_never_seeds_from_a_real_file_under_the_root`);
@@ -467,8 +463,7 @@ fn a_preserving_write_to_a_file_only_on_real_disk_never_seeds_from_it() {
 /// **Known issue, pinned.** The director serves 9 000 bytes of a file its `Opcode::Open` and
 /// `Opcode::GetAttr` call 50 000 bytes long. The read hook answers the read at offset 9 000 with
 /// `STATUS_SUCCESS` and 0 bytes, which every caller takes for the end of the file, so the read
-/// succeeds, silently truncated. (Copy-up, removed by task C8, failed this case instead.) This
-/// test records the behaviour so a change to it is noticed; when the read hook is made to fail a
+/// succeeds, silently truncated. This test records the behaviour so a change to it is noticed; when the read hook is made to fail a
 /// short-of-size read, flip it.
 fn a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue_body(cached: bool) {
     let (root, _fake, hooks) = session_via(

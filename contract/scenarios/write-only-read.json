@@ -1,6 +1,6 @@
 {
   "name": "write-only-read",
-  "description": "A handle opened with OPEN_WRITE and not OPEN_READ serves READ (wire.md 3.4.4: a handle serves READ whatever access it was opened with, as Cairn and the reference serve it; the shim's write opens send OPEN_WRITE alone and read through them): reads see the file, then its writes, its truncation and a new file's bytes.",
+  "description": "A handle opened with OPEN_WRITE and not OPEN_READ serves READ (wire.md 3.4.4: a handle serves READ whatever access it was opened with; the shim's write opens send OPEN_WRITE alone and read through them): reads see the file, then its writes, its truncation and a new file's bytes.",
   "tree": {
     "roots": [
       {"id": 0,

@@ -1,15 +1,15 @@
-//! **`NtDeleteFile` reaches real disk.** (gate 5, Task 5.)
+//! **`NtDeleteFile` under a managed root is answered by the director.**
 //!
-//! Every other unhooked NT API on this project's list fails *safely* on a
-//! synthetic handle: it is handed a handle the kernel does not own and returns
+//! An NT API that takes a handle fails *safely* on a synthetic handle: it is
+//! handed a handle the kernel does not own and returns
 //! `STATUS_INVALID_HANDLE`. `NtDeleteFile` has no handle to be wrong about. Its
-//! entire request is an `OBJECT_ATTRIBUTES`, so an unhooked call resolves the
-//! path itself, against the real filesystem, and deletes the real file — under
-//! a managed root, whose whole contract is that the real filesystem beneath it
-//! is unreachable by any spelling.
+//! entire request is an `OBJECT_ATTRIBUTES`, so an unhooked call would resolve
+//! the path itself, against the real filesystem, and delete the real file
+//! under a managed root, whose whole contract is that the real filesystem
+//! beneath it is unreachable by any spelling.
 //!
 //! **Why the fixture is shaped the way it is.** A test that only asserted on
-//! the returned status would pass against the unhooked code for two of its
+//! the returned status would pass against an unhooked delete for two of its
 //! three cases: an unhooked delete of a file that is really there *succeeds*,
 //! and a delete of a path the director does not serve also succeeds. So every
 //! claim here is made about filesystem state, and the bytes on disk are
@@ -41,7 +41,7 @@
 //! satisfy a `< 0` check and still break callers: the delete-then-create idiom
 //! treats only `ERROR_FILE_NOT_FOUND` as benign and gives up on anything else,
 //! so an absent path under a root has to answer `STATUS_OBJECT_NAME_NOT_FOUND`
-//! the way the open path already does.
+//! the way the open path does.
 //!
 //! **The last three cases are handle-relative**, because Win32 decides on its
 //! own whether a name becomes absolute or a (directory handle + leaf) pair, and

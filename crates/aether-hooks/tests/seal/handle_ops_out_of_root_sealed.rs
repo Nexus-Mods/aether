@@ -1,6 +1,5 @@
-//! The three ways a **handle**-based delete or rename used to reach the real
-//! file under a managed root (gate 5, Task 5, review round 2), now answered by
-//! the director.
+//! Three ways a **handle**-based delete or rename could reach the real file
+//! under a managed root, each answered by the director.
 //!
 //! All three live in `setinfo_hook`'s branch for a **real** (non-synthetic)
 //! handle: one the kernel issued, whose path is under a root. A director-served
@@ -12,8 +11,7 @@
 //! 1. **A delete through a handle the shim never saw opened.** No table of ours
 //!    records it, so its path is recovered with `GetFinalPathNameByHandleW` and
 //!    the delete is sent to the director (`Opcode::Delete`), as `delete_hook` does
-//!    for the same path. It used to write a shim-spelled whiteout marker into
-//!    the shim-local overlay instead, which the director never consulted.
+//!    for the same path.
 //! 2. **A rename out of a managed root** to a target outside every root, by
 //!    both handle kinds: `std::fs::rename` (the shim sees the open, so the
 //!    handle is synthetic) and `FILE_RENAME_INFORMATION` on a real handle. The

@@ -459,7 +459,7 @@ pub(crate) struct FileEndOfFileInformation {
     pub end_of_file: i64,
 }
 
-// ---- Registry (spec 2026-10-05 registry overlay, section 3.1) ----
+// ---- Registry ----
 
 /// `ntdll!NtOpenKey`.
 pub(crate) type NtOpenKeyFn = unsafe extern "system" fn(
@@ -640,7 +640,7 @@ pub(crate) const STATUS_INSUFFICIENT_RESOURCES: NTSTATUS = 0xC000_009Au32 as i32
 /// `STATUS_INVALID_INFO_CLASS`.
 pub(crate) const STATUS_INVALID_INFO_CLASS: NTSTATUS = 0xC000_0003u32 as i32;
 
-// ---- Registry: notifications, security, handle flags, out-of-scope calls (Task 12) ----
+// ---- Registry: notifications, security, handle flags, out-of-scope calls ----
 
 /// `ntdll!NtNotifyChangeKey`. `WatchTree` and `Asynchronous` are `BOOLEAN`s.
 pub(crate) type NtNotifyChangeKeyFn = unsafe extern "system" fn(

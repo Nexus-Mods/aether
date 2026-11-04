@@ -1,4 +1,4 @@
-//! The registry write hooks (registry overlay spec sections 3.1, 3.2 and 6): `NtSetValueKey`,
+//! The registry write hooks: `NtSetValueKey`,
 //! `NtDeleteValueKey`, `NtDeleteKey`, `NtRenameKey`, `NtSetInformationKey` and `NtFlushKey`,
 //! through the real ntdll entry points with the shim's detours installed and the fake director's
 //! registry behind the ring (`fakedirector` with [`Fake::with_registry`]).

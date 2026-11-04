@@ -652,7 +652,7 @@ macro_rules! detour_table {
                 ) -> NTSTATUS,
                 on_panic: STATUS_HOOK_PANICKED,
             }
-            // Notifications, security, handle flags and the out-of-scope calls (spec 3.4, 3.6). Each export
+            // Notifications, security, handle flags and the out-of-scope calls. Each export
             // this ntdll has must be detoured like the rest; one it lacks is simply skipped.
             {
                 export: "NtNotifyChangeKey",

@@ -1,5 +1,5 @@
 //! The registry hooks' key handles: open, create, duplicate, close and the object name
-//! (registry overlay spec sections 3.1, 3.2 and 6), through the real ntdll entry points with
+//!, through the real ntdll entry points with
 //! the shim's detours installed and the fake director's registry behind the ring
 //! (`fakedirector` with [`Fake::with_registry`]).
 //!

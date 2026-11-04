@@ -9,8 +9,8 @@
 //! [`CacheConfig::block`] bytes (64 KiB), fetched from the director with one
 //! bulk read per miss. Reads at or above the threshold never touch it.
 //!
-//! OS-free and generic over how a block is fetched, so the shim, the native
-//! tests and `ring-bench` all run this same code.
+//! OS-free and generic over how a block is fetched, so the shim and the
+//! native tests run this same code.
 //!
 //! # How much a miss fetches
 //!

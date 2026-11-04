@@ -200,10 +200,10 @@ pub fn serve_one<N: Notifier, D: Director + ?Sized>(
 ///
 /// A registry reply longer than `payload_cap - 8` is answered
 /// `Status::ReplyTooLarge` (`docs/wire.md` 4.3: required for REG_KEY, and
-/// applied to every registry reply as Cairn does). Any other reply longer
-/// than `payload_cap` is left to the ring, which answers it with its
-/// overflow status `i32::MIN` and no payload (2.5, step 3), as both
-/// directors do for an oversized READDIR listing (3.4.2).
+/// applied to every registry reply, as a director may). Any other reply
+/// longer than `payload_cap` is left to the ring, which answers it with its
+/// overflow status `i32::MIN` and no payload (2.5, step 3), as an oversized
+/// READDIR listing is answered (3.4.2).
 ///
 /// Every slot taken is completed ([`RingServer::serve_one_into`]): a header
 /// claiming a payload past the slot is `Status::BadRequest`, and a director

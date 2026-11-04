@@ -12,11 +12,10 @@
 //! check the director still serves. The tree is built in ([`tree`]): two
 //! roots, a writable entry and a registry layer.
 //!
-//! Every case cites its rule. Where wire.md's 3.5.1 table lets the two
-//! directors answer a short payload differently, the case allows exactly the
-//! answers the table lists. An error status must come with an empty payload
-//! (3.1: "Every director error path in both directors replies with an empty
-//! payload"; 3.3: "answered `ST_BAD_REQUEST` with an empty payload").
+//! Every case cites its rule. Where wire.md's 3.5.1 table lets directors
+//! answer a short payload differently, the case allows exactly the answers
+//! the table lists. An error status must come with an empty payload (3.1:
+//! "A director answers every error with an empty payload"; 3.3: "answered `ST_BAD_REQUEST` with an empty payload").
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -180,9 +179,9 @@ fn adder(v: &mut Vec<Case>) -> impl FnMut(String, u32, u32, Vec<u8>, Expect) + '
 fn registry_cases() -> Vec<Case> {
     let mut v = Vec::new();
     let mut add = adder(&mut v);
-    // 3.5.1: the Rust decoders refuse a path that is not UTF-8; Cairn's
-    // registry reader decodes it with replacement characters and answers the
-    // path that gives (`registry.clj`, `get-str`).
+    // 3.5.1: the Rust decoders refuse a path that is not UTF-8; a director
+    // may decode it with replacement characters and answer the path that
+    // gives.
     let mut p = Vec::new();
     put_str(&mut p, b"\\Registry\\Machine\\\xff");
     let substituted = OwnedRequest::RegLookup {
@@ -591,9 +590,8 @@ fn file_cases(rfh: u64, wfh: u64) -> Vec<Case> {
         bad(),
     );
 
-    // 3.5.1: invalid UTF-8 in a path is ST_BAD_REQUEST in the Rust
-    // decoders; Cairn decodes it with replacement characters and carries
-    // on, which for these missing paths gives the answer a missing path
+    // 3.5.1: invalid UTF-8 in a path is ST_BAD_REQUEST, or a director may
+    // decode it with replacement characters and carry on, which for these missing paths gives the answer a missing path
     // gets.
     let mut p = Vec::new();
     put_u32(&mut p, 0);
@@ -1033,8 +1031,8 @@ mod tests {
         assert!(reg.iter().all(|c| is_registry(c.opcode)));
     }
 
-    /// Cairn's registry reader decodes a key path with replacement
-    /// characters and answers it (wire.md 3.5.1), so a path that is not
+    /// A director may decode a key path with replacement characters and
+    /// answer it (wire.md 3.5.1), so a path that is not
     /// UTF-8 may get the answer the substituted path gets.
     #[test]
     fn a_registry_path_that_is_not_utf8_may_be_substituted() {

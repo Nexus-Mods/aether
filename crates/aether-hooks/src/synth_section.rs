@@ -1,20 +1,13 @@
 //! Synthetic *section* bookkeeping for live PE image mapping.
 //!
-//! **This file used to be two unrelated things.** The half it was named for —
-//! serving zip-window bytes out of memory-mapped container files behind
-//! synthetic *file* handles — is gone (gate 4 task 7). Zip-backed content is
-//! the director's to serve over the ring; the shim no longer opens, maps, or
-//! reads container files itself, and `Decision::Serve`, `open_synth`,
-//! `ZIP_MAPS` and `copy_window_to_file` went with that.
-//!
-//! What remains is the half that never had anything to do with zips: a table of
+//! Zip-backed content is the director's to serve over the ring; the shim never
+//! opens, maps, or reads container files itself. This module is a table of
 //! synthetic section handles over address ranges the shim already owns, plus a
 //! refcounted table of the views mapped out of them. `register_mapped_image`
 //! takes a PE image [`crate::lazy_section`] or `fuse_create_section`'s
 //! `SEC_IMAGE` path has already mapped into this process and hands back a
 //! handle that `NtMapViewOfSection` can answer from — no second mapping, and no
-//! file behind it at all. (It was called `zipserve` while it still served
-//! zip-window bytes.)
+//! file behind it at all.
 
 use crate::handle_tags::SYNTH_SECTION_TAG;
 use std::collections::BTreeMap;

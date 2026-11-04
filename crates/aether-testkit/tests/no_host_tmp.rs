@@ -26,7 +26,6 @@ const EXEMPT_CRATES: &[(&str, &str)] = &[
     ),
     ("aether-shim", "Windows-only shim DLL"),
     ("aether-inject", "Windows injector tests; run under Wine"),
-    ("vfs-payload", "Windows-only injected payload"),
     (
         "aether-redirect",
         "Windows-only path redirection; tests use Win32 and run on Windows",

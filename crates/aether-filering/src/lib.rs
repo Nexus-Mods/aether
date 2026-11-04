@@ -23,11 +23,13 @@ pub struct FileRing {
 }
 
 impl FileRing {
-    /// Create (or truncate) the file at `path`, size it to exactly `bytes`
-    /// (zero-filled) and map it. The caller initialises the ring on it.
+    /// Create the file at `path`, size it to exactly `bytes` (zero-filled)
+    /// and map it. The caller initialises the ring on it.
     ///
-    /// This truncates the file: truncating a file another process currently
-    /// maps faults that process (SIGBUS on Unix).
+    /// A file already at `path` is removed and a new one created in its
+    /// place, never truncated in place (`docs/wire.md` 2.10): a process that
+    /// still maps the old file keeps its pages, where truncating them would
+    /// fault it (SIGBUS on Unix; Windows refuses to truncate a mapped file).
     pub fn create(path: &Path, bytes: usize) -> io::Result<FileRing> {
         if bytes == 0 {
             return Err(io::Error::new(
@@ -35,11 +37,14 @@ impl FileRing {
                 "a file ring cannot be zero bytes",
             ));
         }
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .open(path)?;
         file.set_len(bytes as u64)?;
         Ok(FileRing {

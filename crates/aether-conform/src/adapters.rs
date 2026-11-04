@@ -176,6 +176,40 @@ pub enum Break {
     /// (wire.md 4.2: the current user's hives are `<CurrentUser>` and
     /// `<CurrentUser>_Classes`, keys like any other).
     MachineOnlyRegistry,
+    /// REG_DELETE_KEY of a key the overlay has no record of is
+    /// `ST_NOT_FOUND`, so a real key can never be hidden (wire.md 4.3: any
+    /// key not already tombstoned is tombstoned).
+    DeleteUnrecordedNotFound,
+    /// Each file handle reads a snapshot of the file taken at its OPEN,
+    /// changed only by its own WRITEs and SETATTRs: what another handle
+    /// writes reaches the file, GETATTR and new handles, never it (wire.md
+    /// 3.4.4: "Every handle of a file reads the file as it is now").
+    SnapshotReads,
+    /// A SETATTR changes the file at once, but GETATTR, READDIR and OPEN
+    /// report the size the file had before it until the handle's CLOSE, as
+    /// a director that publishes sizes at close would (wire.md 3.4.1: a
+    /// file's `size` is its length now, SETATTRs through handles still open
+    /// included).
+    SetattrAtClose,
+    /// Every error is answered with a 4-byte payload (wire.md 3.1: "A
+    /// director answers every error with an empty payload").
+    ErrorPayload,
+    /// An `OPEN_APPEND` handle writes at an end of its own: the size at its
+    /// OPEN plus its own writes, whatever other handles did (wire.md 3.4.3:
+    /// each WRITE lands at the file's end as it is when it is served).
+    AppendOwnEnd,
+    /// A SETATTR that cuts a file keeps the bytes it cut, and a later WRITE
+    /// past the end through the same handle shows them again in the gap
+    /// (wire.md 3.4.5, 3.4.6: the gap reads as zeros, "bytes a truncation
+    /// cut off included").
+    TruncateKeepsBytes,
+    /// A refused registry write moves the overlay's version anyway (wire.md
+    /// 4.3: "a refused write leaves it alone").
+    RefusedWriteBumps,
+    /// A RENAME of a directory leaves its children recorded under the old
+    /// name, and a MKDIR that makes the old name again brings them back
+    /// (wire.md 3.4.7: "a directory moves with everything under it").
+    RenameDirGhosts,
 }
 
 impl Break {
@@ -209,6 +243,14 @@ impl Break {
             "growth-garbage" => Some(Break::GrowthGarbage),
             "stream-base" => Some(Break::StreamBase),
             "machine-only-registry" => Some(Break::MachineOnlyRegistry),
+            "delete-unrecorded-not-found" => Some(Break::DeleteUnrecordedNotFound),
+            "snapshot-reads" => Some(Break::SnapshotReads),
+            "setattr-at-close" => Some(Break::SetattrAtClose),
+            "error-payload" => Some(Break::ErrorPayload),
+            "append-own-end" => Some(Break::AppendOwnEnd),
+            "truncate-keeps-bytes" => Some(Break::TruncateKeepsBytes),
+            "refused-write-bumps" => Some(Break::RefusedWriteBumps),
+            "rename-dir-ghosts" => Some(Break::RenameDirGhosts),
             _ => None,
         }
     }
@@ -321,6 +363,8 @@ fn mount(
         staged_files: staged.clone(),
         write_only: Arc::default(),
         reg_reads: Arc::default(),
+        held: Arc::default(),
+        view: Vec::new(),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -506,6 +550,8 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 staged_files: d.staged_files.clone(),
                 write_only: d.write_only.clone(),
                 reg_reads: d.reg_reads.clone(),
+                held: d.held.clone(),
+                view: Vec::new(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
@@ -515,7 +561,8 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                         | Break::PerSlotFh
                         | Break::SlotZeroOnly
                         | Break::CompleteAbandoned
-                        | Break::OpenFlagBits),
+                        | Break::OpenFlagBits
+                        | Break::ErrorPayload),
                     ) => interposed(seg, &notifier, &mut d, b, &handles, &stop),
                     _ => RingServer::new(seg, notifier).and_then(|server| {
                         let arena = (arena_len > 0)
@@ -648,6 +695,9 @@ fn interposed(
                 (Status::BadRequest.code(), Vec::new())
             };
             let mut reply = reply;
+            if how == Break::ErrorPayload && status != Status::Ok.code() {
+                reply = vec![0xEE; 4];
+            }
             if how == Break::OpenFlagBits
                 && head.opcode == Opcode::Open as u32
                 && status == Status::Ok.code()
@@ -829,7 +879,41 @@ struct Served {
     /// [`Break::BumpBeforeWrite`]'s count of REG_KEYs answered, shared by
     /// every serve thread, and signalled at each.
     reg_reads: Arc<(Mutex<u64>, std::sync::Condvar)>,
+    /// What the breaks that keep state per handle or per name hold, shared
+    /// by every serve thread.
+    held: Arc<Mutex<Held>>,
+    /// [`Break::SnapshotReads`]'s READ answer, from the handle's snapshot.
+    view: Vec<u8>,
 }
+
+/// The state of [`Break::SnapshotReads`], [`Break::SetattrAtClose`],
+/// [`Break::AppendOwnEnd`], [`Break::TruncateKeepsBytes`] and
+/// [`Break::RenameDirGhosts`], by the reference's handle number.
+#[derive(Default)]
+struct Held {
+    /// Each file handle's snapshot.
+    snaps: BTreeMap<u64, Vec<u8>>,
+    /// Each open handle's (root, folded path).
+    paths: BTreeMap<u64, (u32, String)>,
+    /// The size published for a (root, folded path) while a handle that
+    /// SETATTR'd it is open.
+    sizes: BTreeMap<(u32, String), u64>,
+    /// An append handle's own end.
+    ends: BTreeMap<u64, u64>,
+    /// The bytes a SETATTR cut, and where they began.
+    cut: BTreeMap<u64, (u64, Vec<u8>)>,
+    /// A renamed directory's old (root, folded path) and what was under it:
+    /// each path below it as stored, and a file's bytes (`None` for a
+    /// directory), parents first.
+    ghosts: Vec<(u32, String, Subtree)>,
+}
+
+/// What was below a directory: each path below it as stored, and a file's
+/// bytes (`None` for a directory), parents first.
+type Subtree = Vec<(String, Option<Vec<u8>>)>;
+
+/// A registry key the breaks write to and delete, which no scenario names.
+const HIDDEN_KEY: &str = r"\Registry\Machine\Software\AetherConformBreak";
 
 impl Served {
     /// The number the client is given for the reference's handle `fh`.
@@ -883,6 +967,66 @@ impl Served {
         Ok(())
     }
 
+    /// The whole file behind the reference's handle `fh`.
+    fn bytes(&mut self, fh: u64) -> Result<Vec<u8>, Status> {
+        let at = ReadSlot {
+            slot: 0,
+            arena: None,
+            inline_cap: usize::MAX,
+        };
+        match self
+            .reference
+            .read(at, RequestFlags::empty(), fh, 0, u32::MAX)?
+        {
+            ReadReply::Inline(d) => Ok(d.to_vec()),
+            ReadReply::Bulk { .. } => Err(Status::IoError),
+        }
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// [`Break::RefusedWriteBumps`]: after a refused registry write, two
+    /// writes no scenario looks at, so the version moves.
+    fn refused<T>(&mut self, r: Result<T, Status>) -> Result<T, Status> {
+        if self.broken == Some(Break::RefusedWriteBumps)
+            && matches!(r, Err(s) if s != Status::NotSupported)
+        {
+            let _ = self.reference.reg_create_key(HIDDEN_KEY, false);
+            let _ = self.reference.reg_delete_key(HIDDEN_KEY);
+        }
+        r
+    }
+
+    /// [`Break::RenameDirGhosts`]: everything below directory `dir`, as
+    /// stored, parents first, each file with its bytes.
+    fn subtree(&mut self, root: RootId, dir: &str) -> Subtree {
+        let mut out = Vec::new();
+        let mut listing = Listing::default();
+        if self.reference.read_dir(root, dir, &mut listing).is_err() {
+            return out;
+        }
+        let rows: Vec<(String, bool)> = listing
+            .iter()
+            .map(|e| (e.name.to_string(), e.is_dir))
+            .collect();
+        for (name, is_dir) in rows {
+            let path = format!("{dir}/{name}");
+            if is_dir {
+                out.push((name.clone(), None));
+                for (rest, b) in self.subtree(root, &path) {
+                    out.push((format!("{name}/{rest}"), b));
+                }
+            } else if let Ok(o) = self.reference.open(root, OpenFlags::READ, &path) {
+                let b = self.bytes(o.fh).unwrap_or_default();
+                let _ = self.reference.close(o.fh);
+                out.push((name, Some(b)));
+            }
+        }
+        out
+    }
+
     /// The reference's handle for the number `fh` a client sent.
     fn fh_in(&self, fh: u64) -> u64 {
         match self.broken {
@@ -898,6 +1042,13 @@ impl Director for Served {
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
         let path = self.base(path);
         let mut a = self.reference.get_attr(root, path)?;
+        if let Some(&size) = self
+            .held()
+            .sizes
+            .get(&(root.0, aether_casefold::fold(path)))
+        {
+            a.size = size;
+        }
         if self.broken == Some(Break::FoundForMissing) && !a.found {
             a.found = true;
         }
@@ -909,10 +1060,11 @@ impl Director for Served {
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
         self.reference.read_dir(root, path, out)?;
         let millis = self.broken == Some(Break::MtimeMillis);
-        if self.broken == Some(Break::TruncateReaddir) || millis {
+        let held = self.broken == Some(Break::SetattrAtClose);
+        if self.broken == Some(Break::TruncateReaddir) || millis || held {
             // `count`, then 21 bytes and the name per entry (wire.md 3.4.2).
             let mut size = 4usize;
-            let truncate = !millis;
+            let truncate = self.broken == Some(Break::TruncateReaddir);
             let kept: Vec<(String, bool, u64, i64)> = out
                 .iter()
                 .take_while(|e| {
@@ -921,7 +1073,15 @@ impl Director for Served {
                 })
                 .map(|e| {
                     let mtime = if millis { MILLIS } else { e.mtime };
-                    (e.name.to_string(), e.is_dir, e.size, mtime)
+                    let child = aether_casefold::fold(&format!("{path}/{}", e.name));
+                    let child = child.strip_prefix("./").unwrap_or(&child).to_string();
+                    let size = self
+                        .held()
+                        .sizes
+                        .get(&(root.0, child))
+                        .copied()
+                        .unwrap_or(e.size);
+                    (e.name.to_string(), e.is_dir, size, mtime)
                 })
                 .collect();
             *out = Listing::default();
@@ -938,7 +1098,28 @@ impl Director for Served {
     }
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
         let path = self.base(path);
+        let own_end = self.broken == Some(Break::AppendOwnEnd) && flags.contains(OpenFlags::APPEND);
+        let flags = if own_end {
+            flags - OpenFlags::APPEND
+        } else {
+            flags
+        };
         let mut o = self.reference.open(root, flags, path)?;
+        if own_end {
+            self.held().ends.insert(o.fh, o.size);
+        }
+        {
+            let key = (root.0, aether_casefold::fold(path));
+            let mut h = self.held();
+            if let Some(&size) = h.sizes.get(&key) {
+                o.size = size;
+            }
+            h.paths.insert(o.fh, key);
+        }
+        if self.broken == Some(Break::SnapshotReads) && !o.is_dir {
+            let snap = self.bytes(o.fh)?;
+            self.held().snaps.insert(o.fh, snap);
+        }
         if self.broken == Some(Break::WriteOnlyUnreadable)
             && flags.contains(OpenFlags::WRITE)
             && !flags.contains(OpenFlags::READ)
@@ -970,6 +1151,13 @@ impl Director for Served {
             _ => at,
         };
         let fh = self.fh_in(fh);
+        let snap = self.held().snaps.get(&fh).cloned();
+        if let Some(b) = snap {
+            let start = offset.min(b.len() as u64) as usize;
+            let n = (b.len() - start).min(len as usize).min(at.inline_cap);
+            self.view = b[start..start + n].to_vec();
+            return Ok(ReadReply::Inline(&self.view));
+        }
         if self.broken == Some(Break::WriteOnlyUnreadable)
             && self
                 .write_only
@@ -1014,10 +1202,78 @@ impl Director for Served {
             let end = self.length(fh)?;
             self.garbage(fh, end, offset)?;
         }
+        match self.broken {
+            Some(Break::SnapshotReads) => {
+                let n = self.reference.write(fh, offset, data)?;
+                let now = self.bytes(fh)?;
+                if let Some(snap) = self.held().snaps.get_mut(&fh) {
+                    // Its own write, at the place the file put it.
+                    let at = if data.is_empty() {
+                        snap.len()
+                    } else {
+                        (offset as usize).min(now.len().saturating_sub(data.len()))
+                    };
+                    let end = at + data.len();
+                    if snap.len() < end {
+                        snap.resize(end, 0);
+                    }
+                    snap[at..end].copy_from_slice(data);
+                }
+                return Ok(n);
+            }
+            Some(Break::AppendOwnEnd) => {
+                let end = self.held().ends.get(&fh).copied();
+                if let Some(end) = end {
+                    let n = self.reference.write(fh, end, data)?;
+                    self.held().ends.insert(fh, end + u64::from(n));
+                    return Ok(n);
+                }
+            }
+            Some(Break::TruncateKeepsBytes) => {
+                let cut = self.held().cut.get(&fh).cloned();
+                if let Some((from, kept)) = cut {
+                    let end = self.length(fh)?;
+                    let lo = end.max(from);
+                    let hi = offset.min(from + kept.len() as u64);
+                    if lo < hi {
+                        let shown = kept[(lo - from) as usize..(hi - from) as usize].to_vec();
+                        self.reference.write(fh, lo, &shown)?;
+                    }
+                }
+            }
+            _ => {}
+        }
         self.reference.write(fh, offset, data)
     }
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
         let fh = self.fh_in(fh);
+        match self.broken {
+            Some(Break::SnapshotReads) => {
+                self.reference.set_attr(fh, size)?;
+                if let Some(snap) = self.held().snaps.get_mut(&fh) {
+                    snap.resize(size as usize, 0);
+                }
+                return Ok(());
+            }
+            Some(Break::SetattrAtClose) => {
+                let before = self.length(fh)?;
+                self.reference.set_attr(fh, size)?;
+                let mut h = self.held();
+                if let Some(key) = h.paths.get(&fh).cloned() {
+                    h.sizes.entry(key).or_insert(before);
+                }
+                return Ok(());
+            }
+            Some(Break::TruncateKeepsBytes) => {
+                let bytes = self.bytes(fh)?;
+                if size < bytes.len() as u64 {
+                    self.held()
+                        .cut
+                        .insert(fh, (size, bytes[size as usize..].to_vec()));
+                }
+            }
+            _ => {}
+        }
         let end = match self.broken {
             Some(Break::GrowthGarbage) => Some(self.length(fh)?),
             _ => None,
@@ -1029,16 +1285,64 @@ impl Director for Served {
         }
     }
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
-        self.reference.rename(root, from, to)
+        let ghosts = self.broken == Some(Break::RenameDirGhosts)
+            && self
+                .reference
+                .get_attr(root, from)
+                .is_ok_and(|a| a.found && a.is_dir);
+        let below = if ghosts {
+            self.subtree(root, from)
+        } else {
+            Vec::new()
+        };
+        self.reference.rename(root, from, to)?;
+        if ghosts {
+            self.held()
+                .ghosts
+                .push((root.0, aether_casefold::fold(from), below));
+        }
+        Ok(())
     }
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
         self.reference.delete(root, path)
     }
     fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
-        self.reference.mkdir(root, mode, path)
+        self.reference.mkdir(root, mode, path)?;
+        let folded = aether_casefold::fold(path);
+        let back = self
+            .held()
+            .ghosts
+            .iter()
+            .find(|g| g.0 == root.0 && g.1 == folded)
+            .map(|g| g.2.clone());
+        for (rest, bytes) in back.unwrap_or_default() {
+            let p = format!("{path}/{rest}");
+            match bytes {
+                None => {
+                    let _ = self.reference.mkdir(root, mode, &p);
+                }
+                Some(b) => {
+                    let flags = OpenFlags::WRITE | OpenFlags::CREATE;
+                    if let Ok(o) = self.reference.open(root, flags, &p) {
+                        let _ = self.reference.write(o.fh, 0, &b);
+                        let _ = self.reference.close(o.fh);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     fn close(&mut self, fh: u64) -> Result<(), Status> {
         let fh = self.fh_in(fh);
+        {
+            let mut h = self.held();
+            h.ends.remove(&fh);
+            h.cut.remove(&fh);
+            if let Some(key) = h.paths.remove(&fh) {
+                h.sizes.remove(&key);
+            }
+            h.snaps.remove(&fh);
+        };
         self.reference.close(fh)?;
         self.write_only
             .lock()
@@ -1089,19 +1393,34 @@ impl Director for Served {
                     .unwrap_or_else(|e| e.into_inner());
             }
         }
-        self.reference.reg_set_value(path, name, ty, data)
+        let r = self.reference.reg_set_value(path, name, ty, data);
+        self.refused(r)
     }
     fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {
-        self.reference.reg_delete_value(path, name)
+        let r = self.reference.reg_delete_value(path, name);
+        self.refused(r)
     }
     fn reg_create_key(&mut self, path: &str, volatile: bool) -> Result<u64, Status> {
-        self.reference.reg_create_key(path, volatile)
+        let r = self.reference.reg_create_key(path, volatile);
+        self.refused(r)
     }
     fn reg_delete_key(&mut self, path: &str) -> Result<u64, Status> {
-        self.reference.reg_delete_key(path)
+        if self.broken == Some(Break::DeleteUnrecordedNotFound)
+            && path.split('\\').count() <= 64
+            && path.split('\\').all(|c| c.chars().count() <= 255)
+            && self
+                .reference
+                .reg_lookup(path)
+                .is_ok_and(|l| l.state == aether_protocol::Lookup::Absent)
+        {
+            return Err(Status::NotFound);
+        }
+        let r = self.reference.reg_delete_key(path);
+        self.refused(r)
     }
     fn reg_rename_key(&mut self, path: &str, new_leaf: &str) -> Result<u64, Status> {
-        self.reference.reg_rename_key(path, new_leaf)
+        let r = self.reference.reg_rename_key(path, new_leaf);
+        self.refused(r)
     }
     fn reg_changed(
         &mut self,
@@ -1284,6 +1603,8 @@ mod tests {
             staged_files: Arc::default(),
             write_only: Arc::default(),
             reg_reads: Arc::default(),
+            held: Arc::default(),
+            view: Vec::new(),
         };
         let two = Served {
             reference: one.reference.share(),
@@ -1293,6 +1614,8 @@ mod tests {
             staged_files: one.staged_files.clone(),
             write_only: one.write_only.clone(),
             reg_reads: one.reg_reads.clone(),
+            held: one.held.clone(),
+            view: Vec::new(),
             ..one
         };
         (one, two, b)

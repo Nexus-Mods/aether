@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aether_protocol::{Opcode, Reply, Request, Status};
-use aether_rpc::CallError;
 
 use crate::adapter::{Adapter, AdapterError};
 use crate::attach::Attached;
@@ -331,7 +330,7 @@ pub(crate) fn play(
         let (sent, gen_before, gen_now) = match step.client {
             0 => {
                 let before = ring.reg_gen();
-                let sent = send(ring, &client, &req, &mut scratch);
+                let sent = send(ring, &client, &req);
                 (sent, before, ring.reg_gen())
             }
             k => match others.send(k, &req) {
@@ -685,60 +684,58 @@ fn send<N: aether_ipc::Notifier>(
     ring: &Attached,
     client: &aether_rpc::Client<'_, N>,
     req: &OwnedRequest,
-    scratch: &mut Vec<u8>,
 ) -> Result<Sent, String> {
     let request = req.as_request();
     if request.opcode() == Opcode::Read {
         return read(ring, client, &request);
     }
-    if request.opcode() == Opcode::Open {
-        return open(client, &request);
-    }
-    Ok(match client.call(&request, scratch) {
-        Ok(reply) => Sent::Answer(Ok(OwnedReply::from_reply(&reply))),
-        Err(CallError::Status(s)) => Sent::Answer(Err(s)),
-        Err(CallError::UnknownStatus(n)) => Sent::Bad(format!(
-            "status {n}, which the protocol table does not have"
-        )),
-        Err(CallError::Undecodable) => Sent::Bad(
-            "an OK reply whose payload does not decode as this opcode's reply (wire.md 3.1)".into(),
-        ),
-        Err(CallError::Ipc(e)) => return Err(format!("{e:?}")),
-        Err(CallError::BulkRead) => unreachable!("READ is sent on a held slot"),
-    })
-}
-
-/// An OPEN on a held slot, so its payload's reserved bytes can be read
-/// (`compare::open_reply_reserved`) before it is decoded.
-fn open<N: aether_ipc::Notifier>(
-    client: &aether_rpc::Client<'_, N>,
-    request: &Request<'_>,
-) -> Result<Sent, String> {
+    // On a held slot, so an error's payload and an OPEN reply's reserved
+    // bytes can be looked at before the reply is decoded.
     let mut body = Vec::new();
     request.encode(&mut body);
+    let (op, flags) = (request.opcode(), request.flags());
     let (mut replies, slots) = client
         .ring()
-        .submit_many_held(&[(Opcode::Open as u32, 0, body)])
+        .submit_many_held(&[(op as u32, flags, body)])
         .map_err(|e| format!("{e:?}"))?;
     client.ring().release_slots(&slots);
     let reply = replies.pop().expect("one reply per request");
-    Ok(if reply.status != Status::Ok.code() {
-        match Status::try_from(reply.status) {
-            Ok(s) => Sent::Answer(Err(s)),
-            Err(_) => Sent::Bad(format!(
-                "status {}, which the protocol table does not have",
-                reply.status
-            )),
+    if let Some(sent) = refused(reply.status, &reply.payload) {
+        return Ok(sent);
+    }
+    if op == Opcode::Open {
+        if let Some(why) = crate::compare::open_reply_reserved(&reply.payload) {
+            return Ok(Sent::Bad(why));
         }
-    } else if let Some(why) = crate::compare::open_reply_reserved(&reply.payload) {
-        Sent::Bad(why)
-    } else {
-        match Reply::decode(Opcode::Open, 0, &reply.payload) {
-            Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
-            Err(_) => Sent::Bad(
-                "an OK reply whose payload does not decode as an OPEN reply (wire.md 3.1)".into(),
-            ),
-        }
+    }
+    Ok(match Reply::decode(op, flags, &reply.payload) {
+        Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
+        Err(_) => Sent::Bad(format!(
+            "an OK reply whose payload does not decode as a {} reply (wire.md 3.1)",
+            op.name()
+        )),
+    })
+}
+
+/// The answer for a reply whose status is not `ST_OK`, or `None` for one
+/// that is: the status, unless it is not in the table or comes with a
+/// payload (wire.md 3.1: "A director answers every error with an empty
+/// payload").
+fn refused(status: i32, payload: &[u8]) -> Option<Sent> {
+    if status == Status::Ok.code() {
+        return None;
+    }
+    Some(match Status::try_from(status) {
+        Ok(s) if !payload.is_empty() => Sent::Bad(format!(
+            "{} with a {}-byte payload (wire.md 3.1: \"A director answers every error with an \
+             empty payload\")",
+            s.name(),
+            payload.len()
+        )),
+        Ok(s) => Sent::Answer(Err(s)),
+        Err(_) => Sent::Bad(format!(
+            "status {status}, which the protocol table does not have"
+        )),
     })
 }
 
@@ -757,14 +754,8 @@ fn read<N: aether_ipc::Notifier>(
         .submit_many_held(&[(Opcode::Read as u32, flags, body)])
         .map_err(|e| format!("{e:?}"))?;
     let reply = replies.pop().expect("one reply per request");
-    let sent = if reply.status != Status::Ok.code() {
-        match Status::try_from(reply.status) {
-            Ok(s) => Sent::Answer(Err(s)),
-            Err(_) => Sent::Bad(format!(
-                "status {}, which the protocol table does not have",
-                reply.status
-            )),
-        }
+    let sent = if let Some(sent) = refused(reply.status, &reply.payload) {
+        sent
     } else {
         match Reply::decode(Opcode::Read, flags, &reply.payload) {
             Ok(r) => match OwnedReply::from_reply(&r) {

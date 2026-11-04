@@ -1316,3 +1316,80 @@ fn a_director_refusing_the_user_hives_fails() {
     let (failed, _) = failing_notes("machine-only-registry");
     assert_eq!(failed, ["registry-current-user"]);
 }
+
+/// The suite must fail `how` on the scenario `name`: a defect every
+/// director could have, which only that scenario's steps show.
+fn caught_by(how: &str, name: &str) -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let (code, entries, _, all) =
+        run_json(&format!("test-adapter --misbehave {how}"), &dir, "20", &[]);
+    let failed: Vec<&Entry> = entries.iter().filter(|e| !e.1).collect();
+    assert!(
+        code == Some(1) && failed.iter().any(|e| e.0 == name),
+        "{how}: {name} passed; failed {:?}\n{all}",
+        failed.iter().map(|e| &e.0).collect::<Vec<_>>()
+    );
+    failed.iter().flat_map(|e| e.3.clone()).collect()
+}
+
+/// wire.md 4.3: REG_DELETE_KEY of a key the overlay has no record of
+/// tombstones it, which hides the real key. A director answering it
+/// ST_NOT_FOUND fails.
+#[test]
+fn a_director_that_cannot_delete_an_unrecorded_key_fails() {
+    caught_by("delete-unrecorded-not-found", "registry-delete-unknown-key");
+}
+
+/// wire.md 3.4.4: every handle of a file reads it as it is now. A director
+/// whose handles read a snapshot taken at their OPEN fails.
+#[test]
+fn a_director_reading_snapshots_per_handle_fails() {
+    caught_by("snapshot-reads", "handles-two-on-one-file");
+}
+
+/// wire.md 3.4.1: a size is the file's length now, SETATTRs through handles
+/// still open included. A director applying SETATTR at CLOSE fails.
+#[test]
+fn a_director_applying_setattr_at_close_fails() {
+    caught_by("setattr-at-close", "handles-two-on-one-file");
+}
+
+/// wire.md 3.1: a director answers every error with an empty payload. One
+/// that sends bytes with an error fails, citing 3.1.
+#[test]
+fn a_director_sending_a_payload_with_an_error_fails() {
+    let notes = caught_by("error-payload", "open-errors");
+    assert!(notes.iter().any(|n| n.contains("wire.md 3.1")), "{notes:?}");
+}
+
+/// wire.md 3.4.3: an append WRITE lands at the file's end as it is when it
+/// is served. An append handle keeping an end of its own fails.
+#[test]
+fn an_append_handle_with_an_end_of_its_own_fails() {
+    caught_by("append-own-end", "append-tracks-end");
+}
+
+/// wire.md 3.4.5, 3.4.6: the bytes a truncation cut read as zeros when a
+/// WRITE grows the file again. A director that shows them again fails.
+#[test]
+fn a_director_showing_cut_bytes_again_fails() {
+    caught_by("truncate-keeps-bytes", "regrow-after-truncate");
+}
+
+/// wire.md 4.3: a refused registry write leaves the version alone. A
+/// director that moves it fails.
+#[test]
+fn a_director_moving_the_version_on_a_refused_write_fails() {
+    caught_by(
+        "refused-write-bumps",
+        "registry-refused-writes-keep-version",
+    );
+}
+
+/// wire.md 3.4.7: a directory moves with everything under it. A director
+/// that leaves its children under the old name, to come back when the name
+/// is made again, fails.
+#[test]
+fn a_director_leaving_children_under_a_renamed_directory_fails() {
+    caught_by("rename-dir-ghosts", "mkdir-child-rename-parent");
+}

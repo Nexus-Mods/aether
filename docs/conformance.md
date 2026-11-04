@@ -63,7 +63,9 @@ For every scenario, and for each generated case and the malformed part:
 - **Every step's answer**: the status, and on `ok` every reply field, equal
   to the step's expectation except where wire.md lets directors differ
   (below). A bulk READ reply is read from the arena and compared by its
-  data, and must lie inside the mapping (2.6).
+  data, and must lie inside the mapping (2.6). An error status must come
+  with an empty payload (3.1: "A director answers every error with an empty
+  payload"), whatever the step expects.
 - **What the shim caches on the director's word**, across a scenario's steps
   (or a generated case's), where no single answer shows it:
   - *The read cache* (3.4.3: "two immutable opens of one path with equal size
@@ -180,11 +182,13 @@ over a section (the tests and CI run both).
 | `multi-handles-unique` | three processes' handles, all open at once, unique across them (2.8.1, 3.4.3) |
 | `multi-write-visible` | one process's writes, truncation and new file seen by another in GETATTR, READDIR, OPEN and READ (2.8.1, 3.4.1 to 3.4.5) |
 | `multi-registry-gen` | one process's registry writes move `reg_gen` in another's mapping and change its answers (2.8.1, 4.3, 4.5) |
+| `handles-two-on-one-file`, `append-tracks-end`, `regrow-after-truncate` | two handles open on one file: each sees the other's WRITEs and SETATTRs at once, sizes live while both are open, an append lands at the end as it is now, a regrown file reads zeros where a cut was (3.4.1, 3.4.3 to 3.4.6) |
 | `handles-deleted-file`, `handles-follow-rename` | a handle on a deleted or replaced file never reaches the file later at its name; a handle follows its file through a rename, its own or a directory's (3.4.7, 3.4.8) |
-| `rename-edges`, `rename-x-edges` | RENAME onto an ancestor, onto itself, a directory onto a file, a missing parent, two writable entries of one root; RENAME_X onto a directory, with a read-only end, in the caller's spelling (3.4.7, 3.4.13) |
+| `rename-edges`, `rename-x-edges`, `mkdir-child-rename-parent` | RENAME onto an ancestor, onto itself, a directory onto a file, a missing parent, two writable entries of one root; RENAME_X onto a directory, with a read-only end, in the caller's spelling; a renamed directory's old name made again is empty (3.4.7, 3.4.9, 3.4.13) |
 | `open-dirs-and-parents`, `paths-through-files` | write opens of directories, `OPEN_EXCL` and `OPEN_TRUNC` alone, read opens with write bits, creates under a missing parent or a file; paths below a file and READDIR of what is not a directory (3.4.2, 3.4.3, 3.4.9, 3.5) |
 | `names-stream-writable`, `case-fold-created` | named streams on a writable path, never stored as entries; names created in non-ASCII case pairs and a name a store may fold onto another (3.2) |
 | `write-offset-huge`, `write-read-handle`, `stored-names-edges` | sizes that cannot exist, zero-length WRITEs, READs at huge offsets; WRITE and SETATTR through a read handle; STORED_NAMES with unknown components, `skip` past the end, after a respell and a delete (3.4.4 to 3.4.6, 3.4.12) |
+| `registry-delete-unknown-key`, `registry-refused-writes-keep-version` | REG_DELETE_KEY of a key the overlay never held tombstones it; a refused write leaves the version alone (4.3) |
 
 **Where wire.md lets directors differ**, the step accepts each answer it
 names (`one_of`), and nothing later in the scenario depends on which one a
@@ -514,8 +518,9 @@ shrunk case valid and plays each through the adapter's own mount.
   DELETE of it or of a directory above it) is only closed afterwards. wire.md
   3.4.4, 3.4.7 and 3.4.8 fix what it reads (every handle reads the file as it
   is now, a handle follows its file through a rename, one whose file is gone
-  never reaches the file later at its name), and the `handles-*` scenarios
-  check it; the generator does not predict it yet.
+  never reaches the file later at its name), and the `handles-*`,
+  `append-tracks-end` and `regrow-after-truncate` scenarios check it; the
+  generator does not predict it yet.
 - RENAME_X onto a directory, and RENAME_X with a read-only end
   (`rename-x-edges` checks them).
 - A RENAME whose `to` is an ancestor of `from`, or the same name spelled the

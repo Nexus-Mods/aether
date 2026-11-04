@@ -159,6 +159,10 @@ state):
 | A request naming a named stream (`x.sav:s`) | `not-found`, `bad-request`, or the stream a director holds | 3.2 |
 | A create of a name a director's store would make one with another (`ας` beside `ασ`) | created, or `exists` | 3.2 |
 
+An error answer must carry no payload (wire.md 3.1: "A director answers
+every error with an empty payload"); one that does fails its step whatever
+the expectation.
+
 ## Checks across steps
 
 Rules no single answer shows are checked across a scenario's steps and

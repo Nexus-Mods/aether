@@ -44,6 +44,8 @@ pub use child::{finish_ready_handshake, signal_bootstrap_failed};
 pub use aether_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
 #[doc(hidden)]
 pub use hook::as_shim_io_for_tests;
+#[cfg(feature = "test-support")]
+pub use hook::{plant_under_root_record_for_tests, with_handle_table_held_for_tests};
 
 /// Fill a data section over a director file on demand when it is larger
 /// than `bytes` (256 MiB in the shipped shim; 0 restores that), so a test

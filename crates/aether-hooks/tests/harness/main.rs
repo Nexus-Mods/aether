@@ -40,6 +40,7 @@ mod costs;
 mod fault_table;
 mod fileops;
 mod geometry;
+mod handles_outside;
 mod idle;
 mod overlay_answers;
 mod reads_large;

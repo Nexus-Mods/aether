@@ -95,6 +95,26 @@ pub fn tracked_handle_count() -> usize {
 
 pub(super) static HANDLES: Mutex<HandleTable> = Mutex::new(HandleTable::new());
 
+/// Record `path` as the under-root path of `handle`, as an under-root open
+/// does: a stale record for a handle value the OS issues again. Not in the
+/// shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn plant_under_root_record_for_tests(handle: isize, path: &str) {
+    if let Ok(mut t) = HANDLES.lock() {
+        t.set_under_root(handle, path.to_string());
+    }
+}
+
+/// `f` run with the handle table locked, as another thread holding it does.
+/// Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn with_handle_table_held_for_tests<R>(f: impl FnOnce() -> R) -> R {
+    let _held = HANDLES.lock();
+    f()
+}
+
 const HANDLE_PATHS_MAX: usize = 65_536;
 
 /// Forget whatever the table holds for `key`, because a new handle with that value was just

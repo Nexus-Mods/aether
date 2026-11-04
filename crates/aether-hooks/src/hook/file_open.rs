@@ -22,8 +22,9 @@ use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
-/// `DELETE` in an open's access mask.
-const DELETE_ACCESS: u32 = 0x0001_0000;
+/// The access bits that can grant `DELETE`: `DELETE` itself, `GENERIC_ALL`
+/// (which maps to `FILE_ALL_ACCESS`) and `MAXIMUM_ALLOWED`.
+const MAY_DELETE: u32 = 0x0001_0000 | 0x1000_0000 | 0x0200_0000;
 /// `FILE_NON_DIRECTORY_FILE` in an open's options: the caller opens a file.
 const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 
@@ -596,24 +597,27 @@ unsafe fn route_open(
         create,
     } = *call;
     // A file outside every root, the commonest open there is: the host opens
-    // it, and nothing is decoded or recorded, so nothing is allocated. Only
-    // the handle value's stale record, if any, is cleared (`reset_handle`
-    // without a path: a `try_lock`, as for any open it records nothing for).
+    // it, and nothing is decoded or recorded, so nothing is allocated. The
+    // handle value's stale record, if any, is always cleared: the clear waits
+    // for the table's lock, and a removal allocates nothing.
     // What is not recorded is the path it was opened as, which is read for
     // two things: the parent of a relative open, and the source of a
     // handle-based delete or rename. A file is the parent only of its own
-    // streams, which lie outside the roots with it, and an open that asks for
-    // `DELETE` keeps the full path below, so a delete or rename through it
-    // still finds the path in the table rather than asking the OS.
+    // streams, which lie outside the roots with it, and an open whose access
+    // can grant `DELETE` keeps the full path below, so a delete or rename
+    // through it still finds the path in the table rather than asking the OS.
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     if opts & FILE_NON_DIRECTORY_FILE != 0
-        && access & DELETE_ACCESS == 0
+        && access & MAY_DELETE == 0
         && !crate::hookstats::enabled()
         && unsafe { surely_outside(oa) }
     {
         let status = real(oa);
-        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-        unsafe { reset_handle(file_handle, None, status) };
+        if status >= 0 && !file_handle.is_null() {
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs);
+            // the open succeeded, so the slot holds its handle.
+            reset_key(unsafe { *file_handle } as isize, true);
+        }
         return status;
     }
     // Decode once for the whole call and thread the result through every

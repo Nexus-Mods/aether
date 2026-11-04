@@ -173,6 +173,12 @@ impl Attached {
         self.backing.seg()
     }
 
+    /// The registry generation the director last published in the ring
+    /// header (`reg_gen`, wire.md 4.5), 0 if none.
+    pub fn reg_gen(&self) -> u64 {
+        aether_ipc::ring::reg_generation(self.seg())
+    }
+
     /// The ring's geometry, as its header gave it.
     pub fn geom(&self) -> Geom {
         self.geom

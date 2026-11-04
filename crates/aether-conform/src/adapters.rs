@@ -45,8 +45,9 @@ pub enum RingKind {
 /// One rule the reference adapter breaks on purpose, so that the tests can
 /// show the checks find a director that gets it wrong. Test-only: reached
 /// only through the hidden `reference-adapter --break <rule>` switch, which
-/// the usage does not list; without it the adapter serves the reference as
-/// it is.
+/// the usage does not list (and, for the two rules only checks across steps
+/// find, the hidden `test-adapter --misbehave stale-immutable` and
+/// `frozen-reg-gen`); without it the adapter serves the reference as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Break {
     /// GETATTR of a missing path answers `found = 1` (wire.md 3.4.1 says
@@ -55,6 +56,14 @@ pub enum Break {
     /// An unknown opcode or a payload that does not decode is answered
     /// `ST_IO_ERROR` (wire.md 3.3 and 3.5.1 say `ST_BAD_REQUEST`).
     IoErrorForBadRequest,
+    /// Every read open of a file is answered `immutable`, writable ones
+    /// included, with the `mount_gen` it always has: an overwrite of the file
+    /// at the same size leaves the shim's read cache serving the old bytes
+    /// (wire.md 3.4.3).
+    StaleImmutable,
+    /// The registry generation is published once, at attach, and never moved
+    /// by a write (wire.md 4.5 says every successful write moves it).
+    FrozenRegGen,
 }
 
 impl Break {
@@ -63,6 +72,8 @@ impl Break {
         match name {
             "found-for-missing" => Some(Break::FoundForMissing),
             "io-error-for-bad-request" => Some(Break::IoErrorForBadRequest),
+            "stale-immutable" => Some(Break::StaleImmutable),
+            "frozen-reg-gen" => Some(Break::FrozenRegGen),
             _ => None,
         }
     }
@@ -267,8 +278,14 @@ fn serve<N: Notifier + Send + 'static>(
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<Result<(), IpcError>> {
     let published = backing.clone();
-    d.reference
-        .publish_generation(move |g| ring::publish_reg_generation(published.seg(), g));
+    let frozen = d.broken == Some(Break::FrozenRegGen);
+    let once = AtomicBool::new(false);
+    d.reference.publish_generation(move |g| {
+        if frozen && once.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        ring::publish_reg_generation(published.seg(), g)
+    });
     std::thread::spawn(move || {
         let seg = backing.seg();
         let server = RingServer::new(seg, notifier)?;
@@ -300,7 +317,14 @@ impl Director for Served {
         self.reference.read_dir(root, path, out)
     }
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
-        self.reference.open(root, flags, path)
+        let mut o = self.reference.open(root, flags, path)?;
+        if self.broken == Some(Break::StaleImmutable)
+            && !o.is_dir
+            && !flags.contains(OpenFlags::WRITE)
+        {
+            o.immutable = true;
+        }
+        Ok(o)
     }
     fn read(
         &mut self,
@@ -412,6 +436,10 @@ pub enum Misbehave {
     HangGrandchild,
     /// Refuses every mount; answers unmount.
     Refuse,
+    /// The reference adapter breaking a rule no single reply shows, which
+    /// the checks across steps must find: [`Break::StaleImmutable`] or
+    /// [`Break::FrozenRegGen`].
+    Director(Break),
 }
 
 /// Runs the test adapter. The exit code.
@@ -461,6 +489,7 @@ pub fn test_adapter(how: Misbehave) -> i32 {
             }
             test_adapter(Misbehave::Hang)
         }
+        Misbehave::Director(b) => reference_adapter(RingKind::File, Some(b)),
         Misbehave::Refuse => {
             answer_requests(|req| -> Value {
                 match req {

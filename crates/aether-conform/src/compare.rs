@@ -42,10 +42,27 @@
 //!   by it.
 //! - **`last_write`** of a REG_KEY node (wire.md 4.3: a FILETIME the overlay
 //!   stamps with the director's clock). Not compared.
+//!
+//! Besides comparing, a session checks one rule across steps, which no single
+//! answer shows:
+//!
+//! - **Read-cache coherence** (wire.md 3.4.3: "The cache keys a file's blocks
+//!   by (root, folded path, size, `mount_gen`), so two immutable opens of one
+//!   path with equal size and `mount_gen` must have identical content", and
+//!   "the handle's bytes cannot change while it is open"). An OPEN whose
+//!   reply sets `immutable` keys its handle by (root, path folded as wire.md
+//!   3.2 folds it, the reply's `size` and `mount_gen`). Each successful READ
+//!   through such a handle (a bulk one once read from the arena) records its
+//!   bytes under that key, its offset and its length, for the rest of the
+//!   session, as the shim's cache outlives the handles that filled it; a READ
+//!   of the same key, offset and length through any immutable handle that
+//!   returns other bytes fails, since the shim's cache would have served the
+//!   old ones. READs through other handles are not recorded.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
+use aether_casefold::fold;
 use aether_protocol::{OpenFlags, Status};
 
 use crate::scenario::{Expect, OwnedReply, OwnedRequest};
@@ -65,6 +82,22 @@ pub struct Session {
     stand_in: BTreeMap<u64, u64>,
     /// The director's registry version minus the expected one.
     reg_offset: Option<i128>,
+    /// Expected fh to its read-cache key, for the open handles whose OPEN
+    /// reply set `immutable`.
+    immutable: BTreeMap<u64, CacheKey>,
+    /// What READs through immutable handles returned, by key, offset and
+    /// length: the shim's read cache, which outlives the handles.
+    cached: BTreeMap<(CacheKey, u64, u32), Vec<u8>>,
+}
+
+/// What the shim's read cache keys a file's blocks by (wire.md 3.4.3): the
+/// root, the folded path, and the OPEN reply's `size` and `mount_gen`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CacheKey {
+    root: u32,
+    path: String,
+    size: u64,
+    mount_gen: u32,
 }
 
 /// A director's answer that is not the one expected.
@@ -206,7 +239,24 @@ impl Session {
                 if (e.size, e.is_dir) != (g.size, g.is_dir) {
                     return Err("a different size or is_dir".into());
                 }
-                self.pair(e.fh, g.fh)
+                self.pair(e.fh, g.fh)?;
+                match req {
+                    OwnedRequest::Open { root, path, .. } if g.immutable => {
+                        self.immutable.insert(
+                            e.fh,
+                            CacheKey {
+                                root: root.0,
+                                path: fold(path),
+                                size: g.size,
+                                mount_gen: g.mount_gen,
+                            },
+                        );
+                    }
+                    _ => {
+                        self.immutable.remove(&e.fh);
+                    }
+                }
+                Ok(())
             }
             (O::Empty, O::Empty) => {
                 if let OwnedRequest::Close { fh } = req {
@@ -214,8 +264,20 @@ impl Session {
                         self.fh_back.remove(&d);
                         self.released.insert(*fh, d);
                     }
+                    self.immutable.remove(fh);
                 }
                 Ok(())
+            }
+            (O::Read(e), O::Read(g)) => {
+                if e != g {
+                    return Err("a different reply".into());
+                }
+                match req {
+                    OwnedRequest::Read {
+                        fh, offset, len, ..
+                    } => self.cache_read(*fh, *offset, *len, g),
+                    _ => Ok(()),
+                }
             }
             (O::GetAttr(e), O::GetAttr(g)) => {
                 if (e.found, e.is_dir, e.size) == (g.found, g.is_dir, g.size) {
@@ -310,6 +372,36 @@ impl Session {
         }
     }
 
+    /// Records `data`, read through expected handle `fh` at `offset` for
+    /// `len` bytes, if the handle is immutable; other bytes recorded under
+    /// the same key fail (the module doc's read-cache coherence).
+    fn cache_read(&mut self, fh: u64, offset: u64, len: u32, data: &[u8]) -> Result<(), String> {
+        let Some(k) = self.immutable.get(&fh) else {
+            return Ok(());
+        };
+        let at = (k.clone(), offset, len);
+        match self.cached.get(&at) {
+            Some(before) if before.as_slice() != data => Err(format!(
+                "{} bytes at {offset} of root {} {:?} (size {}, mount_gen {}) differ from \
+                 what an earlier READ of an immutable handle with the same key returned \
+                 ({}), so the shim's read cache would serve stale bytes (wire.md 3.4.3: two \
+                 immutable opens of one path with equal size and mount_gen must have \
+                 identical content)",
+                data.len(),
+                k.root,
+                k.path,
+                k.size,
+                k.mount_gen,
+                render_reply(&OwnedReply::Read(before.clone())),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.cached.insert(at, data.to_vec());
+                Ok(())
+            }
+        }
+    }
+
     /// Registry versions, up to the session's one offset.
     fn version(&mut self, e: u64, g: u64) -> Result<(), String> {
         let off = i128::from(g) - i128::from(e);
@@ -361,5 +453,142 @@ fn render_reply(r: &OwnedReply) -> String {
             }
         },
         r => format!("{r:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_protocol::{OpenResp, RequestFlags, RootId};
+
+    fn open(path: &str) -> OwnedRequest {
+        OwnedRequest::Open {
+            root: RootId(0),
+            flags: OpenFlags::READ,
+            path: path.into(),
+        }
+    }
+
+    fn read(fh: u64) -> OwnedRequest {
+        OwnedRequest::Read {
+            slot_flags: RequestFlags::empty(),
+            fh,
+            offset: 0,
+            len: 16,
+        }
+    }
+
+    fn close(fh: u64) -> OwnedRequest {
+        OwnedRequest::Close { fh }
+    }
+
+    fn opened(fh: u64, size: u64, immutable: bool, mount_gen: u32) -> OwnedReply {
+        OwnedReply::Open(OpenResp {
+            fh,
+            size,
+            immutable,
+            mount_gen,
+            ..Default::default()
+        })
+    }
+
+    /// Plays open, read and close of `path` as expected handle `fh`, the
+    /// director answering with `got` (an OPEN reply) and `data`. The READ's
+    /// expectation is `data` itself, so only the cache rule can fail it.
+    fn open_read_close(
+        sess: &mut Session,
+        path: &str,
+        fh: u64,
+        got: OwnedReply,
+        data: &[u8],
+    ) -> Result<(), Mismatch> {
+        let OwnedReply::Open(o) = &got else {
+            panic!("an OPEN reply");
+        };
+        let expect_open = Expect::Reply(opened(fh, o.size, false, 0));
+        sess.check(0, &open(path), &expect_open, &Ok(got))?;
+        let bytes = OwnedReply::Read(data.to_vec());
+        sess.check(1, &read(fh), &Expect::Reply(bytes.clone()), &Ok(bytes))?;
+        sess.check(
+            2,
+            &close(fh),
+            &Expect::Reply(OwnedReply::Empty),
+            &Ok(OwnedReply::Empty),
+        )
+    }
+
+    #[test]
+    fn two_immutable_opens_with_one_key_and_different_bytes_fail_citing_wire_3_4_3() {
+        let mut sess = Session::new();
+        open_read_close(&mut sess, "Data/A.esp", 1, opened(7, 3, true, 2), b"abc").unwrap();
+        let m =
+            open_read_close(&mut sess, "data/a.esp", 2, opened(8, 3, true, 2), b"xyz").unwrap_err();
+        assert_eq!(m.step, 1, "{m}");
+        assert!(m.why.contains("wire.md 3.4.3"), "{m}");
+        assert!(m.why.contains("stale bytes"), "{m}");
+    }
+
+    #[test]
+    fn two_reads_of_one_immutable_handle_that_differ_fail() {
+        let mut sess = Session::new();
+        sess.check(
+            0,
+            &open("a"),
+            &Expect::Reply(opened(1, 3, false, 0)),
+            &Ok(opened(9, 3, true, 0)),
+        )
+        .unwrap();
+        let abc = OwnedReply::Read(b"abc".to_vec());
+        let abd = OwnedReply::Read(b"abd".to_vec());
+        sess.check(1, &read(1), &Expect::Reply(abc.clone()), &Ok(abc))
+            .unwrap();
+        assert!(sess
+            .check(2, &read(1), &Expect::Reply(abd.clone()), &Ok(abd))
+            .is_err());
+    }
+
+    #[test]
+    fn a_different_mount_gen_or_size_is_another_file_to_the_cache() {
+        let mut sess = Session::new();
+        open_read_close(&mut sess, "a", 1, opened(7, 3, true, 2), b"abc").unwrap();
+        open_read_close(&mut sess, "a", 2, opened(8, 3, true, 3), b"xyz").unwrap();
+        open_read_close(&mut sess, "a", 3, opened(9, 4, true, 2), b"wxyz").unwrap();
+        // Another root is another file too.
+        let mut sess2 = Session::new();
+        open_read_close(&mut sess2, "a", 1, opened(7, 3, true, 2), b"abc").unwrap();
+        let other_root = OwnedRequest::Open {
+            root: RootId(1),
+            flags: OpenFlags::READ,
+            path: "a".into(),
+        };
+        sess2
+            .check(
+                0,
+                &other_root,
+                &Expect::Reply(opened(2, 3, false, 0)),
+                &Ok(opened(8, 3, true, 2)),
+            )
+            .unwrap();
+        let xyz = OwnedReply::Read(b"xyz".to_vec());
+        sess2
+            .check(1, &read(2), &Expect::Reply(xyz.clone()), &Ok(xyz))
+            .unwrap();
+    }
+
+    #[test]
+    fn reads_through_handles_not_marked_immutable_are_not_recorded() {
+        let mut sess = Session::new();
+        open_read_close(&mut sess, "a", 1, opened(7, 3, false, 0), b"abc").unwrap();
+        open_read_close(&mut sess, "a", 2, opened(8, 3, true, 0), b"xyz").unwrap();
+        open_read_close(&mut sess, "a", 3, opened(9, 3, false, 0), b"123").unwrap();
+        assert_eq!(sess.cached.len(), 1, "{:?}", sess.cached);
+    }
+
+    #[test]
+    fn a_handle_reissued_mutable_is_no_longer_immutable() {
+        let mut sess = Session::new();
+        open_read_close(&mut sess, "a", 1, opened(7, 3, true, 0), b"abc").unwrap();
+        // The same expected fh, now for a mutable open of the same path.
+        open_read_close(&mut sess, "a", 1, opened(7, 3, false, 0), b"xyz").unwrap();
     }
 }

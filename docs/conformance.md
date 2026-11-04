@@ -43,6 +43,20 @@ For every scenario, and for each generated case and the malformed part:
   to the step's expectation except where wire.md lets directors differ
   (below). A bulk READ reply is read from the arena and compared by its
   data, and must lie inside the mapping (2.6).
+- **What the shim caches on the director's word**, across a scenario's steps
+  (or a generated case's), where no single answer shows it:
+  - *The read cache* (3.4.3: "two immutable opens of one path with equal size
+    and `mount_gen` must have identical content"). Every READ through a
+    handle whose OPEN reply set `immutable` is recorded under (root, folded
+    path, size, `mount_gen`, offset, length) for the rest of the scenario;
+    another READ of that key through an immutable handle that returns other
+    bytes fails, since the shim's read cache would serve the old ones.
+  - *The registry generation* (4.5), read from the ring header before every
+    request and after every reply: in a scenario whose tree has a registry it
+    is non-zero before the first registry request; a successful
+    REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or
+    REG_RENAME_KEY leaves it greater after the reply than before the
+    request; and it never goes backward.
 
 ## What it does not check
 
@@ -64,7 +78,7 @@ are the only exceptions, and each is allowed by the wire.md text quoted
 |---|---|---|
 | OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles." |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and the directors start it differently. |
-| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory. | 3.4.3: "Never set it for a write open or a directory". |
+| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). | 3.4.3: "Never set it for a write open or a directory". |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared. | 3.2: "Which time a director reports for a path, if any, is the director's to choose". |
 | READ inline or bulk | Compared by data. | 3.4.4: the client "must accept either whatever flag it sent". |
@@ -78,8 +92,8 @@ them (`one_of`) and names the section that allows it.
 **What a run does not exercise.** Several processes on one ring, concurrent
 requests, the director's thread count against `worker_hint` (2.8), how
 quickly a director wakes (2.11), `shim.cfg` and the injector (5.1, 6), and
-the rule that two immutable opens with equal size and `mount_gen` have
-identical content (3.4.3). The handshake variables a run does not use
+the read cache's rule (3.4.3) across a remount, which no scenario makes. The
+handshake variables a run does not use
 (`VFS_VIRTUAL_ROOTS`, `VFS_REGISTRY` and the rest) are not checked against
 the tree.
 
@@ -113,6 +127,8 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `rename-*` | RENAME: replace, respell, directories, refusals, unknown root (3.4.7, 3.5.1) |
 | `rename-x-*` | RENAME_X: files across roots, directories `ST_CROSS_ROOT`, equal roots, errors (3.4.13) |
 | `mkdir-*`, `delete-*` | MKDIR and DELETE: spelling, existing names, non-empty directories, read-only, errors (3.4.8, 3.4.9) |
+| `readonly-root-refuses-changes` | a root with no writable provider: DELETE, RENAME, RENAME_X between equal roots `ST_READ_ONLY`, SETATTR on a directory handle (3.4.5, 3.4.7, 3.4.8, 3.4.13, 3.5) |
+| `cache-*` | what the read-cache check rests on: a writable file overwritten at the same size reads the new bytes; reads of one read-only file agree across handles (3.4.3) |
 | `readdir-*` | READDIR: listing, case, changes, unknown root (3.4.2) |
 | `stored-names-*` | STORED_NAMES: stored spelling, `skip`, unknown names, after changes (3.4.12) |
 | `case-fold-*` | the fold: ASCII, Unicode (`Σ`, `İ`, composed and decomposed), fold-equal names are one entry (3.2) |
@@ -451,7 +467,11 @@ the reference director (`aether_refdirector::Reference`, built with
 checked against in this repository's tests, and an example of what an
 adapter does. Its hidden `--break <rule>` switch, for this repository's tests
 only, makes it break one rule on purpose (`aether_conform::adapters::Break`),
-so the tests can show that generation and the malformed part find it.
+so the tests can show that generation and the malformed part find it; the
+hidden `test-adapter --misbehave stale-immutable` (every read open of a file
+`immutable`, under one `mount_gen`) and `--misbehave frozen-reg-gen` (the
+registry generation never moved by a write) do the same for the checks
+across steps.
 
 ## Reading a report
 

@@ -18,6 +18,14 @@
 //! (`docs/wire.md` 2.6); a director may answer any READ in bulk (3.4.4).
 //! A step that asks for `read_bulk` on a ring with no arena is sent without
 //! the flag, as the shim never sets it then (2.6), and its note says so.
+//!
+//! Around every step the runner also reads the registry generation the
+//! director publishes in the ring header (`reg_gen`, wire.md 4.5), which no
+//! reply carries, and fails the step that breaks one of its rules
+//! ([`RegGen`]): in a session that serves a registry it is non-zero before
+//! the first registry request; a successful registry write moves it forward
+//! before its reply is published, so it is greater right after the reply
+//! than right before the request; and it never goes backward.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -260,8 +268,11 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
         .call(&Request::Heartbeat {}, &mut scratch)
         .map_err(|e| format!("the HEARTBEAT sent on attach failed: {e}"))?;
     let mut session = Session::new();
+    let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
+        let gen_before = ring.reg_gen();
+        let gen_broken = reg_gen.before(&step.request, gen_before);
         let mut req = session.translate(&step.request);
         if let OwnedRequest::Read { slot_flags, .. } = &mut req {
             if ring.arena_len() == 0 && slot_flags.contains(RequestFlags::READ_BULK) {
@@ -283,19 +294,25 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
                 return Err(format!("step {i}: the ring gave no answer: {e}"));
             }
         };
-        let (got, passed) = match sent {
+        let (got, mut passed) = match &sent {
             Sent::Answer(got) => {
-                let r = session.check(i, &step.request, &step.expect, &got);
+                let r = session.check(i, &step.request, &step.expect, got);
                 if let Err(m) = &r {
                     notes.insert(0, m.why.clone());
                 }
-                (render_got(&got), r.is_ok())
+                (render_got(got), r.is_ok())
             }
             Sent::Bad(why) => {
                 notes.insert(0, why.clone());
-                (why, false)
+                (why.clone(), false)
             }
         };
+        let succeeded = matches!(sent, Sent::Answer(Ok(_)));
+        let gen_after = reg_gen.after(&step.request, succeeded, gen_before, ring.reg_gen());
+        if let Some(why) = gen_broken.or(gen_after) {
+            notes.insert(0, why);
+            passed = false;
+        }
         out.push(StepResult {
             index: i,
             request: crate::scenario::request_json(&step.request),
@@ -306,6 +323,114 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
         });
     }
     Ok(())
+}
+
+/// wire.md 4.5's rules for the registry generation (`reg_gen`) in the ring
+/// header, checked across one session's steps from what the runner reads
+/// there before each request and after each reply.
+#[derive(Debug, Clone)]
+pub(crate) struct RegGen {
+    /// The session serves a registry (its tree has one), so the shim would
+    /// send registry requests (wire.md 4.5: "a director that serves the
+    /// registry must publish a non-zero generation before the shim
+    /// attaches"). Without one the shim sends none, and the header may stay
+    /// 0, as Cairn's does.
+    serves: bool,
+    /// The last generation read.
+    last: u64,
+    /// Whether a registry request has been sent yet.
+    asked: bool,
+}
+
+impl RegGen {
+    /// The rules for a session that serves a registry or not, with `now` the
+    /// generation read once attached.
+    pub(crate) fn new(serves: bool, now: u64) -> RegGen {
+        RegGen {
+            serves,
+            last: now,
+            asked: false,
+        }
+    }
+
+    /// Before `req` is sent, with `now` read from the header: why that
+    /// breaks a rule, if it does.
+    pub(crate) fn before(&mut self, req: &OwnedRequest, now: u64) -> Option<String> {
+        let backward = self.seen(now);
+        if backward.is_some() {
+            return backward;
+        }
+        if self.serves && !self.asked && is_registry(req) {
+            self.asked = true;
+            if now == 0 {
+                return Some(
+                    "reg_gen in the ring header is 0 at the session's first registry request, \
+                     so the shim would cache nothing (wire.md 4.5: a director that serves the \
+                     registry must publish a non-zero generation before the shim attaches)"
+                        .into(),
+                );
+            }
+        }
+        None
+    }
+
+    /// After the reply to `req` (`succeeded` when it was OK), with `before`
+    /// read before the request and `now` after the reply.
+    pub(crate) fn after(
+        &mut self,
+        req: &OwnedRequest,
+        succeeded: bool,
+        before: u64,
+        now: u64,
+    ) -> Option<String> {
+        let backward = self.seen(now);
+        if backward.is_some() {
+            return backward;
+        }
+        if succeeded && is_registry_write(req) && now <= before {
+            return Some(format!(
+                "reg_gen in the ring header was {before} before this successful registry write \
+                 and {now} after its reply, so other processes would keep serving stale \
+                 answers (wire.md 4.5: it moves on every successful registry write, before \
+                 the write's reply is published)"
+            ));
+        }
+        None
+    }
+
+    /// Notes `now` as the latest generation; why, if it went backward.
+    fn seen(&mut self, now: u64) -> Option<String> {
+        let last = std::mem::replace(&mut self.last, now);
+        (now < last).then(|| {
+            format!(
+                "reg_gen in the ring header went back from {last} to {now} (wire.md 4.5: \
+                 \"never backward\")"
+            )
+        })
+    }
+}
+
+/// The registry opcodes (wire.md 4.3).
+fn is_registry(req: &OwnedRequest) -> bool {
+    use OwnedRequest as O;
+    matches!(
+        req,
+        O::RegLookup { .. } | O::RegKey { .. } | O::RegChanged { .. }
+    ) || is_registry_write(req)
+}
+
+/// The registry writes (wire.md 3.3, 4.3: REG_SET_VALUE to REG_RENAME_KEY),
+/// each of which moves the generation when it succeeds (4.5).
+fn is_registry_write(req: &OwnedRequest) -> bool {
+    use OwnedRequest as O;
+    matches!(
+        req,
+        O::RegSetValue { .. }
+            | O::RegDeleteValue { .. }
+            | O::RegCreateKey { .. }
+            | O::RegDeleteKey { .. }
+            | O::RegRenameKey { .. }
+    )
 }
 
 fn join(mut notes: Vec<String>, scenario_note: Option<&str>) -> String {
@@ -388,4 +513,57 @@ fn read<N: aether_ipc::Notifier>(
     };
     client.ring().release_slots(&slots);
     Ok(sent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create() -> OwnedRequest {
+        OwnedRequest::RegCreateKey {
+            path: r"\Registry\Machine\Software\T".into(),
+            volatile: false,
+        }
+    }
+
+    fn lookup() -> OwnedRequest {
+        OwnedRequest::RegLookup {
+            path: r"\Registry\Machine\Software\T".into(),
+        }
+    }
+
+    #[test]
+    fn a_zero_generation_fails_the_first_registry_request_of_a_session_serving_one() {
+        let mut g = RegGen::new(true, 0);
+        assert_eq!(g.before(&OwnedRequest::Heartbeat, 0), None);
+        let why = g.before(&lookup(), 0).expect("a failure");
+        assert!(why.contains("wire.md 4.5"), "{why}");
+        // Once, at the first registry request.
+        assert_eq!(g.before(&lookup(), 0), None);
+        // Without a registry the header may stay 0 (Cairn's does).
+        let mut g = RegGen::new(false, 0);
+        assert_eq!(g.before(&lookup(), 0), None);
+    }
+
+    #[test]
+    fn a_successful_registry_write_must_move_the_generation() {
+        let mut g = RegGen::new(true, 1);
+        assert_eq!(g.before(&create(), 1), None);
+        let why = g.after(&create(), true, 1, 1).expect("a failure");
+        assert!(why.contains("wire.md 4.5"), "{why}");
+        assert_eq!(g.after(&create(), true, 1, 2), None);
+        // A refused write, and a read, need not move it.
+        assert_eq!(g.after(&create(), false, 2, 2), None);
+        assert_eq!(g.after(&lookup(), true, 2, 2), None);
+    }
+
+    #[test]
+    fn the_generation_never_goes_backward() {
+        let mut g = RegGen::new(false, 5);
+        let why = g.before(&OwnedRequest::Heartbeat, 4).expect("a failure");
+        assert!(why.contains("never backward"), "{why}");
+        let mut g = RegGen::new(false, 5);
+        assert_eq!(g.before(&OwnedRequest::Heartbeat, 5), None);
+        assert!(g.after(&OwnedRequest::Heartbeat, true, 5, 3).is_some());
+    }
 }

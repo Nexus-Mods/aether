@@ -86,7 +86,16 @@ fn main() -> ExitCode {
                 Some("hang") => code(test_adapter(Misbehave::Hang)),
                 Some("hang-grandchild") => code(test_adapter(Misbehave::HangGrandchild)),
                 Some("refuse") => code(test_adapter(Misbehave::Refuse)),
-                _ => usage("--misbehave exit|garbage|hang|hang-grandchild|refuse"),
+                Some("stale-immutable") => {
+                    code(test_adapter(Misbehave::Director(Break::StaleImmutable)))
+                }
+                Some("frozen-reg-gen") => {
+                    code(test_adapter(Misbehave::Director(Break::FrozenRegGen)))
+                }
+                _ => usage(
+                    "--misbehave exit|garbage|hang|hang-grandchild|refuse|stale-immutable|\
+                     frozen-reg-gen",
+                ),
             },
             Err(e) => usage(&e),
         },

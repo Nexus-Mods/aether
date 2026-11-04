@@ -119,7 +119,7 @@ text quoted from the section named; there are no others
 |---|---|---|
 | OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number (`Session::translate`): the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles" |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; the directors start it differently |
-| OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory. | 3.4.3: it permits caching; "Never set it for a write open or a directory" |
+| OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory" |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared, and not checked for changed or unchanged after a write either (an earlier plan's idea, dropped: the time is the director's). A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first (`OwnedReply::resolve_bulk`). | 3.4.4: the client "must accept either whatever flag it sent" |
@@ -129,6 +129,16 @@ text quoted from the section named; there are no others
 
 A `one_of` is the only way a scenario allows several answers, and it cites
 its section in `wire`.
+
+## Checks across steps
+
+Two rules no single answer shows are checked across a scenario's steps, and
+fail the step that breaks them, whatever its expectation:
+
+| What | Rule | wire.md |
+|---|---|---|
+| Read cache | Every READ through a handle whose OPEN reply set `immutable` is recorded under (root, path folded as 3.2 folds it, the reply's `size` and `mount_gen`, offset, length) for the rest of the scenario, bulk reads once read from the arena; a READ of the same key through an immutable handle that returns other bytes fails. Reads through other handles are not recorded (`compare.rs`). | 3.4.3: "two immutable opens of one path with equal size and `mount_gen` must have identical content"; "the handle's bytes cannot change while it is open" |
+| `reg_gen` | Read from the ring header before every request and after every reply (`run.rs`, `RegGen`): with a `registry` in the tree it is non-zero before the first registry request; after a successful REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or REG_RENAME_KEY it is greater than before the request; it never goes backward. Without a `registry` only the last applies. | 4.5: "a director that serves the registry must publish a non-zero generation before the shim attaches, and must bump it before replying to any write"; "never backward" |
 
 To play scenarios against a director, see `docs/conformance.md`. A generated
 case that fails (`aether-conform run --generate`) is written in this format

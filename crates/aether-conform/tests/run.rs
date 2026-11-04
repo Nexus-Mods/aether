@@ -381,4 +381,114 @@ fn the_committed_scenarios_pass_against_the_reference_adapter() {
     let out = stdout(&o);
     assert!(o.status.success(), "{out}\n{}", stderr(&o));
     assert!(!out.contains("not ok"), "{out}");
+    // The ones the read-cache and read-only checks rest on among them.
+    for name in [
+        "cache-immutable-readonly",
+        "cache-overwrite-same-size",
+        "readonly-root-refuses-changes",
+    ] {
+        assert!(out.contains(&format!(" - {name}\n")), "{name}: {out}");
+    }
+}
+
+/// The committed suite against `test-adapter --misbehave <how>`, as a JSON
+/// report: each scenario's name, whether it passed, and its failing steps'
+/// notes.
+fn committed_against(how: &str) -> Vec<(String, bool, Vec<String>)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let out = aether_testkit::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    let director = format!("{} test-adapter --misbehave {how}", quoted_exe());
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+        "--timeout",
+        "20",
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    assert_eq!(o.status.code(), Some(1), "{}", all_output(&o));
+    let v: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    v["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            let notes = s["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|st| st["passed"] == false)
+                .map(|st| st["note"].as_str().unwrap_or("").to_string())
+                .collect();
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["passed"] == true,
+                notes,
+            )
+        })
+        .collect()
+}
+
+/// wire.md 3.4.3: a director that calls a writable file's read opens
+/// immutable under one `mount_gen`, and lets it be overwritten at the same
+/// size, fails the read-cache check, and only that.
+#[test]
+fn a_director_marking_writable_files_immutable_fails_the_read_cache_check() {
+    let results = committed_against("stale-immutable");
+    let (_, passed, notes) = results
+        .iter()
+        .find(|(n, ..)| n == "cache-overwrite-same-size")
+        .expect("the scenario ran");
+    assert!(!passed, "{results:?}");
+    assert!(!notes.is_empty(), "{results:?}");
+    for n in notes {
+        assert!(n.contains("wire.md 3.4.3"), "{n}");
+        assert!(n.contains("stale bytes"), "{n}");
+    }
+    let failed: Vec<&str> = results
+        .iter()
+        .filter(|(_, p, _)| !p)
+        .map(|(n, ..)| n.as_str())
+        .collect();
+    assert_eq!(failed, ["cache-overwrite-same-size"], "{results:?}");
+}
+
+/// wire.md 4.5: a director that never moves `reg_gen` after a write fails
+/// every scenario with a successful registry write, citing 4.5, and no other.
+#[test]
+fn a_director_that_never_moves_reg_gen_fails_the_registry_write_scenarios() {
+    let results = committed_against("frozen-reg-gen");
+    let failed: Vec<&str> = results
+        .iter()
+        .filter(|(_, p, _)| !p)
+        .map(|(n, ..)| n.as_str())
+        .collect();
+    for name in [
+        "registry-create-key",
+        "registry-delete-key",
+        "registry-delete-value",
+        "registry-rename-key",
+        "registry-values",
+    ] {
+        assert!(failed.contains(&name), "{name}: {results:?}");
+    }
+    for (name, passed, notes) in &results {
+        if !passed {
+            assert!(name.starts_with("registry-"), "{name}: {notes:?}");
+            assert!(
+                notes.iter().all(|n| n.contains("wire.md 4.5")),
+                "{name}: {notes:?}"
+            );
+        }
+    }
+    assert!(
+        results.iter().any(|(n, p, _)| n == "registry-none" && *p),
+        "no registry, no generation to move: {results:?}"
+    );
 }

@@ -1,0 +1,26 @@
+{
+  "name": "cache-overwrite-same-size",
+  "description": "A file the writable provider holds, read, then overwritten with different bytes of the same length, then read through a new handle: the new bytes (wire.md 3.4.5). The shim's read cache keys a file's blocks by (root, folded path, size, `mount_gen`), so a director that called these read opens `immutable` with one `mount_gen` would break 3.4.3 (\"two immutable opens of one path with equal size and `mount_gen` must have identical content\"); aether-conform checks that rule across the steps (compare.rs, read-cache coherence).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/slot.sav", "contents": "abcdef"}
+       ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/slot.sav"}, "expect": {"reply": {"fh": 1, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": "abcdef"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 2, "len": 3}, "expect": {"reply": {"data": "cde"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/slot.sav"}, "expect": {"reply": {"fh": 2, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "UVWXYZ"}, "expect": {"reply": {"written": 6}}, "note": "the same length, so the size the cache keys by is unchanged"},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/slot.sav"}, "expect": {"reply": {"fh": 3, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 16}, "expect": {"reply": {"data": "UVWXYZ"}}, "note": "the new bytes"},
+    {"request": {"op": "read", "fh": 3, "offset": 2, "len": 3}, "expect": {"reply": {"data": "WXY"}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

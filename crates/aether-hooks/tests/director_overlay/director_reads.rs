@@ -51,6 +51,24 @@ fn session(
     fake: Fake,
     arena_len: usize,
 ) -> (std::path::PathBuf, &'static Fake, HookGuard) {
+    session_via(name, fake, arena_len, true)
+}
+
+/// As [`session`], through a handle of the given kind. `immutable` false puts a writable
+/// provider over `data/`, so the reference answers a read open there without `immutable` and
+/// the shim's read hook takes its uncached path; true leaves the files to read-only providers,
+/// which the reference answers `immutable`, and small reads go through the read cache.
+fn session_via(
+    name: &str,
+    fake: Fake,
+    arena_len: usize,
+    immutable: bool,
+) -> (std::path::PathBuf, &'static Fake, HookGuard) {
+    let fake = if immutable {
+        fake
+    } else {
+        fake.writable_under("data/")
+    };
     let base = std::env::temp_dir().join(format!(
         "aether-shim-director-reads-{name}-{}",
         std::process::id()
@@ -61,6 +79,43 @@ fn session(
     let fake = fakedirector::install(&root, fake, arena_len);
     let hooks = install().expect("install");
     (root, fake, hooks)
+}
+
+/// Both small-read variants of a test: `$cached` runs `$body(true)` through an immutable handle
+/// (the read cache), `$uncached` runs `$body(false)` through a mutable one (the plain ring read).
+/// Each is its own `#[test]`, so its own process.
+macro_rules! both_paths {
+    ($body:ident, $cached:ident, $uncached:ident) => {
+        #[test]
+        fn $cached() {
+            isolate!();
+            $body(true);
+        }
+        #[test]
+        fn $uncached() {
+            isolate!();
+            $body(false);
+        }
+    };
+}
+
+/// Which path the small reads took, from the read cache's own counters: the variant that is
+/// meant to be cached must have used the cache, and the other must not have touched it, so
+/// neither can silently run through the other's path.
+fn assert_path(cached: bool) {
+    let c = aether_hooks::read_cache_stats_for_tests().expect("the read cache is on in tests");
+    let activity = c.hits + c.misses + c.declined + c.fetches + c.fetch_failures;
+    if cached {
+        assert!(
+            activity > 0,
+            "an immutable handle's small reads never reached the read cache"
+        );
+    } else {
+        assert_eq!(
+            activity, 0,
+            "a non-immutable handle's small reads went through the read cache: {c:?}"
+        );
+    }
 }
 
 /// The provider's bytes, never the real file's: for a read, and for a preserving write, whose
@@ -142,17 +197,17 @@ fn a_large_read_spans_round_trips_over_the_arena_and_is_byte_exact() {
 /// The inline transport's own fragmentation, counted on the server side. 63 KiB stays below
 /// `BULK_THRESHOLD` even with no arena, and a 4088-byte inline response cannot carry it in fewer
 /// than 15 READs.
-#[test]
-fn a_sub_threshold_read_fragments_over_the_inline_transport() {
-    isolate!();
+fn a_sub_threshold_read_fragments_over_the_inline_transport_body(cached: bool) {
     let want = pattern(63 * 1024);
-    let (root, fake, hooks) = session(
+    let (root, fake, hooks) = session_via(
         "inline",
         Fake::new().with("data/inline.bin", want.clone(), ReadStyle::Whole),
         0,
+        cached,
     );
     let got = std::fs::read(root.join("Data").join("inline.bin")).unwrap_or_default();
     drop(hooks);
+    assert_path(cached);
 
     let reads = fake.tally.reads("data/inline.bin");
     let minimum = (want.len() / (PAYLOAD_CAP as usize - 8)) as u64;
@@ -170,18 +225,22 @@ fn a_sub_threshold_read_fragments_over_the_inline_transport() {
     assert!(got == want, "bytes differ across the fragment boundaries");
 }
 
+both_paths!(
+    a_sub_threshold_read_fragments_over_the_inline_transport_body,
+    a_sub_threshold_read_fragments_over_the_inline_transport_cached,
+    a_sub_threshold_read_fragments_over_the_inline_transport_uncached
+);
+
 /// A short read is not the end of the file. The provider hands back at most 7 bytes per READ
 /// inline, and 100 KiB per READ over the arena, however much is asked for: what a provider does
 /// whenever its own backing read comes back partial.
 ///
 /// Both transports, because they return their length through different code
 /// (`decode_read_bulk_resp` and an arena copy, against `decode_read_resp_into`).
-#[test]
-fn a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport() {
-    isolate!();
+fn a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport_body(cached: bool) {
     let inline = pattern(5_000);
     let bulk = pattern(500 * 1024);
-    let (root, fake, hooks) = session(
+    let (root, fake, hooks) = session_via(
         "short",
         Fake::new()
             .with("data/dribble.bin", inline.clone(), ReadStyle::Short(7))
@@ -191,10 +250,12 @@ fn a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport() {
                 ReadStyle::Short(100_000),
             ),
         ARENA_LEN,
+        cached,
     );
     let got_inline = std::fs::read(root.join("Data").join("dribble.bin")).unwrap_or_default();
     let got_bulk = std::fs::read(root.join("Data").join("bulk-dribble.bin")).unwrap_or_default();
     drop(hooks);
+    assert_path(cached);
 
     assert_eq!(
         got_inline.len(),
@@ -217,21 +278,27 @@ fn a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport() {
     );
 }
 
+both_paths!(
+    a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport_body,
+    a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport_cached,
+    a_short_read_is_not_taken_for_the_end_of_the_file_on_either_transport_uncached
+);
+
 /// A director error fails the read. There is no fallback to the real file under the root, which
 /// sits right there with other bytes: falling back at the moment something went wrong would be
 /// the escape.
-#[test]
-fn a_director_read_error_fails_the_read_and_never_falls_back_to_the_real_file() {
-    isolate!();
-    let (root, _fake, hooks) = session(
+fn a_director_read_error_fails_the_read_and_never_falls_back_to_the_real_file_body(cached: bool) {
+    let (root, _fake, hooks) = session_via(
         "error",
         Fake::new().with("data/broken.bin", pattern(50_000), ReadStyle::Error),
         0,
+        cached,
     );
     let real = root.join("Data").join("broken.bin");
     aether_hooks::as_shim_io_for_tests(|| std::fs::write(&real, ON_DISK)).unwrap();
     let got = std::fs::read(&real);
     drop(hooks);
+    assert_path(cached);
 
     assert!(
         got.is_err(),
@@ -240,12 +307,16 @@ fn a_director_read_error_fails_the_read_and_never_falls_back_to_the_real_file() 
     );
 }
 
+both_paths!(
+    a_director_read_error_fails_the_read_and_never_falls_back_to_the_real_file_body,
+    a_director_read_error_fails_the_read_and_never_falls_back_to_the_real_file_cached,
+    a_director_read_error_fails_the_read_and_never_falls_back_to_the_real_file_uncached
+);
+
 /// Every director handle a read opens is closed, the failing read included. A leaked `fh` is a
 /// provider-side file the director never releases.
-#[test]
-fn every_director_handle_a_read_opens_is_closed_failed_reads_included() {
-    isolate!();
-    let (root, fake, hooks) = session(
+fn every_director_handle_a_read_opens_is_closed_failed_reads_included_body(cached: bool) {
+    let (root, fake, hooks) = session_via(
         "close",
         Fake::new()
             .with("data/closecheck.esp", PROVIDER.to_vec(), ReadStyle::Whole)
@@ -255,10 +326,12 @@ fn every_director_handle_a_read_opens_is_closed_failed_reads_included() {
                 ReadStyle::Error,
             ),
         0,
+        cached,
     );
     let _ = std::fs::read(root.join("Data").join("closecheck.esp"));
     let _ = std::fs::read(root.join("Data").join("closecheck-broken.bin"));
     drop(hooks);
+    assert_path(cached);
 
     for vpath in ["data/closecheck.esp", "data/closecheck-broken.bin"] {
         assert!(
@@ -272,6 +345,12 @@ fn every_director_handle_a_read_opens_is_closed_failed_reads_included() {
         );
     }
 }
+
+both_paths!(
+    every_director_handle_a_read_opens_is_closed_failed_reads_included_body,
+    every_director_handle_a_read_opens_is_closed_failed_reads_included_cached,
+    every_director_handle_a_read_opens_is_closed_failed_reads_included_uncached
+);
 
 /// A write to a **named alternate data stream** is the stream's, not the file's. Answering
 /// `f.esp:probe` with `f.esp`'s bytes, or writing `f.esp` on its behalf, is a containment bug
@@ -318,16 +397,16 @@ fn a_write_to_an_alternate_data_stream_leaves_the_file_s_own_bytes_alone() {
 /// A read open crosses the ring with the folded vpath. The fake director folds every name it is
 /// sent, so without this a shim that stopped folding would pass every other test here, and a
 /// real provider graph keyed by folded names would then miss the file.
-#[test]
-fn a_read_open_puts_the_folded_vpath_on_the_wire() {
-    isolate!();
-    let (root, fake, hooks) = session(
+fn a_read_open_puts_the_folded_vpath_on_the_wire_body(cached: bool) {
+    let (root, fake, hooks) = session_via(
         "fold",
         Fake::new().with("data/mixed.esp", PROVIDER.to_vec(), ReadStyle::Whole),
         0,
+        cached,
     );
     let got = std::fs::read(root.join("Data").join("MiXeD.ESP"));
     drop(hooks);
+    assert_path(cached);
 
     assert_eq!(got.ok().as_deref(), Some(PROVIDER));
     let reads: Vec<String> = fake
@@ -349,6 +428,12 @@ fn a_read_open_puts_the_folded_vpath_on_the_wire() {
         "a read open sent an unfolded vpath: {reads:?}"
     );
 }
+
+both_paths!(
+    a_read_open_puts_the_folded_vpath_on_the_wire_body,
+    a_read_open_puts_the_folded_vpath_on_the_wire_cached,
+    a_read_open_puts_the_folded_vpath_on_the_wire_uncached
+);
 
 /// A preserving write (`OPEN_ALWAYS`, append) to a file that exists only on real disk under the
 /// root, inside a writable mount: the director creates it, and its prior content is nothing —
@@ -385,10 +470,8 @@ fn a_preserving_write_to_a_file_only_on_real_disk_never_seeds_from_it() {
 /// succeeds, silently truncated. (Copy-up, removed by task C8, failed this case instead.) This
 /// test records the behaviour so a change to it is noticed; when the read hook is made to fail a
 /// short-of-size read, flip it.
-#[test]
-fn a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue() {
-    isolate!();
-    let (root, _fake, hooks) = session(
+fn a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue_body(cached: bool) {
+    let (root, _fake, hooks) = session_via(
         "liar",
         Fake::new().with(
             "data/liar.bin",
@@ -396,9 +479,11 @@ fn a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue() {
             ReadStyle::ShorterThanClaimed(9_000),
         ),
         0,
+        cached,
     );
     let got = std::fs::read(root.join("Data").join("liar.bin"));
     drop(hooks);
+    assert_path(cached);
 
     let got = got.expect("today the read does not fail");
     assert_eq!(
@@ -411,3 +496,9 @@ fn a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue() {
         "and what it does return is the right prefix"
     );
 }
+
+both_paths!(
+    a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue_body,
+    a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue_cached,
+    a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue_uncached
+);

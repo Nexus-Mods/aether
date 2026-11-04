@@ -100,3 +100,9 @@ pub fn registry_notify_pending() -> usize {
 pub fn is_synthetic_key_handle(handle: isize) -> bool {
     regkeys::is_synthetic(handle)
 }
+
+/// The read cache's counters, `None` when it is off. For tests that must know which path a
+/// small read took (cached through an immutable handle, or over the ring).
+pub fn read_cache_stats_for_tests() -> Option<aether_ipc::CacheStats> {
+    read_cache::stats()
+}

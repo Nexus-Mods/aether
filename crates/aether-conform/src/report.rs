@@ -1,6 +1,7 @@
 //! A run's report, as TAP (the default) or JSON.
 //!
-//! TAP (version 13) has one test point per scenario; a failed one carries a
+//! TAP (version 13) has one test point per scenario, its description the
+//! scenario name with `#`, line breaks and `\` escaped; a failed one carries a
 //! YAML block with the scenario's error, if any, and each failed step's
 //! request (in the scenario format, so it can be pasted into a scenario;
 //! a malformed request, which that format cannot say, is described in a
@@ -33,11 +34,12 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
     }
     for (n, s) in report.scenarios.iter().enumerate() {
         let n = n + 1;
+        let name = tap_name(&s.name);
         if s.passed {
-            out.push_str(&format!("ok {n} - {}\n", s.name));
+            out.push_str(&format!("ok {n} - {name}\n"));
             continue;
         }
-        out.push_str(&format!("not ok {n} - {}\n", s.name));
+        out.push_str(&format!("not ok {n} - {name}\n"));
         out.push_str("  ---\n");
         out.push_str(&format!(
             "  file: {}\n",
@@ -67,6 +69,23 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
         }
         let first = e.lines().next().unwrap_or("");
         out.push_str(&format!("Bail out! {first}\n"));
+    }
+    out
+}
+
+/// A test point's description: `#` would start a directive (`# SKIP`) and a
+/// line break would end the line, so they are escaped as `\#`, `\n` and
+/// `\r`, and `\` itself as `\\`.
+fn tap_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '#' => out.push_str("\\#"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
     }
     out
 }
@@ -109,4 +128,45 @@ fn scenario(s: &ScenarioResult) -> Value {
             "note": st.note,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run::ScenarioResult;
+
+    fn report(names: &[(&str, bool)]) -> RunReport {
+        RunReport {
+            scenarios: names
+                .iter()
+                .map(|(n, passed)| ScenarioResult {
+                    name: n.to_string(),
+                    file: "f.json".into(),
+                    passed: *passed,
+                    steps: Vec::new(),
+                    error: None,
+                })
+                .collect(),
+            adapter_error: None,
+            seed: None,
+        }
+    }
+
+    /// A `#` in a test point's description starts a directive (`# SKIP`,
+    /// `# TODO`) and a newline ends the line, so a scenario named with
+    /// either must not change what the point says.
+    #[test]
+    fn a_tap_name_with_a_hash_or_a_newline_is_escaped() {
+        let r = report(&[("a # SKIP x", true), ("two\nlines\r\\ok 9", false)]);
+        let out = tap(&r, 2);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[2], r"ok 1 - a \# SKIP x", "{out}");
+        assert_eq!(lines[3], r"not ok 2 - two\nlines\r\\ok 9", "{out}");
+        assert!(!out.lines().any(|l| l.starts_with("lines")), "{out}");
+        assert_eq!(
+            out.lines().filter(|l| l.contains("ok ")).count(),
+            2,
+            "{out}"
+        );
+    }
 }

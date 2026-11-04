@@ -24,7 +24,7 @@ statuses, flags. The loader is `aether_conform::scenario::load` (one file) and
   },
   "steps": [
     {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
-     "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+     "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": true, "mount_gen": 0}}},
     {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16},
      "expect": {"reply": {"data": "abc"}}},
     {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},

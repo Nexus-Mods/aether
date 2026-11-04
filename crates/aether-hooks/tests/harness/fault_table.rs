@@ -591,6 +591,9 @@ pub(crate) const HELD: Duration = Duration::from_secs(5);
 /// How long a call may take before the row calls it hung.
 const WATCHDOG: Duration = Duration::from_secs(8);
 
+/// A tap behind the harness chain, for a setup below.
+pub(crate) type Tapped = Box<dyn aether_rpc::Tap + Send>;
+
 /// What one call saw: the table's kind of answer, or a description of an
 /// answer that is wrong (success with the wrong bytes, say).
 pub(crate) type Seen = Result<Expect, String>;
@@ -738,13 +741,14 @@ pub(crate) fn file_director_named(names: usize) -> Fake {
 }
 
 fn file_row(op: HookedOp) {
-    let (served, ctx) = file_setup(file_director());
+    let (served, ctx) = file_setup(file_director(), None);
     run_row(served, ctx, op, file_call, true);
 }
 
 /// `fake` served at the client deadline [`DEADLINE`] and the hooks
-/// installed: what [`file_call`] needs.
-pub(crate) fn file_setup(fake: Fake) -> (&'static Served, &'static Ctx) {
+/// installed: what [`file_call`] needs. `tap` sees each reply as the
+/// director gave it (`Options::tap`).
+pub(crate) fn file_setup(fake: Fake, tap: Option<Tapped>) -> (&'static Served, &'static Ctx) {
     let dir = aether_testkit::tempdir().expect("temp folder");
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
@@ -754,6 +758,7 @@ pub(crate) fn file_setup(fake: Fake) -> (&'static Served, &'static Ctx) {
         fake,
         Options {
             deadline: Some(DEADLINE),
+            tap,
             ..Options::default()
         },
     );
@@ -1484,7 +1489,7 @@ pub(crate) fn probe() -> Option<PathBuf> {
 fn row_start_a_child() {
     isolate!();
     let Some(probe) = probe() else { return };
-    let (served, ctx) = stage_setup(&probe);
+    let (served, ctx) = stage_setup(&probe, None);
     // A start takes the ready wait: the unfaulted call is made once, at the
     // end, and after the late reply.
     run_row(served, ctx, HookedOp::StageExec, stage_call, false);
@@ -1496,7 +1501,7 @@ pub(crate) const READY_WAIT: Duration = Duration::from_secs(1);
 
 /// The image `probe` served under the root and staged, at the client
 /// deadline [`DEADLINE`], the hooks installed: what [`stage_call`] needs.
-pub(crate) fn stage_setup(probe: &Path) -> (&'static Served, &'static Ctx) {
+pub(crate) fn stage_setup(probe: &Path, tap: Option<Tapped>) -> (&'static Served, &'static Ctx) {
     let dir = aether_testkit::tempdir().expect("temp folder");
     let base = dir.path().to_path_buf();
     std::mem::forget(dir);
@@ -1526,6 +1531,7 @@ pub(crate) fn stage_setup(probe: &Path) -> (&'static Served, &'static Ctx) {
         fake,
         Options {
             deadline: Some(DEADLINE),
+            tap,
             ..Options::default()
         },
     );
@@ -1543,6 +1549,16 @@ pub(crate) fn stage_setup(probe: &Path) -> (&'static Served, &'static Ctx) {
 /// This process's key `HKCU\Software\AetherFaultTable-<pid>`: real, with
 /// `v = 1`, and `v = 2` in the overlay.
 static KEY: crate::reg::Base = crate::reg::Base::new(r"Software\AetherFaultTable");
+
+/// What a registry read of `v` saw when it read the value `v`: the overlay's
+/// 2, the real key's 1, or something else.
+pub(crate) fn reg_value_seen(v: u32) -> Seen {
+    match v {
+        2 => Ok(Expect::Nt(STATUS_SUCCESS)),
+        1 => Ok(Expect::Fallback),
+        v => Err(format!("NtQueryValueKey: the value {v}")),
+    }
+}
 
 pub(crate) fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
     let k = ctx.key as isize;
@@ -1568,11 +1584,7 @@ pub(crate) fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
             if st != STATUS_SUCCESS {
                 return status(st);
             }
-            match u32::from_le_bytes(info[12..16].try_into().unwrap()) {
-                2 => Ok(Expect::Nt(STATUS_SUCCESS)),
-                1 => Ok(Expect::Fallback),
-                v => Err(format!("NtQueryValueKey: the value {v}")),
-            }
+            reg_value_seen(u32::from_le_bytes(info[12..16].try_into().unwrap()))
         }
         HookedOp::RegWrite => {
             const REG_DWORD: u32 = 4;
@@ -1588,14 +1600,14 @@ pub(crate) fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
 }
 
 fn registry_row(op: HookedOp) {
-    let (served, ctx) = registry_setup();
+    let (served, ctx) = registry_setup(None);
     run_row(served, ctx, op, reg_call, true);
 }
 
 /// This process's scratch key, real `v = 1` and overlay `v = 2`, served at
 /// the client deadline [`DEADLINE`] with nothing cached, the hooks installed
 /// and the key open through them: what [`reg_call`] needs.
-pub(crate) fn registry_setup() -> (&'static Served, &'static Ctx) {
+pub(crate) fn registry_setup(tap: Option<Tapped>) -> (&'static Served, &'static Ctx) {
     use windows_sys::Win32::System::Registry::{
         RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_DWORD,
     };
@@ -1622,6 +1634,7 @@ pub(crate) fn registry_setup() -> (&'static Served, &'static Ctx) {
         Options {
             arena_len: 0,
             deadline: Some(DEADLINE),
+            tap,
             // Nothing cached: every read asks the director.
             reg_gen: fakedirector::RegGen::Fixed(0),
             ..Options::default()

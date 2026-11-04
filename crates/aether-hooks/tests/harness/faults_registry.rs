@@ -4,7 +4,7 @@
 //! REG_SET_VALUE), with nothing cached, so every read asks the director.
 
 use crate::fault_table::{self, reg_call, Ctx, HookedOp, Seen, DEADLINE};
-use crate::faults_file::{cases, check, Op, Subject};
+use crate::faults_file::{cases, check, every_cut, DirectorReplies, Op, Subject, KINDS};
 use std::time::Duration;
 
 fn reg_op(ctx: &'static Ctx, op: Op, i: usize) -> Seen {
@@ -18,16 +18,36 @@ fn reg_op(ctx: &'static Ctx, op: Op, i: usize) -> Seen {
     }
 }
 
-#[test]
-fn generated_faults_never_crash_or_hang_a_registry_call() {
-    isolate!();
-    let (served, ctx) = fault_table::registry_setup();
-    let s = Subject::new(
+/// The registry read and write.
+const OPS: [Op; 2] = [Op::Call(HookedOp::RegRead), Op::Call(HookedOp::RegWrite)];
+
+fn subject(ops: &[Op]) -> &'static Subject {
+    let director = DirectorReplies::default();
+    let (served, ctx) = fault_table::registry_setup(Some(director.tap()));
+    Subject::new(
         served,
         ctx,
         reg_op,
         DEADLINE + Duration::from_secs(2),
-        &[Op::Call(HookedOp::RegRead), Op::Call(HookedOp::RegWrite)],
-    );
-    check("registry calls", s, cases(1));
+        ops,
+        director,
+    )
+}
+
+#[test]
+fn generated_faults_never_crash_or_hang_a_registry_call() {
+    isolate!();
+    // Every kind but the bulk lie, which no registry reply can carry.
+    let kinds: Vec<&str> = KINDS.into_iter().filter(|k| *k != "bulk lie").collect();
+    check("registry calls", subject(&OPS), cases(1), &kinds);
+}
+
+/// Every cut of a registry read's and write's reply: none decodes to
+/// another answer (wire.md 3.2), so each is the table's garbage cell.
+#[test]
+fn every_cut_of_a_registry_reply_is_the_table_s() {
+    isolate!();
+    let s = subject(&[]);
+    let wrong: Vec<String> = OPS.iter().flat_map(|&op| every_cut(s, op)).collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

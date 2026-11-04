@@ -348,7 +348,10 @@ both_paths!(
     every_director_handle_a_read_opens_is_closed_failed_reads_included_uncached
 );
 
-/// A write to a **named alternate data stream** is the stream's, not the file's. Answering
+/// A write to a **named alternate data stream** is the stream's, never the file's. The director
+/// holds no streams, and wire.md 3.2 has such a director treat every request naming one as a name
+/// it does not have, so the write fails: nothing is stored under the stream's name, nothing is
+/// written to `f.esp` on its behalf, and nothing reaches the real disk under the root. Answering
 /// `f.esp:probe` with `f.esp`'s bytes, or writing `f.esp` on its behalf, is a containment bug
 /// this project has had once on the read path (`aether-fixture-escape`'s vector 11, which is why
 /// `FuseClient::vpath_under_root` carries the suffix).
@@ -367,11 +370,21 @@ fn a_write_to_an_alternate_data_stream_leaves_the_file_s_own_bytes_alone() {
     let base = std::fs::read(root.join("Data").join("streamed.esp"));
     drop(hooks);
 
-    written.expect("a write to a named stream under a writable mount must succeed");
+    assert!(
+        written.is_err(),
+        "a write to a stream the director does not hold must fail"
+    );
+    // The shim carries the suffix to the director, which refused it: the
+    // refusal is the director's, not a shim that keeps streams to itself.
+    let opens = fake.tally.wire_opens();
+    assert!(
+        opens.iter().any(|(_, p)| p == "data/streamed.esp:probe"),
+        "the stream write never reached the director under its own vpath: {opens:?}"
+    );
     assert_eq!(
-        fake.contents("data/streamed.esp:probe").as_deref(),
-        Some(&b"stream bytes"[..]),
-        "the stream's bytes must land under the stream's own vpath"
+        fake.contents("data/streamed.esp:probe"),
+        None,
+        "a stream must never be stored as an entry of its own"
     );
     assert_eq!(
         fake.contents("data/streamed.esp").as_deref(),
@@ -387,6 +400,10 @@ fn a_write_to_an_alternate_data_stream_leaves_the_file_s_own_bytes_alone() {
         fake.tally.writes("data/streamed.esp"),
         0,
         "the base file was written on behalf of a stream write"
+    );
+    assert!(
+        !root.join("Data").join("streamed.esp").exists(),
+        "the refused stream write fell through to the real disk under the root"
     );
 }
 

@@ -1,0 +1,19 @@
+{
+  "name": "registry-delete-unknown-key",
+  "description": "REG_DELETE_KEY of a key the overlay has no record of succeeds and tombstones it, which hides the real key (wire.md 4.3: \"Otherwise makes the parent exist, drops the key's node and everything below it, tombstones the key\"); only a key already tombstoned is ST_NOT_FOUND, and REG_CHANGED reports the deletion.",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [{"path": "\\Registry\\Machine\\Software\\Conform\\Seed"}]}
+  },
+  "steps": [
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\RealOnly"}, "expect": {"reply": {"version": 1, "state": "absent", "below": false}}, "note": "the overlay says nothing"},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\RealOnly"}, "expect": {"reply": {"version": 2}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\RealOnly"}, "expect": {"reply": {"version": 2, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\RealOnly"}, "expect": {"reply": {"version": 2, "node": null}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 2, "node": {"created": false, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": [{"folded": "realonly", "spelling": "RealOnly", "state": "tombstone"}, {"folded": "seed", "spelling": "Seed", "state": "present"}]}}}},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\REALONLY"}, "expect": {"status": "not-found"}, "note": "now tombstoned"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform\\RealOnly", "subtree": false, "since": 1}, "expect": {"reply": {"version": 2, "changed": true}}}
+  ]
+}

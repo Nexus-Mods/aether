@@ -180,7 +180,8 @@ fn attributes_ex(p: &Path) -> WIN32_FILE_ATTRIBUTE_DATA {
     data
 }
 
-/// S9 (`docs/wire.md` 3.4.3: any u64 is a valid `fh`): a director whose
+/// S9 (`docs/wire.md` 3.4.3: `fh` is any u64 but 0; the shim gives 0 no
+/// meaning, so 0 is tried too): a director whose
 /// handles count up from `base`. Open, read, write and close each carry
 /// the handle as issued, and a second handle is the next one.
 fn handles_from(base: u64) {

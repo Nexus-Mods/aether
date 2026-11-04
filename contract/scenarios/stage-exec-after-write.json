@@ -1,0 +1,17 @@
+{
+  "name": "stage-exec-after-write",
+  "description": "STAGE_EXEC of an image written in the session: a director that stages nothing answers ST_NOT_SUPPORTED; one with a stager answers the path of a copy holding the bytes as they are now (wire.md 3.4.14: \"A staged image holds the file's bytes as they are when STAGE_EXEC is served, writes in the session included\"), which aether-conform reads and compares with the bytes it reads through the ring; a directory and a missing path are ST_NOT_FOUND with a stager (3.4.14).",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "bin/tool.exe", "contents": "MZ"}], "writable": ["bin"]}]},
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "bin/tool.exe"}, "expect": {"reply": {"fh": 1, "size": 2, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 2, "data": "-tail"}, "expect": {"reply": {"written": 5}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "stage-exec", "root": 0, "path": "bin/tool.exe"}, "expect": {"one_of": [{"status": "not-supported"}, {"status": "not-found"}, {"reply": {"path": "staged"}}], "wire": "3.4.14"}},
+    {"request": {"op": "stage-exec", "root": 0, "path": "bin"}, "expect": {"one_of": [{"status": "not-supported"}, {"status": "not-found"}], "wire": "3.4.14"}, "note": "wire.md 3.4.14: a directory"},
+    {"request": {"op": "stage-exec", "root": 0, "path": "bin/none.exe"}, "expect": {"one_of": [{"status": "not-supported"}, {"status": "not-found"}], "wire": "3.4.14"}, "note": "wire.md 3.4.14: a missing path"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "bin/new.exe"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "MZnew"}, "expect": {"reply": {"written": 5}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "stage-exec", "root": 0, "path": "bin/new.exe"}, "expect": {"one_of": [{"status": "not-supported"}, {"status": "not-found"}, {"reply": {"path": "staged"}}], "wire": "3.4.14"}, "note": "wire.md 3.4.14: a file created in the session"}
+  ]
+}

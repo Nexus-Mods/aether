@@ -1,0 +1,27 @@
+{
+  "name": "write-then-read",
+  "description": "A file written through a handle reads back its bytes at once: through the handle that wrote them (wire.md 3.4.4: a handle serves READ whatever access it was opened with), through a second handle opened while the writer is still open, inline and in bulk (3.4.4: \"Every handle of a file reads the file as it is now\"), and after both close; GETATTR, READDIR and an OPEN report the size the WRITEs made before any CLOSE (3.4.1).",
+  "tree": {"roots": [{"id": 0, "dirs": ["saves"], "writable": ["saves"]}]},
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/Slot.sav"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "hello"}, "expect": {"reply": {"written": 5}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "hello"}}, "note": "wire.md 3.4.4: read back through the write-only handle that wrote it"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/slot.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 5, "mtime": 0}}, "note": "wire.md 3.4.1: the size now, the writer still open"},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "Slot.sav", "is_dir": false, "size": 5, "mtime": 0}]}}, "note": "wire.md 3.4.1, 3.4.2"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/SLOT.SAV"}, "expect": {"reply": {"fh": 2, "size": 5, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "wire.md 3.4.1: an OPEN reply's size is the size now"},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "hello"}}},
+    {"request": {"op": "write", "fh": 1, "offset": 5, "data": " world"}, "expect": {"reply": {"written": 6}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "hello world"}}, "note": "wire.md 3.4.4: a WRITE through another handle is seen at once"},
+    {"request": {"op": "read", "fh": 2, "offset": 6, "len": 5, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": "world"}}, "note": "wire.md 3.4.4: in bulk or inline, the same bytes"},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "J"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 5}, "expect": {"reply": {"data": "Jello"}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/slot.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 11, "mtime": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "Jello world"}}, "note": "wire.md 3.4.10: the writer's CLOSE changes nothing the reader sees"},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/slot.sav"}, "expect": {"reply": {"fh": 3, "size": 11, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": "Jello world"}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"reply": {"data": "Jello world"}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

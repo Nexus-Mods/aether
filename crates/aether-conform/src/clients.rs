@@ -209,6 +209,15 @@ pub(crate) fn decode(
 ) -> (Answer, Option<u32>) {
     if status != Status::Ok.code() {
         return match Status::try_from(status) {
+            Ok(s) if !payload.is_empty() => (
+                Answer::Bad(format!(
+                    "{} with a {}-byte payload (wire.md 3.1: \"A director answers every \
+                     error with an empty payload\")",
+                    s.name(),
+                    payload.len()
+                )),
+                None,
+            ),
             Ok(s) => (Answer::Got(Err(s)), None),
             Err(_) => (
                 Answer::Bad(format!(
@@ -218,10 +227,8 @@ pub(crate) fn decode(
             ),
         };
     }
-    if op == Opcode::Open {
-        if let Some(why) = crate::compare::open_reply_reserved(payload) {
-            return (Answer::Bad(why), None);
-        }
+    if let Some(why) = crate::shape::reply_shape(op, payload) {
+        return (Answer::Bad(why), None);
     }
     let Ok(reply) = Reply::decode(op, flags, payload) else {
         return (

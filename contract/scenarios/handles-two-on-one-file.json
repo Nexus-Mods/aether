@@ -1,0 +1,39 @@
+{
+  "name": "handles-two-on-one-file",
+  "description": "Two handles on one file, both open: a WRITE or SETATTR through one is seen at once by a READ through the other, and by GETATTR, READDIR and a new OPEN (wire.md 3.4.4: \"Every handle of a file reads the file as it is now\"; 3.4.1: a file's size is \"its length now, WRITEs and SETATTRs through handles still open included\"); closing one handle leaves the other's view as it was (3.4.10). The gap a SETATTR or a WRITE past the end leaves reads as zeros (3.4.5, 3.4.6).",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/f.bin", "contents": "0123456789"}], "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/f.bin"}, "expect": {"reply": {"fh": 1, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/f.bin"}, "expect": {"reply": {"fh": 2, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 2, "data": "AB"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": "01AB456789"}}, "note": "a WRITE through fh 1, read through fh 2"},
+    {"request": {"op": "write", "fh": 2, "offset": 10, "data": "Z"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/f.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 11, "mtime": 0}}, "note": "both handles still open"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": "01AB456789Z"}}},
+    {"request": {"op": "setattr", "fh": 1, "size": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": "01AB"}}, "note": "a SETATTR through fh 1, read through fh 2"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/f.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "f.bin", "is_dir": false, "size": 4, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/f.bin"}, "expect": {"reply": {"fh": 3, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 6, "data": "Q"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": {"hex": "30314142000051"}}}, "note": "the gap reads as zeros"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": {"hex": "30314142000051"}}}, "note": "closing fh 1 neither drops nor writes over fh 2's view"},
+    {"request": {"op": "setattr", "fh": 2, "size": 20}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/f.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 20, "mtime": 0}}, "note": "the size a SETATTR set, its handle still open"},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "f.bin", "is_dir": false, "size": 20, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/f.bin"}, "expect": {"reply": {"fh": 4, "size": 20, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 4, "offset": 3, "len": 64}, "expect": {"reply": {"data": {"hex": "4200005100000000000000000000000000"}}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"hex": "3031414200005100000000000000000000000000"}}}, "note": "fh 3, opened at size 4, reads the file as it is now"},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/f.bin"}, "expect": {"reply": {"fh": 5, "size": 20, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 5, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"hex": "3031414200005100000000000000000000000000"}}}},
+    {"request": {"op": "close", "fh": 5}, "expect": {"status": "ok"}}
+  ]
+}

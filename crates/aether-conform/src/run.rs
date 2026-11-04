@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aether_protocol::{Opcode, Reply, Request, Status};
-use aether_rpc::CallError;
 
 use crate::adapter::{Adapter, AdapterError};
 use crate::attach::Attached;
@@ -72,6 +71,10 @@ pub struct StepResult {
     pub passed: bool,
     /// Why it failed, what was changed on the way, and the scenario's note.
     pub note: Option<String>,
+    /// The status the director answered (`ok` for an OK reply), when it
+    /// answered one the protocol table has; `None` otherwise, and for the
+    /// parts of a run that do not record it.
+    pub answer: Option<String>,
 }
 
 /// One scenario as played.
@@ -95,6 +98,38 @@ pub struct RunReport {
     pub adapter_error: Option<String>,
     /// The generator's seed, for a run with generated cases.
     pub seed: Option<u64>,
+    /// For the scenario files: by opcode, how often each answer came (`ok`
+    /// or a status name), every answer a step allows counted, so one a
+    /// scenario allows and no director answer gave shows as 0.
+    pub answers: Answers,
+}
+
+/// Opcode name to answer name to count ([`RunReport::answers`]).
+pub type Answers = std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>>;
+
+/// Adds `s`'s steps, as played in `r`, to `tally`: every answer each step
+/// allows (at 0 if not given yet) and the one it got.
+fn count_answers(tally: &mut Answers, s: &Scenario, r: &ScenarioResult) {
+    fn allowed(e: &scenario::Expect, out: &mut Vec<String>) {
+        match e {
+            scenario::Expect::Reply(_) => out.push("ok".into()),
+            scenario::Expect::Status(st) => out.push(st.name().into()),
+            scenario::Expect::OneOf(alts) => alts.iter().for_each(|a| allowed(a, out)),
+        }
+    }
+    for (step, played) in s.steps.iter().zip(&r.steps) {
+        let op = tally
+            .entry(step.request.opcode().name().into())
+            .or_default();
+        let mut names = Vec::new();
+        allowed(&step.expect, &mut names);
+        for n in names {
+            op.entry(n).or_insert(0);
+        }
+        if let Some(a) = &played.answer {
+            *op.entry(a.clone()).or_insert(0) += 1;
+        }
+    }
 }
 
 impl RunReport {
@@ -169,6 +204,7 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             .as_ref()
             .map(|g| g.seed)
             .or(opts.concurrent.as_ref().map(|c| c.seed)),
+        answers: Answers::new(),
     };
     for (file, s) in &scenarios {
         let mut result = ScenarioResult {
@@ -181,6 +217,7 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
         match one(&mut adapter, file, s, opts.timeout, &mut result) {
             Ok(()) => {
                 result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
+                count_answers(&mut report.answers, s, &result);
                 report.scenarios.push(result);
             }
             Err(e) => {
@@ -324,14 +361,19 @@ pub(crate) fn play(
     let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
-        let mut req = session.translate(&step.request);
+        // A literal handle is sent as written (`Step::literal_fh`).
+        let mut req = if step.literal_fh {
+            step.request.clone()
+        } else {
+            session.translate(&step.request)
+        };
         if crate::clients::fit_to_ring(ring, &mut req) {
             notes.push("sent without read_bulk: the ring has no arena (wire.md 2.6)".into());
         }
         let (sent, gen_before, gen_now) = match step.client {
             0 => {
                 let before = ring.reg_gen();
-                let sent = send(ring, &client, &req, &mut scratch);
+                let sent = send(ring, &client, &req);
                 (sent, before, ring.reg_gen())
             }
             k => match others.send(k, &req) {
@@ -347,11 +389,12 @@ pub(crate) fn play(
             Err(e) => {
                 out.push(StepResult {
                     index: i,
-                    request: crate::scenario::request_json(&step.request),
+                    request: crate::scenario::step_request_json(step),
                     expected: render_expect(&step.expect),
                     got: format!("no answer: {e}"),
                     passed: false,
                     note: Some(join(notes, step.note.as_deref())),
+                    answer: None,
                 });
                 return Err(format!("step {i}: the ring gave no answer: {e}"));
             }
@@ -386,7 +429,24 @@ pub(crate) fn play(
                 }
             }
         }
+        if let (Sent::Answer(Ok(OwnedReply::Open(o))), OwnedRequest::Open { root, path, .. }) =
+            (&sent, &req)
+        {
+            if o.immutable && !o.is_dir && writable_holds(&s.tree, *root, path) {
+                notes.insert(
+                    0,
+                    "immutable set on a file a writable provider holds (wire.md 3.4.3: \"never set it for a file a writable provider holds\")"
+                        .into(),
+                );
+                passed = false;
+            }
+        }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
+        let answer = match &sent {
+            Sent::Answer(Ok(_)) => Some("ok".to_string()),
+            Sent::Answer(Err(st)) => Some(st.name().to_string()),
+            Sent::Bad(_) => None,
+        };
         let gen_after = reg_gen.after(&step.request, succeeded, gen_before, gen_now);
         if let Some(why) = gen_broken.or(gen_after) {
             notes.insert(0, why);
@@ -394,14 +454,32 @@ pub(crate) fn play(
         }
         out.push(StepResult {
             index: i,
-            request: crate::scenario::request_json(&step.request),
+            request: crate::scenario::step_request_json(step),
             expected: render_expect(&step.expect),
             got,
             passed,
             note: Some(join(notes, step.note.as_deref())).filter(|n| !n.is_empty()),
+            answer,
         });
     }
     Ok(())
+}
+
+/// Whether `path` in `root` lies under one of the tree's `writable`
+/// entries, so the writable provider holds it (contract/scenarios/README.md,
+/// "Who holds what"), compared by the fold (wire.md 3.2).
+fn writable_holds(
+    tree: &aether_refdirector::tree::Tree,
+    root: aether_protocol::RootId,
+    path: &str,
+) -> bool {
+    let p = aether_casefold::fold(path);
+    tree.roots.iter().filter(|r| r.id == root.0).any(|r| {
+        r.writable.iter().any(|w| {
+            let w = aether_casefold::fold(w);
+            w == "." || p == w || p.starts_with(&format!("{w}/"))
+        })
+    })
 }
 
 /// The scenario's clients other than 0, each a process of its own.
@@ -685,60 +763,56 @@ fn send<N: aether_ipc::Notifier>(
     ring: &Attached,
     client: &aether_rpc::Client<'_, N>,
     req: &OwnedRequest,
-    scratch: &mut Vec<u8>,
 ) -> Result<Sent, String> {
     let request = req.as_request();
     if request.opcode() == Opcode::Read {
         return read(ring, client, &request);
     }
-    if request.opcode() == Opcode::Open {
-        return open(client, &request);
-    }
-    Ok(match client.call(&request, scratch) {
-        Ok(reply) => Sent::Answer(Ok(OwnedReply::from_reply(&reply))),
-        Err(CallError::Status(s)) => Sent::Answer(Err(s)),
-        Err(CallError::UnknownStatus(n)) => Sent::Bad(format!(
-            "status {n}, which the protocol table does not have"
-        )),
-        Err(CallError::Undecodable) => Sent::Bad(
-            "an OK reply whose payload does not decode as this opcode's reply (wire.md 3.1)".into(),
-        ),
-        Err(CallError::Ipc(e)) => return Err(format!("{e:?}")),
-        Err(CallError::BulkRead) => unreachable!("READ is sent on a held slot"),
-    })
-}
-
-/// An OPEN on a held slot, so its payload's reserved bytes can be read
-/// (`compare::open_reply_reserved`) before it is decoded.
-fn open<N: aether_ipc::Notifier>(
-    client: &aether_rpc::Client<'_, N>,
-    request: &Request<'_>,
-) -> Result<Sent, String> {
+    // On a held slot, so an error's payload and an OK reply's shape
+    // (`crate::shape`) can be looked at before the reply is decoded.
     let mut body = Vec::new();
     request.encode(&mut body);
+    let (op, flags) = (request.opcode(), request.flags());
     let (mut replies, slots) = client
         .ring()
-        .submit_many_held(&[(Opcode::Open as u32, 0, body)])
+        .submit_many_held(&[(op as u32, flags, body)])
         .map_err(|e| format!("{e:?}"))?;
     client.ring().release_slots(&slots);
     let reply = replies.pop().expect("one reply per request");
-    Ok(if reply.status != Status::Ok.code() {
-        match Status::try_from(reply.status) {
-            Ok(s) => Sent::Answer(Err(s)),
-            Err(_) => Sent::Bad(format!(
-                "status {}, which the protocol table does not have",
-                reply.status
-            )),
-        }
-    } else if let Some(why) = crate::compare::open_reply_reserved(&reply.payload) {
-        Sent::Bad(why)
-    } else {
-        match Reply::decode(Opcode::Open, 0, &reply.payload) {
-            Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
-            Err(_) => Sent::Bad(
-                "an OK reply whose payload does not decode as an OPEN reply (wire.md 3.1)".into(),
-            ),
-        }
+    if let Some(sent) = refused(reply.status, &reply.payload) {
+        return Ok(sent);
+    }
+    if let Some(why) = crate::shape::reply_shape(op, &reply.payload) {
+        return Ok(Sent::Bad(why));
+    }
+    Ok(match Reply::decode(op, flags, &reply.payload) {
+        Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
+        Err(_) => Sent::Bad(format!(
+            "an OK reply whose payload does not decode as a {} reply (wire.md 3.1)",
+            op.name()
+        )),
+    })
+}
+
+/// The answer for a reply whose status is not `ST_OK`, or `None` for one
+/// that is: the status, unless it is not in the table or comes with a
+/// payload (wire.md 3.1: "A director answers every error with an empty
+/// payload").
+fn refused(status: i32, payload: &[u8]) -> Option<Sent> {
+    if status == Status::Ok.code() {
+        return None;
+    }
+    Some(match Status::try_from(status) {
+        Ok(s) if !payload.is_empty() => Sent::Bad(format!(
+            "{} with a {}-byte payload (wire.md 3.1: \"A director answers every error with an \
+             empty payload\")",
+            s.name(),
+            payload.len()
+        )),
+        Ok(s) => Sent::Answer(Err(s)),
+        Err(_) => Sent::Bad(format!(
+            "status {status}, which the protocol table does not have"
+        )),
     })
 }
 
@@ -757,14 +831,10 @@ fn read<N: aether_ipc::Notifier>(
         .submit_many_held(&[(Opcode::Read as u32, flags, body)])
         .map_err(|e| format!("{e:?}"))?;
     let reply = replies.pop().expect("one reply per request");
-    let sent = if reply.status != Status::Ok.code() {
-        match Status::try_from(reply.status) {
-            Ok(s) => Sent::Answer(Err(s)),
-            Err(_) => Sent::Bad(format!(
-                "status {}, which the protocol table does not have",
-                reply.status
-            )),
-        }
+    let sent = if let Some(sent) = refused(reply.status, &reply.payload) {
+        sent
+    } else if let Some(why) = crate::shape::reply_shape(Opcode::Read, &reply.payload) {
+        Sent::Bad(why)
     } else {
         match Reply::decode(Opcode::Read, flags, &reply.payload) {
             Ok(r) => match OwnedReply::from_reply(&r) {

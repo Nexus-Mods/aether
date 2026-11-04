@@ -10,7 +10,7 @@
   "steps": [
     {"request": {"op": "getattr", "root": 0, "path": "data/missing.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
     {"request": {"op": "getattr", "root": 0, "path": "nowhere/at/all.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "under a directory that does not exist"},
-    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp/below"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.5"}, "note": "below a file: 3.4.1 says found=0 for a missing path, 3.5 has ST_NOT_A_DIRECTORY for \"a path component is a file\""},
+    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp/below"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"status": "not-found"}], "wire": "3.4.1, 3.5"}, "note": "below a file: a missing path, found=0 (3.5: GETATTR never answers ST_NOT_A_DIRECTORY), or ST_NOT_FOUND, which the shim reads the same (3.4.1)"},
     {"request": {"op": "getattr", "root": 9, "path": "data/a.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "root 9 is not served"}
   ]
 }

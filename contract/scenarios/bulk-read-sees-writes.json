@@ -1,0 +1,27 @@
+{
+  "name": "bulk-read-sees-writes",
+  "description": "Bulk READs of a file changed in the session see every change, as inline ones do (wire.md 3.4.4: inline or bulk, \"Every handle of a file reads the file as it is now\"): a WRITE past the end, a SETATTR that grows and one that cuts, and a WRITE over the start, each read back in bulk, with the flag and at 64 KiB and more, through the handle that made it and through another.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "saves/big", "contents": {"size": 65536, "seed": 3}}], "writable": ["saves"]}]},
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/big"}, "expect": {"reply": {"fh": 1, "size": 65536, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 65536, "seed": 3}}}},
+    {"request": {"op": "write", "fh": 1, "offset": 65536, "data": "TAIL"}, "expect": {"reply": {"written": 4}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 65540, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"concat": [{"size": 65536, "seed": 3}, "TAIL"]}}}, "note": "wire.md 3.4.4: the WRITE, in bulk"},
+    {"request": {"op": "read", "fh": 1, "offset": 65530, "len": 10}, "expect": {"reply": {"data": {"hex": "55a8e2e230e05441494c"}}}},
+    {"request": {"op": "setattr", "fh": 1, "size": 70000}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 65536, "len": 8192, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"concat": ["TAIL", {"zeros": 4460}]}}}, "note": "wire.md 3.4.6"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/big"}, "expect": {"reply": {"fh": 2, "size": 70000, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 70000, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"concat": [{"size": 65536, "seed": 3}, "TAIL", {"zeros": 4460}]}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 70000}, "expect": {"reply": {"data": {"concat": [{"size": 65536, "seed": 3}, "TAIL", {"zeros": 4460}]}}}, "note": "wire.md 3.4.4: 64 KiB and more may come in bulk"},
+    {"request": {"op": "setattr", "fh": 1, "size": 100}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 100, "seed": 3}}}, "note": "wire.md 3.4.4, 3.4.6: the cut, in bulk"},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": {"size": 4096, "seed": 4}}, "expect": {"reply": {"written": 4096}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 4096, "seed": 4}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 65536}, "expect": {"reply": {"data": {"size": 4096, "seed": 4}}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/big"}, "expect": {"reply": {"fh": 3, "size": 4096, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 4096, "seed": 4}}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

@@ -8,8 +8,8 @@ struct FuseOpen {
     fh: u64,
     /// Whether `fh` is a handle the director issued, so closing this handle
     /// closes it there. Not for the directory handle `try_fuse_mkdir` makes
-    /// without an OPEN: any u64 is a valid `fh` (docs/wire.md 3.4.3), 0
-    /// included, so no value of `fh` can say "none".
+    /// without an OPEN. A director never issues 0 (docs/wire.md 3.4.3), but
+    /// the shim does not rely on it: no value of `fh` says "none".
     issued: bool,
     size: u64,
     is_dir: bool,

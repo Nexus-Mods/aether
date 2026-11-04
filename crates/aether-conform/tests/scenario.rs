@@ -821,3 +821,65 @@ fn a_step_names_its_client_and_handles_are_counted_across_clients() {
     ]));
     assert!(e.contains("step 0") && e.contains("client"), "{e}");
 }
+
+/// In a step, `{"zeros": N}` is N zero bytes and `{"concat": [..]}` the
+/// bytes of its elements in order; a count past the largest file, or an
+/// element that is not bytes, is a load error.
+#[test]
+fn zeros_and_concat_stand_for_their_bytes_in_a_step() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let steps = json!([
+        {"request": {"op": "write", "fh": 1, "offset": 0,
+                     "data": {"concat": ["ab", {"zeros": 3}, {"hex": "ff"}, {"size": 2, "seed": 1}]}},
+         "expect": {"status": "bad-fh"}},
+        {"request": {"op": "read", "fh": 1, "offset": 0, "len": 8},
+         "expect": {"reply": {"data": {"zeros": 4}}}}
+    ]);
+    let s = load(&write(dir.path(), "z.json", &scenario(steps))).unwrap();
+    let mut want = b"ab\0\0\0\xff".to_vec();
+    want.extend(Contents::Fill { size: 2, seed: 1 }.bytes());
+    assert_eq!(
+        s.steps[0].request,
+        OwnedRequest::Write {
+            fh: 1,
+            offset: 0,
+            data: want
+        }
+    );
+    assert_eq!(
+        s.steps[1].expect,
+        Expect::Reply(OwnedReply::Read(vec![0; 4]))
+    );
+    let e = load_error(json!([
+        {"request": {"op": "write", "fh": 1, "offset": 0, "data": {"zeros": 1u64 << 40}},
+         "expect": {"status": "bad-fh"}}
+    ]));
+    assert!(e.contains("zeros"), "{e}");
+    let e = load_error(json!([
+        {"request": {"op": "write", "fh": 1, "offset": 0, "data": {"concat": [7]}},
+         "expect": {"status": "bad-fh"}}
+    ]));
+    assert!(e.contains("concat[0]"), "{e}");
+}
+
+/// A handle written `{"literal": n}` is sent as `n`, unpaired, and written
+/// back the same way; anything else in its place is a load error.
+#[test]
+fn a_literal_handle_is_marked_and_written_back_as_one() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let steps = json!([
+        {"request": {"op": "close", "fh": {"literal": 0}}, "expect": {"status": "bad-fh"}},
+        {"request": {"op": "close", "fh": 0}, "expect": {"status": "bad-fh"}}
+    ]);
+    let s = load(&write(dir.path(), "l.json", &scenario(steps))).unwrap();
+    assert!(s.steps[0].literal_fh);
+    assert!(!s.steps[1].literal_fh);
+    assert_eq!(s.steps[0].request, OwnedRequest::Close { fh: 0 });
+    let back: Value = serde_json::from_str(&aether_conform::scenario::to_json_string(&s)).unwrap();
+    assert_eq!(back["steps"][0]["request"]["fh"], json!({"literal": 0}));
+    assert_eq!(back["steps"][1]["request"]["fh"], json!(0));
+    let e = load_error(json!([
+        {"request": {"op": "close", "fh": {"literal": -1}}, "expect": {"status": "bad-fh"}}
+    ]));
+    assert!(e.contains("literal"), "{e}");
+}

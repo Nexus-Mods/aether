@@ -268,6 +268,7 @@ fn scenario(g: Geometry) -> Scenario {
             cite,
             note: Some(note.to_string()),
             client: 0,
+            literal_fh: false,
         });
     };
     add(
@@ -501,6 +502,7 @@ fn play(
             got,
             passed: passes(&why),
             note: why,
+            answer: None,
         });
         next += 1;
     };

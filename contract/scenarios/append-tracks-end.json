@@ -1,0 +1,26 @@
+{
+  "name": "append-tracks-end",
+  "description": "An OPEN_APPEND handle writes at the file's end as it is when each WRITE is served, after another handle's WRITE or SETATTR (wire.md 3.4.3: \"each WRITE lands at the file's end as it is when the WRITE is served, after every other handle's WRITEs and SETATTRs\"); it serves READ (3.4.4), and a zero-length WRITE changes nothing (3.4.5).",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/log.txt", "contents": "start:"}], "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write", "append"], "path": "saves/log.txt"}, "expect": {"reply": {"fh": 1, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/log.txt"}, "expect": {"reply": {"fh": 2, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "start:"}}},
+    {"request": {"op": "write", "fh": 2, "offset": 6, "data": "XYZ"}, "expect": {"reply": {"written": 3}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "A"}, "expect": {"reply": {"written": 1}}, "note": "lands at 9, after fh 2's bytes"},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "start:XYZA"}}},
+    {"request": {"op": "setattr", "fh": 2, "size": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "write", "fh": 1, "offset": 99, "data": "B"}, "expect": {"reply": {"written": 1}}, "note": "lands at 4, the end fh 2's SETATTR left"},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": ""}, "expect": {"reply": {"written": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/log.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 5, "mtime": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/log.txt"}, "expect": {"reply": {"fh": 3, "size": 5, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"reply": {"data": "starB"}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

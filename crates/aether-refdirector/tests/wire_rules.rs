@@ -199,7 +199,8 @@ fn a_write_or_length_past_what_it_holds_is_no_space() {
     assert_eq!(d.write(fh, u64::MAX, b"x"), Err(Status::NoSpace));
     assert_eq!(d.write(fh, u64::MAX - 1, b"xyz"), Err(Status::NoSpace));
     assert_eq!(d.write(fh, cap, b"x"), Err(Status::NoSpace));
-    assert_eq!(d.write(fh, cap + 1_000_000, b""), Err(Status::NoSpace));
+    // A zero-length WRITE changes nothing, wherever its offset (3.4.5).
+    assert_eq!(d.write(fh, cap + 1_000_000, b""), Ok(0));
     assert_eq!(d.set_attr(fh, u64::MAX), Err(Status::NoSpace));
     assert_eq!(d.set_attr(fh, cap + 1), Err(Status::NoSpace));
     assert_eq!(d.contents("a"), Some(b"keep".to_vec()));
@@ -510,4 +511,308 @@ fn rename_moves_a_directory_and_what_is_under_it() {
 
     let mut ro = Reference::new().with_dir("sealed");
     assert_eq!(ro.rename(R0, "sealed", "x"), Err(Status::ReadOnly));
+}
+
+/// 3.4.7: a handle follows its file through a RENAME, its own or one of a
+/// directory above it, and never reaches a file later created at the old
+/// name. The shim's save pattern writes, renames into place, then writes
+/// through the same handle.
+#[test]
+fn a_handle_follows_its_file_through_a_rename() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("saves")
+        .with("saves/final.sav", b"OLD".to_vec(), ReadStyle::Whole)
+        .with_dir("dir")
+        .with("dir/f.txt", b"abc".to_vec(), ReadStyle::Whole);
+    let tmp = d
+        .open(R0, RW | OpenFlags::CREATE, "saves/final.tmp")
+        .unwrap()
+        .fh;
+    assert_eq!(d.write(tmp, 0, b"NEWDATA"), Ok(7));
+    assert_eq!(d.rename(R0, "saves/final.tmp", "saves/Final.sav"), Ok(()));
+    assert_eq!(d.write(tmp, 7, b"!"), Ok(1), "the handle follows its file");
+    assert_eq!(d.set_attr(tmp, 8), Ok(()));
+    assert_eq!(read_inline(&mut d, tmp, 0, 16), Ok(b"NEWDATA!".to_vec()));
+    assert_eq!(d.contents("saves/final.sav"), Some(b"NEWDATA!".to_vec()));
+    // A file created at the old name is not the handle's.
+    let again = d
+        .open(
+            R0,
+            RW | OpenFlags::CREATE | OpenFlags::EXCL,
+            "saves/final.tmp",
+        )
+        .unwrap()
+        .fh;
+    assert_eq!(d.write(tmp, 0, b"n"), Ok(1));
+    assert_eq!(d.contents("saves/final.tmp"), Some(Vec::new()));
+    assert_eq!(d.contents("saves/final.sav"), Some(b"nEWDATA!".to_vec()));
+    assert_eq!(d.close(again), Ok(()));
+    assert_eq!(d.close(tmp), Ok(()));
+
+    // A file under a renamed directory.
+    let f = d.open(R0, OpenFlags::READ, "dir/f.txt").unwrap().fh;
+    assert_eq!(d.rename(R0, "dir", "Moved"), Ok(()));
+    assert_eq!(read_inline(&mut d, f, 0, 16), Ok(b"abc".to_vec()));
+    assert_eq!(d.mkdir(R0, 0o755, "dir"), Ok(()));
+    let new = d.open(R0, RW | OpenFlags::CREATE, "dir/f.txt").unwrap().fh;
+    assert_eq!(d.write(new, 0, b"zz"), Ok(2));
+    assert_eq!(read_inline(&mut d, f, 0, 16), Ok(b"abc".to_vec()));
+    assert_eq!(d.close(f), Ok(()));
+    assert_eq!(d.close(new), Ok(()));
+}
+
+/// 3.4.8: a handle whose file was deleted, or replaced by a RENAME onto its
+/// name, fails its READ, WRITE and SETATTR (as the reference chooses), never
+/// reaches a file later created at or moved to that name, and closes OK.
+#[test]
+fn a_handle_whose_file_is_gone_never_reaches_a_new_file_at_its_name() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("a.txt", b"old!".to_vec(), ReadStyle::Whole)
+        .with("b.txt", b"OLD".to_vec(), ReadStyle::Whole)
+        .with("c.txt", b"CCC".to_vec(), ReadStyle::Whole);
+    let gone = d.open(R0, RW, "a.txt").unwrap().fh;
+    assert_eq!(d.delete(R0, "a.txt"), Ok(()));
+    let new = d
+        .open(R0, RW | OpenFlags::CREATE | OpenFlags::EXCL, "A.txt")
+        .unwrap()
+        .fh;
+    assert_eq!(d.write(new, 0, b"new"), Ok(3));
+    assert_eq!(read_inline(&mut d, gone, 0, 16), Err(Status::IoError));
+    assert_eq!(d.write(gone, 0, b"Z"), Err(Status::NotFound));
+    assert_eq!(d.set_attr(gone, 0), Err(Status::NotFound));
+    assert_eq!(d.contents("a.txt"), Some(b"new".to_vec()));
+    assert_eq!(d.close(gone), Ok(()));
+    assert_eq!(d.close(new), Ok(()));
+
+    // Replaced by a rename onto its name: the handle does not read the file
+    // that replaced its own.
+    let replaced = d.open(R0, OpenFlags::READ, "b.txt").unwrap().fh;
+    assert_eq!(d.rename(R0, "c.txt", "b.txt"), Ok(()));
+    assert_eq!(read_inline(&mut d, replaced, 0, 16), Err(Status::IoError));
+    assert_eq!(d.write(replaced, 0, b"x"), Err(Status::NotFound));
+    assert_eq!(d.contents("b.txt"), Some(b"CCC".to_vec()));
+    assert_eq!(d.close(replaced), Ok(()));
+}
+
+/// 3.4.7, 3.4.13: after a RENAME_X the reference's handle follows the file
+/// to its new root.
+#[test]
+fn a_handle_follows_its_file_to_another_root() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("a.bin", b"abcd".to_vec(), ReadStyle::Whole)
+        .with_root(1);
+    let fh = d.open(R0, RW, "a.bin").unwrap().fh;
+    assert_eq!(d.rename_x(R0, r1, "a.bin", "A.bin"), Ok(()));
+    assert_eq!(read_inline(&mut d, fh, 0, 16), Ok(b"abcd".to_vec()));
+    assert_eq!(d.write(fh, 4, b"e"), Ok(1));
+    assert_eq!(d.contents(&key(1, "a.bin")), Some(b"abcde".to_vec()));
+    let o = d.open(R0, RW | OpenFlags::CREATE, "a.bin").unwrap().fh;
+    assert_eq!(d.write(fh, 0, b"Z"), Ok(1));
+    assert_eq!(d.contents("a.bin"), Some(Vec::new()));
+    assert_eq!(d.close(o), Ok(()));
+    assert_eq!(d.close(fh), Ok(()));
+}
+
+/// 3.4.3, 3.4.7, 3.4.9, 3.4.13: a create whose parent is missing, or is a
+/// file, is refused (the reference answers Status::NotFound for both), and
+/// nothing is created or moved.
+#[test]
+fn a_create_under_a_missing_parent_or_a_file_is_not_found() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("saves")
+        .with("saves/a.txt", b"abc".to_vec(), ReadStyle::Whole)
+        .with_root(1);
+    for p in ["saves/no/such.txt", "saves/a.txt/below", "none/x"] {
+        assert_eq!(
+            d.open(R0, RW | OpenFlags::CREATE, p).map(|_| ()),
+            Err(Status::NotFound),
+            "{p}"
+        );
+        assert_eq!(d.mkdir(R0, 0o755, p), Err(Status::NotFound), "{p}");
+        // Below `from` itself, a `to` inside `from` is answered first.
+        let inside = p.starts_with("saves/a.txt/");
+        let want = if inside {
+            Status::BadRequest
+        } else {
+            Status::NotFound
+        };
+        assert_eq!(d.rename(R0, "saves/a.txt", p), Err(want), "{p}");
+        assert_eq!(
+            d.rename_x(R0, r1, "saves/a.txt", p),
+            Err(Status::NotFound),
+            "{p}"
+        );
+        assert!(!d.get_attr(R0, p).unwrap().found, "{p}");
+    }
+    assert_eq!(names(&mut d, R0, "."), vec![("saves".to_string(), true)]);
+    assert_eq!(
+        names(&mut d, R0, "saves"),
+        vec![("a.txt".to_string(), false)]
+    );
+    assert_eq!(names(&mut d, r1, "."), Vec::new());
+    assert_eq!(d.contents("saves/a.txt"), Some(b"abc".to_vec()));
+    // A parent the reference implies (a file below it, a writable prefix)
+    // is a directory.
+    let mut implied = Reference::new()
+        .writable_under("w/")
+        .with("data/deep/f", vec![1], ReadStyle::Whole)
+        .writable_under("data/");
+    assert!(implied.open(R0, RW | OpenFlags::CREATE, "w/new").is_ok());
+    assert_eq!(implied.mkdir(R0, 0o755, "data/deep/sub"), Ok(()));
+}
+
+/// 3.4.3: OPEN_EXCL on an existing directory the writable provider holds is
+/// Status::Exists, before the kind of entry is looked at; any other write
+/// open of it is Status::IsDir (with OPEN_CREATE) or Status::IoError, and one
+/// no writable provider serves Status::ReadOnly.
+#[test]
+fn open_excl_on_a_directory_is_exists() {
+    let mut d = Reference::new()
+        .writable_under("saves/")
+        .with_dir("saves")
+        .with_dir("saves/dir")
+        .with_dir("data");
+    for flags in [
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCL,
+        OpenFlags::WRITE | OpenFlags::EXCL,
+        RW | OpenFlags::CREATE | OpenFlags::EXCL | OpenFlags::TRUNC,
+    ] {
+        assert_eq!(
+            d.open(R0, flags, "saves/DIR").map(|_| ()),
+            Err(Status::Exists),
+            "{flags:?}"
+        );
+        assert_eq!(
+            d.open(R0, flags, "data").map(|_| ()),
+            Err(Status::ReadOnly),
+            "{flags:?}"
+        );
+    }
+    assert_eq!(
+        d.open(R0, OpenFlags::WRITE | OpenFlags::CREATE, "saves/dir")
+            .map(|_| ()),
+        Err(Status::IsDir)
+    );
+    assert_eq!(
+        d.open(R0, OpenFlags::WRITE, "saves/dir").map(|_| ()),
+        Err(Status::IoError)
+    );
+    assert!(d.get_attr(R0, "saves/dir").unwrap().is_dir);
+}
+
+/// 3.4.7: a directory renamed onto an existing file is Status::IoError, and
+/// nothing moves; a file onto an empty directory may replace it, as the
+/// reference does.
+#[test]
+fn a_directory_never_replaces_a_file() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("dir")
+        .with("dir/x", vec![1], ReadStyle::Whole)
+        .with("f.txt", b"f".to_vec(), ReadStyle::Whole)
+        .with_dir("empty");
+    assert_eq!(d.rename(R0, "dir", "F.TXT"), Err(Status::IoError));
+    assert_eq!(d.rename(R0, "empty", "f.txt"), Err(Status::IoError));
+    assert_eq!(d.contents("f.txt"), Some(b"f".to_vec()));
+    assert_eq!(d.contents("dir/x"), Some(vec![1]));
+    assert!(d.get_attr(R0, "empty").unwrap().is_dir);
+    assert_eq!(d.rename(R0, "f.txt", "empty"), Ok(()));
+    assert_eq!(d.contents("empty"), Some(b"f".to_vec()));
+}
+
+/// 3.2: the reference holds no named streams, so every request naming one
+/// is a name it does not have (Status::NotFound, GETATTR found = 0), and no
+/// entry with `:` in its name is ever stored or listed.
+#[test]
+fn a_named_stream_is_a_name_the_reference_does_not_have() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("saves")
+        .with("saves/x.sav", b"data".to_vec(), ReadStyle::Whole)
+        .with_root(1);
+    let nf = Err(Status::NotFound);
+    for s in [
+        "saves/x.sav:stream",
+        "saves/x.sav:zone.identifier:$data",
+        "saves/n:s",
+    ] {
+        assert_eq!(d.get_attr(R0, s), Ok(ABSENT), "{s}");
+        for flags in [
+            OpenFlags::READ,
+            RW | OpenFlags::CREATE,
+            RW | OpenFlags::CREATE | OpenFlags::TRUNC,
+            OpenFlags::WRITE,
+        ] {
+            assert_eq!(d.open(R0, flags, s).map(|_| ()), nf, "{s} {flags:?}");
+        }
+        assert_eq!(d.mkdir(R0, 0o755, s), nf, "{s}");
+        assert_eq!(d.delete(R0, s), nf, "{s}");
+        assert_eq!(d.rename(R0, s, "saves/y.sav"), nf, "{s}");
+        assert_eq!(d.rename(R0, "saves/x.sav", s), nf, "{s}");
+        assert_eq!(d.rename_x(R0, r1, "saves/x.sav", s), nf, "{s}");
+        assert_eq!(d.rename_x(R0, r1, s, "y"), nf, "{s}");
+        assert_eq!(d.stored_names(R0, 0, s), Err(Status::NotFound), "{s}");
+    }
+    assert_eq!(
+        names(&mut d, R0, "saves"),
+        vec![("x.sav".to_string(), false)]
+    );
+    assert_eq!(d.contents("saves/x.sav"), Some(b"data".to_vec()));
+}
+
+/// 3.4.5: a WRITE of `len = 0` is OK with `written = 0` and changes
+/// nothing, wherever its offset: it never grows the file.
+#[test]
+fn a_zero_length_write_changes_nothing() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("a", b"abc".to_vec(), ReadStyle::Whole);
+    let fh = d.open(R0, RW, "a").unwrap().fh;
+    let app = d.open(R0, RW | OpenFlags::APPEND, "a").unwrap().fh;
+    for at in [0, 3, 4, 100, u64::MAX] {
+        assert_eq!(d.write(fh, at, b""), Ok(0), "{at}");
+        assert_eq!(d.write(app, at, b""), Ok(0), "{at}");
+    }
+    assert_eq!(d.contents("a"), Some(b"abc".to_vec()));
+    assert_eq!(d.get_attr(R0, "a").unwrap().size, 3);
+}
+
+/// wire.md 2.8.1: a request is served whole, "the state before it or the
+/// state after it, never a mixture". An OPEN_CREATE and a MKDIR of one
+/// name, sent at once from two threads over and over, leave one entry of
+/// one kind: never a file and a directory both at the name.
+#[test]
+fn a_create_and_a_mkdir_of_one_name_never_both_land() {
+    let base = Reference::new().writable_under("saves").with_dir("saves");
+    for i in 0..300 {
+        let name = format!("saves/n{i}");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (mut a, mut b) = (base.share(), base.share());
+        let (ba, bb) = (barrier.clone(), barrier);
+        let (na, nb) = (name.clone(), name.clone());
+        let t = std::thread::spawn(move || {
+            ba.wait();
+            a.open(R0, OpenFlags::WRITE | OpenFlags::CREATE, &na)
+                .is_ok()
+        });
+        bb.wait();
+        let made_dir = b.mkdir(R0, 0o755, &nb).is_ok();
+        let made_file = t.join().unwrap();
+        assert!(
+            !(made_file && made_dir),
+            "{name}: both the create and the MKDIR succeeded"
+        );
+        let mut d = base.share();
+        let mut l = Listing::default();
+        d.read_dir(R0, "saves", &mut l).unwrap();
+        let here = l.iter().filter(|e| e.name == format!("n{i}")).count();
+        assert_eq!(here, 1, "{name}: listed {here} times");
+    }
 }

@@ -44,11 +44,13 @@
 //!   stamps with the director's clock). Not compared.
 //!
 //! Some fields the rules do not compare must still be well formed, whatever
-//! the expectation: an OPEN reply's `fh` is never 0 (wire.md 3.4.3: the shim
-//! keeps 0 for a directory it made with MKDIR), and an `mtime` is below 2^40,
-//! as a time in seconds is (3.2, Timestamps). The runner checks the raw OPEN
-//! reply's reserved bits ([`open_reply_reserved`]) and a STAGE_EXEC path
-//! (`run.rs`, `stage_check`).
+//! the expectation: an OPEN reply's `fh` is never 0 (wire.md 3.4.3: a client
+//! may send `CLOSE(0)` for a directory it made with MKDIR), and an `mtime` is
+//! below 2^40,
+//! as a time in seconds is (3.2, Timestamps). The runner checks the raw
+//! reply's shape (`crate::shape`: sizes, zero bytes, an OPEN reply's reserved
+//! bits, REG_KEY's child order) and a STAGE_EXEC path (`run.rs`,
+//! `stage_check`).
 //!
 //! Besides comparing, a session checks one rule across steps, which no single
 //! answer shows:
@@ -271,8 +273,8 @@ impl Session {
                 }
                 if g.fh == 0 {
                     return Err(
-                        "fh 0, which a director never issues (wire.md 3.4.3: the shim keeps 0 \
-                         for a directory it made with MKDIR, and sends CLOSE(0) for it)"
+                        "fh 0, which a director never issues (wire.md 3.4.3: a client may \
+                         send CLOSE(0) for a directory it made with MKDIR)"
                             .into(),
                     );
                 }

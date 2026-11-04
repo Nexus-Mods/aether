@@ -5,8 +5,12 @@
 //! YAML block with the scenario's error, if any, and each failed step's
 //! request (in the scenario format, so it can be pasted into a scenario;
 //! a malformed request, which that format cannot say, is described in a
-//! string), expected and got answers and note. An adapter error ends the
-//! run with `Bail out!`, so the plan's count is not reached.
+//! string), expected and got answers and note. After the test points, one
+//! comment line per opcode the scenario files sent counts the answers the
+//! director gave (`# answers open: exists 3, is-dir 0, ok 40`): every
+//! answer a step allows is listed, so one no step drew shows as 0. An
+//! adapter error ends the run with `Bail out!`, so the plan's count is not
+//! reached.
 //!
 //! JSON is one object:
 //!
@@ -15,11 +19,13 @@
 //!                 "steps": [{"index": 0, "request": {"op": "..."}, "expected": "...",
 //!                            "got": "...", "passed": false, "note": "..."}]}],
 //!  "seed": null,
+//!  "answers": {"open": {"exists": 3, "is-dir": 0, "ok": 40}},
 //!  "adapter_error": null}
 //! ```
 //!
 //! `seed` is the generator's seed for a generated run and `null` for
-//! scenarios read from files.
+//! scenarios read from files. `answers` counts only the scenario files'
+//! steps, as the TAP comment lines do.
 
 use serde_json::{json, Value};
 
@@ -62,6 +68,10 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
             }
         }
         out.push_str("  ...\n");
+    }
+    for (op, counts) in &report.answers {
+        let list: Vec<String> = counts.iter().map(|(a, n)| format!("{a} {n}")).collect();
+        out.push_str(&format!("# answers {op}: {}\n", list.join(", ")));
     }
     if let Some(e) = &report.adapter_error {
         for line in e.lines() {
@@ -109,6 +119,7 @@ pub fn json(report: &RunReport) -> Value {
     json!({
         "scenarios": report.scenarios.iter().map(scenario).collect::<Vec<_>>(),
         "seed": report.seed,
+        "answers": report.answers,
         "adapter_error": report.adapter_error,
     })
 }
@@ -149,6 +160,7 @@ mod tests {
                 .collect(),
             adapter_error: None,
             seed: None,
+            answers: Default::default(),
         }
     }
 
@@ -168,5 +180,18 @@ mod tests {
             2,
             "{out}"
         );
+    }
+
+    /// Every answer a step allowed is listed, a count of 0 included.
+    #[test]
+    fn the_answers_are_listed_by_opcode_with_their_zeros() {
+        let mut r = report(&[("a", true)]);
+        r.answers
+            .entry("open".into())
+            .or_default()
+            .extend([("ok".to_string(), 3), ("is-dir".to_string(), 0)]);
+        let out = tap(&r, 1);
+        assert!(out.contains("# answers open: is-dir 0, ok 3\n"), "{out}");
+        assert_eq!(json(&r)["answers"]["open"]["is-dir"], 0);
     }
 }

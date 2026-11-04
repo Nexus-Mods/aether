@@ -214,13 +214,14 @@ pub fn put_file_name(name: &str, buf: &mut [u8]) -> (Fit, usize) {
     if buf.len() < 8 {
         return (Fit::Mismatch, 0);
     }
-    let units: Vec<u16> = name.encode_utf16().collect();
-    let fits = units.len().min((buf.len() - 4) / 2);
-    put_u32(buf, 0, (units.len() * 2) as u32);
-    for (i, u) in units[..fits].iter().enumerate() {
+    // Counted, then written in place: no allocation.
+    let len = name.encode_utf16().count();
+    let fits = len.min((buf.len() - 4) / 2);
+    put_u32(buf, 0, (len * 2) as u32);
+    for (i, u) in name.encode_utf16().take(fits).enumerate() {
         buf[4 + i * 2..6 + i * 2].copy_from_slice(&u.to_le_bytes());
     }
-    let fit = if fits == units.len() {
+    let fit = if fits == len {
         Fit::Fits
     } else {
         Fit::Overflow

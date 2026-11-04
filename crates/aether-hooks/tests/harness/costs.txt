@@ -10,9 +10,9 @@ close round_trips=1 ring_bytes=8 allocs<=0
 create_directory round_trips=2 ring_bytes=50 allocs<=79
 create_process round_trips=2 ring_bytes=58 allocs<=120
 delete round_trips=3 ring_bytes=68 allocs<=74
-final_path_name_cold round_trips=1 ring_bytes=36 allocs<=56
-final_path_name_not_stored round_trips=1 ring_bytes=22 allocs<=41
-final_path_name_warm round_trips=0 ring_bytes=0 allocs<=40
+final_path_name_cold round_trips=1 ring_bytes=36 allocs<=26
+final_path_name_not_stored round_trips=1 ring_bytes=22 allocs<=11
+final_path_name_warm round_trips=0 ring_bytes=0 allocs<=10
 list_100_entries round_trips=3 ring_bytes=2966 allocs<=131
 list_next_entry round_trips=0 ring_bytes=0 allocs<=1
 move round_trips=3 ring_bytes=85 allocs<=150

@@ -30,6 +30,15 @@ serde_json.workspace = true
 # A named section and its events, on Windows.
 [target.'cfg(windows)'.dependencies]
 aether-win.workspace = true
+# `job`: the kill-on-close job an adapter runs in, resuming a process
+# created suspended in it, and the director's wake event.
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 aether-testkit.workspace = true

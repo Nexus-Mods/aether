@@ -19,14 +19,19 @@
 //! which [`model`] makes from proptest values by reading them against an
 //! in-process reference, and shrinks the first that fails into a scenario
 //! file. `docs/conformance.md` is the user's guide.
+//!
+//! Unsafe is confined to [`job`] (Windows only): the Job Object an adapter
+//! runs in and the director's wake event.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod adapter;
 pub mod adapters;
 pub mod attach;
 pub mod compare;
 pub mod generate;
+#[cfg(windows)]
+pub mod job;
 pub mod malformed;
 pub mod model;
 pub mod report;

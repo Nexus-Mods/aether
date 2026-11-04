@@ -282,7 +282,7 @@ impl Drop for Adapter {
 /// The adapter's process tree.
 ///
 /// On Windows it is a Job Object that kills its members when closed
-/// (`aether_win::KillOnCloseJob`); the adapter is created suspended and
+/// (`crate::job::KillOnCloseJob`); the adapter is created suspended and
 /// assigned before it runs, so every process it starts is in the job. On
 /// Unix the adapter leads a new process group, and the group is sent
 /// `SIGKILL`. A process that leaves the group (`setsid`) is not followed.
@@ -299,7 +299,7 @@ struct ProcessTree {
     /// The leader's exit, once reaped.
     status: Option<std::process::ExitStatus>,
     #[cfg(windows)]
-    job: aether_win::KillOnCloseJob,
+    job: crate::job::KillOnCloseJob,
     #[cfg(unix)]
     group: u32,
     /// Whether the group has been sent SIGKILL (or must not be, being
@@ -311,7 +311,7 @@ struct ProcessTree {
 impl ProcessTree {
     #[cfg(windows)]
     fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
-        let job = aether_win::KillOnCloseJob::new()?;
+        let job = crate::job::KillOnCloseJob::new()?;
         let child = job.spawn(cmd)?;
         let tree = ProcessTree {
             child: None,

@@ -7,8 +7,12 @@
 # The inputs are the files git tracks among Cargo.toml, Cargo.lock,
 # rust-toolchain.toml, vendor/, crates/, bin/build-natives.ps1 and
 # contract/artifacts.json (the names the four are staged under), read from
-# the working tree, except the fixtures' crates (crates/*fixture*) and the
-# test kit (crates/aether-testkit): a change there changes no native. They are
+# the working tree, except the crates no native is built from: the fixtures'
+# (crates/*fixture*) and those named in $excluded below (the test kit, the
+# conformance harness, the reference director, the file ring), so a change
+# there changes no native. bin/natives-key.tests.ps1 checks, with cargo tree,
+# that neither native's dependency tree (x64 and i686) contains any of them.
+# They are
 # sorted by path (ordinal), and each is hashed as its UTF-8 path, a NUL, its
 # length in decimal, a NUL, then its bytes. So any change to an input's
 # content, a new or removed input or a rename gives another key. Whatever
@@ -19,7 +23,16 @@
 # .gitattributes fixes every text file's line endings (eol=lf), so a Windows
 # and a Linux checkout give the same key. Runs under Windows PowerShell 5.1
 # and PowerShell 7.
+#
+#   -ListExcluded  prints the excluded crates' folders, one per line
+#   -ListInputs    prints the inputs, one per line, instead of the key
+param([switch]$ListExcluded, [switch]$ListInputs)
 $ErrorActionPreference = 'Stop'
+
+# crates no native depends on (bin/natives-key.tests.ps1 checks it), besides
+# the fixtures' crates/*fixture*
+$excluded = @('crates/aether-testkit', 'crates/aether-conform', 'crates/aether-refdirector', 'crates/aether-filering')
+if ($ListExcluded) { $excluded; exit 0 }
 
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -28,7 +41,9 @@ $oldEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 try {
   $global:LASTEXITCODE = 0
-  $listed = & git -C $root ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml vendor crates bin/build-natives.ps1 contract/artifacts.json ':(exclude,glob)crates/*fixture*/**' ':(exclude)crates/aether-testkit'
+  $pathspec = @('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'vendor', 'crates', 'bin/build-natives.ps1', 'contract/artifacts.json', ':(exclude,glob)crates/*fixture*/**')
+  foreach ($e in $excluded) { $pathspec += ":(exclude)$e" }
+  $listed = & git -C $root ls-files -z -- @pathspec
   if ($LASTEXITCODE) { throw "natives-key: git ls-files failed (exit $LASTEXITCODE)" }
 } finally {
   [Console]::OutputEncoding = $oldEncoding
@@ -40,6 +55,7 @@ foreach ($chunk in @($listed)) {
 }
 if ($paths.Count -eq 0) { throw "natives-key: git lists none of the inputs" }
 $paths.Sort([StringComparer]::Ordinal)
+if ($ListInputs) { $paths; exit 0 }
 
 $utf8 = New-Object System.Text.UTF8Encoding $false
 $nul = [byte[]]@(0)

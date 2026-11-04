@@ -25,7 +25,7 @@
 //! - **Waking** (2.11). On a file ring nothing is signalled: the client
 //!   spins, as the shim does, and the director must not sleep on an event.
 //!   On a section the client opens `VFS_SERVER_EV` with the shim's rights
-//!   (`EVENT_MODIFY_STATE`, `aether_win::WakeEvent`) and sets it after
+//!   (`EVENT_MODIFY_STATE`, `crate::job::WakeEvent`) and sets it after
 //!   publishing a request and after freeing a slot, as the shim does; a
 //!   failed open is tolerated (no wake), as it is in the shim. Either way a
 //!   reply that has not come within the ring's spin budget is waited for by
@@ -72,7 +72,7 @@ pub struct Attached {
     ring_bytes: usize,
     arena_len: usize,
     #[cfg(windows)]
-    server_ev: Option<aether_win::WakeEvent>,
+    server_ev: Option<crate::job::WakeEvent>,
     deadline: Duration,
     what: String,
 }
@@ -241,8 +241,8 @@ pub fn payload_cap_and_arena(env: &Env) -> (u32, usize) {
 /// (`crates/aether-hooks/src/director.rs`, `connect_source`). The client
 /// event is not opened, as the shim does not open it.
 #[cfg(windows)]
-fn open_server_event(env: &Env) -> Option<aether_win::WakeEvent> {
-    aether_win::WakeEvent::open(env.get(aether_env::SERVER_EV)?).ok()
+fn open_server_event(env: &Env) -> Option<crate::job::WakeEvent> {
+    crate::job::WakeEvent::open(env.get(aether_env::SERVER_EV)?).ok()
 }
 
 /// Whether the shim would accept the roots `env` declares, checked as the
@@ -352,7 +352,7 @@ fn normalize_path_for_root(p: &str) -> String {
 /// sleeping.
 pub struct Wake<'a> {
     #[cfg(windows)]
-    server_ev: Option<&'a aether_win::WakeEvent>,
+    server_ev: Option<&'a crate::job::WakeEvent>,
     _seg: std::marker::PhantomData<&'a ()>,
 }
 

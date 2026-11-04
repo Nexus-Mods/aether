@@ -195,3 +195,42 @@ case that fails (`aether-conform run --generate`) is written in this format
 too, with the reference's answers as its expectations, so it replays as any
 other scenario.
 
+## Index
+
+Every scenario file, by what it is about. Each file's `description` says
+what it checks and cites wire.md.
+
+| About | Scenarios |
+|---|---|
+| HEARTBEAT, GETATTR | `heartbeat`, `getattr-files`, `getattr-missing`, `root-dot`, `root-dot-readonly` |
+| READDIR | `readdir-listing`, `readdir-case`, `readdir-roots-and-changes`, `readdir-unknown-root`, `paths-through-files` |
+| OPEN | `open-read`, `open-flags-zero`, `open-errors`, `open-write-existing-readonly-path`, `open-dirs-and-parents` |
+| READ | `read-inline`, `read-eof`, `read-bulk`, `read-bulk-threshold`, `read-offset-extremes` |
+| Handles | `handles-unique`, `handles-bad`, `handles-closed`, `handles-dir`, `handles-fh-zero`, `handles-two-on-one-file`, `handles-deleted-file`, `handles-follow-rename` |
+| Writing and reading back | `write-create`, `write-overwrite`, `write-append`, `write-trunc`, `write-setattr`, `write-setattr-size`, `write-growth`, `write-only-read`, `write-read-handle`, `write-offset-huge`, `write-case-spelling`, `write-excl-fold`, `write-then-read`, `append-tracks-end`, `regrow-after-truncate`, `truncate-then-read`, `extend-then-read-gap`, `bulk-read-sees-writes` |
+| The read cache | `cache-immutable-readonly`, `cache-overwrite-same-size`, `cache-content-change-same-size` |
+| RENAME | `rename-file`, `rename-dir`, `rename-replace`, `rename-respell`, `rename-refused`, `rename-root`, `rename-unknown-root`, `rename-onto-full-dir`, `rename-case-fold-source`, `rename-edges`, `write-rename-read`, `rename-dir-open-child`, `rename-dir-case-only` |
+| RENAME_X | `rename-x-file`, `rename-x-directory`, `rename-x-edges`, `rename-x-errors`, `rename-x-same-root`, `rename-x-read-both` |
+| MKDIR and DELETE | `mkdir-create`, `mkdir-errors`, `mkdir-existing`, `mkdir-existing-readonly`, `mkdir-spelling`, `mkdir-child-rename-parent`, `delete-file`, `delete-dir`, `delete-errors`, `delete-root`, `delete-dir-after-open-child`, `delete-and-excl-edges`, `type-change-same-name` |
+| Names and spellings | `case-fold-ascii`, `case-fold-collide`, `case-fold-unicode`, `case-fold-created`, `names-non-bmp`, `names-stream`, `names-stream-writable`, `stored-names-spelling`, `stored-names-unknown`, `stored-names-after-changes`, `stored-names-edges`, `spelling-after-delete-recreate`, `respell-parent-components`, `escape-paths` |
+| Roots | `roots-isolated`, `roots-unknown`, `roots-mutations-isolated`, `readonly-root-refuses-changes` |
+| STAGE_EXEC | `stage-exec`, `stage-exec-after-write` |
+| Registry | `registry-none`, `registry-lookup`, `registry-case`, `registry-bad-path`, `registry-values`, `registry-value-order`, `registry-delete-value`, `registry-create-key`, `registry-delete-key`, `registry-delete-unknown-key`, `registry-rename-key`, `registry-changed`, `registry-current-user`, `registry-limits`, `registry-key-too-large`, `registry-write-depth`, `registry-reads-and-limits`, `registry-refused-writes-keep-version`, `registry-key-lifecycle`, `registry-under-tombstone`, `registry-rename-changed-recreate` |
+| Several clients | `multi-handle-shared`, `multi-handles-unique`, `multi-write-visible`, `multi-registry-gen`, `multi-registry-overlay` |
+
+The interactions a director is most likely to get wrong each have a scenario
+of their own, to be read as the contract's example of them; generated cases
+(`--generate`) play them too, in random orders:
+
+| Interaction | Scenario |
+|---|---|
+| Write, then read | `write-then-read` |
+| Write, rename, read under the new name and miss under the old | `write-rename-read` |
+| Truncate, then read | `truncate-then-read` |
+| Extend past the end, then read the gap | `extend-then-read-gap` |
+| Two handles on one file | `handles-two-on-one-file` |
+| Delete with a handle open, then create again | `handles-deleted-file`, `delete-dir-after-open-child` |
+| Rename a directory, then open a child by the old and the new path | `rename-dir-open-child` |
+| A case-only rename, then READDIR and STORED_NAMES | `rename-dir-case-only` |
+| RENAME_X across roots, then read in both | `rename-x-read-both` |
+| A registry key created, given values, renamed, looked up under both names, deleted with values and subkeys | `registry-key-lifecycle` |

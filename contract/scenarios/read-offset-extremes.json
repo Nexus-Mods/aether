@@ -1,0 +1,26 @@
+{
+  "name": "read-offset-extremes",
+  "description": "READs of a file a read-only provider holds at offsets near 2^32, 2^63 and u64::MAX, and with `len` u32::MAX, inline and in bulk: each answers min(len, size - offset) bytes, never a wrap (wire.md 3.4.4: \"That holds at any offset, with no wrap: a READ at or past the end answers 0 bytes, whatever its `offset` and `len`\").",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "a.txt", "contents": "hello"}, {"path": "big.bin", "contents": {"size": 70000, "seed": 3}}]}]},
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 1, "size": 5, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 18446744073709551615, "len": 16}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 18446744073709551615, "len": 16, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 4294967295, "len": 16}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 4294967296, "len": 1}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 4294967296, "len": 1, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 9223372036854775808, "len": 16}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 3, "len": 4294967295}, "expect": {"reply": {"data": "lo"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 3, "len": 4294967295, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": "lo"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 5, "len": 4294967295}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 0}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 18446744073709551614, "len": 4294967295, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "big.bin"}, "expect": {"reply": {"fh": 2, "size": 70000, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 69999, "len": 4294967295}, "expect": {"reply": {"data": {"hex": "6d"}}}, "note": "wire.md 3.4.4: the last byte"},
+    {"request": {"op": "read", "fh": 2, "offset": 69999, "len": 4294967295, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"hex": "6d"}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 70000, "len": 0, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 2, "offset": 4294967301, "len": 16}, "expect": {"reply": {"data": ""}}, "note": "wire.md 3.4.4: not offset 5"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

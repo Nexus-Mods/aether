@@ -1,0 +1,16 @@
+{
+  "name": "multi-registry-overlay",
+  "description": "Two processes of one session share one overlay (wire.md 2.8.1, 4.3, 4.5): client 1 creates a key, sets two values and renames it; client 0 sees the old name gone and the new one with both values, then deletes it; client 1 sees it tombstoned and the parent changed. Each client reads `reg_gen` in its own mapping, and it moves past every write the other made.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "a.txt", "contents": "a"}]}], "registry": {"keys": [{"path": "\\Registry\\Machine\\Software\\Conform"}]}},
+  "steps": [
+    {"request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Conform\\A", "volatile": false}, "expect": {"reply": {"version": 2}}, "client": 1},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Conform\\A", "name": "x", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"reply": {"version": 3}}, "client": 1},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Conform\\A", "name": "y", "ty": 4, "data": {"hex": "02000000"}}, "expect": {"reply": {"version": 4}}, "client": 1},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\A", "new_leaf": "B"}, "expect": {"reply": {"version": 5}}, "client": 1},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\A"}, "expect": {"reply": {"version": 5, "node": null}}, "note": "wire.md 2.8.1: one tree, whichever process asks"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\B"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "x", "ty": 4, "data": {"hex": "01000000"}}, {"name": "y", "ty": 4, "data": {"hex": "02000000"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\B"}, "expect": {"reply": {"version": 6}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\B"}, "expect": {"reply": {"version": 6, "state": "tombstoned", "below": false}}, "client": 1},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform", "subtree": true, "since": 4}, "expect": {"reply": {"version": 6, "changed": true}}, "client": 1}
+  ]
+}

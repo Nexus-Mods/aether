@@ -277,6 +277,84 @@ pub enum Break {
     /// (wire.md 2.8.1: "the state before it or the state after it, never a
     /// mixture").
     RenameInSteps,
+    /// WRITEs are kept by the handle that made them and reach the file at
+    /// its CLOSE: that handle reads them, nothing else sees them before
+    /// (wire.md 3.4.1: a size is the file's length now, WRITEs through
+    /// handles still open included; 3.4.4: every handle reads the file as it
+    /// is now).
+    WriteAtClose,
+    /// GETATTR of a file's old name after a RENAME still finds it, as a
+    /// lookup cache that RENAME does not clear would (wire.md 3.4.7: the file
+    /// moves).
+    RenameKeepsOldName,
+    /// A RENAME that changes only a directory's case respells the directory,
+    /// but STORED_NAMES of a path below it answers the old spelling, as a
+    /// table of full stored paths not updated for a parent's respell would
+    /// (wire.md 3.4.7: the rename respells the name; 3.4.12).
+    CaseRenameStaleChildren,
+    /// RENAME_X between roots copies the bytes the file had when the tree
+    /// was mounted (none for a file made since), as a copy from the backing
+    /// store that misses the session's writes would (wire.md 3.4.13: the
+    /// file is copied).
+    RenameXFromMount,
+    /// REG_DELETE_KEY hides a key's values instead of dropping them, so a
+    /// REG_CREATE_KEY of it brings them back (wire.md 4.3: "everything below
+    /// it is dropped").
+    DeleteKeepsSubtree,
+    /// REG_CHANGED of a key renamed away says unchanged (wire.md 4.3: a key
+    /// with no node is changed when it was "deleted or renamed away" after
+    /// `since`).
+    RenameUnchanged,
+    /// REG_SET_VALUE under a tombstoned key or ancestor is `ST_NOT_FOUND`
+    /// (wire.md 4.3: it makes the path exist, reviving the chain).
+    SetUnderTombstoneNotFound,
+    /// A value name's limit is counted in UTF-8 bytes (wire.md 4.1: limits
+    /// count UTF-16 code units).
+    ValueNameBytes,
+    /// REG_SET_VALUE of a name a key holds deletes the value and appends a
+    /// new one in the caller's spelling (wire.md 4.3: it replaces the value,
+    /// "keeping its stored name").
+    SetValueAppends,
+    /// READ, WRITE, SETATTR and CLOSE of `fh` 0 answer `ST_OK` (wire.md
+    /// 3.4.3: 0 is never issued; 3.4.10: `CLOSE(0)` is `ST_BAD_FH`).
+    FhZeroOk,
+    /// A name deleted and created again takes back the spelling it had
+    /// before the delete, as a name table never cleaned of deleted names
+    /// would (wire.md 3.2: a name keeps the spelling it was created with).
+    SpellingOutlivesDelete,
+    /// DELETE removes the path in every root that has it (wire.md 3.2: a
+    /// request addresses its own root).
+    DeleteIgnoresRoot,
+    /// GETATTR of the root `.` is found = 0 (wire.md 3.2: the root is `.`;
+    /// 3.4.1).
+    RootNotFound,
+    /// DELETE of a directory that holds only directories deletes them all
+    /// (wire.md 3.4.8: a directory with anything under it is `ST_IO_ERROR`).
+    DeleteDirIgnoresEmptyDirs,
+    /// GETATTR answers the kind a path had the first time it was found, as a
+    /// stat cache that DELETE does not clear would (wire.md 3.4.1).
+    StaleKind,
+    /// Not a broken rule but [`Break::StageCopy`]'s stager, copying the
+    /// bytes the image had when the tree was mounted (wire.md 3.4.14: "A
+    /// staged image holds the file's bytes as they are when STAGE_EXEC is
+    /// served, writes in the session included").
+    StageMountBytes,
+    /// A bulk READ of a (file, offset, length) read in bulk before is
+    /// answered with the bytes of that first read, as a read-ahead cache
+    /// that writes do not clear would (wire.md 3.4.4: inline or bulk, a
+    /// handle reads the file as it is now).
+    BulkCache,
+    /// DELETE of a directory under which a deleted file still has an open
+    /// handle is `ST_IO_ERROR`, as a delete left pending until the last
+    /// CLOSE would (wire.md 3.4.8: a file with open handles is deleted like
+    /// any other).
+    DeletePendingUntilClose,
+    /// GETATTR replies carry two bytes after their 18 (wire.md 3.4.1:
+    /// "Reply, 18 bytes"), which the shim's lenient decoder would ignore.
+    ReplyTrailing,
+    /// REG_KEY replies list a node's children in reverse order (wire.md 4.3:
+    /// "sorted by `folded` in byte order"), which the shim's map would hide.
+    UnsortedChildren,
 }
 
 impl Break {
@@ -336,6 +414,26 @@ impl Break {
             "torn-append" => Some(Break::TornAppend),
             "lost-update" => Some(Break::LostUpdate),
             "rename-in-steps" => Some(Break::RenameInSteps),
+            "write-at-close" => Some(Break::WriteAtClose),
+            "rename-keeps-old-name" => Some(Break::RenameKeepsOldName),
+            "case-rename-stale-children" => Some(Break::CaseRenameStaleChildren),
+            "rename-x-from-mount" => Some(Break::RenameXFromMount),
+            "delete-keeps-subtree" => Some(Break::DeleteKeepsSubtree),
+            "rename-unchanged" => Some(Break::RenameUnchanged),
+            "set-under-tombstone-not-found" => Some(Break::SetUnderTombstoneNotFound),
+            "value-name-bytes" => Some(Break::ValueNameBytes),
+            "set-value-appends" => Some(Break::SetValueAppends),
+            "fh-zero-ok" => Some(Break::FhZeroOk),
+            "spelling-outlives-delete" => Some(Break::SpellingOutlivesDelete),
+            "delete-ignores-root" => Some(Break::DeleteIgnoresRoot),
+            "root-not-found" => Some(Break::RootNotFound),
+            "delete-dir-ignores-empty-dirs" => Some(Break::DeleteDirIgnoresEmptyDirs),
+            "stale-kind" => Some(Break::StaleKind),
+            "stage-mount-bytes" => Some(Break::StageMountBytes),
+            "bulk-cache" => Some(Break::BulkCache),
+            "delete-pending-until-close" => Some(Break::DeletePendingUntilClose),
+            "reply-trailing" => Some(Break::ReplyTrailing),
+            "unsorted-children" => Some(Break::UnsortedChildren),
             _ => None,
         }
     }
@@ -451,6 +549,7 @@ fn mount(
         held: Arc::default(),
         view: Vec::new(),
         echo: String::new(),
+        tree: Arc::new(Mounts::of(&s.tree)),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -639,6 +738,7 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 held: d.held.clone(),
                 view: Vec::new(),
                 echo: String::new(),
+                tree: d.tree.clone(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
@@ -649,7 +749,9 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                         | Break::SlotZeroOnly
                         | Break::CompleteAbandoned
                         | Break::OpenFlagBits
-                        | Break::ErrorPayload),
+                        | Break::ErrorPayload
+                        | Break::ReplyTrailing
+                        | Break::UnsortedChildren),
                     ) => interposed(seg, &notifier, &mut d, b, &handles, &stop),
                     _ => RingServer::new(seg, notifier).and_then(|server| {
                         let arena = (arena_len > 0)
@@ -793,6 +895,18 @@ fn interposed(
                 reply[17] |= 0x02;
                 reply[18] = 1;
             }
+            if how == Break::ReplyTrailing
+                && head.opcode == Opcode::GetAttr as u32
+                && status == Status::Ok.code()
+            {
+                reply.extend_from_slice(&[0, 0]);
+            }
+            if how == Break::UnsortedChildren
+                && head.opcode == Opcode::RegKey as u32
+                && status == Status::Ok.code()
+            {
+                reply = reversed_children(reply);
+            }
             answers.push((slot, head.req_id, status, reply));
         }
         if let [a, b] = answers.as_mut_slice() {
@@ -818,6 +932,36 @@ fn interposed(
         }
     }
     Ok(())
+}
+
+/// [`Break::UnsortedChildren`]: a REG_KEY reply with its children in
+/// reverse order (each `folded:str | spelling:str | state:u8`, wire.md 4.3).
+fn reversed_children(reply: Vec<u8>) -> Vec<u8> {
+    let Some((at, n)) = crate::shape::key_children(&reply) else {
+        return reply;
+    };
+    let mut kids = Vec::new();
+    let mut i = at;
+    for _ in 0..n {
+        let start = i;
+        for _ in 0..2 {
+            let Some(len) = reply.get(i..i + 4) else {
+                return reply;
+            };
+            i += 4 + u32::from_le_bytes(len.try_into().unwrap()) as usize;
+        }
+        i += 1;
+        if i > reply.len() {
+            return reply;
+        }
+        kids.push(reply[start..i].to_vec());
+    }
+    let mut out = reply[..at].to_vec();
+    for k in kids.iter().rev() {
+        out.extend_from_slice(k);
+    }
+    out.extend_from_slice(&reply[i..]);
+    out
 }
 
 /// A request as [`interposed`] took it off the ring.
@@ -973,6 +1117,30 @@ struct Served {
     view: Vec<u8>,
     /// [`Break::SkipPastEndEcho`]'s STORED_NAMES answer.
     echo: String,
+    /// The tree's files as mounted, by (root, folded path), and its roots:
+    /// for the breaks that copy mounted bytes or act on every root.
+    tree: Arc<Mounts>,
+}
+
+/// What [`Served::tree`] holds.
+#[derive(Default)]
+struct Mounts {
+    files: BTreeMap<(u32, String), Vec<u8>>,
+    roots: Vec<RootId>,
+}
+
+impl Mounts {
+    fn of(t: &aether_refdirector::tree::Tree) -> Mounts {
+        let mut m = Mounts::default();
+        for r in &t.roots {
+            m.roots.push(RootId(r.id));
+            for f in &r.files {
+                m.files
+                    .insert((r.id, aether_casefold::fold(&f.path)), f.contents.bytes());
+            }
+        }
+        m
+    }
 }
 
 /// The state of [`Break::SnapshotReads`], [`Break::SetattrAtClose`],
@@ -1001,6 +1169,24 @@ struct Held {
     /// [`Break::TornAppend`]'s and [`Break::LostUpdate`]'s handles opened
     /// `OPEN_APPEND`.
     appends: std::collections::BTreeSet<u64>,
+    /// [`Break::WriteAtClose`]'s WRITEs kept by each handle.
+    pending: BTreeMap<u64, Vec<(u64, Vec<u8>)>>,
+    /// [`Break::RenameKeepsOldName`]'s old names and what they were.
+    old_names: BTreeMap<(u32, String), AttrResp>,
+    /// [`Break::CaseRenameStaleChildren`]'s respelled directories: (root,
+    /// folded path) and the stored path before the respell.
+    respelled: Vec<(u32, String, String)>,
+    /// [`Break::DeleteKeepsSubtree`]'s deleted keys' values, by folded path.
+    reg_hidden: BTreeMap<String, Vec<(String, u32, Vec<u8>)>>,
+    /// [`Break::RenameUnchanged`]'s keys renamed away, folded.
+    renamed_away: std::collections::BTreeSet<String>,
+    /// [`Break::SpellingOutlivesDelete`]'s deleted names' stored paths.
+    spellings: BTreeMap<(u32, String), String>,
+    /// [`Break::StaleKind`]'s kinds, by (root, folded path).
+    kinds: BTreeMap<(u32, String), bool>,
+    /// [`Break::BulkCache`]'s bulk replies, by (root, folded path, offset,
+    /// length).
+    bulk: BTreeMap<(u32, String, u64, u32), Vec<u8>>,
 }
 
 /// What was below a directory: each path below it as stored, and a file's
@@ -1200,6 +1386,31 @@ impl Served {
         }
     }
 
+    /// [`Break::WriteAtClose`]: the WRITEs handle `fh` kept, made now.
+    fn flush(&mut self, fh: u64) -> Result<(), Status> {
+        let kept = self.held().pending.remove(&fh).unwrap_or_default();
+        for (offset, data) in kept {
+            self.reference.write(fh, offset, &data)?;
+        }
+        Ok(())
+    }
+
+    /// [`Break::SpellingOutlivesDelete`]: a name just created respelled as
+    /// it was before it was deleted.
+    fn old_spelling(&mut self, root: RootId, path: &str) {
+        if self.broken != Some(Break::SpellingOutlivesDelete) {
+            return;
+        }
+        let old = self
+            .held()
+            .spellings
+            .get(&(root.0, aether_casefold::fold(path)))
+            .cloned();
+        if let Some(old) = old {
+            let _ = self.reference.rename(root, path, &old);
+        }
+    }
+
     /// Whether `root`'s `path` is a directory.
     fn is_dir(&mut self, root: RootId, path: &str) -> bool {
         self.reference
@@ -1221,7 +1432,30 @@ impl Served {
 impl Director for Served {
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
         let path = self.base(path);
+        if self.broken == Some(Break::RootNotFound) && path == "." {
+            return Ok(AttrResp {
+                found: false,
+                is_dir: false,
+                size: 0,
+                mtime: 0,
+            });
+        }
         let mut a = self.reference.get_attr(root, path)?;
+        let key = (root.0, aether_casefold::fold(path));
+        if self.broken == Some(Break::RenameKeepsOldName) && !a.found {
+            if let Some(old) = self.held().old_names.get(&key) {
+                a = old.clone();
+            }
+        }
+        if self.broken == Some(Break::StaleKind) && a.found {
+            let mut h = self.held();
+            match h.kinds.get(&key) {
+                Some(&k) => a.is_dir = k,
+                None => {
+                    h.kinds.insert(key, a.is_dir);
+                }
+            }
+        }
         if let Some(&size) = self
             .held()
             .sizes
@@ -1327,6 +1561,7 @@ impl Director for Served {
         let mut o = opened?;
         if !existed && flags.contains(OpenFlags::CREATE) {
             self.respell_parents(root, path);
+            self.old_spelling(root, path);
         }
         if matches!(self.broken, Some(Break::TornAppend | Break::LostUpdate))
             && flags.contains(OpenFlags::APPEND)
@@ -1384,8 +1619,26 @@ impl Director for Served {
             Some(Break::BankZero) => ReadSlot { slot: 0, ..at },
             _ => at,
         };
+        if self.broken == Some(Break::FhZeroOk) && fh == 0 {
+            return Ok(ReadReply::Inline(&[]));
+        }
         let fh = self.fh_in(fh);
         let fh = self.at_path(fh, false)?.unwrap_or(fh);
+        let kept = self.held().pending.get(&fh).cloned();
+        if let Some(kept) = kept {
+            let mut b = self.bytes(fh)?;
+            for (o, d) in kept {
+                let end = o as usize + d.len();
+                if b.len() < end {
+                    b.resize(end, 0);
+                }
+                b[o as usize..end].copy_from_slice(&d);
+            }
+            let start = offset.min(b.len() as u64) as usize;
+            let n = (b.len() - start).min(len as usize).min(at.inline_cap);
+            self.view = b[start..start + n].to_vec();
+            return Ok(ReadReply::Inline(&self.view));
+        }
         let offset = match self.broken {
             Some(Break::ReadOffsetWraps) => offset & 0xFFFF_FFFF,
             _ => offset,
@@ -1417,8 +1670,42 @@ impl Director for Served {
         }
         let broken = self.broken;
         let banks = self.banks.clone();
+        // [`Break::BulkCache`]: what an earlier bulk READ of this range gave,
+        // or the bytes now, to keep if this one is answered in bulk.
+        let path_of = self.held().paths.get(&fh).cloned();
+        let cache = match (broken, path_of) {
+            (Some(Break::BulkCache), Some((r, p))) => {
+                let key = (r, p, offset, len);
+                let before = self.held().bulk.get(&key).cloned();
+                let now = self.bytes(fh).unwrap_or_default();
+                let start = offset.min(now.len() as u64) as usize;
+                let end = start + (now.len() - start).min(len as usize);
+                Some((key, before, now[start..end].to_vec()))
+            }
+            _ => None,
+        };
+        let held = self.held.clone();
         match self.reference.read(at, slot_flags, fh, offset, len) {
             Ok(ReadReply::Bulk { len, arena_offset }) => {
+                if let (Some((key, before, now)), Some(arena)) = (cache, at.arena) {
+                    let mut h = held.lock().unwrap_or_else(|e| e.into_inner());
+                    match before {
+                        Some(b) => {
+                            let n = b.len();
+                            let _ = arena.fill_bank(at.slot, n, |buf| {
+                                buf.copy_from_slice(&b[..buf.len()]);
+                                Ok(buf.len())
+                            });
+                            return Ok(ReadReply::Bulk {
+                                len: n as u32,
+                                arena_offset,
+                            });
+                        }
+                        None => {
+                            h.bulk.insert(key, now);
+                        }
+                    }
+                }
                 let len = match broken {
                     Some(Break::ShortBulk) => len.min(256 * 1024),
                     Some(Break::LateBank) => {
@@ -1436,8 +1723,21 @@ impl Director for Served {
         }
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
+        if self.broken == Some(Break::FhZeroOk) && fh == 0 {
+            return Ok(data.len() as u32);
+        }
         let fh = self.fh_in(fh);
         let fh = self.at_path(fh, true)?.unwrap_or(fh);
+        if self.broken == Some(Break::WriteAtClose) && !data.is_empty() {
+            // Checked as the reference checks it, then kept.
+            self.length(fh)?;
+            self.held()
+                .pending
+                .entry(fh)
+                .or_default()
+                .push((offset, data.to_vec()));
+            return Ok(data.len() as u32);
+        }
         if self.broken == Some(Break::HugeWriteOk)
             && !data.is_empty()
             && offset
@@ -1519,8 +1819,12 @@ impl Director for Served {
         self.reference.write(fh, offset, data)
     }
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
+        if self.broken == Some(Break::FhZeroOk) && fh == 0 {
+            return Ok(());
+        }
         let fh = self.fh_in(fh);
         let fh = self.at_path(fh, true)?.unwrap_or(fh);
+        self.flush(fh)?;
         if self.broken == Some(Break::HugeWriteOk) && size > aether_refdirector::MAX_FILE_LEN as u64
         {
             return Ok(());
@@ -1617,6 +1921,17 @@ impl Director for Served {
             }
             _ => {}
         }
+        let before = self.reference.get_attr(root, from).ok();
+        let respell = (self.broken == Some(Break::CaseRenameStaleChildren)
+            && f == t
+            && before.as_ref().is_some_and(|a| a.found && a.is_dir))
+        .then(|| {
+            self.reference
+                .stored_names(root, 0, from)
+                .map(str::to_string)
+                .ok()
+        })
+        .flatten();
         let ghosts = self.broken == Some(Break::RenameDirGhosts)
             && self
                 .reference
@@ -1633,10 +1948,67 @@ impl Director for Served {
                 .ghosts
                 .push((root.0, aether_casefold::fold(from), below));
         }
+        if let Some(old) = respell {
+            self.held().respelled.push((root.0, f.clone(), old));
+        }
+        if let (Some(Break::RenameKeepsOldName), Some(a)) = (self.broken, before) {
+            if a.found && !a.is_dir && f != t {
+                self.held().old_names.insert((root.0, f), a);
+            }
+        }
         Ok(())
     }
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
-        self.reference.delete(root, path)
+        let key = (root.0, aether_casefold::fold(path));
+        if self.broken == Some(Break::DeletePendingUntilClose) && self.is_dir(root, path) {
+            let below = format!("{}/", key.1);
+            if self
+                .held()
+                .paths
+                .values()
+                .any(|(r, p)| *r == root.0 && p.starts_with(&below))
+            {
+                return Err(Status::IoError);
+            }
+        }
+        let spelled = (self.broken == Some(Break::SpellingOutlivesDelete))
+            .then(|| {
+                self.reference
+                    .stored_names(root, 0, path)
+                    .map(str::to_string)
+                    .ok()
+            })
+            .flatten();
+        let r = self.reference.delete(root, path);
+        if r == Err(Status::IoError)
+            && self.broken == Some(Break::DeleteDirIgnoresEmptyDirs)
+            && self.is_dir(root, path)
+        {
+            let below = self.subtree(root, path);
+            if below.iter().all(|(_, b)| b.is_none()) {
+                for (rest, _) in below.iter().rev() {
+                    let _ = self.reference.delete(root, &format!("{path}/{rest}"));
+                }
+                return self.reference.delete(root, path);
+            }
+        }
+        r?;
+        if let Some(sp) = spelled {
+            self.held().spellings.insert(key, sp);
+        }
+        if self.broken == Some(Break::DeleteIgnoresRoot) {
+            let others: Vec<RootId> = self
+                .tree
+                .roots
+                .iter()
+                .copied()
+                .filter(|r| *r != root)
+                .collect();
+            for other in others {
+                let _ = self.reference.delete(other, path);
+            }
+        }
+        Ok(())
     }
     fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
         let mut made = self.reference.mkdir(root, mode, path);
@@ -1645,6 +2017,7 @@ impl Director for Served {
         }
         made?;
         self.respell_parents(root, path);
+        self.old_spelling(root, path);
         let folded = aether_casefold::fold(path);
         let back = self
             .held()
@@ -1670,7 +2043,11 @@ impl Director for Served {
         Ok(())
     }
     fn close(&mut self, fh: u64) -> Result<(), Status> {
+        if self.broken == Some(Break::FhZeroOk) && fh == 0 {
+            return Ok(());
+        }
         let fh = self.fh_in(fh);
+        let _ = self.flush(fh);
         self.held().appends.remove(&fh);
         let at = self.held().by_path.remove(&fh).and_then(|e| e.3);
         if let Some(t) = at {
@@ -1699,6 +2076,28 @@ impl Director for Served {
         if self.broken == Some(Break::SkipPastEndEcho) && skip as usize >= path.split('/').count() {
             self.echo = path.rsplit('/').next().unwrap_or(path).to_string();
             return Ok(&self.echo);
+        }
+        if self.broken == Some(Break::CaseRenameStaleChildren) {
+            let folded = aether_casefold::fold(path);
+            let hit = self
+                .held()
+                .respelled
+                .iter()
+                .rev()
+                .find(|(r, d, _)| *r == root.0 && folded.starts_with(&format!("{d}/")))
+                .cloned();
+            if let Some((_, _, old)) = hit {
+                let full = self.reference.stored_names(root, 0, path)?.to_string();
+                let mut parts: Vec<&str> = full.split('/').collect();
+                for (i, o) in old.split('/').enumerate() {
+                    if let Some(p) = parts.get_mut(i) {
+                        *p = o;
+                    }
+                }
+                let skip = (skip as usize).min(parts.len());
+                self.echo = parts[skip..].join("/");
+                return Ok(&self.echo);
+            }
         }
         self.reference.stored_names(root, skip, path)
     }
@@ -1739,10 +2138,36 @@ impl Director for Served {
                     .unwrap_or_else(|e| e.into_inner());
             }
         }
+        if self.broken == Some(Break::SetUnderTombstoneNotFound)
+            && self
+                .reference
+                .reg_lookup(path)
+                .is_ok_and(|l| l.state == aether_protocol::Lookup::Tombstoned)
+        {
+            return Err(Status::NotFound);
+        }
+        if self.broken == Some(Break::ValueNameBytes) && name.len() > 16_383 {
+            return Err(Status::BadRequest);
+        }
+        if self.broken == Some(Break::SetValueAppends) {
+            let held = self.reference.reg_key(path).is_ok_and(|k| {
+                k.node.as_ref().is_some_and(|n| {
+                    n.values
+                        .iter()
+                        .any(|v| aether_casefold::fold(&v.name) == aether_casefold::fold(name))
+                })
+            });
+            if held {
+                let _ = self.reference.reg_delete_value(path, name);
+            }
+        }
         let r = self.reference.reg_set_value(path, name, ty, data);
         self.refused(r)
     }
     fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {
+        if self.broken == Some(Break::ValueNameBytes) && name.len() > 16_383 {
+            return Err(Status::BadRequest);
+        }
         let r = self.reference.reg_delete_value(path, name);
         self.refused(r)
     }
@@ -1760,6 +2185,16 @@ impl Director for Served {
             };
         }
         let r = self.reference.reg_create_key(path, volatile);
+        if r.is_ok() && self.broken == Some(Break::DeleteKeepsSubtree) {
+            let back = self
+                .held()
+                .reg_hidden
+                .remove(&aether_casefold::fold(path))
+                .unwrap_or_default();
+            for (name, ty, data) in back {
+                let _ = self.reference.reg_set_value(path, &name, ty, &data);
+            }
+        }
         self.refused(r)
     }
     fn reg_delete_key(&mut self, path: &str) -> Result<u64, Status> {
@@ -1773,11 +2208,35 @@ impl Director for Served {
         {
             return Err(Status::NotFound);
         }
+        let values: Vec<(String, u32, Vec<u8>)> = match self.broken {
+            Some(Break::DeleteKeepsSubtree) => self
+                .reference
+                .reg_key(path)
+                .ok()
+                .and_then(|k| {
+                    k.node.as_ref().map(|n| {
+                        n.values
+                            .iter()
+                            .map(|v| (v.name.to_string(), v.ty, v.data.to_vec()))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let r = self.reference.reg_delete_key(path);
+        if r.is_ok() && !values.is_empty() {
+            self.held()
+                .reg_hidden
+                .insert(aether_casefold::fold(path), values);
+        }
         self.refused(r)
     }
     fn reg_rename_key(&mut self, path: &str, new_leaf: &str) -> Result<u64, Status> {
         let r = self.reference.reg_rename_key(path, new_leaf);
+        if r.is_ok() && self.broken == Some(Break::RenameUnchanged) {
+            self.held().renamed_away.insert(aether_casefold::fold(path));
+        }
         self.refused(r)
     }
     fn reg_changed(
@@ -1786,7 +2245,16 @@ impl Director for Served {
         subtree: bool,
         since: u64,
     ) -> Result<ChangedReply, Status> {
-        self.reference.reg_changed(path, subtree, since)
+        let mut c = self.reference.reg_changed(path, subtree, since)?;
+        if self.broken == Some(Break::RenameUnchanged)
+            && self
+                .held()
+                .renamed_away
+                .contains(&aether_casefold::fold(path))
+        {
+            c.changed = false;
+        }
+        Ok(c)
     }
     fn rename_x(
         &mut self,
@@ -1801,14 +2269,39 @@ impl Director for Served {
         {
             return Ok(());
         }
-        self.reference.rename_x(from_root, to_root, from, to)
+        self.reference.rename_x(from_root, to_root, from, to)?;
+        if self.broken == Some(Break::RenameXFromMount) && from_root != to_root {
+            let mounted = self
+                .tree
+                .files
+                .get(&(from_root.0, aether_casefold::fold(from)))
+                .cloned()
+                .unwrap_or_default();
+            if let Ok(o) = self
+                .reference
+                .open(to_root, OpenFlags::WRITE | OpenFlags::TRUNC, to)
+            {
+                let _ = self.reference.write(o.fh, 0, &mounted);
+                let _ = self.reference.close(o.fh);
+            }
+        }
+        Ok(())
     }
     fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
         let wrong = match self.broken {
-            Some(Break::StageCopy) => false,
+            Some(Break::StageCopy | Break::StageMountBytes) => false,
             Some(Break::StageWrongBytes) => true,
             _ => return self.reference.stage_exec(root, path),
         };
+        // wire.md 3.4.14: with a stager, a directory or a missing path is
+        // ST_NOT_FOUND.
+        if !self
+            .reference
+            .get_attr(root, path)
+            .is_ok_and(|a| a.found && !a.is_dir)
+        {
+            return Err(Status::NotFound);
+        }
         let fh = self.reference.open(root, OpenFlags::READ, path)?.fh;
         let at = ReadSlot {
             slot: 0,
@@ -1824,6 +2317,11 @@ impl Director for Served {
             });
         let _ = self.reference.close(fh);
         let mut bytes = read?;
+        if self.broken == Some(Break::StageMountBytes) {
+            if let Some(b) = self.tree.files.get(&(root.0, aether_casefold::fold(path))) {
+                bytes = b.clone();
+            }
+        }
         if wrong {
             if let Some(b) = bytes.first_mut() {
                 *b ^= 0xff;
@@ -1970,6 +2468,7 @@ mod tests {
             held: Arc::default(),
             view: Vec::new(),
             echo: String::new(),
+            tree: Arc::default(),
         };
         let two = Served {
             reference: one.reference.share(),
@@ -1982,6 +2481,7 @@ mod tests {
             held: one.held.clone(),
             view: Vec::new(),
             echo: String::new(),
+            tree: one.tree.clone(),
             ..one
         };
         (one, two, b)

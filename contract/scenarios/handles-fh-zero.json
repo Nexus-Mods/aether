@@ -1,0 +1,18 @@
+{
+  "name": "handles-fh-zero",
+  "description": "`fh` 0 is never a director's handle (wire.md 3.4.3: \"any u64 the director chooses except 0\"), so CLOSE(0), which a shim may send for a directory it made with MKDIR, is ST_BAD_FH (3.4.10), and so are READ, WRITE and SETATTR of 0 (3.4.4, 3.4.6; 3.5: \"Unknown handle\"); none of them touches an open handle or a file. The handle is sent as written (`{\"literal\": 0}`), not as a scenario handle number.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "saves/a.txt", "contents": "abc"}], "writable": ["saves"]}]},
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": {"literal": 0}}, "expect": {"status": "bad-fh"}, "note": "wire.md 3.4.10: CLOSE(0) is ST_BAD_FH"},
+    {"request": {"op": "read", "fh": {"literal": 0}, "offset": 0, "len": 16}, "expect": {"status": "bad-fh"}, "note": "wire.md 3.4.4"},
+    {"request": {"op": "write", "fh": {"literal": 0}, "offset": 0, "data": "x"}, "expect": {"status": "bad-fh"}, "note": "wire.md 3.5"},
+    {"request": {"op": "setattr", "fh": {"literal": 0}, "size": 0}, "expect": {"status": "bad-fh"}, "note": "wire.md 3.4.6"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": "abc"}}, "note": "nothing was closed or changed"},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/made"}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": {"literal": 0}}, "expect": {"status": "bad-fh"}, "note": "wire.md 3.4.3, 3.4.10: the CLOSE(0) a shim sends for the directory it made"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/made"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+  ]
+}

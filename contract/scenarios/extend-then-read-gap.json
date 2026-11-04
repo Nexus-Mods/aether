@@ -1,0 +1,30 @@
+{
+  "name": "extend-then-read-gap",
+  "description": "A file grown past its end by a WRITE and by SETATTR reads zeros in the gap, inline and in bulk, through the handle that grew it and through others (wire.md 3.4.5: \"the bytes between the old end and the WRITE's offset read as zeros\"; 3.4.6: \"An extension reads as zeros\"); a READ past the new end is empty (3.4.4), and a SETATTR to the size the file has changes nothing.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "saves/e.bin", "contents": "end"}], "writable": ["saves"]}]},
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/e.bin"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 10, "data": "X"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/e.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 11, "mtime": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"concat": ["end", {"zeros": 7}, "X"]}}}, "note": "wire.md 3.4.5"},
+    {"request": {"op": "read", "fh": 1, "offset": 3, "len": 7}, "expect": {"reply": {"data": {"zeros": 7}}}},
+    {"request": {"op": "setattr", "fh": 1, "size": 11}, "expect": {"status": "ok"}, "note": "wire.md 3.4.6: the size it has"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"concat": ["end", {"zeros": 7}, "X"]}}}},
+    {"request": {"op": "setattr", "fh": 1, "size": 100000}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/e.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 100000, "mtime": 0}}, "note": "wire.md 3.4.1"},
+    {"request": {"op": "read", "fh": 1, "offset": 11, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"zeros": 65536}}}, "note": "wire.md 3.4.6: an extension reads as zeros"},
+    {"request": {"op": "read", "fh": 1, "offset": 99990, "len": 64}, "expect": {"reply": {"data": {"zeros": 10}}}},
+    {"request": {"op": "read", "fh": 1, "offset": 100000, "len": 16}, "expect": {"reply": {"data": ""}}, "note": "wire.md 3.4.4: at the end, nothing"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/e.bin"}, "expect": {"reply": {"fh": 2, "size": 100000, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": {"concat": ["end", {"zeros": 7}, "X", {"zeros": 5}]}}}},
+    {"request": {"op": "write", "fh": 1, "offset": 200000, "data": "Y"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "read", "fh": 2, "offset": 199999, "len": 16}, "expect": {"reply": {"data": {"hex": "0059"}}}, "note": "wire.md 3.4.4, 3.4.5: seen through the other handle"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/e.bin"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 200001, "mtime": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/e.bin"}, "expect": {"reply": {"fh": 3, "size": 200001, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 100000, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"zeros": 65536}}}},
+    {"request": {"op": "read", "fh": 3, "offset": 199990, "len": 64}, "expect": {"reply": {"data": {"concat": [{"zeros": 10}, "Y"]}}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

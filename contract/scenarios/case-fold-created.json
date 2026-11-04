@@ -1,11 +1,7 @@
 {
   "name": "case-fold-created",
-  "description": "Names a request creates are matched by the wire's fold and keep their spelling (wire.md 3.2): a directory and a file under it made in non-ASCII case pairs are found in any case and listed as made, and an exclusive create in another case is ST_EXISTS. `ας` folds apart from `ασ` under the fold (no final-sigma rule), so its create may succeed, or be refused ST_EXISTS by a director whose store would make the two one name (3.2).",
-  "tree": {
-    "roots": [
-      {"id": 0, "writable": ["saves"]}
-    ]
-  },
+  "description": "Names a request creates are matched by the wire's fold and keep their spelling (wire.md 3.2): a directory and a file under it made in non-ASCII case pairs are found in any case and listed as made, and an exclusive create in another case is ST_EXISTS. `ας` folds apart from `ασ` under the fold (no final-sigma rule), so its create may succeed, or be refused ST_EXISTS by a director whose store would make the two one name (3.2). `İ` folds to two characters, `i` and U+0307 (3.2, \"Case folding\"): a directory made as `İnfo` is found by that fold and not by `info`, and STORED_NAMES and READDIR answer its spelling. A file found under a fold is deleted under it.",
+  "tree": {"roots": [{"id": 0, "writable": ["saves"]}]},
   "steps": [
     {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/Été"}, "expect": {"status": "ok"}},
     {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/été/ÉCOLE.txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
@@ -19,6 +15,17 @@
     {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/ΑΣ.txt"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
     {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
     {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/ασ.txt"}, "expect": {"status": "exists"}, "note": "its fold is ΑΣ's"},
-    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/ας.txt"}, "expect": {"one_of": [{"reply": {"fh": 3, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}, {"status": "exists"}], "wire": "3.2"}, "note": "another name under the fold; the last step, since what follows would depend on it"}
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/ας.txt"}, "expect": {"one_of": [{"reply": {"fh": 3, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}, {"status": "exists"}], "wire": "3.2"}, "note": "another name under the fold; nothing after depends on which answer it got"},
+    {"request": {"op": "close", "fh": 3}, "expect": {"one_of": [{"status": "ok"}, {"status": "bad-fh"}], "wire": "3.2"}, "note": "handle 3 is open only if the create of `ας` succeeded"},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/İnfo"}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/İnfo/Data.TXT"}, "expect": {"reply": {"fh": 4, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/i̇nfo/data.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 0, "mtime": 0}}, "note": "wire.md 3.2: İ folds to i and U+0307"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/info/data.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "wire.md 3.2: not the fold of `info`"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "saves/i̇nfo/data.txt"}, "expect": {"reply": {"names": "İnfo/Data.TXT"}}, "note": "wire.md 3.2, 3.4.12"},
+    {"request": {"op": "readdir", "root": 0, "path": "saves/i̇nfo"}, "expect": {"reply": {"entries": [{"name": "Data.TXT", "is_dir": false, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/été/école.txt"}, "expect": {"status": "ok"}, "note": "wire.md 3.2: found under the fold"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/ÉTÉ/ÉCOLE.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves/été"}, "expect": {"reply": {"entries": []}}}
   ]
 }

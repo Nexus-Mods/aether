@@ -1,0 +1,32 @@
+{
+  "name": "registry-rename-changed-recreate",
+  "description": "REG_RENAME_KEY and what follows it (wire.md 4.3): REG_CHANGED reports the old path, the new path and the parent's child list as changed, and an unrelated key as not; the subtree moves, tombstones below it included; the old name made again is a new empty key; a rename onto another node is ST_EXISTS, onto a tombstoned name it is allowed; `volatile` moves with the key; a rename to its own leaf renames it in place; an empty `new_leaf` or one holding `\\` is ST_BAD_REQUEST and changes nothing.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "a.txt", "contents": "a"}]}], "registry": {"keys": [{"path": "\\Registry\\Machine\\Software\\Conform\\Old", "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}]}, {"path": "\\Registry\\Machine\\Software\\Conform\\Old\\Kid"}, {"path": "\\Registry\\Machine\\Software\\Conform\\Old\\Kid2"}, {"path": "\\Registry\\Machine\\Software\\Conform\\Other"}, {"path": "\\Registry\\Machine\\Software\\Conform\\Vol", "volatile": true}]}},
+  "steps": [
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\Old\\Kid2"}, "expect": {"reply": {"version": 7}}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\Old", "new_leaf": "New"}, "expect": {"reply": {"version": 8}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform\\Old", "subtree": false, "since": 7}, "expect": {"reply": {"version": 8, "changed": true}}, "note": "wire.md 4.3: renamed away after `since`"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform\\New", "subtree": false, "since": 7}, "expect": {"reply": {"version": 8, "changed": true}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform\\New", "subtree": true, "since": 8}, "expect": {"reply": {"version": 8, "changed": false}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform", "subtree": false, "since": 7}, "expect": {"reply": {"version": 8, "changed": true}}, "note": "wire.md 4.3: the parent's child list changed"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform\\Other", "subtree": true, "since": 7}, "expect": {"reply": {"version": 8, "changed": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\Old\\Kid"}, "expect": {"reply": {"version": 8, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\New\\Kid"}, "expect": {"reply": {"version": 8, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\New\\Kid2"}, "expect": {"reply": {"version": 8, "state": "tombstoned", "below": false}}, "note": "wire.md 4.3: \"tombstones below it moving with it\""},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\New"}, "expect": {"reply": {"version": 8, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": [], "children": [{"folded": "kid", "spelling": "Kid", "state": "present"}, {"folded": "kid2", "spelling": "Kid2", "state": "tombstone"}]}}}},
+    {"request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Conform\\Old", "volatile": false}, "expect": {"reply": {"version": 9}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\Old"}, "expect": {"reply": {"version": 9, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}, "note": "wire.md 4.3: a new key at the old name"},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\New", "new_leaf": "old"}, "expect": {"status": "exists"}, "note": "wire.md 4.3: another node at the new name"},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\Old"}, "expect": {"reply": {"version": 10}}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\New", "new_leaf": "Old"}, "expect": {"reply": {"version": 11}}, "note": "wire.md 4.3: onto a tombstoned name"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\Old\\Kid"}, "expect": {"reply": {"version": 11, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\New"}, "expect": {"reply": {"version": 11, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\Old"}, "expect": {"reply": {"version": 11, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": [], "children": [{"folded": "kid", "spelling": "Kid", "state": "present"}, {"folded": "kid2", "spelling": "Kid2", "state": "tombstone"}]}}}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\Vol", "new_leaf": "Vol2"}, "expect": {"reply": {"version": 12}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\Vol2"}, "expect": {"reply": {"version": 12, "node": {"created": true, "volatile": true, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}, "note": "wire.md 4.3: volatile moves with the key"},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\Vol2", "new_leaf": "Vol2"}, "expect": {"reply": {"version": 13}}, "note": "wire.md 4.3: its own leaf renames it in place"},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\Vol2", "new_leaf": ""}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Conform\\Vol2", "new_leaf": "a\\b"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\Vol2"}, "expect": {"reply": {"version": 13, "state": "created", "below": false}}, "note": "wire.md 4.3: a refused write leaves the version alone"}
+  ]
+}

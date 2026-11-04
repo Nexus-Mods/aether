@@ -1,0 +1,23 @@
+{
+  "name": "registry-under-tombstone",
+  "description": "Writes under a tombstoned key (wire.md 4.3): REG_DELETE_VALUE there is ST_NOT_FOUND; REG_SET_VALUE makes the path exist, reviving the chain as created with nothing of the deleted key's values; REG_CREATE_KEY of a deleted key comes back empty, its former subkey absent. A parent whose only child is a tombstone has something below it (\"`below` is whether a node or a tombstone lies strictly under the path\"). REG_DELETE_VALUE on a key the overlay has no node for makes it present and records the value tombstone.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "a.txt", "contents": "a"}]}], "registry": {"keys": [{"path": "\\Registry\\Machine\\Software\\Conform\\A", "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}]}, {"path": "\\Registry\\Machine\\Software\\Conform\\A\\B", "values": [{"name": "w", "ty": 4, "data": {"hex": "02000000"}}]}]}},
+  "steps": [
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\A"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Conform\\A\\B", "name": "w"}, "expect": {"status": "not-found"}, "note": "wire.md 4.3: tombstoned through an ancestor"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\A\\B"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 5, "state": "present", "below": true}}, "note": "wire.md 4.3: a tombstone below it"},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Conform\\A\\B", "name": "x", "ty": 4, "data": {"hex": "03000000"}}, "expect": {"reply": {"version": 6}}, "note": "wire.md 4.3: \"Makes the path exist\"; the chain is revived"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\A"}, "expect": {"reply": {"version": 6, "state": "created", "below": true}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\A"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": [{"folded": "b", "spelling": "B", "state": "present"}]}}}, "note": "wire.md 4.3: none of the deleted key's values"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\A\\B"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "x", "ty": 4, "data": {"hex": "03000000"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Conform\\A"}, "expect": {"reply": {"version": 7}}},
+    {"request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Conform\\A", "volatile": false}, "expect": {"reply": {"version": 8}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\A"}, "expect": {"reply": {"version": 8, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}, "note": "wire.md 4.3: created again with nothing below it"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\A\\B"}, "expect": {"reply": {"version": 8, "state": "absent", "below": false}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform\\A", "subtree": true, "since": 4}, "expect": {"reply": {"version": 8, "changed": true}}},
+    {"request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Conform\\Fresh", "name": "Gone"}, "expect": {"reply": {"version": 9}}, "note": "wire.md 4.3: makes the path exist and records a value tombstone"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\Fresh"}, "expect": {"reply": {"version": 9, "state": "present", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform\\Fresh"}, "expect": {"reply": {"version": 9, "node": {"created": false, "volatile": false, "last_write": 0, "values": [], "value_tombstones": ["gone"], "children": []}}}}
+  ]
+}

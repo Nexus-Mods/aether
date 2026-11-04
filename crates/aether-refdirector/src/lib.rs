@@ -15,12 +15,21 @@
 //! [`tree`] is the tree a conformance scenario mounts and
 //! [`Reference::from_tree`] the reference serving it; with the `scenario`
 //! feature a [`tree::Tree`] deserialises from a scenario file.
+//!
+//! [`harness`] holds the taps the shim's tests serve through
+//! ([`aether_rpc::serve_tapped`]): a [`Recorder`] of every request, armed
+//! [`Faults`] and OPEN [`Override`]s. [`Reference`] also has test knobs
+//! (a mount generation, content replaced as a remount would, and answers
+//! other directors give that it does not); each is off until a test sets it,
+//! and conformance never does.
 
 #![forbid(unsafe_code)]
 
+pub mod harness;
 mod null;
 mod reference;
 pub mod tree;
 
+pub use harness::{Fault, Faults, Match, OpenEdit, Override, Recorded, Recorder};
 pub use null::Null;
 pub use reference::{key, pattern, ReadStyle, Reference, Tally, BULK_THRESHOLD, MAX_FILE_LEN};

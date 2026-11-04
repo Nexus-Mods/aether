@@ -432,6 +432,172 @@ mod tests {
         assert!(check_arena(4096, 8).is_err());
     }
 
+    const DEADLINE: Duration = Duration::from_secs(1);
+
+    fn attach_err(e: &Env) -> String {
+        match Attached::from_env(e, DEADLINE) {
+            Ok(_) => panic!("attach succeeded on {e:?}"),
+            Err(m) => m,
+        }
+    }
+
+    /// An env naming the ring file `path`, with the numbers given.
+    fn file_env(path: &Path, ring_bytes: usize, payload_cap: u32, extra: &[(&str, &str)]) -> Env {
+        let mut e = env(&[
+            (aether_env::VIRTUAL_DIR, r"C:\game"),
+            (aether_env::RING_PATH, path.to_str().unwrap()),
+            (aether_env::RING_BYTES, &ring_bytes.to_string()),
+            (aether_env::RING_PAYLOAD_CAP, &payload_cap.to_string()),
+        ]);
+        e.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        e
+    }
+
+    /// A ring file of `file_len` bytes holding an initialised ring.
+    fn ring_file(dir: &Path, file_len: usize, slots: u32, payload_cap: u32) -> std::path::PathBuf {
+        let path = dir.join("ring.bin");
+        let r = aether_filering::FileRing::create(&path, file_len).unwrap();
+        ring::init(r.seg(), slots, payload_cap).unwrap();
+        path
+    }
+
+    /// wire.md 2.10: a mount names a ring by file or by section.
+    #[test]
+    fn an_env_naming_no_ring_fails_attach() {
+        let e = attach_err(&env(&[(aether_env::VIRTUAL_DIR, r"C:\game")]));
+        assert!(e.contains(aether_env::RING_PATH), "{e}");
+        assert!(e.contains(aether_env::RING_SECTION), "{e}");
+        // An empty path counts as unset (2.10).
+        let e = attach_err(&env(&[
+            (aether_env::VIRTUAL_DIR, r"C:\game"),
+            (aether_env::RING_PATH, ""),
+        ]));
+        assert!(e.contains(aether_env::RING_SECTION), "{e}");
+    }
+
+    /// wire.md 2.10: the ring file must exist.
+    #[test]
+    fn a_missing_ring_file_fails_attach() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let e = attach_err(&file_env(&dir.path().join("absent"), 65536, 4096, &[]));
+        assert!(e.contains("open ring file"), "{e}");
+    }
+
+    /// wire.md 2.10: the shim refuses a file shorter than `VFS_RING_BYTES`.
+    #[test]
+    fn a_ring_file_shorter_than_ring_bytes_fails_attach() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 64 * 1024, 2, 4096);
+        let e = attach_err(&file_env(&path, 64 * 1024 + 1, 4096, &[]));
+        assert!(e.contains("shorter than"), "{e}");
+    }
+
+    /// wire.md 2.4: a file of the right length whose header is not a ring.
+    #[test]
+    fn a_file_without_a_ring_header_fails_attach() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = dir.path().join("zeros.bin");
+        std::fs::write(&path, vec![0u8; 64 * 1024]).unwrap();
+        let e = attach_err(&file_env(&path, 64 * 1024, 4096, &[]));
+        assert!(e.starts_with("ring open"), "{e}");
+    }
+
+    /// wire.md 2.4: the slots must end within `VFS_RING_BYTES`, though the
+    /// file itself may be longer.
+    #[test]
+    fn slots_ending_past_ring_bytes_fail_attach() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 64 * 1024, 4, 4096);
+        let e = attach_err(&file_env(&path, 8192, 4096, &[]));
+        assert!(e.contains("wire.md 2.4"), "{e}");
+    }
+
+    /// wire.md 5.3: `VFS_RING_PAYLOAD_CAP` must equal the header's.
+    #[test]
+    fn a_payload_cap_unlike_the_headers_fails_attach() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 64 * 1024, 2, 4096);
+        let e = attach_err(&file_env(&path, 64 * 1024, 2048, &[]));
+        assert!(e.contains("5.3"), "{e}");
+    }
+
+    /// wire.md 2.6: the arena must lie inside the first `VFS_RING_BYTES`.
+    #[test]
+    fn an_arena_past_ring_bytes_fails_attach() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 64 * 1024, 2, 4096);
+        let arena = (2 * MIN_BULK_CHUNK).to_string();
+        let e = attach_err(&file_env(
+            &path,
+            64 * 1024,
+            4096,
+            &[
+                (aether_env::ARENA_LEN, &arena),
+                (aether_env::ARENA_OFFSET, "4096"),
+            ],
+        ));
+        assert!(e.contains("2.6"), "{e}");
+    }
+
+    /// wire.md 2.10: a section that does not exist cannot be opened.
+    #[cfg(windows)]
+    #[test]
+    fn a_section_that_does_not_exist_fails_attach() {
+        let name = format!(
+            "Local\\aether-conform-absent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let e = attach_err(&env(&[
+            (aether_env::VIRTUAL_DIR, r"C:\game"),
+            (aether_env::RING_SECTION, &name),
+        ]));
+        assert!(e.starts_with("open section"), "{e}");
+    }
+
+    /// wire.md 2.10: a section is Windows-only; elsewhere a file is needed.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_section_name_fails_attach_off_windows() {
+        let e = attach_err(&env(&[
+            (aether_env::VIRTUAL_DIR, r"C:\game"),
+            (aether_env::RING_SECTION, "some-section"),
+        ]));
+        assert!(e.contains("wire.md 2.10"), "{e}");
+    }
+
+    /// wire.md 2.4, 2.10: a valid ring file of exactly `VFS_RING_BYTES`
+    /// attaches and reports what was set up.
+    #[test]
+    fn a_valid_ring_file_of_exact_size_attaches() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 2 * MIN_BULK_CHUNK, 2, 4096);
+        let arena = (2 * MIN_BULK_CHUNK).to_string();
+        let e = file_env(
+            &path,
+            2 * MIN_BULK_CHUNK,
+            4096,
+            &[(aether_env::ARENA_LEN, &arena)],
+        );
+        let a = match Attached::from_env(&e, DEADLINE) {
+            Ok(a) => a,
+            Err(m) => panic!("{m}"),
+        };
+        assert_eq!(a.ring_bytes(), 2 * MIN_BULK_CHUNK);
+        assert_eq!(a.arena_len(), 2 * MIN_BULK_CHUNK);
+        assert_eq!(
+            a.geom(),
+            Geom {
+                slot_count: 2,
+                slot_stride: 4096 + aether_ipc::layout::SLOT_HEADER_SIZE as u32,
+                payload_cap: 4096
+            }
+        );
+    }
+
     #[test]
     fn roots_the_shim_accepts_pass() {
         for e in [

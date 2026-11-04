@@ -94,6 +94,22 @@ fn a_handle_value_issued_again_names_the_new_file() {
     isolate!();
     let (root, file) = setup();
     let stale = format!(r"\??\{}", root.join("data").join("a.esp").display());
+    // Windows issues a closed handle's value again to the next handle as a
+    // rule, not a promise: another thread may take it first. So the case is
+    // tried until the value comes back.
+    let named = (0..20)
+        .find_map(|_| reissued_name(&file, &stale))
+        .expect("a closed handle's value was never issued again");
+    assert!(
+        named.to_ascii_lowercase().ends_with(r"\real-b.txt"),
+        "the handle is named {named}, not as the new file"
+    );
+}
+
+/// Open `file`, close it, give its handle value a stale record of `stale`,
+/// and open `file` again while another thread holds the handle table: the
+/// new handle's name, if it has the old value.
+fn reissued_name(file: &Path, stale: &str) -> Option<String> {
     // The holder thread is started first: a thread is itself a handle.
     let (go_tx, go_rx) = mpsc::channel::<()>();
     let (held_tx, held_rx) = mpsc::channel::<()>();
@@ -108,20 +124,17 @@ fn a_handle_value_issued_again_names_the_new_file() {
         });
     });
 
-    let h = open(&file, GENERIC_READ);
+    let h = open(file, GENERIC_READ);
     close(h);
-    aether_hooks::plant_under_root_record_for_tests(h as isize, &stale);
+    aether_hooks::plant_under_root_record_for_tests(h as isize, stale);
     go_tx.send(()).unwrap();
     held_rx.recv().unwrap();
-    let again = open(&file, GENERIC_READ);
+    let again = open(file, GENERIC_READ);
     let _ = done_tx.send(());
     holder.join().unwrap();
 
-    assert_eq!(again, h, "the handle value was issued again");
-    let name = crate::reg::object_name(again as isize).expect("NtQueryObject");
+    let named =
+        (again == h).then(|| crate::reg::object_name(again as isize).expect("NtQueryObject"));
     close(again);
-    assert!(
-        name.to_ascii_lowercase().ends_with(r"\real-b.txt"),
-        "the handle is named {name}, not as the new file"
-    );
+    named
 }

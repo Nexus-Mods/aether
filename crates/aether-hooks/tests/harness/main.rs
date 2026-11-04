@@ -27,5 +27,6 @@ mod ntapi;
 mod bugs_files;
 mod child_start;
 mod idle;
+mod reads_large;
 mod recording;
 mod sections;

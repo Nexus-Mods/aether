@@ -419,6 +419,17 @@ pub(crate) fn nt_query_by_name_relative(
 pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
     // Read through the handle with NtReadFile so the test stays on the NT
     // surface it is exercising.
+    let mut out = vec![0u8; 4096];
+    let (st, got) = nt_read_at(h, 0, &mut out);
+    assert!(st >= 0, "NtReadFile failed: {st:#x}");
+    out.truncate(got);
+    out
+}
+
+/// One `NtReadFile` of `buf.len()` bytes at `offset`: its status and the
+/// count its `IO_STATUS_BLOCK.Information` reports. One call, so a short
+/// count is what the hook answered, not what a loop added up.
+pub(crate) fn nt_read_at(h: *mut c_void, offset: i64, buf: &mut [u8]) -> (i32, usize) {
     type NtReadFileFn = unsafe extern "system" fn(
         *mut c_void,
         *mut c_void,
@@ -432,9 +443,7 @@ pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
     ) -> i32;
     let p = ntdll_proc("NtReadFile").expect("NtReadFile");
     let f: NtReadFileFn = unsafe { core::mem::transmute(p) };
-    let mut out = vec![0u8; 4096];
     let mut iosb = [0u8; 16];
-    let offset: i64 = 0;
     let st = unsafe {
         f(
             h,
@@ -442,16 +451,13 @@ pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
             core::ptr::null(),
             core::ptr::null(),
             iosb.as_mut_ptr() as *mut c_void,
-            out.as_mut_ptr() as *mut c_void,
-            out.len() as u32,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
             &offset,
             core::ptr::null(),
         )
     };
-    assert!(st >= 0, "NtReadFile failed: {st:#x}");
-    let got = usize::from_le_bytes(iosb[8..16].try_into().unwrap());
-    out.truncate(got);
-    out
+    (st, usize::from_le_bytes(iosb[8..16].try_into().unwrap()))
 }
 
 pub(crate) fn close(h: *mut c_void) {

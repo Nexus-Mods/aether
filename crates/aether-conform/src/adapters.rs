@@ -210,6 +210,73 @@ pub enum Break {
     /// name, and a MKDIR that makes the old name again brings them back
     /// (wire.md 3.4.7: "a directory moves with everything under it").
     RenameDirGhosts,
+    /// A file handle acts on whatever is at the name it was opened with: it
+    /// loses its file to a RENAME, and reaches a file created at the name
+    /// after its own was deleted (wire.md 3.4.7: "Its handles follow it";
+    /// 3.4.8: "It never reads or changes a file created at, or moved to,
+    /// that name later").
+    HandlesByPath,
+    /// An OPEN_CREATE or MKDIR in a missing directory makes the missing
+    /// directories (wire.md 3.4.3, 3.4.9: `ST_NOT_FOUND`, and nothing is
+    /// created).
+    CreateMakesParents,
+    /// An OPEN_CREATE or MKDIR below a file is `ST_IO_ERROR` (wire.md 3.4.3,
+    /// 3.4.9: `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`).
+    FileParentIoError,
+    /// A write OPEN of a directory, without OPEN_EXCL, opens it as a
+    /// directory handle (wire.md 3.4.3: `ST_IS_DIR` or `ST_IO_ERROR`).
+    DirWriteOpen,
+    /// READDIR of a file lists the file (wire.md 3.4.2: an empty listing,
+    /// `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`).
+    ReaddirFileListsItself,
+    /// A RENAME of a file onto an empty directory answers `ST_OK` and moves
+    /// nothing (wire.md 3.4.7: replaced, or refused with `ST_IO_ERROR`).
+    FileOntoDirKept,
+    /// A RENAME onto an ancestor of `from` is `ST_BAD_REQUEST` (wire.md
+    /// 3.4.7: a directory with something under it, `ST_IO_ERROR`).
+    AncestorBadRequest,
+    /// A RENAME to `from` in the spelling it is stored with is `ST_EXISTS`
+    /// (wire.md 3.4.7: `ST_OK`, and nothing changes).
+    SameNameExists,
+    /// A READ offset is taken modulo 2^32, as a 32-bit offset would be
+    /// (wire.md 3.4.4: "no wrap: a READ at or past the end answers 0
+    /// bytes").
+    ReadOffsetWraps,
+    /// A WRITE or SETATTR past the largest file the reference holds answers
+    /// `ST_OK` and changes nothing (wire.md 3.4.5, 3.4.6: `ST_NO_SPACE` or
+    /// `ST_BAD_REQUEST`).
+    HugeWriteOk,
+    /// RENAME_X between two roots onto a directory answers `ST_OK` and moves
+    /// nothing (wire.md 3.4.13: `ST_IS_DIR` or `ST_IO_ERROR`).
+    RenameXOntoDirOk,
+    /// STORED_NAMES with a `skip` of every component answers the last one
+    /// (wire.md 3.4.12: an empty reply or `ST_BAD_REQUEST`).
+    SkipPastEndEcho,
+    /// A create respells the existing directories above it to the caller's
+    /// spelling (wire.md 3.2: a creating request's parents keep their stored
+    /// spelling).
+    ParentRespelled,
+    /// OPEN_EXCL checks that the name is free, waits, then creates without
+    /// checking again, so concurrent creates of one name all succeed
+    /// (wire.md 2.8.1: "exactly one succeeds").
+    RacyExcl,
+    /// REG_CREATE_KEY checks that the key is absent, waits, then creates,
+    /// and answers `ST_OK` when it finds the key made meanwhile (wire.md
+    /// 2.8.1: "exactly one succeeds").
+    RacyRegCreate,
+    /// An append WRITE lands in two halves, each at the end as it is then,
+    /// with a wait between (wire.md 2.8.1: "each append WRITE lands whole at
+    /// an end").
+    TornAppend,
+    /// A WRITE reads the whole file, waits, and writes it back with its
+    /// bytes in, so of concurrent WRITEs only the last lands (wire.md 2.8.1:
+    /// "concurrent WRITEs to disjoint ranges all land").
+    LostUpdate,
+    /// A RENAME of a file to a free name copies it there, waits, then
+    /// deletes `from`, so a request in flight with it sees both names
+    /// (wire.md 2.8.1: "the state before it or the state after it, never a
+    /// mixture").
+    RenameInSteps,
 }
 
 impl Break {
@@ -251,6 +318,24 @@ impl Break {
             "truncate-keeps-bytes" => Some(Break::TruncateKeepsBytes),
             "refused-write-bumps" => Some(Break::RefusedWriteBumps),
             "rename-dir-ghosts" => Some(Break::RenameDirGhosts),
+            "handles-by-path" => Some(Break::HandlesByPath),
+            "create-makes-parents" => Some(Break::CreateMakesParents),
+            "file-parent-io-error" => Some(Break::FileParentIoError),
+            "dir-write-open" => Some(Break::DirWriteOpen),
+            "readdir-file-lists-itself" => Some(Break::ReaddirFileListsItself),
+            "file-onto-dir-kept" => Some(Break::FileOntoDirKept),
+            "ancestor-bad-request" => Some(Break::AncestorBadRequest),
+            "same-name-exists" => Some(Break::SameNameExists),
+            "read-offset-wraps" => Some(Break::ReadOffsetWraps),
+            "huge-write-ok" => Some(Break::HugeWriteOk),
+            "rename-x-onto-dir-ok" => Some(Break::RenameXOntoDirOk),
+            "skip-past-end-echo" => Some(Break::SkipPastEndEcho),
+            "parent-respelled" => Some(Break::ParentRespelled),
+            "racy-excl" => Some(Break::RacyExcl),
+            "racy-reg-create" => Some(Break::RacyRegCreate),
+            "torn-append" => Some(Break::TornAppend),
+            "lost-update" => Some(Break::LostUpdate),
+            "rename-in-steps" => Some(Break::RenameInSteps),
             _ => None,
         }
     }
@@ -365,6 +450,7 @@ fn mount(
         reg_reads: Arc::default(),
         held: Arc::default(),
         view: Vec::new(),
+        echo: String::new(),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -552,6 +638,7 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 reg_reads: d.reg_reads.clone(),
                 held: d.held.clone(),
                 view: Vec::new(),
+                echo: String::new(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
@@ -884,6 +971,8 @@ struct Served {
     held: Arc<Mutex<Held>>,
     /// [`Break::SnapshotReads`]'s READ answer, from the handle's snapshot.
     view: Vec<u8>,
+    /// [`Break::SkipPastEndEcho`]'s STORED_NAMES answer.
+    echo: String,
 }
 
 /// The state of [`Break::SnapshotReads`], [`Break::SetattrAtClose`],
@@ -906,11 +995,21 @@ struct Held {
     /// each path below it as stored, and a file's bytes (`None` for a
     /// directory), parents first.
     ghosts: Vec<(u32, String, Subtree)>,
+    /// [`Break::HandlesByPath`]: each file handle's root, path and access,
+    /// and the handle at that path it last acted through.
+    by_path: BTreeMap<u64, (RootId, String, OpenFlags, Option<u64>)>,
+    /// [`Break::TornAppend`]'s and [`Break::LostUpdate`]'s handles opened
+    /// `OPEN_APPEND`.
+    appends: std::collections::BTreeSet<u64>,
 }
 
 /// What was below a directory: each path below it as stored, and a file's
 /// bytes (`None` for a directory), parents first.
 type Subtree = Vec<(String, Option<Vec<u8>>)>;
+
+/// How long the breaks of 2.8.1's atomicity wait between the halves of a
+/// request, so that a request in flight with it falls between them.
+const RACE_HOLD: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// A registry key the breaks write to and delete, which no scenario names.
 const HIDDEN_KEY: &str = r"\Registry\Machine\Software\AetherConformBreak";
@@ -1027,6 +1126,87 @@ impl Served {
         out
     }
 
+    /// [`Break::HandlesByPath`]: the reference's handle at the path file
+    /// handle `fh` was opened with, opened now (for a write, with its
+    /// access), so it is whatever is at the name; `None` for a handle the
+    /// break does not track. A READ that finds nothing there is
+    /// `ST_IO_ERROR`, a WRITE or SETATTR `ST_NOT_FOUND`.
+    fn at_path(&mut self, fh: u64, write: bool) -> Result<Option<u64>, Status> {
+        if self.broken != Some(Break::HandlesByPath) {
+            return Ok(None);
+        }
+        let Some((root, path, flags, old)) = self.held().by_path.get(&fh).cloned() else {
+            return Ok(None);
+        };
+        if let Some(t) = old {
+            let _ = self.reference.close(t);
+        }
+        let access = if write {
+            flags & (OpenFlags::WRITE | OpenFlags::APPEND)
+        } else {
+            OpenFlags::READ
+        };
+        let now = self.reference.open(root, access, &path).map(|o| o.fh).ok();
+        if let Some(e) = self.held().by_path.get_mut(&fh) {
+            e.3 = now;
+        }
+        match now {
+            Some(t) => Ok(Some(t)),
+            None if write => Err(Status::NotFound),
+            None => Err(Status::IoError),
+        }
+    }
+
+    /// For the breaks of a create with no parent:
+    /// [`Break::FileParentIoError`] answers `ST_IO_ERROR` below a file;
+    /// [`Break::CreateMakesParents`] makes the missing directories and asks
+    /// for another try (`true`).
+    fn no_parent(&mut self, root: RootId, path: &str) -> Result<bool, Status> {
+        let parts: Vec<&str> = path.split('/').collect();
+        let above: Vec<String> = (1..parts.len()).map(|i| parts[..i].join("/")).collect();
+        match self.broken {
+            Some(Break::FileParentIoError) => {
+                for p in &above {
+                    if self
+                        .reference
+                        .get_attr(root, p)
+                        .is_ok_and(|a| a.found && !a.is_dir)
+                    {
+                        return Err(Status::IoError);
+                    }
+                }
+                Ok(false)
+            }
+            Some(Break::CreateMakesParents) => {
+                for p in &above {
+                    let _ = self.reference.mkdir(root, 0o755, p);
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// [`Break::ParentRespelled`]: each directory above `path` respelled as
+    /// `path` spells it.
+    fn respell_parents(&mut self, root: RootId, path: &str) {
+        if self.broken != Some(Break::ParentRespelled) {
+            return;
+        }
+        let parts: Vec<&str> = path.split('/').collect();
+        for i in 1..parts.len() {
+            let p = parts[..i].join("/");
+            let _ = self.reference.rename(root, &p, &p);
+        }
+    }
+
+    /// Whether `root`'s `path` is a directory.
+    fn is_dir(&mut self, root: RootId, path: &str) -> bool {
+        self.reference
+            .get_attr(root, path)
+            .is_ok_and(|a| a.found && a.is_dir)
+    }
+
     /// The reference's handle for the number `fh` a client sent.
     fn fh_in(&self, fh: u64) -> u64 {
         match self.broken {
@@ -1058,6 +1238,20 @@ impl Director for Served {
         Ok(a)
     }
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
+        if self.broken == Some(Break::ReaddirFileListsItself) {
+            if let Ok(a) = self.reference.get_attr(root, path) {
+                if a.found && !a.is_dir {
+                    *out = Listing::default();
+                    out.push(aether_protocol::DirEntry {
+                        name: path.rsplit('/').next().unwrap_or(path),
+                        is_dir: false,
+                        size: a.size,
+                        mtime: a.mtime,
+                    });
+                    return Ok(());
+                }
+            }
+        }
         self.reference.read_dir(root, path, out)?;
         let millis = self.broken == Some(Break::MtimeMillis);
         let held = self.broken == Some(Break::SetattrAtClose);
@@ -1104,7 +1298,47 @@ impl Director for Served {
         } else {
             flags
         };
-        let mut o = self.reference.open(root, flags, path)?;
+        let flags = if self.broken == Some(Break::DirWriteOpen)
+            && flags.contains(OpenFlags::WRITE)
+            && !flags.contains(OpenFlags::EXCL)
+            && self.is_dir(root, path)
+        {
+            OpenFlags::READ
+        } else {
+            flags
+        };
+        let existed = self.reference.get_attr(root, path).is_ok_and(|a| a.found);
+        let flags = if self.broken == Some(Break::RacyExcl)
+            && flags.contains(OpenFlags::CREATE | OpenFlags::EXCL)
+            && !existed
+        {
+            std::thread::sleep(RACE_HOLD);
+            flags - OpenFlags::EXCL
+        } else {
+            flags
+        };
+        let mut opened = self.reference.open(root, flags, path);
+        if opened == Err(Status::NotFound)
+            && flags.contains(OpenFlags::CREATE)
+            && self.no_parent(root, path)?
+        {
+            opened = self.reference.open(root, flags, path);
+        }
+        let mut o = opened?;
+        if !existed && flags.contains(OpenFlags::CREATE) {
+            self.respell_parents(root, path);
+        }
+        if matches!(self.broken, Some(Break::TornAppend | Break::LostUpdate))
+            && flags.contains(OpenFlags::APPEND)
+        {
+            self.held().appends.insert(o.fh);
+        }
+        if self.broken == Some(Break::HandlesByPath) && !o.is_dir {
+            let access = flags & (OpenFlags::WRITE | OpenFlags::APPEND);
+            self.held()
+                .by_path
+                .insert(o.fh, (root, path.to_string(), access, None));
+        }
         if own_end {
             self.held().ends.insert(o.fh, o.size);
         }
@@ -1151,6 +1385,11 @@ impl Director for Served {
             _ => at,
         };
         let fh = self.fh_in(fh);
+        let fh = self.at_path(fh, false)?.unwrap_or(fh);
+        let offset = match self.broken {
+            Some(Break::ReadOffsetWraps) => offset & 0xFFFF_FFFF,
+            _ => offset,
+        };
         let snap = self.held().snaps.get(&fh).cloned();
         if let Some(b) = snap {
             let start = offset.min(b.len() as u64) as usize;
@@ -1198,9 +1437,43 @@ impl Director for Served {
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
         let fh = self.fh_in(fh);
+        let fh = self.at_path(fh, true)?.unwrap_or(fh);
+        if self.broken == Some(Break::HugeWriteOk)
+            && !data.is_empty()
+            && offset
+                .checked_add(data.len() as u64)
+                .is_none_or(|end| end > aether_refdirector::MAX_FILE_LEN as u64)
+        {
+            return Ok(data.len() as u32);
+        }
         if self.broken == Some(Break::GrowthGarbage) {
             let end = self.length(fh)?;
             self.garbage(fh, end, offset)?;
+        }
+        if self.broken == Some(Break::TornAppend)
+            && data.len() > 1
+            && self.held().appends.contains(&fh)
+        {
+            let half = data.len() / 2;
+            self.reference.write(fh, 0, &data[..half])?;
+            std::thread::sleep(RACE_HOLD);
+            self.reference.write(fh, 0, &data[half..])?;
+            return Ok(data.len() as u32);
+        }
+        if self.broken == Some(Break::LostUpdate)
+            && !data.is_empty()
+            && offset < (1 << 20)
+            && !self.held().appends.contains(&fh)
+        {
+            let mut whole = self.bytes(fh)?;
+            std::thread::sleep(RACE_HOLD);
+            let end = offset as usize + data.len();
+            if whole.len() < end {
+                whole.resize(end, 0);
+            }
+            whole[offset as usize..end].copy_from_slice(data);
+            self.reference.write(fh, 0, &whole)?;
+            return Ok(data.len() as u32);
         }
         match self.broken {
             Some(Break::SnapshotReads) => {
@@ -1247,6 +1520,11 @@ impl Director for Served {
     }
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
         let fh = self.fh_in(fh);
+        let fh = self.at_path(fh, true)?.unwrap_or(fh);
+        if self.broken == Some(Break::HugeWriteOk) && size > aether_refdirector::MAX_FILE_LEN as u64
+        {
+            return Ok(());
+        }
         match self.broken {
             Some(Break::SnapshotReads) => {
                 self.reference.set_attr(fh, size)?;
@@ -1285,6 +1563,60 @@ impl Director for Served {
         }
     }
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
+        let (f, t) = (aether_casefold::fold(from), aether_casefold::fold(to));
+        let broken = self.broken;
+        match broken {
+            Some(Break::AncestorBadRequest) if f.starts_with(&format!("{t}/")) => {
+                return Err(Status::BadRequest)
+            }
+            Some(Break::SameNameExists)
+                if from == to
+                    && self
+                        .reference
+                        .stored_names(root, 0, &f)
+                        .is_ok_and(|stored| stored == to) =>
+            {
+                return Err(Status::Exists)
+            }
+            Some(Break::RenameInSteps)
+                if self
+                    .reference
+                    .get_attr(root, from)
+                    .is_ok_and(|a| a.found && !a.is_dir)
+                    && self.reference.get_attr(root, to).is_ok_and(|a| !a.found) =>
+            {
+                // Moved, then a copy left at `from` for a while.
+                let src = self.reference.open(root, OpenFlags::READ, from)?.fh;
+                let bytes = self.bytes(src);
+                let _ = self.reference.close(src);
+                self.reference.rename(root, from, to)?;
+                if let Ok(o) = self
+                    .reference
+                    .open(root, OpenFlags::WRITE | OpenFlags::CREATE, from)
+                {
+                    let _ = self.reference.write(o.fh, 0, &bytes.unwrap_or_default());
+                    let _ = self.reference.close(o.fh);
+                    std::thread::sleep(RACE_HOLD);
+                    let _ = self.reference.delete(root, from);
+                }
+                return Ok(());
+            }
+            Some(Break::FileOntoDirKept)
+                if self
+                    .reference
+                    .get_attr(root, from)
+                    .is_ok_and(|a| a.found && !a.is_dir)
+                    && self.is_dir(root, to) =>
+            {
+                let mut listing = Listing::default();
+                let empty = self.reference.read_dir(root, to, &mut listing).is_ok()
+                    && listing.iter().next().is_none();
+                if empty {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
         let ghosts = self.broken == Some(Break::RenameDirGhosts)
             && self
                 .reference
@@ -1307,7 +1639,12 @@ impl Director for Served {
         self.reference.delete(root, path)
     }
     fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
-        self.reference.mkdir(root, mode, path)?;
+        let mut made = self.reference.mkdir(root, mode, path);
+        if made == Err(Status::NotFound) && self.no_parent(root, path)? {
+            made = self.reference.mkdir(root, mode, path);
+        }
+        made?;
+        self.respell_parents(root, path);
         let folded = aether_casefold::fold(path);
         let back = self
             .held()
@@ -1334,6 +1671,11 @@ impl Director for Served {
     }
     fn close(&mut self, fh: u64) -> Result<(), Status> {
         let fh = self.fh_in(fh);
+        self.held().appends.remove(&fh);
+        let at = self.held().by_path.remove(&fh).and_then(|e| e.3);
+        if let Some(t) = at {
+            let _ = self.reference.close(t);
+        }
         {
             let mut h = self.held();
             h.ends.remove(&fh);
@@ -1354,6 +1696,10 @@ impl Director for Served {
         self.reference.heartbeat()
     }
     fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
+        if self.broken == Some(Break::SkipPastEndEcho) && skip as usize >= path.split('/').count() {
+            self.echo = path.rsplit('/').next().unwrap_or(path).to_string();
+            return Ok(&self.echo);
+        }
         self.reference.stored_names(root, skip, path)
     }
     fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {
@@ -1401,6 +1747,18 @@ impl Director for Served {
         self.refused(r)
     }
     fn reg_create_key(&mut self, path: &str, volatile: bool) -> Result<u64, Status> {
+        if self.broken == Some(Break::RacyRegCreate)
+            && self
+                .reference
+                .reg_lookup(path)
+                .is_ok_and(|l| l.state == aether_protocol::Lookup::Absent)
+        {
+            std::thread::sleep(RACE_HOLD);
+            return match self.reference.reg_create_key(path, volatile) {
+                Err(Status::Exists) => self.reference.reg_lookup(path).map(|l| l.version),
+                r => r,
+            };
+        }
         let r = self.reference.reg_create_key(path, volatile);
         self.refused(r)
     }
@@ -1437,6 +1795,12 @@ impl Director for Served {
         from: &str,
         to: &str,
     ) -> Result<(), Status> {
+        if self.broken == Some(Break::RenameXOntoDirOk)
+            && from_root != to_root
+            && self.is_dir(to_root, to)
+        {
+            return Ok(());
+        }
         self.reference.rename_x(from_root, to_root, from, to)
     }
     fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
@@ -1605,6 +1969,7 @@ mod tests {
             reg_reads: Arc::default(),
             held: Arc::default(),
             view: Vec::new(),
+            echo: String::new(),
         };
         let two = Served {
             reference: one.reference.share(),
@@ -1616,6 +1981,7 @@ mod tests {
             reg_reads: one.reg_reads.clone(),
             held: one.held.clone(),
             view: Vec::new(),
+            echo: String::new(),
             ..one
         };
         (one, two, b)

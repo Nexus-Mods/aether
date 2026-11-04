@@ -89,8 +89,19 @@ impl Adapter {
             });
         };
         let mut cmd = Command::new(program);
-        cmd.args(args)
-            .stdin(Stdio::piped())
+        cmd.args(args);
+        Adapter::spawn(cmd, program, timeout)
+    }
+
+    /// Starts `cmd` with piped stdio, as [`Adapter::start`] does a command
+    /// line: any child that answers one JSON line per JSON line, as the
+    /// client workers do ([`crate::clients`]). `program` names it in errors.
+    pub fn spawn(
+        mut cmd: Command,
+        program: &str,
+        timeout: Duration,
+    ) -> Result<Adapter, AdapterError> {
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let (mut child, tree) = ProcessTree::spawn(&mut cmd).map_err(|e| AdapterError {
@@ -194,6 +205,20 @@ impl Adapter {
             std::thread::sleep(Duration::from_millis(10));
         }
         // Drop kills the tree.
+    }
+
+    /// Sends `request` as one line and returns the JSON object answered,
+    /// within the timeout: the protocol's one round trip, for a child that
+    /// is not a mount adapter ([`Adapter::spawn`]).
+    pub fn request(&mut self, request: &Value) -> Result<Value, AdapterError> {
+        self.ask(request)
+    }
+
+    /// Kills the child and every process it started now, and reaps it: a
+    /// process that is killed, as a game's processes may be (`docs/wire.md`
+    /// 2.8.1). A tree that could not be killed is returned.
+    pub fn kill_now(&mut self) -> Option<String> {
+        self.kill()
     }
 
     /// Kills the adapter and every process it started. A tree that could

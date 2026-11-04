@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aether_protocol::{Opcode, Reply, Request, RequestFlags, Status};
+use aether_protocol::{Opcode, Reply, Request, Status};
 use aether_rpc::CallError;
 
 use crate::adapter::{Adapter, AdapterError};
@@ -52,6 +52,8 @@ pub struct RunOptions {
     pub malformed: bool,
     /// Also play generated cases ([`crate::generate`]).
     pub generate: Option<GenerateOptions>,
+    /// Also play rounds of clients at once ([`crate::concurrent`]).
+    pub concurrent: Option<crate::concurrent::ConcurrentOptions>,
 }
 
 /// One step as played.
@@ -155,7 +157,11 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
     let mut report = RunReport {
         scenarios: Vec::new(),
         adapter_error: None,
-        seed: opts.generate.as_ref().map(|g| g.seed),
+        seed: opts
+            .generate
+            .as_ref()
+            .map(|g| g.seed)
+            .or(opts.concurrent.as_ref().map(|c| c.seed)),
     };
     for (file, s) in &scenarios {
         let mut result = ScenarioResult {
@@ -189,6 +195,16 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
     }
     if let Some(g) = &opts.generate {
         match crate::generate::run(&mut adapter, g, opts.timeout) {
+            Ok(r) => report.scenarios.push(r),
+            Err(GenerateError::Adapter(e)) => {
+                report.adapter_error = Some(e.to_string());
+                return Ok(report);
+            }
+            Err(GenerateError::Generator(e)) => return Err(RunError::Generator(e)),
+        }
+    }
+    if let Some(c) = &opts.concurrent {
+        match crate::concurrent::run(&mut adapter, c, opts.timeout) {
             Ok(r) => report.scenarios.push(r),
             Err(GenerateError::Adapter(e)) => {
                 report.adapter_error = Some(e.to_string());
@@ -239,7 +255,7 @@ fn one(
     };
     match Attached::from_env(&env, timeout) {
         Ok(ring) => {
-            if let Err(e) = play(&ring, s, &mut out.steps) {
+            if let Err(e) = play(&ring, &env, timeout, s, &mut out.steps) {
                 out.error = Some(format!("{}: {e}", ring.describe()));
             }
             // Detached before the unmount, so the adapter can remove the
@@ -260,27 +276,49 @@ enum Sent {
     Bad(String),
 }
 
-/// Plays `s`'s steps on `ring`. `Err` when the ring stopped answering.
-fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), String> {
+/// Plays `s`'s steps on `ring`, the steps of client 0 from this process and
+/// those of every other client number from a client process of its own
+/// ([`crate::clients::ProcessClient`]) attached from `env`. One session
+/// pairs the handles of all of them, since handles are ring-global (wire.md
+/// 2.8.1), and one [`RegGen`] reads the generation each step's own client
+/// read. `Err` when the ring stopped answering.
+fn play(
+    ring: &Attached,
+    env: &crate::adapter::Env,
+    timeout: Duration,
+    s: &Scenario,
+    out: &mut Vec<StepResult>,
+) -> Result<(), String> {
     let client = ring.client();
     let mut scratch = Vec::new();
     client
         .call(&Request::Heartbeat {}, &mut scratch)
         .map_err(|e| format!("the HEARTBEAT sent on attach failed: {e}"))?;
+    let mut others = Others::start(env, timeout, s)?;
     let mut session = Session::new();
     let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
-        let gen_before = ring.reg_gen();
-        let gen_broken = reg_gen.before(&step.request, gen_before);
         let mut req = session.translate(&step.request);
-        if let OwnedRequest::Read { slot_flags, .. } = &mut req {
-            if ring.arena_len() == 0 && slot_flags.contains(RequestFlags::READ_BULK) {
-                slot_flags.remove(RequestFlags::READ_BULK);
-                notes.push("sent without read_bulk: the ring has no arena (wire.md 2.6)".into());
-            }
+        if crate::clients::fit_to_ring(ring, &mut req) {
+            notes.push("sent without read_bulk: the ring has no arena (wire.md 2.6)".into());
         }
-        let sent = match send(ring, &client, &req, &mut scratch) {
+        let (sent, gen_before, gen_now) = match step.client {
+            0 => {
+                let before = ring.reg_gen();
+                let sent = send(ring, &client, &req, &mut scratch);
+                (sent, before, ring.reg_gen())
+            }
+            k => match others.send(k, &req) {
+                Ok((sent, slot, before, after)) => {
+                    notes.push(format!("sent by client {k}, in slot {slot}"));
+                    (Ok(sent), before, after)
+                }
+                Err(e) => (Err(e), 0, 0),
+            },
+        };
+        let gen_broken = reg_gen.before(&step.request, gen_before);
+        let sent = match sent {
             Ok(sent) => sent,
             Err(e) => {
                 out.push(StepResult {
@@ -308,7 +346,7 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
             }
         };
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
-        let gen_after = reg_gen.after(&step.request, succeeded, gen_before, ring.reg_gen());
+        let gen_after = reg_gen.after(&step.request, succeeded, gen_before, gen_now);
         if let Some(why) = gen_broken.or(gen_after) {
             notes.insert(0, why);
             passed = false;
@@ -323,6 +361,51 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
         });
     }
     Ok(())
+}
+
+/// The scenario's clients other than 0, each a process of its own.
+struct Others {
+    clients: std::collections::BTreeMap<u32, crate::clients::ProcessClient>,
+}
+
+impl Others {
+    /// Starts a client process for every client number `s`'s steps name
+    /// besides 0.
+    fn start(env: &crate::adapter::Env, timeout: Duration, s: &Scenario) -> Result<Others, String> {
+        let wanted: std::collections::BTreeSet<u32> = s
+            .steps
+            .iter()
+            .map(|st| st.client)
+            .filter(|&k| k != 0)
+            .collect();
+        let mut clients = std::collections::BTreeMap::new();
+        if !wanted.is_empty() {
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("cannot find this program to start clients: {e}"))?;
+            for k in wanted {
+                clients.insert(
+                    k,
+                    crate::clients::ProcessClient::start(&exe, k, env, timeout)?,
+                );
+            }
+        }
+        Ok(Others { clients })
+    }
+
+    /// Sends `req` from client `k`: the answer, the slot it went in, and the
+    /// generations the client read before and after.
+    fn send(&mut self, k: u32, req: &OwnedRequest) -> Result<(Sent, u32, u64, u64), String> {
+        let c = self
+            .clients
+            .get_mut(&k)
+            .ok_or_else(|| format!("client {k} was not started"))?;
+        let r = c.send(req)?;
+        let sent = match r.outcome.answer {
+            crate::clients::Answer::Got(a) => Sent::Answer(a),
+            crate::clients::Answer::Bad(why) => Sent::Bad(why),
+        };
+        Ok((sent, r.outcome.slot, r.gen_before, r.gen_after))
+    }
 }
 
 /// wire.md 4.5's rules for the registry generation (`reg_gen`) in the ring

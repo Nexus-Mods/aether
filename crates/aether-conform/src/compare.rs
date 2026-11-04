@@ -88,6 +88,8 @@ pub struct Session {
     /// What READs through immutable handles returned, by key, offset and
     /// length: the shim's read cache, which outlives the handles.
     cached: BTreeMap<(CacheKey, u64, u32), Vec<u8>>,
+    /// Never send a closed handle's old number ([`Session::among_others`]).
+    no_reuse: bool,
 }
 
 /// What the shim's read cache keys a file's blocks by (wire.md 3.4.3): the
@@ -128,6 +130,19 @@ impl Session {
         Session::default()
     }
 
+    /// A session for one of several clients sending at once, each pairing
+    /// its own handles: a closed handle, or a number never paired, is always
+    /// sent as a stand-in, never as the number the director closed, since
+    /// the director may already have issued that number to another client
+    /// (wire.md 2.8.1: handles are ring-global), and this session cannot
+    /// know.
+    pub fn among_others() -> Session {
+        Session {
+            no_reuse: true,
+            ..Session::default()
+        }
+    }
+
     /// `req` as the director should get it: an expected handle replaced as
     /// the module doc says (paired, closed, or a stand-in), and a
     /// REG_CHANGED `since` shifted by the registry version offset. Mutable
@@ -154,7 +169,12 @@ impl Session {
         if let Some(&d) = self.fh.get(&n) {
             return d;
         }
-        for m in [&self.released, &self.stand_in] {
+        let reuse = if self.no_reuse {
+            &[&self.stand_in][..]
+        } else {
+            &[&self.released, &self.stand_in][..]
+        };
+        for m in reuse {
             if let Some(&d) = m.get(&n) {
                 if !self.fh_back.contains_key(&d) {
                     return d;

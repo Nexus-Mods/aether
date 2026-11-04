@@ -103,11 +103,20 @@ components (`a/../..`) is not sent. Registry paths are sent as written.
 - `{"one_of": [...], "wire": "<section>"}`: any of the listed answers, only
   where wire.md allows more than one, and `wire` names the section that does.
 
-A step may carry a `note`. An unknown op, field, flag, state or status, a
-missing field, a non-canonical path, a bad tree, or an OPEN that expects a
-handle number still open in the scenario (wire.md 3.4.3: unique among open
-handles) is a load error naming the file, the step and the field
-(`saves.json: step 3: request.flags: unknown flag "sideways", ...`).
+A step may carry a `note`, and `"client": n` (default 0): which client of
+the ring sends it. The run attaches one client per number named, every one
+but 0 a process of its own claiming from slot `n`, so a scenario can show
+what one process of a session sees of another's requests (wire.md 2.8.1;
+`docs/conformance.md`, "Several clients"). Handle numbers belong to the
+scenario, not to a client: any client may present a handle another opened,
+and a number open in one client is open for all.
+
+An unknown op, field, flag, state or status, a missing field, a
+non-canonical path, a bad tree, or an OPEN that expects a handle number
+still open in the scenario, in any client (wire.md 3.4.3: unique among open
+handles; 2.8.1: across all processes), is a load error naming the file, the
+step and the field (`saves.json: step 3: request.flags: unknown flag
+"sideways", ...`).
 
 ## Comparison rules
 
@@ -132,13 +141,14 @@ its section in `wire`.
 
 ## Checks across steps
 
-Two rules no single answer shows are checked across a scenario's steps, and
-fail the step that breaks them, whatever its expectation:
+Rules no single answer shows are checked across a scenario's steps and
+clients, and fail the step that breaks them, whatever its expectation:
 
 | What | Rule | wire.md |
 |---|---|---|
 | Read cache | Every READ through a handle whose OPEN reply set `immutable` is recorded under (root, path folded as 3.2 folds it, the reply's `size` and `mount_gen`, offset, length) for the rest of the scenario, bulk reads once read from the arena; a READ of the same key through an immutable handle that returns other bytes fails. Reads through other handles are not recorded (`compare.rs`). | 3.4.3: "two immutable opens of one path with equal size and `mount_gen` must have identical content"; "the handle's bytes cannot change while it is open" |
-| `reg_gen` | Read from the ring header before every request and after every reply (`run.rs`, `RegGen`): with a `registry` in the tree it is non-zero before the first registry request; after a successful REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or REG_RENAME_KEY it is greater than before the request; it never goes backward. Without a `registry` only the last applies. | 4.5: "a director that serves the registry must publish a non-zero generation before the shim attaches, and must bump it before replying to any write"; "never backward" |
+| `reg_gen` | Read from the ring header before every request and after every reply (`run.rs`, `RegGen`), by the client that sends the step, in its own mapping: with a `registry` in the tree it is non-zero before the first registry request; after a successful REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or REG_RENAME_KEY it is greater than before the request; it never goes backward, across all the clients. Without a `registry` only the last applies. | 4.5: "a director that serves the registry must publish a non-zero generation before the shim attaches, and must bump it before replying to any write"; "never backward"; 2.8.1: it is how one process's write reaches the others |
+| A client's slot | A step of client `n` is claimed from slot `n`: an answer must come within the timeout, a bulk reply must lie in that slot's bank, and the slot's `ack` must be its request's (`clients.rs`). | 2.5: every taken slot is completed; 2.6: "Slot `s` owns bank `s % banks`" |
 
 To play scenarios against a director, see `docs/conformance.md`. A generated
 case that fails (`aether-conform run --generate`) is written in this format

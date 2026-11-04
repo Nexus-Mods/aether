@@ -386,6 +386,10 @@ fn the_committed_scenarios_pass_against_the_reference_adapter() {
         "cache-immutable-readonly",
         "cache-overwrite-same-size",
         "readonly-root-refuses-changes",
+        "multi-handle-shared",
+        "multi-handles-unique",
+        "multi-registry-gen",
+        "multi-write-visible",
     ] {
         assert!(out.contains(&format!(" - {name}\n")), "{name}: {out}");
     }
@@ -475,12 +479,16 @@ fn a_director_that_never_moves_reg_gen_fails_the_registry_write_scenarios() {
         "registry-delete-value",
         "registry-rename-key",
         "registry-values",
+        "multi-registry-gen",
     ] {
         assert!(failed.contains(&name), "{name}: {results:?}");
     }
     for (name, passed, notes) in &results {
         if !passed {
-            assert!(name.starts_with("registry-"), "{name}: {notes:?}");
+            assert!(
+                name.starts_with("registry-") || name == "multi-registry-gen",
+                "{name}: {notes:?}"
+            );
             assert!(
                 notes.iter().all(|n| n.contains("wire.md 4.5")),
                 "{name}: {notes:?}"
@@ -491,4 +499,364 @@ fn a_director_that_never_moves_reg_gen_fails_the_registry_write_scenarios() {
         results.iter().any(|(n, p, _)| n == "registry-none" && *p),
         "no registry, no generation to move: {results:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Several clients on one ring (wire.md 2.5 to 2.8.1).
+
+/// A folder holding the committed `multi-*` scenarios, which play steps from
+/// client processes of their own.
+fn multi_scenarios() -> TempDir {
+    let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let dir = aether_testkit::tempdir().unwrap();
+    for e in std::fs::read_dir(&from).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with("multi-") && name.ends_with(".json") {
+            std::fs::copy(&p, dir.path().join(&name)).unwrap();
+        }
+    }
+    dir
+}
+
+/// One scenario of a JSON report: name, passed, error, failing steps' notes.
+type Entry = (String, bool, Option<String>, Vec<String>);
+
+/// `run` against `director` (the arguments after the binary) over the
+/// scenarios in `dir`, with `extra` arguments, as a JSON report: its exit
+/// code, its entries, the `file` of the `concurrent` entry (if any), and
+/// everything the run printed.
+fn run_json(
+    director: &str,
+    dir: &Path,
+    timeout: &str,
+    extra: &[&str],
+) -> (Option<i32>, Vec<Entry>, String, String) {
+    let out = aether_testkit::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    let director = format!("{} {director}", quoted_exe());
+    let mut args = vec![
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+        "--timeout",
+        timeout,
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ];
+    args.extend_from_slice(extra);
+    let o = conform(&args);
+    let all = all_output(&o);
+    let v: Value = match std::fs::read(&report) {
+        Ok(b) => serde_json::from_slice(&b).unwrap(),
+        Err(e) => panic!("no report ({e}): {all}"),
+    };
+    let mut concurrent = String::new();
+    let entries = v["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            if s["name"] == "concurrent" {
+                concurrent = s["file"].as_str().unwrap_or("").to_string();
+            }
+            let notes = s["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|st| st["passed"] == false)
+                .map(|st| st["note"].as_str().unwrap_or("").to_string())
+                .collect();
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["passed"] == true,
+                s["error"].as_str().map(str::to_string),
+                notes,
+            )
+        })
+        .collect();
+    (o.status.code(), entries, concurrent, all)
+}
+
+fn entry<'a>(entries: &'a [Entry], name: &str) -> &'a Entry {
+    entries
+        .iter()
+        .find(|e| e.0 == name)
+        .unwrap_or_else(|| panic!("no {name} in {entries:?}"))
+}
+
+/// Four clients at once, each a generated case, their requests in flight
+/// together, against the reference over a file ring: every reply matches,
+/// every slot carries a request and every bank a bulk reply, and more than
+/// one request was in flight at once.
+#[test]
+fn concurrent_clients_pass_against_the_reference_on_a_file_ring() {
+    let dir = multi_scenarios();
+    let (code, entries, summary, all) = run_json(
+        "reference-adapter",
+        dir.path(),
+        "20",
+        &["--concurrent", "4", "--concurrent-cases", "48"],
+    );
+    assert_eq!(code, Some(0), "{entries:?}\n{all}");
+    assert!(entries.iter().all(|e| e.1), "{entries:?}");
+    assert_eq!(entries.len(), 5, "{entries:?}");
+    assert!(
+        summary.contains("8 of 8 slots and 8 banks used"),
+        "{summary}"
+    );
+    let most: u32 = summary
+        .rsplit("at most ")
+        .next()
+        .and_then(|r| r.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{summary}"));
+    assert!(most >= 2, "requests were not in flight together: {summary}");
+}
+
+/// The same over a named section, with its events.
+#[cfg(windows)]
+#[test]
+fn several_clients_pass_against_the_reference_on_a_named_section() {
+    let dir = multi_scenarios();
+    let (code, entries, summary, all) = run_json(
+        "reference-adapter --ring section",
+        dir.path(),
+        "20",
+        &["--concurrent", "4", "--concurrent-cases", "16"],
+    );
+    assert_eq!(code, Some(0), "{entries:?}\n{all}");
+    assert!(entries.iter().all(|e| e.1), "{entries:?}");
+    assert!(summary.contains("8 of 8 slots"), "{summary}");
+}
+
+const CONCURRENT_FEW: [&str; 6] = [
+    "--concurrent",
+    "4",
+    "--concurrent-cases",
+    "8",
+    "--seed",
+    "11",
+];
+
+/// The committed suite against `test-adapter --misbehave <how>`, with the
+/// concurrent clients: the entries, and everything the run printed.
+fn committed_with(how: &str, timeout: &str) -> (Vec<Entry>, String) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let (code, entries, _, all) = run_json(
+        &format!("test-adapter --misbehave {how}"),
+        &dir,
+        timeout,
+        &CONCURRENT_FEW,
+    );
+    assert_eq!(code, Some(1), "{entries:?}\n{all}");
+    (entries, all)
+}
+
+fn failed(entries: &[Entry]) -> Vec<&str> {
+    entries
+        .iter()
+        .filter(|e| !e.1)
+        .map(|e| e.0.as_str())
+        .collect()
+}
+
+/// wire.md 2.8.1: handles are ring-global. A director that numbers handles
+/// per slot (per connection) passes every single-client scenario, since one
+/// client sending one request at a time only uses slot 0, and fails the
+/// scenarios where another process presents or is issued a handle, and the
+/// concurrent clients.
+#[test]
+fn a_director_numbering_handles_per_slot_fails_only_with_several_clients() {
+    let (entries, all) = committed_with("per-slot-fh", "20");
+    assert_eq!(
+        failed(&entries),
+        ["multi-handle-shared", "multi-handles-unique", "concurrent"],
+        "{all}"
+    );
+    let unique = entry(&entries, "multi-handles-unique");
+    assert!(
+        unique.3.iter().any(|n| n.contains("wire.md 3.4.3")),
+        "{unique:?}"
+    );
+    let concurrent = entry(&entries, "concurrent");
+    assert!(
+        concurrent
+            .3
+            .iter()
+            .any(|n| n.contains("wire.md 2.8.1") || n.contains("wire.md 3.4.3")),
+        "{concurrent:?}"
+    );
+}
+
+/// wire.md 2.5: every slot a client publishes is taken and completed. A
+/// director that only ever takes slot 0 passes every single-client
+/// scenario and fails every one with a second client, and the concurrent
+/// clients, at the timeout.
+#[test]
+fn a_director_serving_only_slot_zero_fails_every_second_client() {
+    let (entries, all) = committed_with("slot-zero-only", "2");
+    assert_eq!(
+        failed(&entries),
+        [
+            "multi-handle-shared",
+            "multi-handles-unique",
+            "multi-registry-gen",
+            "multi-write-visible",
+            "concurrent"
+        ],
+        "{all}"
+    );
+    for e in entries.iter().filter(|e| !e.1) {
+        let error = e.2.as_deref().unwrap_or("");
+        assert!(error.contains("no answer within 2 s"), "{e:?}");
+        assert!(error.contains("wire.md 2.5"), "{e:?}");
+    }
+}
+
+/// wire.md 2.6: slot `s` owns bank `s % banks`. A director that writes every
+/// bulk reply into bank 0 passes every single-client scenario and fails the
+/// bulk READ from client 1 (slot 1), and the concurrent clients.
+#[test]
+fn a_director_writing_every_bulk_reply_into_bank_zero_fails_on_other_slots() {
+    let (entries, all) = committed_with("bank-zero", "20");
+    assert_eq!(
+        failed(&entries),
+        ["multi-handle-shared", "concurrent"],
+        "{all}"
+    );
+    let shared = entry(&entries, "multi-handle-shared");
+    assert!(
+        shared
+            .3
+            .iter()
+            .any(|n| n.contains("wire.md 2.6") && n.contains("not in bank 1")),
+        "{shared:?}"
+    );
+    let concurrent = entry(&entries, "concurrent");
+    let error = concurrent.2.as_deref().unwrap_or("");
+    assert!(
+        concurrent.3.iter().any(|n| n.contains("wire.md 2.6")) || error.contains("2.6"),
+        "{concurrent:?}"
+    );
+}
+
+/// wire.md 2.5: a reply goes into the slot of the request it answers. A
+/// director that swaps the replies of two requests in flight together
+/// passes every scenario, whose steps go one at a time, and fails the
+/// concurrent clients, whose requests each name their own client's paths.
+#[test]
+fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients() {
+    let (entries, all) = committed_with("swap-replies", "20");
+    assert_eq!(failed(&entries), ["concurrent"], "{all}");
+}
+
+/// wire.md 2.8.1: "a process that is killed never sends CLOSE for its open
+/// handles". A client process attached from the mount's environment opens
+/// handles and is killed; the director goes on answering this process's
+/// client and a new client process, which reads through a handle the killed
+/// one left open (the director keeps them until the session ends), and new
+/// handles do not collide with those.
+fn a_killed_client(ring: &str) {
+    use aether_conform::adapter::Adapter;
+    use aether_conform::attach::Attached;
+    use aether_conform::clients::{call_on, Answer, ProcessClient};
+    use aether_conform::scenario::{OwnedReply, OwnedRequest};
+    use aether_protocol::{OpenFlags, RequestFlags, RootId};
+
+    let timeout = Duration::from_secs(20);
+    let dir = aether_testkit::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "killed.json",
+        &json!({
+            "name": "killed",
+            "description": "a tree for a client that is killed",
+            "tree": {"roots": [{"id": 0,
+                "files": [{"path": "a.txt", "contents": "alpha"},
+                          {"path": "b.txt", "contents": "beta"}],
+                "writable": ["w"]}]},
+            "steps": []
+        }),
+    );
+    let mut adapter = Adapter::start(
+        &format!("{} reference-adapter --ring {ring}", quoted_exe()),
+        timeout,
+    )
+    .unwrap();
+    let env = adapter.mount(&file).unwrap().unwrap();
+    let open = |path: &str| OwnedRequest::Open {
+        root: RootId(0),
+        flags: OpenFlags::READ,
+        path: path.into(),
+    };
+    let read = |fh: u64| OwnedRequest::Read {
+        slot_flags: RequestFlags::empty(),
+        fh,
+        offset: 0,
+        len: 16,
+    };
+    let fh_of = |a: &Answer| match a {
+        Answer::Got(Ok(OwnedReply::Open(o))) => o.fh,
+        other => panic!("not an open: {other:?}"),
+    };
+
+    let mut doomed = ProcessClient::start(Path::new(EXE), 1, &env, timeout).unwrap();
+    let left: Vec<u64> = ["a.txt", "b.txt", "a.txt"]
+        .iter()
+        .map(|p| fh_of(&doomed.send(&open(p)).unwrap().outcome.answer))
+        .collect();
+    assert_eq!(doomed.kill(), None);
+    assert!(
+        doomed.send(&OwnedRequest::Heartbeat).is_err(),
+        "a killed client cannot answer"
+    );
+
+    // This process's own client goes on.
+    let me = Attached::from_env(&env, timeout).unwrap();
+    let hb = call_on(&me, 0, &OwnedRequest::Heartbeat).unwrap();
+    assert_eq!(hb.answer, Answer::Got(Ok(OwnedReply::Empty)));
+    let mine = fh_of(&call_on(&me, 0, &open("b.txt")).unwrap().answer);
+    assert!(
+        !left.contains(&mine),
+        "{mine} is still open in the killed client: {left:?}"
+    );
+    assert_eq!(
+        call_on(&me, 0, &read(mine)).unwrap().answer,
+        Answer::Got(Ok(OwnedReply::Read(b"beta".to_vec())))
+    );
+
+    // A new client process, on another slot, reads through a handle the
+    // killed one left open, and is issued a number of its own.
+    let mut next = ProcessClient::start(Path::new(EXE), 2, &env, timeout).unwrap();
+    let r = next.send(&read(left[0])).unwrap();
+    assert_eq!(r.outcome.slot, 2);
+    assert_eq!(
+        r.outcome.answer,
+        Answer::Got(Ok(OwnedReply::Read(b"alpha".to_vec())))
+    );
+    let theirs = fh_of(&next.send(&open("a.txt")).unwrap().outcome.answer);
+    assert!(
+        !left.contains(&theirs) && theirs != mine,
+        "{theirs}: {left:?}, {mine}"
+    );
+    drop(next);
+    drop(me);
+    adapter.unmount().unwrap();
+    adapter.finish();
+}
+
+#[test]
+fn a_killed_client_process_leaves_the_director_serving_the_others_on_a_file_ring() {
+    a_killed_client("file");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_killed_client_process_leaves_the_director_serving_the_others_on_a_named_section() {
+    a_killed_client("section");
 }

@@ -1,0 +1,35 @@
+{
+  "name": "multi-write-visible",
+  "description": "One session, one tree, whichever process asks (wire.md 2.8.1): what client 0 writes, client 1, another process of the ring, sees at once. GETATTR, READDIR and OPEN report a file's size as it is now, writes through a handle still open included (3.4.1, 3.4.2, 3.4.3); READ returns the new bytes (3.4.4); a truncating open by one client and a write through it are seen by the other (3.4.3, 3.4.5).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/old.txt", "contents": "old"}
+       ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/new.txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "hello from client 0"}, "expect": {"reply": {"written": 19}}},
+    {"client": 1, "request": {"op": "getattr", "root": 0, "path": "saves/new.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 19, "mtime": 0}}, "note": "written through a handle still open"},
+    {"client": 1, "request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [
+      {"name": "old.txt", "is_dir": false, "size": 3, "mtime": 0},
+      {"name": "new.txt", "is_dir": false, "size": 19, "mtime": 0}]}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"client": 1, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/new.txt"}, "expect": {"reply": {"fh": 2, "size": 19, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"client": 1, "request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "hello from client 0"}}},
+    {"client": 1, "request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"client": 1, "request": {"op": "open", "root": 0, "flags": ["write", "trunc"], "path": "saves/old.txt"}, "expect": {"reply": {"fh": 3, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/old.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 0, "mtime": 0}}, "note": "truncated by client 1's open"},
+    {"client": 1, "request": {"op": "write", "fh": 3, "offset": 0, "data": "newer, longer"}, "expect": {"reply": {"written": 13}}},
+    {"client": 1, "request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [
+      {"name": "old.txt", "is_dir": false, "size": 13, "mtime": 0},
+      {"name": "new.txt", "is_dir": false, "size": 19, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/old.txt"}, "expect": {"reply": {"fh": 4, "size": 13, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 4, "offset": 0, "len": 64}, "expect": {"reply": {"data": "newer, longer"}}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}}
+  ]
+}

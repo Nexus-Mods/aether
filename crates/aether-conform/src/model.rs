@@ -2207,6 +2207,7 @@ impl Gen {
             expect,
             cite,
             note: Some(note),
+            client: 0,
         });
         if let Ok(r) = &got {
             self.record_version(r);

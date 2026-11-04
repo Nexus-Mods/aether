@@ -73,6 +73,7 @@ pub struct Attached {
     geom: Geom,
     ring_bytes: usize,
     arena_len: usize,
+    arena_offset: usize,
     #[cfg(windows)]
     server_ev: Option<crate::job::WakeEvent>,
     deadline: Duration,
@@ -130,7 +131,11 @@ impl Attached {
             ));
         }
         check_arena(arena_len, geom.slot_count)?;
-        if let Some(off) = get(aether_env::ARENA_OFFSET).and_then(|s| s.parse::<usize>().ok()) {
+        let given_offset = get(aether_env::ARENA_OFFSET).and_then(|s| s.parse::<usize>().ok());
+        // Without `VFS_ARENA_OFFSET` the arena follows the last slot, where
+        // both directors put it (wire.md 2.1).
+        let arena_offset = given_offset.unwrap_or(ring_end);
+        if let Some(off) = given_offset {
             if arena_len > 0 && off.saturating_add(arena_len) > ring_bytes {
                 return Err(format!(
                     "the arena ({}={off}, {}={arena_len}) runs past {}={ring_bytes} (wire.md 2.6)",
@@ -150,6 +155,7 @@ impl Attached {
             geom,
             ring_bytes,
             arena_len,
+            arena_offset,
             #[cfg(windows)]
             server_ev,
             deadline,
@@ -207,6 +213,28 @@ impl Attached {
     /// `VFS_ARENA_LEN`; 0 means the shim sends no bulk READ.
     pub fn arena_len(&self) -> usize {
         self.arena_len
+    }
+
+    /// Where the arena starts in the mapping: `VFS_ARENA_OFFSET`, or right
+    /// after the last slot (wire.md 2.1).
+    pub fn arena_offset(&self) -> usize {
+        self.arena_offset
+    }
+
+    /// The arena bank `offset .. offset + len` lies in, if it lies in one:
+    /// banks are `max(arena_len / slot_count, 4096)` bytes, bank `b` at
+    /// `arena_offset + b * bank_size` (wire.md 2.6). `None` outside the
+    /// arena or across a bank's end.
+    pub fn bank_of(&self, offset: u64, len: u32) -> Option<u32> {
+        if self.arena_len == 0 {
+            return None;
+        }
+        let banks = u64::from(self.geom.slot_count.max(1));
+        let size = (self.arena_len as u64 / banks).max(4096);
+        let rel = offset.checked_sub(self.arena_offset as u64)?;
+        let bank = rel / size;
+        let end = rel.checked_add(u64::from(len))?;
+        (bank < banks && end <= (bank + 1) * size).then_some(bank as u32)
     }
 
     /// Which ring this is, for messages.
@@ -602,6 +630,38 @@ mod tests {
                 payload_cap: 4096
             }
         );
+    }
+
+    /// wire.md 2.6: bank `b` is `bank_size` bytes at `arena_offset + b *
+    /// bank_size`, `bank_size = max(arena_len / slot_count, 4096)`.
+    #[test]
+    fn a_range_is_in_the_bank_that_holds_all_of_it() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 4 * MIN_BULK_CHUNK, 2, 4096);
+        let arena = (2 * MIN_BULK_CHUNK).to_string();
+        let off = (2 * MIN_BULK_CHUNK).to_string();
+        let e = file_env(
+            &path,
+            4 * MIN_BULK_CHUNK,
+            4096,
+            &[
+                (aether_env::ARENA_LEN, &arena),
+                (aether_env::ARENA_OFFSET, &off),
+            ],
+        );
+        let a = Attached::from_env(&e, DEADLINE).unwrap_or_else(|m| panic!("{m}"));
+        let (start, bank) = (2 * MIN_BULK_CHUNK as u64, MIN_BULK_CHUNK as u64);
+        assert_eq!(a.arena_offset(), 2 * MIN_BULK_CHUNK);
+        assert_eq!(a.bank_of(start, 10), Some(0));
+        assert_eq!(a.bank_of(start + bank - 10, 10), Some(0));
+        assert_eq!(
+            a.bank_of(start + bank - 10, 11),
+            None,
+            "across the end of bank 0"
+        );
+        assert_eq!(a.bank_of(start + bank, bank as u32), Some(1));
+        assert_eq!(a.bank_of(start + 2 * bank, 1), None, "past the arena");
+        assert_eq!(a.bank_of(start - 1, 1), None, "before the arena");
     }
 
     #[test]

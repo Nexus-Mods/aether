@@ -71,7 +71,7 @@ impl From<AdapterError> for GenerateError {
 }
 
 /// The test runner, used only as the source of randomness, for `seed`.
-fn runner(seed: u64) -> TestRunner {
+pub(crate) fn runner(seed: u64) -> TestRunner {
     let mut bytes = [0u8; 32];
     for (i, chunk) in bytes.chunks_mut(8).enumerate() {
         let word = seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -114,7 +114,7 @@ pub fn cases(seed: u64, n: u32, steps: usize) -> Result<Vec<Scenario>, String> {
 }
 
 /// A folder of its own for the case files a run mounts.
-fn scratch() -> Result<PathBuf, GenerateError> {
+pub(crate) fn scratch() -> Result<PathBuf, GenerateError> {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())

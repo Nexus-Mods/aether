@@ -626,6 +626,36 @@ fn a_closed_handle_is_sent_as_the_directors_old_number() {
     assert!(fh != 7 && fh != 9, "{fh}");
 }
 
+/// Among several clients sending at once, a closed handle's old number may
+/// already be another client's (wire.md 2.8.1), so a session for one of
+/// them sends a stand-in no handle it knows of has, never the old number.
+#[test]
+fn among_other_clients_a_closed_handle_is_sent_as_a_stand_in() {
+    let s = handles_scenario();
+    let mut sess = Session::among_others();
+    let e = |i: usize| s.steps[i].expect.clone();
+    sess.check(0, &s.steps[0].request, &e(0), &Ok(open_resp(7, 3)))
+        .unwrap();
+    sess.check(1, &s.steps[1].request, &e(1), &Ok(open_resp(9, 3)))
+        .unwrap();
+    sess.check(2, &s.steps[2].request, &e(2), &Ok(OwnedReply::Empty))
+        .unwrap();
+    let read = OwnedRequest::Read {
+        slot_flags: RequestFlags::empty(),
+        fh: 1,
+        offset: 0,
+        len: 3,
+    };
+    let OwnedRequest::Read { fh, .. } = sess.translate(&read) else {
+        panic!("read");
+    };
+    assert!(fh != 7 && fh != 9, "{fh}");
+    let OwnedRequest::Read { fh: again, .. } = sess.translate(&read) else {
+        panic!("read");
+    };
+    assert_eq!(fh, again, "the same stand-in each time");
+}
+
 /// A number no OPEN paired is sent as one no open handle of the director
 /// has, the same one each time.
 #[test]
@@ -751,4 +781,43 @@ fn the_non_canonical_path_message_is_one_line() {
     );
     assert!(e.contains("canonical") && !e.contains('\n'), "{e:?}");
     assert!(!e.contains("  "), "{e:?}");
+}
+
+/// A step names the client that sends it (`"client"`, default 0); handles
+/// are paired across clients, so one client may present another's handle
+/// (wire.md 2.8.1), and a number open in any client is open for all.
+#[test]
+fn a_step_names_its_client_and_handles_are_counted_across_clients() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "clients.json",
+        &scenario(json!([
+            {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
+             "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+            {"client": 2, "request": {"op": "read", "fh": 1, "offset": 0, "len": 3},
+             "expect": {"reply": {"data": "abc"}}},
+            {"client": 1, "request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+        ])),
+    );
+    let s = load(&p).unwrap();
+    let clients: Vec<u32> = s.steps.iter().map(|st| st.client).collect();
+    assert_eq!(clients, [0, 2, 1]);
+    // Written back only where it is not 0, and read back the same.
+    let text = aether_conform::scenario::to_json_string(&s);
+    assert_eq!(text.matches("\"client\"").count(), 2, "{text}");
+    std::fs::write(&p, text).unwrap();
+    assert_eq!(load(&p).unwrap(), s);
+
+    let e = load_error(json!([
+        {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
+         "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+        {"client": 1, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
+         "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": true, "mount_gen": 0}}}
+    ]));
+    assert!(e.contains("step 1") && e.contains("still open"), "{e}");
+    let e = load_error(json!([
+        {"client": "one", "request": {"op": "heartbeat"}, "expect": {"status": "ok"}}
+    ]));
+    assert!(e.contains("step 0") && e.contains("client"), "{e}");
 }

@@ -18,7 +18,10 @@
 //! valid requests through the raw ring. [`generate`] plays generated cases,
 //! which [`model`] makes from proptest values by reading them against an
 //! in-process reference, and shrinks the first that fails into a scenario
-//! file. `docs/conformance.md` is the user's guide.
+//! file. [`clients`] sends requests from a slot the caller picks and runs
+//! a scenario's other clients as processes of their own; [`concurrent`]
+//! plays rounds of generated cases from several clients at once.
+//! `docs/conformance.md` is the user's guide.
 //!
 //! Unsafe is confined to [`job`] (Windows only): the Job Object an adapter
 //! runs in and the director's wake event.
@@ -28,7 +31,9 @@
 pub mod adapter;
 pub mod adapters;
 pub mod attach;
+pub mod clients;
 pub mod compare;
+pub mod concurrent;
 pub mod generate;
 #[cfg(windows)]
 pub mod job;

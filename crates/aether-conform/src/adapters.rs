@@ -11,15 +11,16 @@
 //! removes the ring. A hidden, test-only `--break <rule>` makes it break one
 //! rule on purpose ([`Break`]), for the tests that show a check finds it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use aether_ipc::{ring, DataArena, IpcError, Notifier, RingBacking, RingServer};
 use aether_protocol::{
-    AttrResp, ChangedReply, KeyReply, LookupReply, Opcode, OpenFlags, OpenResp, ReadReply,
-    RequestFlags, RootId, Status,
+    AttrResp, ChangedReply, KeyReply, LookupReply, Opcode, OpenFlags, OpenResp, ReadReply, Reply,
+    Request, RequestFlags, RootId, Status,
 };
 use aether_refdirector::Reference;
 use aether_rpc::{Director, Listing, ReadSlot};
@@ -32,6 +33,9 @@ use crate::adapter::{answer_requests, AdapterRequest, Env};
 const SLOTS: u32 = 8;
 const PAYLOAD_CAP: u32 = aether_ipc::DEFAULT_PAYLOAD_CAP;
 const BANK: usize = 1024 * 1024;
+/// The threads serving a ring, each with its own handle on the reference
+/// (`Reference::share`), and the `worker_hint` published (wire.md 2.8).
+const WORKERS: u32 = 4;
 
 /// Where the reference adapter's ring lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +68,25 @@ pub enum Break {
     /// The registry generation is published once, at attach, and never moved
     /// by a write (wire.md 4.5 says every successful write moves it).
     FrozenRegGen,
+    /// When two requests are in flight, each one's reply goes into the
+    /// other's slot (under the right `ack`): a director that mixes up its
+    /// threads' answers (wire.md 2.5: a reply is written into the slot of
+    /// the request it answers).
+    SwapReplies,
+    /// Handles are numbered per slot, as a director that keeps a handle table
+    /// per connection would, so two clients on two slots get the same `fh`
+    /// and a handle presented on another slot is `ST_BAD_FH` (wire.md 2.8.1:
+    /// handles are ring-global, unique across every process, and any process
+    /// may present any handle).
+    PerSlotFh,
+    /// Only slot 0 is ever taken; a request in any other slot waits for ever
+    /// (wire.md 2.5: "Every taken slot MUST be completed", and slots are
+    /// taken "in any order and from any number of threads"). A client that
+    /// sends one request at a time from one thread only ever uses slot 0.
+    SlotZeroOnly,
+    /// Every bulk READ reply is written into bank 0, whatever slot it answers
+    /// (wire.md 2.6: "Slot `s` owns bank `s % banks`").
+    BankZero,
 }
 
 impl Break {
@@ -74,6 +97,10 @@ impl Break {
             "io-error-for-bad-request" => Some(Break::IoErrorForBadRequest),
             "stale-immutable" => Some(Break::StaleImmutable),
             "frozen-reg-gen" => Some(Break::FrozenRegGen),
+            "swap-replies" => Some(Break::SwapReplies),
+            "per-slot-fh" => Some(Break::PerSlotFh),
+            "slot-zero-only" => Some(Break::SlotZeroOnly),
+            "bank-zero" => Some(Break::BankZero),
             _ => None,
         }
     }
@@ -113,10 +140,10 @@ pub fn reference_adapter(kind: RingKind, broken: Option<Break>) -> i32 {
     0
 }
 
-/// A mounted tree: the serve thread, how to stop it, and the ring.
+/// A mounted tree: the serve threads, how to stop them, and the ring.
 struct Mounted {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<Result<(), IpcError>>,
+    threads: Vec<JoinHandle<Result<(), IpcError>>>,
     backing: Arc<dyn RingBacking>,
     file: Option<PathBuf>,
     env: Env,
@@ -125,16 +152,19 @@ struct Mounted {
 impl Mounted {
     fn unmount(self) -> Result<(), String> {
         self.stop.store(true, Ordering::Release);
-        let served = self.thread.join();
+        let served: Vec<_> = self.threads.into_iter().map(|t| t.join()).collect();
         drop(self.backing);
         if let Some(f) = &self.file {
             let _ = std::fs::remove_file(f);
         }
-        match served {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(format!("the serve loop ended with {e:?}")),
-            Err(_) => Err("the serve loop panicked".into()),
+        for s in served {
+            match s {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(format!("a serve loop ended with {e:?}")),
+                Err(_) => return Err("a serve loop panicked".into()),
+            }
         }
+        Ok(())
     }
 }
 
@@ -165,7 +195,7 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
 
     let mut env = Env::new();
     let stop = Arc::new(AtomicBool::new(false));
-    let (backing, file, thread): (Arc<dyn RingBacking>, _, _) = match kind {
+    let (backing, file, threads): (Arc<dyn RingBacking>, _, _) = match kind {
         RingKind::File => {
             let path = std::env::temp_dir().join(format!("{}.ring", unique("ring")));
             let f = aether_filering::FileRing::create(&path, ring_bytes)
@@ -178,7 +208,7 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
             );
             let t = serve(
                 b.clone(),
-                aether_ipc::AdaptiveNotifier,
+                Arc::new(aether_ipc::AdaptiveNotifier),
                 d,
                 arena_offset,
                 arena_len,
@@ -211,24 +241,25 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
     }
     Ok(Mounted {
         stop,
-        thread,
+        threads,
         backing,
         file,
         env,
     })
 }
 
-/// A started ring: its backing, its file (if it is one) and the serve thread.
+/// A started ring: its backing, its file (if it is one) and the serve
+/// threads.
 type Started = (
     Arc<dyn RingBacking>,
     Option<PathBuf>,
-    JoinHandle<Result<(), IpcError>>,
+    Vec<JoinHandle<Result<(), IpcError>>>,
 );
 
-/// Initialises the ring and states the one thread serving it (wire.md 2.8).
+/// Initialises the ring and states the threads serving it (wire.md 2.8).
 fn init(b: &dyn RingBacking) -> Result<(), String> {
     ring::init(b.seg(), SLOTS, PAYLOAD_CAP).map_err(|e| format!("ring init: {e:?}"))?;
-    ring::set_worker_hint(b.seg(), 1);
+    ring::set_worker_hint(b.seg(), WORKERS);
     Ok(())
 }
 
@@ -252,7 +283,14 @@ fn section(
     env.insert(aether_env::RING_SECTION.into(), name);
     env.insert(aether_env::SERVER_EV.into(), srv);
     env.insert(aether_env::CLIENT_EV.into(), cli);
-    let t = serve(b.clone(), events, d, arena_offset, arena_len, stop.clone());
+    let t = serve(
+        b.clone(),
+        Arc::new(events),
+        d,
+        arena_offset,
+        arena_len,
+        stop.clone(),
+    );
     Ok((b, None, t))
 }
 
@@ -268,15 +306,19 @@ fn section(
     Err("a named section needs Windows".into())
 }
 
-/// Serves `d` on `backing` until `stop`, on a thread of its own.
-fn serve<N: Notifier + Send + 'static>(
+/// Serves `d` on `backing` until `stop`, on [`WORKERS`] threads, each with
+/// its own handle on the reference and its own `RingServer`, sharing one
+/// notifier: as a Rust director serves (`aether_rpc::serve_with_arena`), or,
+/// for the breaks that need to see slots ([`Break::SwapReplies`],
+/// [`Break::PerSlotFh`], [`Break::SlotZeroOnly`]), with [`interposed`].
+fn serve<N: Notifier + Send + Sync + 'static>(
     backing: Arc<dyn RingBacking>,
-    notifier: N,
+    notifier: Arc<N>,
     d: Served,
     arena_offset: usize,
     arena_len: usize,
     stop: Arc<AtomicBool>,
-) -> JoinHandle<Result<(), IpcError>> {
+) -> Vec<JoinHandle<Result<(), IpcError>>> {
     let published = backing.clone();
     let frozen = d.broken == Some(Break::FrozenRegGen);
     let once = AtomicBool::new(false);
@@ -286,16 +328,275 @@ fn serve<N: Notifier + Send + 'static>(
         }
         ring::publish_reg_generation(published.seg(), g)
     });
-    std::thread::spawn(move || {
-        let seg = backing.seg();
-        let server = RingServer::new(seg, notifier)?;
-        let arena = DataArena::new(seg, arena_offset, arena_len, SLOTS as usize);
-        let mut d = d;
-        let served = aether_rpc::serve_with_arena(&server, Some(&arena), &mut d, &stop);
-        // The reference holds the generation callback, and with it the ring.
-        drop(d);
-        served
-    })
+    let handles = Arc::new(Mutex::new(SlotHandles::default()));
+    (0..WORKERS)
+        .map(|_| {
+            let backing = backing.clone();
+            let notifier = SharedNotifier(notifier.clone());
+            let stop = stop.clone();
+            let handles = handles.clone();
+            let mut d = Served {
+                reference: d.reference.share(),
+                broken: d.broken,
+            };
+            std::thread::spawn(move || {
+                let seg = backing.seg();
+                let served = match d.broken {
+                    Some(b @ (Break::SwapReplies | Break::PerSlotFh | Break::SlotZeroOnly)) => {
+                        interposed(seg, &notifier, &mut d, b, &handles, &stop)
+                    }
+                    _ => RingServer::new(seg, notifier).and_then(|server| {
+                        let arena = DataArena::new(seg, arena_offset, arena_len, SLOTS as usize);
+                        aether_rpc::serve_with_arena(&server, Some(&arena), &mut d, &stop)
+                    }),
+                };
+                // The reference holds the generation callback, and with it
+                // the ring.
+                drop(d);
+                served
+            })
+        })
+        .collect()
+}
+
+/// One notifier shared by every serve thread of a ring.
+struct SharedNotifier<N>(Arc<N>);
+
+impl<N: Notifier> Notifier for SharedNotifier<N> {
+    fn notify_server(&self) {
+        self.0.notify_server()
+    }
+    fn wait_server(&self) {
+        self.0.wait_server()
+    }
+    fn notify_client(&self, slot: u32) {
+        self.0.notify_client(slot)
+    }
+    fn wait_client(&self, slot: u32) {
+        self.0.wait_client(slot)
+    }
+    fn idle_client(&self, slot: u32, waited: std::time::Duration) {
+        self.0.idle_client(slot, waited)
+    }
+    fn notify_slot_free(&self) {
+        self.0.notify_slot_free()
+    }
+    fn now(&self) -> std::time::Instant {
+        self.0.now()
+    }
+}
+
+/// [`Break::PerSlotFh`]'s handle tables: the reference's handle for each
+/// (slot, number that slot's client was given), and each slot's last number.
+#[derive(Default)]
+struct SlotHandles {
+    open: BTreeMap<(u32, u64), u64>,
+    next: BTreeMap<u32, u64>,
+}
+
+/// A serve loop for the breaks that need the slot a request came in on.
+/// Each request is taken off the ring by hand, answered by the reference
+/// through a ring of one slot held in memory ([`Inner`], so the answers are
+/// the serve loop's, and every READ is answered inline, which wire.md 3.4.4
+/// allows), and completed with `ring::server_complete` as a director
+/// completes it (2.5), except for what `how` breaks.
+fn interposed(
+    seg: &aether_ipc::SharedSeg,
+    notifier: &impl Notifier,
+    d: &mut Served,
+    how: Break,
+    handles: &Mutex<SlotHandles>,
+    stop: &AtomicBool,
+) -> Result<(), IpcError> {
+    let geom = ring::open(seg)?;
+    // A slot count of one: only slot 0 is looked at.
+    let take_geom = match how {
+        Break::SlotZeroOnly => ring::Geom {
+            slot_count: 1,
+            ..geom
+        },
+        _ => geom,
+    };
+    let mut inner = Inner::new()?;
+    let mut next = 0;
+    let mut payload = Vec::new();
+    while !stop.load(Ordering::Acquire) {
+        let Some(a) = ring::server_take_from(seg, &take_geom, next) else {
+            notifier.wait_server();
+            continue;
+        };
+        next = a.wrapping_add(1);
+        let mut taken = vec![a];
+        if how == Break::SwapReplies {
+            // Another request in flight with this one, if one comes soon.
+            let since = std::time::Instant::now();
+            while since.elapsed() < std::time::Duration::from_micros(300) {
+                if let Some(b) = ring::server_take_from(seg, &geom, next) {
+                    next = b.wrapping_add(1);
+                    taken.push(b);
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        }
+        let mut answers = Vec::new();
+        for &slot in &taken {
+            let head =
+                ring::read_request_into(seg, &geom, slot, &mut payload).ok_or(IpcError::Layout)?;
+            let (status, reply) = if head.fits(&geom) {
+                let mut table = handles.lock().unwrap_or_else(|e| e.into_inner());
+                let req = Raw {
+                    slot,
+                    opcode: head.opcode,
+                    flags: head.flags,
+                    payload: &payload,
+                };
+                answer_on(&mut inner, d, how, &mut table, &req)
+            } else {
+                (Status::BadRequest.code(), Vec::new())
+            };
+            answers.push((slot, head.req_id, status, reply));
+        }
+        if let [a, b] = answers.as_mut_slice() {
+            // Each reply into the other's slot, under its own ack.
+            std::mem::swap(&mut a.2, &mut b.2);
+            std::mem::swap(&mut a.3, &mut b.3);
+        }
+        for (slot, req_id, status, reply) in answers {
+            ring::server_complete(seg, &geom, slot, req_id, status, &reply)?;
+            notifier.notify_client(slot);
+        }
+    }
+    Ok(())
+}
+
+/// A request as [`interposed`] took it off the ring.
+struct Raw<'p> {
+    slot: u32,
+    opcode: u32,
+    flags: u32,
+    payload: &'p [u8],
+}
+
+/// The status and reply payload for `req`, from the reference, with
+/// [`Break::PerSlotFh`]'s numbering applied.
+fn answer_on(
+    inner: &mut Inner,
+    d: &mut Served,
+    how: Break,
+    table: &mut SlotHandles,
+    req: &Raw<'_>,
+) -> (i32, Vec<u8>) {
+    let (slot, opcode, flags) = (req.slot, req.opcode, req.flags);
+    let passed = |inner: &mut Inner, d: &mut Served| inner.ask(d, opcode, flags, req.payload);
+    if how != Break::PerSlotFh {
+        return passed(inner, d);
+    }
+    let Ok(op) = Opcode::try_from(opcode) else {
+        return passed(inner, d);
+    };
+    let Ok(decoded) = Request::decode(op, flags, req.payload) else {
+        return passed(inner, d);
+    };
+    let bad_fh = (Status::BadFh.code(), Vec::new());
+    let theirs = |fh: u64| table.open.get(&(slot, fh)).copied();
+    let mut body = Vec::new();
+    let mut closing = None;
+    match decoded {
+        Request::Read {
+            slot_flags,
+            fh,
+            offset,
+            len,
+        } => {
+            let Some(fh) = theirs(fh) else { return bad_fh };
+            Request::Read {
+                slot_flags,
+                fh,
+                offset,
+                len,
+            }
+            .encode(&mut body);
+        }
+        Request::Write { fh, offset, data } => {
+            let Some(fh) = theirs(fh) else { return bad_fh };
+            Request::Write { fh, offset, data }.encode(&mut body);
+        }
+        Request::SetAttr { fh, size } => {
+            let Some(fh) = theirs(fh) else { return bad_fh };
+            Request::SetAttr { fh, size }.encode(&mut body);
+        }
+        Request::Close { fh: ext } => {
+            let Some(fh) = theirs(ext) else { return bad_fh };
+            Request::Close { fh }.encode(&mut body);
+            closing = Some(ext);
+        }
+        _ => body.extend_from_slice(req.payload),
+    }
+    let (status, reply) = inner.ask(d, opcode, flags, &body);
+    if status != Status::Ok.code() {
+        return (status, reply);
+    }
+    if let Some(ext) = closing {
+        table.open.remove(&(slot, ext));
+        return (status, reply);
+    }
+    match Reply::decode(op, flags, &reply) {
+        Ok(Reply::Open(o)) => {
+            let n = table.next.entry(slot).or_insert(0);
+            *n += 1;
+            let ext = *n;
+            table.open.insert((slot, ext), o.fh);
+            let mut out = Vec::new();
+            Reply::Open(OpenResp { fh: ext, ..o }).encode(&mut out);
+            (status, out)
+        }
+        _ => (status, reply),
+    }
+}
+
+/// The reference behind a ring of one slot held in memory, with no arena:
+/// what [`interposed`] asks, so the answers are the serve loop's.
+struct Inner {
+    seg: aether_ipc::OwnedSeg,
+    geom: ring::Geom,
+    scratch: aether_rpc::Scratch,
+}
+
+impl Inner {
+    fn new() -> Result<Inner, IpcError> {
+        let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
+        let seg = aether_ipc::OwnedSeg::new(aether_ipc::layout::RING_HEADER_SIZE + stride);
+        let geom = ring::init(seg.seg(), 1, PAYLOAD_CAP)?;
+        Ok(Inner {
+            seg,
+            geom,
+            scratch: aether_rpc::Scratch::default(),
+        })
+    }
+
+    fn ask(&mut self, d: &mut Served, opcode: u32, flags: u32, payload: &[u8]) -> (i32, Vec<u8>) {
+        let seg = self.seg.seg();
+        let io = (Status::IoError.code(), Vec::new());
+        let Some(slot) = ring::claim_free(seg, &self.geom) else {
+            return io;
+        };
+        let Ok(req_id) = ring::publish_request(seg, &self.geom, slot, opcode, flags, payload)
+        else {
+            let _ = ring::free_slot(seg, &self.geom, slot);
+            return io;
+        };
+        let Ok(server) = RingServer::new(seg, aether_ipc::SpinNotifier) else {
+            return io;
+        };
+        let _ = aether_rpc::serve_one_with(&server, d, &mut self.scratch);
+        let reply = ring::take_response(seg, &self.geom, slot, req_id);
+        let _ = ring::free_slot(seg, &self.geom, slot);
+        match reply {
+            Ok(Some(r)) => r,
+            _ => io,
+        }
+    }
 }
 
 /// What the adapter serves: the reference, and the rule it breaks if the
@@ -334,6 +635,10 @@ impl Director for Served {
         offset: u64,
         len: u32,
     ) -> Result<ReadReply<'_>, Status> {
+        let at = match self.broken {
+            Some(Break::BankZero) => ReadSlot { slot: 0, ..at },
+            _ => at,
+        };
         self.reference.read(at, slot_flags, fh, offset, len)
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {

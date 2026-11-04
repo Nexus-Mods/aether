@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use aether_conform::adapters::{reference_adapter, test_adapter, Break, Misbehave, RingKind};
+use aether_conform::concurrent::{self, ConcurrentOptions};
 use aether_conform::generate::{self, GenerateOptions};
 use aether_conform::report;
 use aether_conform::run::{run, RunError, RunOptions};
@@ -17,6 +18,7 @@ usage:
   aether-conform run --director \"<command line>\" [--scenarios DIR]
                      [--malformed] [--generate [--cases N] [--seed S]
                      [--steps M] [--failures DIR]]
+                     [--concurrent N [--concurrent-cases C]]
                      [--report tap|json] [--out FILE] [--timeout SECS]
   aether-conform reference-adapter [--ring file|section]
 
@@ -34,6 +36,10 @@ run       starts the director's adapter (the command line) and plays every
           printed either way), each compared with the reference; the first
           failure is shrunk and written to the failures DIR (default a
           folder in the temporary directory) as a scenario file.
+          --concurrent also plays C rounds (default 64) of N clients at once,
+          each a generated case under a directory of its own, their requests
+          in flight together across every slot of the ring; a failing round
+          is written to the failures DIR. --seed and --steps apply too.
 reference-adapter
           an adapter serving each scenario's tree from the reference
           director, over a ring file (default) or, on Windows, a named
@@ -78,6 +84,24 @@ fn main() -> ExitCode {
             }
             Err(e) => usage(&e),
         },
+        // A client of the ring the environment names, driven by a run
+        // (`aether_conform::clients`); not for people, so not in the usage.
+        "client-worker" => match flags(rest, &["--client", "--timeout"]) {
+            Ok(f) => {
+                let get = |k: &str| f.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v);
+                let client = get("--client").and_then(|v| v.parse::<u32>().ok());
+                let timeout = get("--timeout")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|s| *s > 0.0 && s.is_finite())
+                    .map(Duration::from_secs_f64)
+                    .unwrap_or(Duration::from_secs(30));
+                match client {
+                    Some(k) => code(aether_conform::clients::client_worker(k, timeout)),
+                    None => usage("client-worker needs --client N"),
+                }
+            }
+            Err(e) => usage(&e),
+        },
         // Adapters that misbehave on purpose, for the tests.
         "test-adapter" => match flags(rest, &["--misbehave"]) {
             Ok(f) => match f.first().map(|(_, v)| v.as_str()) {
@@ -86,15 +110,18 @@ fn main() -> ExitCode {
                 Some("hang") => code(test_adapter(Misbehave::Hang)),
                 Some("hang-grandchild") => code(test_adapter(Misbehave::HangGrandchild)),
                 Some("refuse") => code(test_adapter(Misbehave::Refuse)),
-                Some("stale-immutable") => {
-                    code(test_adapter(Misbehave::Director(Break::StaleImmutable)))
-                }
-                Some("frozen-reg-gen") => {
-                    code(test_adapter(Misbehave::Director(Break::FrozenRegGen)))
-                }
+                // The reference breaking a rule only checks across steps or
+                // across clients find (`adapters::Break`).
+                Some(
+                    b @ ("stale-immutable" | "frozen-reg-gen" | "swap-replies" | "per-slot-fh"
+                    | "slot-zero-only" | "bank-zero"),
+                ) => match Break::parse(b) {
+                    Some(b) => code(test_adapter(Misbehave::Director(b))),
+                    None => usage(&format!("unknown --misbehave {b:?}")),
+                },
                 _ => usage(
                     "--misbehave exit|garbage|hang|hang-grandchild|refuse|stale-immutable|\
-                     frozen-reg-gen",
+                     frozen-reg-gen|swap-replies|per-slot-fh|slot-zero-only|bank-zero",
                 ),
             },
             Err(e) => usage(&e),
@@ -160,6 +187,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
             "--seed",
             "--steps",
             "--failures",
+            "--concurrent",
+            "--concurrent-cases",
         ],
         &["--malformed", "--generate"],
     ) {
@@ -187,26 +216,53 @@ fn cmd_run(args: &[String]) -> ExitCode {
             }
         },
     };
-    let generate = if has("--generate") {
-        let number = |k: &str, default: u64| -> Result<u64, String> {
-            match get(k) {
-                None => Ok(default),
-                Some(v) => v
-                    .parse::<u64>()
-                    .map_err(|_| format!("{k} {v:?} is not a whole number")),
+    let number = |k: &str, default: u64| -> Result<u64, String> {
+        match get(k) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| format!("{k} {v:?} is not a whole number")),
+        }
+    };
+    let count = |k: &str, default: u32| -> Result<u32, String> {
+        number(k, u64::from(default))
+            .and_then(|n| u32::try_from(n).map_err(|_| format!("{k} {n} is too many")))
+    };
+    let generating = has("--generate");
+    let concurrent = match get("--concurrent").map(|_| count("--concurrent", 0)) {
+        None => None,
+        Some(Ok(n)) if n >= 1 => Some(n),
+        Some(Ok(_)) => return usage("--concurrent needs at least 1 client"),
+        Some(Err(e)) => return usage(&e),
+    };
+    if !generating && has("--cases") {
+        return usage("--cases goes with --generate");
+    }
+    if concurrent.is_none() && has("--concurrent-cases") {
+        return usage("--concurrent-cases goes with --concurrent");
+    }
+    if !generating && concurrent.is_none() {
+        for k in ["--seed", "--steps", "--failures"] {
+            if has(k) {
+                return usage(&format!("{k} goes with --generate or --concurrent"));
             }
+        }
+    }
+    let (seed, steps) = match (
+        number("--seed", clock_seed()),
+        number("--steps", generate::DEFAULT_STEPS as u64),
+    ) {
+        (Ok(a), Ok(b)) => (a, b.max(1) as usize),
+        (Err(e), _) | (_, Err(e)) => return usage(&e),
+    };
+    let failures = get("--failures")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("aether-conform-failures-{seed}")));
+    let generate = if generating {
+        let cases = match count("--cases", generate::DEFAULT_CASES) {
+            Ok(n) => n,
+            Err(e) => return usage(&e),
         };
-        let seed = number("--seed", clock_seed());
-        let cases = number("--cases", u64::from(generate::DEFAULT_CASES))
-            .and_then(|n| u32::try_from(n).map_err(|_| format!("--cases {n} is too many")));
-        let steps = number("--steps", generate::DEFAULT_STEPS as u64);
-        let (seed, cases, steps) = match (seed, cases, steps) {
-            (Ok(a), Ok(b), Ok(c)) => (a, b, c.max(1) as usize),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return usage(&e),
-        };
-        let failures = get("--failures").map(PathBuf::from).unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("aether-conform-failures-{seed}"))
-        });
         eprintln!(
             "aether-conform: generating {cases} cases from seed {seed} (replay with --seed {seed})"
         );
@@ -214,15 +270,30 @@ fn cmd_run(args: &[String]) -> ExitCode {
             cases,
             seed,
             steps,
-            failures,
+            failures: failures.clone(),
         })
     } else {
-        for k in ["--cases", "--seed", "--steps", "--failures"] {
-            if has(k) {
-                return usage(&format!("{k} goes with --generate"));
-            }
-        }
         None
+    };
+    let concurrent = match concurrent {
+        None => None,
+        Some(clients) => {
+            let cases = match count("--concurrent-cases", concurrent::DEFAULT_CASES) {
+                Ok(n) => n,
+                Err(e) => return usage(&e),
+            };
+            eprintln!(
+                "aether-conform: {clients} clients at once, {cases} cases each, from seed \
+                 {seed} (replay with --seed {seed})"
+            );
+            Some(ConcurrentOptions {
+                clients,
+                cases,
+                seed,
+                steps,
+                failures,
+            })
+        }
     };
     let opts = RunOptions {
         director,
@@ -232,12 +303,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
         timeout,
         malformed: has("--malformed"),
         generate,
+        concurrent,
     };
     let planned = aether_conform::run::scenario_files(&opts.scenarios)
         .map(|f| f.len())
         .unwrap_or(0)
         + usize::from(opts.malformed)
-        + usize::from(opts.generate.is_some());
+        + usize::from(opts.generate.is_some())
+        + usize::from(opts.concurrent.is_some());
     let result = match run(&opts) {
         Ok(r) => r,
         Err(RunError::Scenarios(e)) => {

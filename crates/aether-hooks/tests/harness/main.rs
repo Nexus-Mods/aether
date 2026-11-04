@@ -25,6 +25,7 @@ static A: aether_testkit::alloc::Counting = aether_testkit::alloc::Counting;
 mod ntapi;
 
 mod bugs_files;
+mod caches_read;
 mod child_start;
 mod geometry;
 mod idle;

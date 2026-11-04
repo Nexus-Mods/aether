@@ -8,7 +8,8 @@
 //! on Windows), starts the same serve loop a Rust director runs
 //! ([`aether_rpc::serve_with_arena`]) on a thread of its own, and answers the
 //! handshake variables; on `unmount` it stops the loop, joins the thread and
-//! removes the ring.
+//! removes the ring. A hidden, test-only `--break <rule>` makes it break one
+//! rule on purpose ([`Break`]), for the tests that show a check finds it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -16,7 +17,12 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use aether_ipc::{ring, DataArena, IpcError, Notifier, RingBacking, RingServer};
+use aether_protocol::{
+    AttrResp, ChangedReply, KeyReply, LookupReply, Opcode, OpenFlags, OpenResp, ReadReply,
+    RequestFlags, RootId, Status,
+};
 use aether_refdirector::Reference;
+use aether_rpc::{Director, Listing, ReadSlot};
 use serde_json::{json, Value};
 
 use crate::adapter::{answer_requests, AdapterRequest, Env};
@@ -36,8 +42,36 @@ pub enum RingKind {
     Section,
 }
 
-/// Runs the reference adapter until EOF on stdin. The exit code.
-pub fn reference_adapter(kind: RingKind) -> i32 {
+/// One rule the reference adapter breaks on purpose, so that the tests can
+/// show the checks find a director that gets it wrong. Test-only: reached
+/// only through the hidden `reference-adapter --break <rule>` switch, which
+/// the usage does not list; without it the adapter serves the reference as
+/// it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Break {
+    /// GETATTR of a missing path answers `found = 1` (wire.md 3.4.1 says
+    /// `found = 0`).
+    FoundForMissing,
+    /// An unknown opcode or a payload that does not decode is answered
+    /// `ST_IO_ERROR` (wire.md 3.3 and 3.5.1 say `ST_BAD_REQUEST`).
+    IoErrorForBadRequest,
+}
+
+impl Break {
+    /// The rule a `--break` value names.
+    pub fn parse(name: &str) -> Option<Break> {
+        match name {
+            "found-for-missing" => Some(Break::FoundForMissing),
+            "io-error-for-bad-request" => Some(Break::IoErrorForBadRequest),
+            _ => None,
+        }
+    }
+}
+
+/// Runs the reference adapter until EOF on stdin. The exit code. `broken`
+/// is the test-only rule to break ([`Break`]); `None` serves the reference
+/// as it is.
+pub fn reference_adapter(kind: RingKind, broken: Option<Break>) -> i32 {
     if kind == RingKind::Section && !cfg!(windows) {
         eprintln!("reference-adapter: --ring section needs Windows");
         return 2;
@@ -48,7 +82,7 @@ pub fn reference_adapter(kind: RingKind) -> i32 {
             if mounted.is_some() {
                 return json!({"ok": false, "error": "a tree is already mounted"});
             }
-            match mount(Path::new(&scenario), kind) {
+            match mount(Path::new(&scenario), kind, broken) {
                 Ok(m) => {
                     let env = m.env.clone();
                     mounted = Some(m);
@@ -104,9 +138,12 @@ fn unique(tag: &str) -> String {
     format!("aether-conform-{tag}-{}-{n}-{t}", std::process::id())
 }
 
-fn mount(scenario: &Path, kind: RingKind) -> Result<Mounted, String> {
+fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mounted, String> {
     let s = crate::scenario::load(scenario).map_err(|e| e.to_string())?;
-    let d = Reference::from_tree(&s.tree)?;
+    let d = Served {
+        reference: Reference::from_tree(&s.tree)?,
+        broken,
+    };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
     let arena_offset = aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
@@ -171,7 +208,7 @@ fn mount(scenario: &Path, kind: RingKind) -> Result<Mounted, String> {
 }
 
 /// A started ring: its backing, its file (if it is one) and the serve thread.
-type Served = (
+type Started = (
     Arc<dyn RingBacking>,
     Option<PathBuf>,
     JoinHandle<Result<(), IpcError>>,
@@ -187,12 +224,12 @@ fn init(b: &dyn RingBacking) -> Result<(), String> {
 #[cfg(windows)]
 fn section(
     env: &mut Env,
-    d: Reference,
+    d: Served,
     ring_bytes: usize,
     arena_offset: usize,
     arena_len: usize,
     stop: &Arc<AtomicBool>,
-) -> Result<Served, String> {
+) -> Result<Started, String> {
     let name = format!(r"Local\{}", unique("section"));
     let (srv, cli) = (format!("{name}_srv"), format!("{name}_cli"));
     let m = aether_win::SharedMapping::create(&name, ring_bytes)
@@ -211,12 +248,12 @@ fn section(
 #[cfg(not(windows))]
 fn section(
     _env: &mut Env,
-    _d: Reference,
+    _d: Served,
     _ring_bytes: usize,
     _arena_offset: usize,
     _arena_len: usize,
     _stop: &Arc<AtomicBool>,
-) -> Result<Served, String> {
+) -> Result<Started, String> {
     Err("a named section needs Windows".into())
 }
 
@@ -224,13 +261,14 @@ fn section(
 fn serve<N: Notifier + Send + 'static>(
     backing: Arc<dyn RingBacking>,
     notifier: N,
-    d: Reference,
+    d: Served,
     arena_offset: usize,
     arena_len: usize,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<Result<(), IpcError>> {
     let published = backing.clone();
-    d.publish_generation(move |g| ring::publish_reg_generation(published.seg(), g));
+    d.reference
+        .publish_generation(move |g| ring::publish_reg_generation(published.seg(), g));
     std::thread::spawn(move || {
         let seg = backing.seg();
         let server = RingServer::new(seg, notifier)?;
@@ -241,6 +279,122 @@ fn serve<N: Notifier + Send + 'static>(
         drop(d);
         served
     })
+}
+
+/// What the adapter serves: the reference, and the rule it breaks if the
+/// test-only `--break` switch named one.
+struct Served {
+    reference: Reference,
+    broken: Option<Break>,
+}
+
+impl Director for Served {
+    fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
+        let mut a = self.reference.get_attr(root, path)?;
+        if self.broken == Some(Break::FoundForMissing) && !a.found {
+            a.found = true;
+        }
+        Ok(a)
+    }
+    fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
+        self.reference.read_dir(root, path, out)
+    }
+    fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
+        self.reference.open(root, flags, path)
+    }
+    fn read(
+        &mut self,
+        at: ReadSlot<'_>,
+        slot_flags: RequestFlags,
+        fh: u64,
+        offset: u64,
+        len: u32,
+    ) -> Result<ReadReply<'_>, Status> {
+        self.reference.read(at, slot_flags, fh, offset, len)
+    }
+    fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
+        self.reference.write(fh, offset, data)
+    }
+    fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
+        self.reference.set_attr(fh, size)
+    }
+    fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
+        self.reference.rename(root, from, to)
+    }
+    fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
+        self.reference.delete(root, path)
+    }
+    fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
+        self.reference.mkdir(root, mode, path)
+    }
+    fn close(&mut self, fh: u64) -> Result<(), Status> {
+        self.reference.close(fh)
+    }
+    fn heartbeat(&mut self) -> Result<(), Status> {
+        self.reference.heartbeat()
+    }
+    fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
+        self.reference.stored_names(root, skip, path)
+    }
+    fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {
+        self.reference.reg_lookup(path)
+    }
+    fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
+        self.reference.reg_key(path)
+    }
+    fn reg_set_value(
+        &mut self,
+        path: &str,
+        name: &str,
+        ty: u32,
+        data: &[u8],
+    ) -> Result<u64, Status> {
+        self.reference.reg_set_value(path, name, ty, data)
+    }
+    fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {
+        self.reference.reg_delete_value(path, name)
+    }
+    fn reg_create_key(&mut self, path: &str, volatile: bool) -> Result<u64, Status> {
+        self.reference.reg_create_key(path, volatile)
+    }
+    fn reg_delete_key(&mut self, path: &str) -> Result<u64, Status> {
+        self.reference.reg_delete_key(path)
+    }
+    fn reg_rename_key(&mut self, path: &str, new_leaf: &str) -> Result<u64, Status> {
+        self.reference.reg_rename_key(path, new_leaf)
+    }
+    fn reg_changed(
+        &mut self,
+        path: &str,
+        subtree: bool,
+        since: u64,
+    ) -> Result<ChangedReply, Status> {
+        self.reference.reg_changed(path, subtree, since)
+    }
+    fn rename_x(
+        &mut self,
+        from_root: RootId,
+        to_root: RootId,
+        from: &str,
+        to: &str,
+    ) -> Result<(), Status> {
+        self.reference.rename_x(from_root, to_root, from, to)
+    }
+    fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
+        self.reference.stage_exec(root, path)
+    }
+    fn unknown(&mut self, opcode: u32) -> Status {
+        match self.broken {
+            Some(Break::IoErrorForBadRequest) => Status::IoError,
+            _ => self.reference.unknown(opcode),
+        }
+    }
+    fn undecodable(&mut self, op: Opcode, flags: u32, payload: &[u8]) -> Status {
+        match self.broken {
+            Some(Break::IoErrorForBadRequest) => Status::IoError,
+            _ => self.reference.undecodable(op, flags, payload),
+        }
+    }
 }
 
 /// How the test adapter misbehaves.

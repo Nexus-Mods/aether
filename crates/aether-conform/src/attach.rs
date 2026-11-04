@@ -175,6 +175,26 @@ impl Attached {
         self.backing.seg()
     }
 
+    /// The ring's geometry, as its header gave it.
+    pub fn geom(&self) -> Geom {
+        self.geom
+    }
+
+    /// The notifier the client uses, for a request sent without it (a
+    /// header the ring client would refuse to write).
+    pub fn wake(&self) -> Wake<'_> {
+        Wake {
+            #[cfg(windows)]
+            server_ev: self.server_ev.as_ref(),
+            _seg: std::marker::PhantomData,
+        }
+    }
+
+    /// How long a request may take.
+    pub fn deadline(&self) -> Duration {
+        self.deadline
+    }
+
     /// `VFS_RING_BYTES`: how much of the mapping the shim would map.
     pub fn ring_bytes(&self) -> usize {
         self.ring_bytes

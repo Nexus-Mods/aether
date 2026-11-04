@@ -8,7 +8,10 @@
 //! detach, and unmount. Every step is played even after one fails, so the
 //! report shows them all; a later failure may follow from an earlier one.
 //! A ring that stops answering ends that scenario. An adapter error
-//! ([`AdapterError`]) fails the scenario being run and ends the run.
+//! ([`AdapterError`]) fails the scenario being run and ends the run. After
+//! the files, a run sends the malformed requests ([`crate::malformed`]) and
+//! plays generated cases ([`crate::generate`]) when asked, through the same
+//! adapter; each adds one entry to the report.
 //!
 //! READ goes through the ring's held-slot calls, as the shim's reads do, so
 //! a bulk reply's data is copied out of the arena before the slot is freed
@@ -25,6 +28,7 @@ use aether_rpc::CallError;
 use crate::adapter::{Adapter, AdapterError};
 use crate::attach::Attached;
 use crate::compare::{render_expect, render_got, Session};
+use crate::generate::{GenerateError, GenerateOptions};
 use crate::scenario::{self, LoadError, OwnedReply, OwnedRequest, Scenario};
 
 /// What `run` was asked to do.
@@ -36,6 +40,10 @@ pub struct RunOptions {
     pub scenarios: PathBuf,
     /// How long each adapter answer, and each ring request, may take.
     pub timeout: Duration,
+    /// Also send the malformed requests ([`crate::malformed`]).
+    pub malformed: bool,
+    /// Also play generated cases ([`crate::generate`]).
+    pub generate: Option<GenerateOptions>,
 }
 
 /// One step as played.
@@ -71,6 +79,8 @@ pub struct RunReport {
     pub scenarios: Vec<ScenarioResult>,
     /// Set when the adapter failed and the run ended early.
     pub adapter_error: Option<String>,
+    /// The generator's seed, for a run with generated cases.
+    pub seed: Option<u64>,
 }
 
 impl RunReport {
@@ -86,6 +96,9 @@ pub enum RunError {
     Scenarios(String),
     /// The adapter could not be started.
     Adapter(AdapterError),
+    /// The generator could not make a case: the reference answered a
+    /// request otherwise than wire.md says ([`crate::model::build`]).
+    Generator(String),
 }
 
 impl std::fmt::Display for RunError {
@@ -93,6 +106,7 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::Scenarios(s) => f.write_str(s),
             RunError::Adapter(e) => write!(f, "{e}"),
+            RunError::Generator(e) => f.write_str(e),
         }
     }
 }
@@ -131,6 +145,7 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
     let mut report = RunReport {
         scenarios: Vec::new(),
         adapter_error: None,
+        seed: opts.generate.as_ref().map(|g| g.seed),
     };
     for (file, s) in &scenarios {
         let mut result = ScenarioResult {
@@ -153,8 +168,47 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             }
         }
     }
+    if opts.malformed {
+        match crate::malformed::run(&mut adapter, opts.timeout) {
+            Ok(r) => report.scenarios.push(r),
+            Err(e) => {
+                report.adapter_error = Some(e.to_string());
+                return Ok(report);
+            }
+        }
+    }
+    if let Some(g) = &opts.generate {
+        match crate::generate::run(&mut adapter, g, opts.timeout) {
+            Ok(r) => report.scenarios.push(r),
+            Err(GenerateError::Adapter(e)) => {
+                report.adapter_error = Some(e.to_string());
+                return Ok(report);
+            }
+            Err(GenerateError::Generator(e)) => return Err(RunError::Generator(e)),
+        }
+    }
     adapter.finish();
     Ok(report)
+}
+
+/// Mounts `s` from `file` (which holds it), plays it and unmounts it. `Err`
+/// only for an adapter error; everything else is in the result.
+pub(crate) fn play_file(
+    adapter: &mut Adapter,
+    file: &Path,
+    s: &Scenario,
+    timeout: Duration,
+) -> Result<ScenarioResult, AdapterError> {
+    let mut result = ScenarioResult {
+        name: s.name.clone(),
+        file: file.to_path_buf(),
+        passed: false,
+        steps: Vec::new(),
+        error: None,
+    };
+    one(adapter, file, s, timeout, &mut result)?;
+    result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
+    Ok(result)
 }
 
 /// Mounts, plays and unmounts one scenario. `Err` only for an adapter error;

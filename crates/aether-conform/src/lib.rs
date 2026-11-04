@@ -14,7 +14,11 @@
 //! test: [`adapter`] is the protocol the director's adapter speaks, [`attach`]
 //! joins the ring the adapter names as the shim would, [`run`] plays and
 //! compares, and [`report`] writes TAP or JSON. [`adapters`] holds the
-//! built-in reference adapter. `docs/conformance.md` is the user's guide.
+//! built-in reference adapter. [`malformed`] sends requests that are not
+//! valid requests through the raw ring. [`generate`] plays generated cases,
+//! which [`model`] makes from proptest values by reading them against an
+//! in-process reference, and shrinks the first that fails into a scenario
+//! file. `docs/conformance.md` is the user's guide.
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +26,9 @@ pub mod adapter;
 pub mod adapters;
 pub mod attach;
 pub mod compare;
+pub mod generate;
+pub mod malformed;
+pub mod model;
 pub mod report;
 pub mod run;
 pub mod scenario;

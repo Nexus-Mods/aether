@@ -127,4 +127,7 @@ to search for); there are no others (`crates/aether-conform/src/compare.rs`).
 A `one_of` is the only way a scenario allows several answers, and it cites
 its section in `wire`.
 
-To play scenarios against a director, see `docs/conformance.md`.
+To play scenarios against a director, see `docs/conformance.md`. A generated
+case that fails (`aether-conform run --generate`) is written in this format
+too, with the reference's answers as its expectations, so it replays as any
+other scenario.

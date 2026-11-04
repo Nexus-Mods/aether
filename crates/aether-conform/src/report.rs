@@ -26,6 +26,9 @@ use crate::run::{RunReport, ScenarioResult};
 pub fn tap(report: &RunReport, planned: usize) -> String {
     let mut out = String::from("TAP version 13\n");
     out.push_str(&format!("1..{planned}\n"));
+    if let Some(seed) = report.seed {
+        out.push_str(&format!("# seed {seed}\n"));
+    }
     for (n, s) in report.scenarios.iter().enumerate() {
         let n = n + 1;
         if s.passed {
@@ -75,7 +78,7 @@ fn yaml_str(s: &str) -> String {
 pub fn json(report: &RunReport) -> Value {
     json!({
         "scenarios": report.scenarios.iter().map(scenario).collect::<Vec<_>>(),
-        "seed": Value::Null,
+        "seed": report.seed,
         "adapter_error": report.adapter_error,
     })
 }

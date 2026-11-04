@@ -8,9 +8,20 @@ each answer with the one the scenario expects. Scenarios live in
 `contract/scenarios/` and their format is described in
 `contract/scenarios/README.md`.
 
+A run has up to three parts, all through the same adapter:
+
+- **Scenarios**, the files in `--scenarios` (always).
+- **Malformed requests** (`--malformed`): payloads that are not valid
+  requests, sent on the raw ring, and the answers wire.md gives them
+  ("Malformed requests" below).
+- **Generated cases** (`--generate`): trees and operation sequences made
+  from a seed, each step compared with the reference director's answer, and
+  the first failure shrunk and written as a scenario file ("Generated cases"
+  below).
+
 ## What it checks
 
-For every scenario:
+For every scenario, and for each generated case and the malformed part:
 
 - **The handshake.** The mount's environment must name a ring the shim
   could attach to (wire.md 2.4, 2.9, 2.10, 5.3): a ring file or, on
@@ -121,26 +132,172 @@ WRITE or SETATTR on a handle opened read-only; `ST_NO_SPACE`.
 
 **Left out because a scenario cannot send or receive it.** A scenario names
 opcodes and fields of the table and the statuses in `protocol.json`, so these
-rules are not expressible in the scenario format; the ones marked "malformed"
-belong to the malformed-request mode of a later task:
+rules are not expressible in the scenario format. The malformed part of a run
+(`--malformed`, below) checks each of them:
 
-- 3.4.4: a director must accept a 20-byte READ (no trailing pad) (malformed).
-- 3.4.5: a WRITE whose payload is shorter than 24 + `len` is `ST_BAD_REQUEST`
-  (malformed).
-- 3.5.1: short payloads for every opcode, invalid UTF-8 in a path (malformed).
-- 3.3: opcodes outside the table (0, 4, 12, 25 and up) are `ST_BAD_REQUEST`
-  (malformed).
+- 3.4.4: a director must accept a 20-byte READ (no trailing pad).
+- 3.4.5: a WRITE whose payload is shorter than 24 + `len` is `ST_BAD_REQUEST`.
+- 3.5.1: short payloads for every opcode, invalid UTF-8 in a path.
+- 3.3: opcodes outside the table (0, 4, 12, 25 and up) are `ST_BAD_REQUEST`.
 - 3.6: the slot `flags` word is ignored for every opcode but READ, and bits
-  above bit 0 for READ (malformed: the format sends `read_bulk` only on READ).
+  above bit 0 for READ (the format sends `read_bulk` only on READ).
 - 4.1, 4.3: registry booleans are exactly 0 or 1, and trailing bytes in a
-  registry request are `ST_BAD_REQUEST` (malformed).
+  registry request are `ST_BAD_REQUEST`.
+- 2.5: a slot whose header claims more than `payload_cap` bytes is completed
+  with `ST_BAD_REQUEST` and no payload.
+
+Still left out of every part of a run:
+
 - 3.4.2: a READDIR listing larger than `payload_cap` is answered with the
-  overflow status `i32::MIN` and an empty payload. It is not in the protocol's
-  status table, so a scenario cannot name it, and a tree large enough to
-  overflow depends on the director's cap.
+  overflow status `i32::MIN` and an empty payload. A tree large enough to
+  overflow depends on the director's cap, which the run learns only once the
+  tree is mounted.
 - A WRITE or request larger than the ring's payload, and a registry value over
   `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
   REG_KEY is covered only as a `one_of`, since the cap is the director's.
+
+## Malformed requests
+
+`run --malformed` mounts a built-in tree (`aether_conform::malformed::tree`:
+root 0 with `data/a.txt` = `abc` and the writable entry `saves` holding
+`saves/s.txt`, root 1 with `r.txt`, and a registry layer with
+`\Registry\Machine\Software\Conform` and its value `v`), opens `data/a.txt`
+for reading and `saves/s.txt` for writing, and sends each case below as raw
+slot fields, through the ring client's held-slot call (or, for the header
+case, a header written by hand). Each case's payload is a valid request with
+one thing wrong, so the defect named is the only one. An error status must
+come with an empty payload (3.1, 3.3). After every case a HEARTBEAT must be
+answered `ST_OK`: the director must keep serving. At the end a GETATTR of
+`data/a.txt` must still find it, size 3. The report has one entry,
+`malformed`, with a step per case, each naming its rule.
+
+| Case | Answer | wire.md |
+|---|---|---|
+| Opcodes 0, 4, 12, 25, 26, 100, `0x7fffffff`, `0xffffffff`, with no payload and with a path request | `ST_BAD_REQUEST` | 3.3: "Any other opcode (including 0, 4, 12 and 25 and up) is answered `ST_BAD_REQUEST` with an empty payload" |
+| GETATTR, READDIR, HEARTBEAT, STORED_NAMES with other slot flags set; READ with `0xfffffffe` and `0xffffffff` | As with flags 0 (READ inline or bulk, compared by data) | 3.6: "The slot `flags` word is ignored for every opcode but READ, and bits other than bit 0 are ignored for READ" |
+| READ of 20 bytes (no pad), twice | The data | 3.4.4: "24 bytes (a director must accept 20)" |
+| GETATTR cut to 0 to 3 bytes | `ST_BAD_REQUEST`, or OK with `found = 0` | 3.5.1's table (old Rust director; Cairn) |
+| READDIR cut to 0 to 3 bytes | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | 3.5.1 |
+| OPEN cut to 0 to 7 bytes | `ST_BAD_REQUEST` | 3.5.1 |
+| READ cut to 0 to 19, WRITE to 0 to 23, SETATTR to 0 to 15, CLOSE to 0 to 7 bytes | `ST_BAD_REQUEST` | 3.5.1 ("READ, WRITE, SETATTR, CLOSE: short"); 3.2 for WRITE's pad |
+| RENAME cut to 0 to 7, RENAME_X to 0 to 11 bytes; either with a `from_len` past the payload | `ST_BAD_REQUEST` | 3.5.1 |
+| DELETE cut to 0 to 3, MKDIR to 0 to 7, STORED_NAMES to 0 to 7 bytes | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | 3.5.1 |
+| WRITE whose `len` is 10 with 3 data bytes | `ST_BAD_REQUEST` | 3.4.5: "A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`" |
+| GETATTR, OPEN, RENAME (`from`) of a missing path that is not UTF-8 | `ST_BAD_REQUEST`, or the missing-path answer (found = 0, `ST_NOT_FOUND`) | 3.5.1: "`ST_BAD_REQUEST` in the Rust decoders; Cairn decodes it with replacement characters and carries on" |
+| REG_LOOKUP of a key path that is not UTF-8 | `ST_BAD_REQUEST` | 3.2: "The registry decoders reject trailing bytes, truncation, bad UTF-8"; 4.1 |
+| REG_CREATE_KEY with `volatile` 2 and 255; REG_CHANGED with `subtree` 2 | `ST_BAD_REQUEST` | 4.1: "Booleans are one byte, exactly 0 or 1" |
+| Each of the eight registry requests with a trailing byte | `ST_BAD_REQUEST` | 4.1: "Every registry decoder consumes its input exactly; trailing bytes are `ST_BAD_REQUEST`" |
+| Each registry request cut by a byte; a REG_LOOKUP whose `len` runs past the payload | `ST_BAD_REQUEST` | 3.2 (truncation), 3.5 ("The payload did not decode") |
+| GETATTR whose slot header claims `payload_cap + 1` and `0xffffffff` bytes | `ST_BAD_REQUEST`, payload length 0 | 2.5: "A slot whose `payload_len > payload_cap` MUST be completed with `ST_BAD_REQUEST` and payload length 0" |
+
+Not sent: a short STAGE_EXEC (3.5.1 names no answer for it), trailing bytes
+after a file request's fixed fields (3.2 describes the Rust decoders, which
+ignore them, not a rule for directors), a HEARTBEAT with a payload, and
+registry cases without a registry layer.
+
+## Generated cases
+
+`run --generate` plays `--cases N` generated cases (default 64), each a tree
+and up to `--steps M` operations (default 32), all made from one seed
+(`--seed S`; without it the seed comes from the clock). The seed is printed on
+stderr, in the TAP report (`# seed S`) and in the JSON report's `seed`, and the
+same seed gives the same cases, so `--seed S` replays a run.
+
+**How a case is made** (`crates/aether-conform/src/model.rs`). proptest
+generates a tree spec (up to three roots, files and directories with names
+from a fixed list in varied case, writable entries or roots writable as a
+whole, an optional registry layer) and a list of operations, each a kind and
+four numbers. The generator builds the tree, mounts it in the reference
+director held in this process (behind a ring in memory, served by
+`aether_rpc::serve_one_with_arena` as a Rust director is), and reads the
+operations one at a time: each one's numbers pick its target among what
+exists at that point (an open handle, an existing file, a missing name under
+an existing directory, a key) and its arguments. An operation with nothing to
+act on is dropped, so every case proptest makes, and every case it shrinks
+to, is a valid one. The reference's answer to each request is that step's
+expectation, or, where wire.md allows several answers, a `one_of` of exactly
+those with the section cited. The generator also says, for each request,
+which answer wire.md gives; a reference that answers otherwise is reported as
+a generator error (exit 2) naming the section, never made an expectation.
+
+The case is then an ordinary scenario: it is written to a scratch file,
+mounted through the adapter, and played and compared exactly as a scenario
+file is, so every comparison rule above applies.
+
+**Shrinking and replay.** The first case that fails is shrunk the way proptest
+shrinks (simplify while it still fails, complicate when it passes), each
+candidate played against the director, up to 2048 candidates. The smallest
+failing case is written to `--failures DIR` (default a folder named after the
+seed in the temporary directory) as `generated-<seed>-<case>.json`, a scenario
+file whose expectations are the reference's answers; `run --scenarios DIR`
+replays it and fails the same way. The report's `generated` entry names that
+file and lists its steps.
+
+proptest-state-machine is not used: its reference state machine wants a model
+of the answers, which here is the reference director itself, and it would
+shrink by running the system under test in process. A plain strategy for
+(tree, operations), read against the oracle's state as above, keeps every
+shrunk case valid and plays each through the adapter's own mount.
+
+**What is generated**, with the answer wire.md gives it:
+
+| Request | Generated | Answer (wire.md) |
+|---|---|---|
+| HEARTBEAT | | `ST_OK` (3.4.11) |
+| GETATTR | existing files and directories (root included) in any case spelling; missing names under existing directories; unserved roots | the reference's, found = 0 for missing paths and unserved roots (3.4.1) |
+| READDIR | existing directories in any spelling; unserved roots | the listing (3.4.2, compared as a multiset); `ST_NOT_FOUND` |
+| OPEN, reading (`read`, or `oflags == 0`) | existing files and directories; missing names; unserved roots | a handle (3.4.3); `ST_NOT_FOUND` |
+| OPEN, writing (`write` with any of `read`, `create`, `excl`, `trunc`, `append`) | files the writable provider holds; missing names it would hold; files a read-only provider holds; missing names in a root with no writable provider | a handle, or `ST_EXISTS` with `excl`, or `ST_NOT_FOUND` without `create` (3.4.3); `ST_READ_ONLY` (3.4.3, 3.5) |
+| READ | open handles, at offsets 0, odd, inside, at and past the end, lengths 0, 1, odd, to the end, 4096 and 65536 to 70000, with and without `read_bulk`; directory handles | the data (3.4.4, inline or bulk); `ST_IS_DIR` |
+| WRITE | handles opened for writing, at offsets up to the end (any offset on an `append` handle), 0 to 20000 bytes; directory handles | `written` (3.4.5); `ST_IS_DIR` |
+| SETATTR | handles opened for writing: 0, half, the size, past it; directory handles | `ST_OK` (3.4.6); `ST_IS_DIR` (3.4.5) |
+| CLOSE | open handles, also ones whose file changed under them | `ST_OK` (3.4.10) |
+| READ, WRITE, SETATTR, CLOSE | closed handles and numbers never issued | `ST_BAD_FH` (3.5) |
+| RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
+| RENAME_X across roots | files to a missing name or onto a file; directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
+| DELETE | files, empty and non-empty directories the writable provider holds; missing names; read-only names; the root (writable as a whole); unserved roots | 3.4.8's answers |
+| MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
+| STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
+| STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, a path (3.4.14) |
+| The eight registry requests | keys of the tree and below them in any spelling under `\Registry\Machine`, values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
+
+**What is not generated, and why:**
+
+- Names whose answer depends on how a director layers its providers: a
+  writable entry's own directory and its ancestors are only read (GETATTR,
+  READDIR, OPEN for reading), never written, deleted or renamed (README, "Who
+  holds what").
+- Writes and creates with no fixed answer (as "Left out" above): a write open,
+  DELETE or RENAME of a missing name outside every writable provider in a
+  root that has one; a create whose parent is missing; READDIR of a missing
+  path or a file; a path below a file; a write open of a directory.
+- Bytes wire.md does not fix: a WRITE starts at most at the end of the bytes
+  that are fixed, and after a SETATTR extends a file only the bytes before the
+  old end are read (what the extension holds is the director's).
+- WRITE and SETATTR on a handle opened without `write`, READ on one opened
+  without `read`: wire.md says nothing of them.
+- A handle whose file changed through another handle or a path (a WRITE or
+  SETATTR through another handle, a truncating open, a RENAME, RENAME_X or
+  DELETE of it or of a directory above it) is only closed afterwards: what it
+  reads then is not fixed.
+- RENAME_X onto a directory, and RENAME_X with a read-only end (3.4.13 names
+  no status).
+- A RENAME whose `to` is an ancestor of `from`, or the same name spelled the
+  same way.
+- Paths that leave their root (`escape-paths` covers them) and every
+  non-canonical file path (3.2).
+- Registry requests near a limit (reply size, name length, depth), which
+  `registry-limits` and `registry-key-too-large` cover, and a REG_CHANGED
+  before any registry reply (its `since` has no numbering yet).
+- `ST_NO_SPACE`: sizes stay far below any cap.
+- File names a Windows file system would refuse or compare differently from
+  the wire's fold (no final sigma, no dotted capital I), so a director that
+  stores names on disk is not failed for its file system.
+
+Two assumptions go beyond the letter of wire.md, as the scenarios already
+make them: a WRITE of at most 20000 bytes writes all of them (3.4.5 lets the
+shim repeat after a short write), and GETATTR, READDIR and OPEN report a
+file's size as it is after a WRITE or SETATTR through a handle still open.
 
 ## The adapter protocol
 
@@ -217,6 +374,11 @@ cargo build -p aether-conform
 target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter"
 # The same over a named section (Windows):
 target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter --ring section"
+# With the malformed requests and 256 generated cases from seed 42:
+target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter" \
+    --malformed --generate --cases 256 --seed 42 --failures conform-failures
+# Replaying a shrunk failure:
+target/debug/aether-conform run --director "..." --scenarios conform-failures
 # Another director, behind its own adapter:
 aether-conform run --director "java -jar my-director-adapter.jar" --scenarios contract/scenarios \
     --report json --out report.json --timeout 10
@@ -231,16 +393,33 @@ aether-conform run --director "java -jar my-director-adapter.jar" --scenarios co
 | `--report tap\|json` | The report's format. Default `tap`. |
 | `--out FILE` | Where the report goes. Default stdout. |
 | `--timeout SECS` | How long every adapter answer and every ring request may take. Default 30. |
+| `--malformed` | Also send the malformed requests ("Malformed requests"). |
+| `--generate` | Also play generated cases ("Generated cases"). |
+| `--cases N` | How many generated cases. Default 64. |
+| `--seed S` | The seed the cases are made from. Default: from the clock, printed. |
+| `--steps M` | The most operations per case. Default 32. |
+| `--failures DIR` | Where the shrunk failing case is written. Default `aether-conform-failures-<seed>` in the temporary directory. |
 
 Exit code: 0 when every scenario passes, 1 when any fails, 2 on a usage
-error, a scenario that does not load, or an adapter error.
+error, a scenario that does not load, an adapter error, or a generator error
+(the reference answered a generated request otherwise than wire.md says).
+
+CI runs the committed scenarios, `--malformed` and `--generate --cases 1024`
+against the reference, over a file ring on Linux and Windows and over a
+section on Windows, with the workflow run's id as the seed. Measured on a
+16-thread Windows machine with a debug build, 1024 cases take about 19 s over
+a file ring (each mount creates a 16 MiB ring file) and 8 s over a section;
+pinned to two cores, 512 take 8.4 s and 3.5 s. At two to three times slower
+on CI's 2-vCPU runners that is about one minute for the Windows step.
 
 `aether-conform reference-adapter [--ring file|section]` is an adapter for
 the reference director (`aether_refdirector::Reference`, built with
 `Reference::from_tree`), served with the same loop a Rust director runs
 (`aether_rpc::serve_with_arena`) on its own thread. It is what a run is
 checked against in this repository's tests, and an example of what an
-adapter does.
+adapter does. Its hidden `--break <rule>` switch, for this repository's tests
+only, makes it break one rule on purpose (`aether_conform::adapters::Break`),
+so the tests can show that generation and the malformed part find it.
 
 ## Reading a report
 
@@ -294,5 +473,11 @@ JSON has every step, passed or not:
 A scenario's `error` says what stopped it outside its steps: a refused mount
 (`mount refused: ...`), a failed attach (`attach failed: ...`), a ring that
 gave no answer, or the adapter error that ended the run, which is also in
-`adapter_error`. `seed` is for generated runs and is `null` for scenarios
-read from files.
+`adapter_error`. `seed` is the generator's seed, and `null` for a run without
+`--generate`.
+
+The malformed part is one entry, `malformed`, a step per case; its `request`
+names the rule and shows the slot fields and payload in hex. The generated
+part is one entry, `generated`: passed, with no steps and the case count and
+seed as its `file`, or failed, with the shrunk case's steps and the file it
+was written to.

@@ -1045,3 +1045,252 @@ fn parse_node(i: usize, v: &Value, at: &str) -> R<Node> {
         last_write,
     })
 }
+
+/// `s` as a scenario file says it, in the format [`load`] reads: what a
+/// generated run writes for a case to mount, and for a failure to replay.
+/// [`load`] of the result gives `s` back.
+pub fn to_json(s: &Scenario) -> Value {
+    let steps: Vec<Value> = s.steps.iter().map(step_json).collect();
+    serde_json::json!({
+        "name": s.name,
+        "description": s.description,
+        "tree": tree_json(&s.tree),
+        "steps": steps,
+    })
+}
+
+/// [`to_json`], laid out for a person, with a final newline.
+pub fn to_json_string(s: &Scenario) -> String {
+    let mut out = serde_json::to_string_pretty(&to_json(s)).expect("a JSON value");
+    out.push('\n');
+    out
+}
+
+/// A tree as a scenario file writes it (`contract/scenarios/README.md`).
+pub fn tree_json(t: &Tree) -> Value {
+    use serde_json::json;
+    let roots: Vec<Value> = t
+        .roots
+        .iter()
+        .map(|r| {
+            let files: Vec<Value> = r
+                .files
+                .iter()
+                .map(|f| {
+                    json!({"path": f.path, "contents": contents_json(&f.contents), "mtime": f.mtime})
+                })
+                .collect();
+            json!({"id": r.id, "files": files, "dirs": r.dirs, "writable": r.writable})
+        })
+        .collect();
+    let mut tree = json!({ "roots": roots });
+    if let Some(reg) = &t.registry {
+        let keys: Vec<Value> = reg
+            .keys
+            .iter()
+            .map(|k| {
+                let values: Vec<Value> = k
+                    .values
+                    .iter()
+                    .map(|v| json!({"name": v.name, "ty": v.ty, "data": contents_json(&v.data)}))
+                    .collect();
+                json!({"path": k.path, "volatile": k.volatile, "values": values})
+            })
+            .collect();
+        tree["registry"] = json!({ "keys": keys });
+    }
+    tree
+}
+
+fn contents_json(c: &Contents) -> Value {
+    match c {
+        Contents::Text(s) => Value::String(s.clone()),
+        Contents::Hex(b) => serde_json::json!({ "hex": hex(b) }),
+        Contents::Fill { size, seed } => serde_json::json!({"size": size, "seed": seed}),
+    }
+}
+
+/// Bytes as a scenario writes them: a string when they are UTF-8 (the
+/// loader reads a string as its UTF-8), else hex.
+fn bytes_json(b: &[u8]) -> Value {
+    match std::str::from_utf8(b) {
+        Ok(s) => Value::String(s.to_string()),
+        Err(_) => serde_json::json!({ "hex": hex(b) }),
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The names in `known` whose masks `bits` has.
+fn names(bits: u32, known: &[(String, u32)]) -> Vec<String> {
+    known
+        .iter()
+        .filter(|(_, m)| bits & m != 0)
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
+fn step_json(s: &Step) -> Value {
+    let mut v = serde_json::json!({
+        "request": request_json(&s.request),
+        "expect": expect_json(&s.expect, s.cite.as_deref()),
+    });
+    if let Some(n) = &s.note {
+        v["note"] = Value::String(n.clone());
+    }
+    v
+}
+
+/// A request in the scenario format: `op` and its fields.
+pub fn request_json(r: &OwnedRequest) -> Value {
+    use serde_json::json;
+    use OwnedRequest as O;
+    let mut v = match r {
+        O::GetAttr { root, path }
+        | O::ReadDir { root, path }
+        | O::Delete { root, path }
+        | O::StageExec { root, path } => json!({"root": root.0, "path": path}),
+        O::Open { root, flags, path } => {
+            json!({"root": root.0, "flags": names(flags.bits(), &open_flag_names()), "path": path})
+        }
+        O::Read {
+            slot_flags,
+            fh,
+            offset,
+            len,
+        } => {
+            let mut v = json!({"fh": fh, "offset": offset, "len": len});
+            if !slot_flags.is_empty() {
+                v["slot_flags"] = json!(names(slot_flags.bits(), &request_flag_names()));
+            }
+            v
+        }
+        O::Write { fh, offset, data } => {
+            json!({"fh": fh, "offset": offset, "data": bytes_json(data)})
+        }
+        O::SetAttr { fh, size } => json!({"fh": fh, "size": size}),
+        O::Rename { root, from, to } => json!({"root": root.0, "from": from, "to": to}),
+        O::Mkdir { root, mode, path } => json!({"root": root.0, "mode": mode, "path": path}),
+        O::Close { fh } => json!({ "fh": fh }),
+        O::Heartbeat => json!({}),
+        O::StoredNames { root, skip, path } => {
+            json!({"root": root.0, "skip": skip, "path": path})
+        }
+        O::RegLookup { path } | O::RegKey { path } | O::RegDeleteKey { path } => {
+            json!({ "path": path })
+        }
+        O::RegSetValue {
+            path,
+            name,
+            ty,
+            data,
+        } => json!({"path": path, "name": name, "ty": ty, "data": bytes_json(data)}),
+        O::RegDeleteValue { path, name } => json!({"path": path, "name": name}),
+        O::RegCreateKey { path, volatile } => json!({"path": path, "volatile": volatile}),
+        O::RegRenameKey { path, new_leaf } => json!({"path": path, "new_leaf": new_leaf}),
+        O::RegChanged {
+            path,
+            subtree,
+            since,
+        } => json!({"path": path, "subtree": subtree, "since": since}),
+        O::RenameX {
+            from_root,
+            to_root,
+            from,
+            to,
+        } => json!({"from_root": from_root.0, "to_root": to_root.0, "from": from, "to": to}),
+    };
+    v["op"] = Value::String(r.opcode().name().to_string());
+    v
+}
+
+/// An expectation in the scenario format; a top-level `one_of` carries
+/// `cite` as its `wire`.
+pub fn expect_json(e: &Expect, cite: Option<&str>) -> Value {
+    use serde_json::json;
+    match e {
+        Expect::Reply(OwnedReply::Empty) => json!({"status": "ok"}),
+        Expect::Reply(r) => json!({ "reply": reply_json(r) }),
+        Expect::Status(s) => json!({"status": s.name()}),
+        Expect::OneOf(alts) => {
+            let alts: Vec<Value> = alts.iter().map(|a| expect_json(a, None)).collect();
+            json!({"one_of": alts, "wire": cite.unwrap_or("")})
+        }
+    }
+}
+
+fn reply_json(r: &OwnedReply) -> Value {
+    use serde_json::json;
+    match r {
+        OwnedReply::GetAttr(a) => {
+            json!({"found": a.found, "is_dir": a.is_dir, "size": a.size, "mtime": a.mtime})
+        }
+        OwnedReply::ReadDir(es) => {
+            let entries: Vec<Value> = es
+                .iter()
+                .map(|e| {
+                    json!({"name": e.name, "is_dir": e.is_dir, "size": e.size, "mtime": e.mtime})
+                })
+                .collect();
+            json!({ "entries": entries })
+        }
+        OwnedReply::Open(o) => json!({
+            "fh": o.fh, "size": o.size, "is_dir": o.is_dir,
+            "immutable": o.immutable, "mount_gen": o.mount_gen
+        }),
+        OwnedReply::Read(d) => json!({ "data": bytes_json(d) }),
+        OwnedReply::ReadBulk { len, arena_offset } => {
+            // Never written: a bulk reply is read from the arena first. Said
+            // as what it is rather than as data it does not have.
+            json!({"bulk_len": len, "arena_offset": arena_offset})
+        }
+        OwnedReply::Write(n) => json!({ "written": n }),
+        OwnedReply::StoredNames(s) => json!({ "names": s }),
+        OwnedReply::StageExec(s) => json!({ "path": s }),
+        OwnedReply::RegLookup(l) => {
+            let state = match l.state {
+                Lookup::Absent => "absent",
+                Lookup::Present { created: false } => "present",
+                Lookup::Present { created: true } => "created",
+                Lookup::Tombstoned => "tombstoned",
+            };
+            json!({"version": l.version, "state": state, "below": l.below})
+        }
+        OwnedReply::RegKey { version, node } => {
+            json!({"version": version, "node": node.as_ref().map(node_json)})
+        }
+        OwnedReply::RegVersion(v) => json!({ "version": v }),
+        OwnedReply::RegChanged(c) => json!({"version": c.version, "changed": c.changed}),
+        OwnedReply::Empty => json!({}),
+    }
+}
+
+fn node_json(n: &Node) -> Value {
+    use serde_json::json;
+    let values: Vec<Value> = n
+        .values
+        .iter()
+        .map(|v| json!({"name": v.name, "ty": v.ty, "data": bytes_json(&v.data)}))
+        .collect();
+    let children: Vec<Value> = n
+        .children
+        .iter()
+        .map(|(folded, (spelling, state))| {
+            let state = match state {
+                Child::Present => "present",
+                Child::Tombstone => "tombstone",
+            };
+            json!({"folded": folded, "spelling": spelling, "state": state})
+        })
+        .collect();
+    json!({
+        "created": n.created,
+        "volatile": n.volatile,
+        "last_write": n.last_write,
+        "values": values,
+        "value_tombstones": n.value_tombstones,
+        "children": children,
+    })
+}

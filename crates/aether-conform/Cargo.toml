@@ -20,6 +20,8 @@ aether-redirect.workspace = true
 aether-refdirector = { workspace = true, features = ["scenario"] }
 # The registry node a REG_KEY reply carries.
 aether-registry.workspace = true
+# Generated cases and their shrinking (`run --generate`).
+proptest.workspace = true
 # The typed client a run plays steps through, and the serve loop the
 # reference adapter answers with.
 aether-rpc.workspace = true

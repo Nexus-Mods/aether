@@ -21,6 +21,7 @@ dependencies = [
  "aether-rpc",
  "aether-testkit",
  "aether-win",
+ "proptest",
  "serde_json",
  "tempfile",
 ]

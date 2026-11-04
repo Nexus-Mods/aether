@@ -19,6 +19,9 @@ members = [
   "crates/aether-ipc",
   # A ring in a memory-mapped file (aether_ipc::RingBacking), for native tools on any OS.
   "crates/aether-filering",
+  # The ring's typed ends: a Client (the shim's) and a Director trait with serve
+  # (every Rust-side server's), over aether-protocol's table.
+  "crates/aether-rpc",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.
@@ -76,6 +79,7 @@ aether-pe = { path = "crates/aether-pe" }
 aether-protocol = { path = "crates/aether-protocol" }
 aether-redirect = { path = "crates/aether-redirect" }
 aether-registry = { path = "crates/aether-registry" }
+aether-rpc = { path = "crates/aether-rpc" }
 aether-testkit = { path = "crates/aether-testkit" }
 aether-win = { path = "crates/aether-win" }
 

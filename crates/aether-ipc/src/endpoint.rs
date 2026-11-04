@@ -40,6 +40,16 @@ pub struct Request {
     pub payload: Vec<u8>,
 }
 
+/// A request as [`RingServer::serve_one_into`] lends it: the payload is
+/// borrowed from the caller's buffer.
+pub struct RequestView<'p> {
+    pub slot: u32,
+    pub opcode: u32,
+    pub flags: u32,
+    pub req_id: u64,
+    pub payload: &'p [u8],
+}
+
 pub struct RingClient<'a, N: Notifier> {
     seg: &'a SharedSeg,
     geom: Geom,
@@ -175,10 +185,23 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         req_id: u64,
         start: std::time::Instant,
     ) -> Result<(i32, Vec<u8>), IpcError> {
+        self.await_with(slot, start, || {
+            ring::take_response(self.seg, &self.geom, slot, req_id)
+        })
+    }
+
+    /// [`Self::await_response`] with the response taken by `take`, which says
+    /// `None` while it has not arrived.
+    fn await_with<R>(
+        &self,
+        slot: u32,
+        start: std::time::Instant,
+        mut take: impl FnMut() -> Result<Option<R>, IpcError>,
+    ) -> Result<R, IpcError> {
         let mut tries: u32 = 0;
         let mut idle = false;
         loop {
-            if let Some(r) = ring::take_response(self.seg, &self.geom, slot, req_id)? {
+            if let Some(r) = take()? {
                 return Ok(r);
             }
             if idle {
@@ -257,6 +280,60 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         ring::free_slot(self.seg, &self.geom, slot)?;
         self.notifier.notify_slot_free();
         Ok(Response { status, payload })
+    }
+
+    /// [`Self::submit`] without its allocations. `write` is given the claimed
+    /// slot's whole payload region, writes the request payload at its start
+    /// and returns its length, or `None` when it does not fit. The reply
+    /// payload is copied into `reply` (cleared first), which grows only when
+    /// its capacity is short. Returns the reply's status.
+    ///
+    /// The ring sees exactly what [`Self::submit`] would have sent: the same
+    /// header and the same bytes, only not staged in a buffer first. A request
+    /// that does not fit is never published, and its slot is freed.
+    pub fn submit_in_place(
+        &self,
+        opcode: u32,
+        flags: u32,
+        write: impl FnOnce(&mut [u8]) -> Option<usize>,
+        reply: &mut Vec<u8>,
+    ) -> Result<i32, IpcError> {
+        let slot = self.claim_slot_from(SLOT_HINT.with(|h| h.get()))?;
+        SLOT_HINT.with(|h| h.set(slot));
+        let cap = self.geom.payload_cap as usize;
+        let written = match ring::payload_region(self.seg, &self.geom, slot, write) {
+            Some(Some(len)) if len <= cap => Ok(len),
+            Some(_) => Err(IpcError::PayloadTooLarge),
+            None => Err(IpcError::Layout),
+        };
+        let len = match written {
+            Ok(len) => len,
+            Err(e) => {
+                // Never published, so the slot is still this client's alone.
+                ring::free_slot(self.seg, &self.geom, slot)?;
+                self.notifier.notify_slot_free();
+                return Err(e);
+            }
+        };
+        let outcome = ring::publish_written(self.seg, &self.geom, slot, opcode, flags, len)
+            .and_then(|req_id| {
+                self.notifier.notify_server();
+                self.await_with(slot, self.notifier.now(), || {
+                    ring::take_response_into(self.seg, &self.geom, slot, req_id, reply)
+                })
+            });
+        let status = match outcome {
+            Ok(status) => status,
+            Err(e) => {
+                // As in `submit_reporting`: give the slot up, never by freeing
+                // one the server still has.
+                self.abandon_slots(&[slot]);
+                return Err(e);
+            }
+        };
+        ring::free_slot(self.seg, &self.geom, slot)?;
+        self.notifier.notify_slot_free();
+        Ok(status)
     }
 
     /// **A5:** publish several requests (each on its own slot) and wait for all.
@@ -360,16 +437,8 @@ impl<'a, N: Notifier> RingServer<'a, N> {
         &self,
         handler: impl FnOnce(&Request) -> (i32, Vec<u8>),
     ) -> Result<bool, IpcError> {
-        let start = self.next.load(Ordering::Relaxed);
-        let slot = match ring::server_take_from(self.seg, &self.geom, start) {
-            Some(s) => {
-                self.next.store(s.wrapping_add(1), Ordering::Relaxed);
-                s
-            }
-            None => {
-                self.notifier.wait_server();
-                return Ok(false);
-            }
+        let Some(slot) = self.take_slot() else {
+            return Ok(false);
         };
         let (opcode, flags, req_id, payload) =
             ring::read_request(self.seg, &self.geom, slot).ok_or(IpcError::BadResponse)?;
@@ -386,6 +455,55 @@ impl<'a, N: Notifier> RingServer<'a, N> {
         ring::server_complete(self.seg, &self.geom, slot, req.req_id, status, &resp)?;
         self.notifier.notify_client(slot);
         Ok(true)
+    }
+
+    /// [`Self::serve_one`] without its allocations: the request payload is
+    /// copied into `req` and lent to `handler`, which writes the reply payload
+    /// into `reply` (cleared first) and returns the status. Both buffers grow
+    /// only when their capacity is short.
+    pub fn serve_one_into(
+        &self,
+        req: &mut Vec<u8>,
+        reply: &mut Vec<u8>,
+        handler: impl FnOnce(&RequestView<'_>, &mut Vec<u8>) -> i32,
+    ) -> Result<bool, IpcError> {
+        let Some(slot) = self.take_slot() else {
+            return Ok(false);
+        };
+        let (opcode, flags, req_id) = ring::read_request_into(self.seg, &self.geom, slot, req)
+            .ok_or(IpcError::BadResponse)?;
+        let view = RequestView {
+            slot,
+            opcode,
+            flags,
+            req_id,
+            payload: req,
+        };
+        reply.clear();
+        let status = handler(&view, reply);
+        ring::server_complete(self.seg, &self.geom, slot, req_id, status, reply)?;
+        self.notifier.notify_client(slot);
+        Ok(true)
+    }
+
+    /// The ring's geometry, as validated when this server attached.
+    pub fn geom(&self) -> Geom {
+        self.geom
+    }
+
+    /// Take the next submitted slot, or wait (advisory) and say `None`.
+    fn take_slot(&self) -> Option<u32> {
+        let start = self.next.load(Ordering::Relaxed);
+        match ring::server_take_from(self.seg, &self.geom, start) {
+            Some(s) => {
+                self.next.store(s.wrapping_add(1), Ordering::Relaxed);
+                Some(s)
+            }
+            None => {
+                self.notifier.wait_server();
+                None
+            }
+        }
     }
 }
 
@@ -432,5 +550,93 @@ mod tests {
         init(owned.seg(), 2, 128).unwrap();
         let server = RingServer::new(owned.seg(), SpinNotifier).unwrap();
         assert!(!server.serve_one(|_| (0, Vec::new())).unwrap());
+    }
+
+    #[test]
+    fn submit_in_place_writes_into_the_slot_and_reads_the_reply_into_the_buffer() {
+        let owned = OwnedSeg::new(4096);
+        init(owned.seg(), 2, 128).unwrap();
+        let seg = owned.seg();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let server = RingServer::new(seg, SpinNotifier).unwrap();
+                while !server
+                    .serve_one(|req| {
+                        assert_eq!((req.opcode, req.flags), (OP_GETATTR, 5));
+                        assert_eq!(req.payload, b"ping");
+                        (7, b"pong!".to_vec())
+                    })
+                    .unwrap()
+                {}
+            });
+            let client = RingClient::new(seg, SpinNotifier).unwrap();
+            let mut reply = Vec::with_capacity(16);
+            let status = client
+                .submit_in_place(
+                    OP_GETATTR,
+                    5,
+                    |slot| {
+                        assert_eq!(slot.len(), 128);
+                        slot[..4].copy_from_slice(b"ping");
+                        Some(4)
+                    },
+                    &mut reply,
+                )
+                .unwrap();
+            assert_eq!((status, &reply[..]), (7, &b"pong!"[..]));
+        });
+    }
+
+    #[test]
+    fn submit_in_place_that_does_not_fit_frees_its_slot() {
+        let owned = OwnedSeg::new(4096);
+        let geom = init(owned.seg(), 2, 128).unwrap();
+        let client = RingClient::new(owned.seg(), SpinNotifier).unwrap();
+        for written in [None, Some(129)] {
+            for _ in 0..3 {
+                let r = client.submit_in_place(OP_GETATTR, 0, |_| written, &mut Vec::new());
+                assert_eq!(r, Err(IpcError::PayloadTooLarge));
+            }
+        }
+        for slot in 0..2 {
+            assert_eq!(
+                ring::slot_state(owned.seg(), &geom, slot),
+                Some(crate::layout::ST_FREE)
+            );
+        }
+    }
+
+    #[test]
+    fn serve_one_into_lends_the_request_and_takes_the_reply_from_buffers() {
+        let owned = OwnedSeg::new(4096);
+        let geom = init(owned.seg(), 2, 128).unwrap();
+        let seg = owned.seg();
+        let slot = ring::claim_free(seg, &geom).unwrap();
+        let req_id = ring::publish_request(seg, &geom, slot, OP_GETATTR, 3, b"ping").unwrap();
+
+        let server = RingServer::new(seg, SpinNotifier).unwrap();
+        assert_eq!(server.geom(), geom);
+        let mut req = Vec::new();
+        let mut reply = b"stale".to_vec();
+        let handled = server
+            .serve_one_into(&mut req, &mut reply, |r, out| {
+                assert_eq!(
+                    (r.slot, r.opcode, r.flags, r.req_id),
+                    (slot, OP_GETATTR, 3, req_id)
+                );
+                assert_eq!(r.payload, b"ping");
+                assert!(out.is_empty());
+                out.extend_from_slice(b"pong");
+                99
+            })
+            .unwrap();
+        assert!(handled);
+        let (status, resp) = ring::take_response(seg, &geom, slot, req_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((status, &resp[..]), (99, &b"pong"[..]));
+        assert!(!server
+            .serve_one_into(&mut req, &mut reply, |_, _| unreachable!())
+            .unwrap());
     }
 }

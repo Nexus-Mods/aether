@@ -6,6 +6,11 @@ use std::sync::Mutex;
 
 struct FuseOpen {
     fh: u64,
+    /// Whether `fh` is a handle the director issued, so closing this handle
+    /// closes it there. Not for the directory handle `try_fuse_mkdir` makes
+    /// without an OPEN: any u64 is a valid `fh` (docs/wire.md 3.4.3), 0
+    /// included, so no value of `fh` can say "none".
+    issued: bool,
     size: u64,
     is_dir: bool,
     position: u64,
@@ -42,8 +47,10 @@ pub(crate) fn is_fuse_synth(handle: isize) -> bool {
     is_file_tagged(handle as usize)
 }
 
-pub(crate) fn open_fuse(fh: u64, size: u64, is_dir: bool) -> Option<isize> {
-    open_fuse_at(fh, size, is_dir, None)
+/// A directory handle that holds no director handle: closing it sends no
+/// CLOSE (see `FuseOpen::issued`).
+pub(crate) fn open_dir_unissued() -> Option<isize> {
+    insert(0, false, 0, true, None, false)
 }
 
 pub(crate) fn open_fuse_at(
@@ -69,6 +76,17 @@ pub(crate) fn open_fuse_at_ex(
     abs_path: Option<String>,
     append_only: bool,
 ) -> Option<isize> {
+    insert(fh, true, size, is_dir, abs_path, append_only)
+}
+
+fn insert(
+    fh: u64,
+    issued: bool,
+    size: u64,
+    is_dir: bool,
+    abs_path: Option<String>,
+    append_only: bool,
+) -> Option<isize> {
     let mut next = NEXT.lock().ok()?;
     let slot = *next;
     *next = next.wrapping_add(1);
@@ -78,6 +96,7 @@ pub(crate) fn open_fuse_at_ex(
         handle,
         FuseOpen {
             fh,
+            issued,
             size,
             is_dir,
             position: if append_only { size } else { 0 },
@@ -205,12 +224,17 @@ pub(crate) fn set_delete_on_close(handle: isize, on: bool) {
     }
 }
 
-/// Forget `handle`. Returns its director `fh`, and the path to delete now that it is closed
+/// Forget `handle`. Returns its director `fh` (`None` for a handle the
+/// director never issued, [`open_dir_unissued`]), and the path to delete now that it is closed
 /// when it was opened with `FILE_DELETE_ON_CLOSE` ([`set_delete_on_close`]).
-pub(crate) fn close_fuse(handle: isize) -> Option<(u64, Option<String>)> {
+pub(crate) fn close_fuse(handle: isize) -> Option<(Option<u64>, Option<String>)> {
     let mut g = TABLE.lock().ok()?;
-    g.remove(&(handle as usize))
-        .map(|e| (e.fh, e.abs_path.filter(|_| e.delete_on_close)))
+    g.remove(&(handle as usize)).map(|e| {
+        (
+            e.issued.then_some(e.fh),
+            e.abs_path.filter(|_| e.delete_on_close),
+        )
+    })
 }
 
 #[cfg(test)]

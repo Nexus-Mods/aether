@@ -439,8 +439,8 @@ unsafe fn try_fuse_mkdir(
 /// The handle `try_fuse_mkdir` gives back for a directory it made or found,
 /// with `info` (`FILE_CREATED` or `FILE_OPENED`) in the IO status block.
 ///
-/// A synthetic directory handle, made without an `Opcode::Open` of the
-/// directory: the overlay opens paths as FileChannels, and a directory open
+/// A synthetic directory handle holding no director handle (so closing it
+/// sends no CLOSE), made without an `Opcode::Open` of the directory: the overlay opens paths as FileChannels, and a directory open
 /// throws. The caller (CreateDirectoryW) only needs a handle to receive and
 /// immediately close; later metadata reads are path-based (qattr/getattr),
 /// not through this handle.
@@ -450,7 +450,7 @@ unsafe fn new_dir_handle(
     iosb: *mut c_void,
     info: usize,
 ) -> NTSTATUS {
-    let h = match crate::synth_file::open_fuse(0, 0, true) {
+    let h = match crate::synth_file::open_dir_unissued() {
         Some(h) => h,
         // A poisoned synth table: fail closed rather than fall through to a real mkdir.
         None => return STATUS_UNSUCCESSFUL,

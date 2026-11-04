@@ -919,7 +919,9 @@ The reference director has no layers, so it never gives these answers.
 #### 3.4.10 CLOSE (11)
 
 Request (`Request::Close`), 8 bytes: `fh:u64`. Reply: status only. Unknown
-`fh` `ST_BAD_FH`.
+`fh` `ST_BAD_FH`. The shim sends CLOSE only for an `fh` an OPEN returned: the handle
+it gives a program for a directory it created with MKDIR (3.4.9) holds none,
+and closing it sends nothing.
 
 #### 3.4.11 HEARTBEAT (13)
 

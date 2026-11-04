@@ -44,6 +44,15 @@ pub use child::{finish_ready_handshake, signal_bootstrap_failed};
 pub use aether_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
 #[doc(hidden)]
 pub use hook::as_shim_io_for_tests;
+
+/// Fill a data section over a director file on demand when it is larger
+/// than `bytes` (256 MiB in the shipped shim; 0 restores that), so a test
+/// reaches the demand-paged path with a small file. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn set_eager_section_max(bytes: u64) {
+    lazy_section::set_eager_max(bytes);
+}
 /// Run one `extern "system"` entry point's body with its panic contained.
 ///
 /// Exported for `aether-shim`, which owns the injected DLL's other

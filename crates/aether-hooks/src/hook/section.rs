@@ -206,11 +206,16 @@ unsafe fn fuse_create_section(
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
 
-    const EAGER_MAX: u64 = 256 * 1024 * 1024;
     if size > crate::lazy_section::MAX_LAZY {
         return STATUS_SECTION_TOO_BIG;
     }
-    if size > EAGER_MAX {
+    if size > crate::lazy_section::eager_max() {
+        // The section reads through `fh` for as long as it lives, so it holds
+        // the director handle past the program's close of the file
+        // (docs/wire.md 3.4.10).
+        let Some(fh) = crate::synth_file::hold(file_handle as isize) else {
+            return STATUS_INVALID_FILE_FOR_SECTION;
+        };
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         return match unsafe { crate::lazy_section::create_lazy_data_section(fh, size) } {
             Some(h) => {
@@ -222,7 +227,12 @@ unsafe fn fuse_create_section(
                 }
                 STATUS_SUCCESS
             }
-            None => STATUS_SECTION_TOO_BIG,
+            None => {
+                // No region holds it: let it go (closing it, if another
+                // thread closed the file meanwhile).
+                crate::lazy_section::let_go(Some(fh));
+                STATUS_SECTION_TOO_BIG
+            }
         };
     }
     // Eager path (≤256 MiB): stream on this thread into VirtualAlloc.

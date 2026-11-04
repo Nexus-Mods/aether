@@ -941,6 +941,9 @@ Request (`Request::Close`), 8 bytes: `fh:u64`. Reply: status only. Unknown
 `fh` `ST_BAD_FH`. The shim sends CLOSE only for an `fh` an OPEN returned: the handle
 it gives a program for a directory it created with MKDIR (3.4.9) holds none,
 and closing it sends nothing.
+A file over which a program made a section that fills on first touch keeps
+its `fh` until the last of the program's file handle, the section and its
+views is gone, and the CLOSE goes then, once: the section reads through it.
 
 #### 3.4.11 HEARTBEAT (13)
 

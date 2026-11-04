@@ -41,6 +41,19 @@ pub(crate) struct ReadView {
 }
 
 static TABLE: Mutex<BTreeMap<usize, FuseOpen>> = Mutex::new(BTreeMap::new());
+/// Director handles a demand-paged section reads through
+/// (`crate::lazy_section`), by `fh`. Locked only while [`TABLE`] is held, so
+/// a close and a section's release cannot cross.
+static HELD: Mutex<BTreeMap<u64, Held>> = Mutex::new(BTreeMap::new());
+
+/// Who still needs one director handle besides the program's file handle.
+struct Held {
+    /// Demand-paged sections over it not yet released ([`hold`]).
+    regions: u32,
+    /// The program closed its file handle while a section held `fh`: the
+    /// last [`release`] sends the CLOSE.
+    file_closed: bool,
+}
 static NEXT: Mutex<usize> = Mutex::new(1);
 
 pub(crate) fn is_fuse_synth(handle: isize) -> bool {
@@ -216,17 +229,71 @@ pub(crate) fn set_delete_on_close(handle: isize, on: bool) {
     }
 }
 
-/// Forget `handle`. Returns its director `fh` (`None` for a handle the
-/// director never issued, [`open_dir_unissued`]), and the path to delete now that it is closed
+/// Forget `handle`. Returns its director `fh` to close now (`None` for a handle the
+/// director never issued, [`open_dir_unissued`], or one a demand-paged section still
+/// holds, [`hold`]), and the path to delete now that it is closed
 /// when it was opened with `FILE_DELETE_ON_CLOSE` ([`set_delete_on_close`]).
 pub(crate) fn close_fuse(handle: isize) -> Option<(Option<u64>, Option<String>)> {
     let mut g = TABLE.lock().ok()?;
     g.remove(&(handle as usize)).map(|e| {
+        // A section still reading through `fh` keeps it open at the
+        // director; the CLOSE waits for the section's last release.
+        let held = e.issued && HELD.lock().is_ok_and(|mut h| mark_closed(&mut h, e.fh));
         (
-            e.issued.then_some(e.fh),
+            (e.issued && !held).then_some(e.fh),
             e.abs_path.filter(|_| e.delete_on_close),
         )
     })
+}
+
+/// Note that the program closed its handle on `fh`; whether a section holds it.
+fn mark_closed(held: &mut BTreeMap<u64, Held>, fh: u64) -> bool {
+    match held.get_mut(&fh) {
+        Some(h) => {
+            h.file_closed = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Keep the director handle behind `handle` open for a demand-paged section
+/// over it, past the program's close of `handle`: its `fh`, or `None` for a
+/// handle with none the director issued. Each hold is let go once, with
+/// [`release`].
+pub(crate) fn hold(handle: isize) -> Option<u64> {
+    let g = TABLE.lock().ok()?;
+    let e = g.get(&(handle as usize)).filter(|e| e.issued)?;
+    let mut held = HELD.lock().ok()?;
+    held.entry(e.fh)
+        .or_insert(Held {
+            regions: 0,
+            file_closed: false,
+        })
+        .regions += 1;
+    Some(e.fh)
+}
+
+/// Let go of one [`hold`] on `fh`. `true` when it was the last and the
+/// program's file handle is already closed: the caller sends the CLOSE. An
+/// `fh` nothing holds is `false`.
+pub(crate) fn release(fh: u64) -> bool {
+    let Ok(_table) = TABLE.lock() else {
+        return false;
+    };
+    let Ok(mut held) = HELD.lock() else {
+        return false;
+    };
+    let Some(h) = held.get_mut(&fh) else {
+        return false;
+    };
+    h.regions = h.regions.saturating_sub(1);
+    if h.regions > 0 {
+        return false;
+    }
+    let close = h.file_closed;
+    held.remove(&fh);
+    close
 }
 
 #[cfg(test)]
@@ -252,5 +319,33 @@ mod tests {
             );
             close_fuse(h);
         }
+    }
+
+    /// A held director handle is closed once, by whichever of the file's
+    /// close and the last section's release comes last.
+    #[test]
+    fn a_held_fh_closes_once_with_the_last_of_file_and_sections() {
+        // File first, then two sections.
+        let h = open_fuse_at_ex(0x5EC7_0001, 10, false, None, false).unwrap();
+        assert_eq!(hold(h), Some(0x5EC7_0001));
+        assert_eq!(hold(h), Some(0x5EC7_0001));
+        assert_eq!(close_fuse(h), Some((None, None)), "closed under a section");
+        assert!(!release(0x5EC7_0001), "a section still holds it");
+        assert!(release(0x5EC7_0001), "the last release closes it");
+        assert!(
+            !release(0x5EC7_0001),
+            "a release past the last closes nothing"
+        );
+
+        // Section first, then the file.
+        let h = open_fuse_at_ex(0x5EC7_0002, 10, false, None, false).unwrap();
+        assert_eq!(hold(h), Some(0x5EC7_0002));
+        assert!(!release(0x5EC7_0002), "the file is still open");
+        assert_eq!(close_fuse(h), Some((Some(0x5EC7_0002), None)));
+
+        // A handle the director never issued holds nothing.
+        let d = open_dir_unissued().unwrap();
+        assert_eq!(hold(d), None);
+        close_fuse(d);
     }
 }

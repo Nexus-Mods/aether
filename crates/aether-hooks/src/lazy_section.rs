@@ -38,6 +38,31 @@ const WARM_BYTES: usize = 2 * 1024 * 1024;
 /// `STATUS_SECTION_TOO_BIG` for those makes the game fail the archive outright.
 pub(crate) const MAX_LAZY: u64 = 64 * 1024 * 1024 * 1024;
 
+/// Largest data section filled whole at `NtCreateSection`; a larger one is
+/// filled on demand (this module).
+const EAGER_MAX: u64 = 256 * 1024 * 1024;
+
+/// A test's [`EAGER_MAX`], 0 for none ([`set_eager_max`]).
+#[cfg(feature = "test-support")]
+static EAGER_MAX_FOR_TESTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The size above which a data section over a director file is demand-paged.
+pub(crate) fn eager_max() -> u64 {
+    #[cfg(feature = "test-support")]
+    match EAGER_MAX_FOR_TESTS.load(Ordering::Relaxed) {
+        0 => {}
+        n => return n,
+    }
+    EAGER_MAX
+}
+
+/// Demand-page every data section larger than `bytes` (0: back to
+/// [`EAGER_MAX`]), so a test reaches the lazy path without a 256 MiB file.
+#[cfg(feature = "test-support")]
+pub(crate) fn set_eager_max(bytes: u64) {
+    EAGER_MAX_FOR_TESTS.store(bytes, Ordering::Relaxed);
+}
+
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 use crate::ntdef::STATUS_ACCESS_VIOLATION;
@@ -47,6 +72,8 @@ struct OwnedRegion {
     base: usize,
     reserved: usize,
     file_size: u64,
+    /// The director handle a demand-paged region reads through, held for it
+    /// ([`crate::synth_file::hold`]) until the region is dropped.
     fh: u64,
     /// Demand-paged: reserved `PAGE_NOACCESS`, chunks committed by the VEH.
     /// Eager regions are fully committed and filled at creation.
@@ -176,6 +203,10 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
 /// Reserve VA for a director-backed data section; warm first [`WARM_BYTES`].
 ///
 /// Returns a synthetic section handle for [`crate::synth_section::map_view`].
+///
+/// The caller holds `fh` for the region ([`crate::synth_file::hold`]); the
+/// region lets it go when it is dropped (section closed, last view gone). On
+/// `None` there is no region, and the caller lets it go.
 pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize> {
     if file_size == 0 || file_size > MAX_LAZY {
         return None;
@@ -256,15 +287,34 @@ fn region_key(g: &BTreeMap<usize, OwnedRegion>, addr: usize) -> Option<usize> {
         .map(|(k, _)| *k)
 }
 
-/// Drop the region at `key` if nothing references it any more.
-fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) {
-    if g.get(&key).is_some_and(|r| r.is_dead()) {
-        if let Some(r) = g.remove(&key) {
-            // SAFETY: `base` came from VirtualAlloc(MEM_RESERVE) here and no
-            // view or open section handle refers to it any more.
-            unsafe {
-                VirtualFree(r.base as *mut c_void, 0, MEM_RELEASE);
-            }
+/// Drop the region at `key` if nothing references it any more. Returns the
+/// director handle a dropped demand-paged region held, for [`let_go`] once
+/// `REGIONS` is unlocked.
+fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) -> Option<u64> {
+    if !g.get(&key).is_some_and(|r| r.is_dead()) {
+        return None;
+    }
+    let r = g.remove(&key)?;
+    // SAFETY: `base` came from VirtualAlloc(MEM_RESERVE) here and no
+    // view or open section handle refers to it any more.
+    unsafe {
+        VirtualFree(r.base as *mut c_void, 0, MEM_RELEASE);
+    }
+    r.lazy.then_some(r.fh)
+}
+
+/// Let go of a dropped region's hold on its director handle
+/// ([`crate::synth_file::hold`]), closing it at the director when the
+/// program's file handle is already gone (docs/wire.md 3.4.10). Not under
+/// `REGIONS`: the CLOSE is a round trip, and a fault on another thread must
+/// not wait for it.
+pub(crate) fn let_go(fh: Option<u64>) {
+    let Some(fh) = fh else {
+        return;
+    };
+    if crate::synth_file::release(fh) {
+        if let Some(c) = crate::director::global() {
+            let _ = c.close(fh);
         }
     }
 }
@@ -276,24 +326,26 @@ fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) {
 ///
 /// Call *after* retiring the view in [`crate::synth_section::unmap_view`].
 pub(crate) fn on_view_unmapped(addr: usize) {
-    if let Ok(mut g) = REGIONS.lock() {
-        if let Some(key) = region_key(&g, addr) {
-            reap(&mut g, key);
-        }
-    }
+    let dropped = match REGIONS.lock() {
+        Ok(mut g) => region_key(&g, addr).and_then(|key| reap(&mut g, key)),
+        Err(_) => None,
+    };
+    let_go(dropped);
 }
 
 /// Note that the section handle covering `base` was closed. Frees the region
 /// once the last view is unmapped.
 pub(crate) fn on_section_closed(base: usize) {
-    if let Ok(mut g) = REGIONS.lock() {
-        if let Some(key) = region_key(&g, base) {
+    let dropped = match REGIONS.lock() {
+        Ok(mut g) => region_key(&g, base).and_then(|key| {
             if let Some(r) = g.get_mut(&key) {
                 r.section_open = false;
             }
-            reap(&mut g, key);
-        }
-    }
+            reap(&mut g, key)
+        }),
+        Err(_) => None,
+    };
+    let_go(dropped);
 }
 
 /// Whether `addr` falls in a demand-paged region (so a fault there is ours).

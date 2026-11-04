@@ -38,7 +38,7 @@ windows-sys = { workspace = true, features = [
 
 [features]
 # Entry points for this crate's own tests (`director::install_global`,
-# `director::connect_from_env`). Off in the shipped shim: only the
+# `director::connect_from_env`, `set_eager_section_max`). Off in the shipped shim: only the
 # dev-dependency below turns it on.
 test-support = []
 
@@ -64,6 +64,9 @@ windows-sys = { workspace = true, features = [
   "Win32_System_LibraryLoader",
   # `tests/diagnostics/child_inject_fails_closed.rs`: the process list.
   "Win32_System_Diagnostics_ToolHelp",
+  # `tests/harness/sections.rs`: file mappings, and `SetErrorMode` for a child that must crash.
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
 ] }
 
 [lints]

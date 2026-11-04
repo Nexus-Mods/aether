@@ -137,7 +137,27 @@ text quoted from the section named; there are no others.
 | REG_KEY `last_write` | Not compared. | 4.3: a FILETIME, which the overlay stamps with the director's clock |
 
 A `one_of` is the only way a scenario allows several answers, and it cites
-its section in `wire`.
+its section in `wire`. These are the choices wire.md gives, and a scenario
+that sends one of these requests accepts every answer listed (and puts no
+step after it whose answer depends on the choice, unless both leave the same
+state):
+
+| Request | Answers | wire.md |
+|---|---|---|
+| READDIR of a missing directory; of a file | `not-found` or an empty listing; `not-a-directory`, `not-found` or an empty listing | 3.4.2 |
+| A path below a file, any opcode but GETATTR | `not-found` or `not-a-directory` (GETATTR: found = 0, or `not-found`) | 3.5 |
+| A create (OPEN, MKDIR, a RENAME or RENAME_X `to`) under a file | `not-found` or `not-a-directory` | 3.4.3, 3.4.7, 3.4.9, 3.4.13 |
+| A write open of a directory without `excl` | `is-dir` or `io-error` | 3.4.3 |
+| A read open with `trunc` or `create` | the bit ignored, or `bad-request` | 3.4.3 |
+| A file renamed onto an empty directory | `ok` (replaced) or `io-error` | 3.4.7 |
+| RENAME_X onto a directory | `is-dir` or `io-error` | 3.4.13 |
+| READ, WRITE, SETATTR through a handle whose file was deleted or replaced | the file's last bytes (writes seen by nobody), `io-error` or `not-found` | 3.4.8 |
+| A WRITE or SETATTR to a size that cannot exist | `no-space` or `bad-request` | 3.4.5, 3.4.6 |
+| WRITE or SETATTR through a handle opened without `write`, on a file a writable provider holds | honoured, or `read-only` | 3.4.5 |
+| MKDIR of an existing directory no writable provider serves | `exists` or `read-only` | 3.4.9 |
+| STORED_NAMES with `skip` at or past the number of components | an empty reply or `bad-request` | 3.4.12 |
+| A request naming a named stream (`x.sav:s`) | `not-found`, `bad-request`, or the stream a director holds | 3.2 |
+| A create of a name a director's store would make one with another (`ας` beside `ασ`) | created, or `exists` | 3.2 |
 
 ## Checks across steps
 

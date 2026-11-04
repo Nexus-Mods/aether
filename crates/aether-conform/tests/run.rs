@@ -1279,11 +1279,20 @@ fn a_staged_copy_must_hold_the_served_bytes() {
 
 /// wire.md 3.4.4: a handle serves READ whatever access it was opened with.
 /// A director refusing READ through a write-only handle fails
-/// `write-only-read`, and only that.
+/// `write-only-read` and the scenarios that read back through a handle
+/// opened write|create, and only those.
 #[test]
 fn a_director_refusing_reads_through_write_only_handles_fails() {
-    let (failed, _) = failing_notes("write-only-unreadable");
-    assert_eq!(failed, ["write-only-read"]);
+    let (mut failed, _) = failing_notes("write-only-unreadable");
+    failed.sort();
+    assert_eq!(
+        failed,
+        [
+            "handles-deleted-file",
+            "handles-follow-rename",
+            "write-only-read"
+        ]
+    );
 }
 
 /// wire.md 3.4.5, 3.4.6: what a file grows by reads as zeros.
@@ -1296,8 +1305,9 @@ fn a_director_filling_growth_with_garbage_fails() {
 /// wire.md 3.2: a stream the director does not hold is not its base file.
 #[test]
 fn a_director_serving_a_stream_as_its_base_file_fails() {
-    let (failed, _) = failing_notes("stream-base");
-    assert_eq!(failed, ["names-stream"]);
+    let (mut failed, _) = failing_notes("stream-base");
+    failed.sort();
+    assert_eq!(failed, ["names-stream", "names-stream-writable"]);
 }
 
 /// wire.md 4.2: the current user's hives are keys like any other.

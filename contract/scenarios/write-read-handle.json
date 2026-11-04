@@ -1,0 +1,19 @@
+{
+  "name": "write-read-handle",
+  "description": "A WRITE or SETATTR through a handle opened without OPEN_WRITE (wire.md 3.4.5): on a file no writable provider holds it is ST_READ_ONLY and the file does not change; on one a writable provider holds a director may honour it or answer ST_READ_ONLY.",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/a.txt", "contents": "abc"}, {"path": "data/r.txt", "contents": "r"}], "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/r.txt"}, "expect": {"reply": {"fh": 1, "size": 1, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "x"}, "expect": {"status": "read-only"}},
+    {"request": {"op": "setattr", "fh": 1, "size": 0}, "expect": {"status": "read-only"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": "r"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 2, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "X"}, "expect": {"one_of": [{"reply": {"written": 1}}, {"status": "read-only"}], "wire": "3.4.5"}, "note": "the last step on saves/a.txt, since what follows would depend on it"},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

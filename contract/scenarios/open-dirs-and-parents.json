@@ -1,0 +1,34 @@
+{
+  "name": "open-dirs-and-parents",
+  "description": "Write opens wire.md 3.4.3 fixes: OPEN_EXCL on an existing path is ST_EXISTS, a directory included, before anything is truncated; any other write open of a directory is ST_IS_DIR or ST_IO_ERROR, and one no writable provider serves ST_READ_ONLY; a missing path without OPEN_CREATE is ST_NOT_FOUND, OPEN_EXCL and OPEN_TRUNC alone included. A create (OPEN or MKDIR) under a missing parent is ST_NOT_FOUND, under a file ST_NOT_FOUND or ST_NOT_A_DIRECTORY, and creates nothing (3.4.3, 3.4.9). A read open with OPEN_TRUNC or OPEN_CREATE may ignore the bit or be ST_BAD_REQUEST (3.4.3).",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/a.txt", "contents": "abc"}, {"path": "data/r.txt", "contents": "r"}], "dirs": ["saves/dir", "data/ro"], "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "excl"], "path": "saves/a.txt"}, "expect": {"status": "exists"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "excl"], "path": "saves/none.txt"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "trunc"], "path": "saves/none.txt"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl", "trunc"], "path": "saves/a.txt"}, "expect": {"status": "exists"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}, "note": "refused before truncating"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/dir"}, "expect": {"status": "exists"}, "note": "OPEN_EXCL on a directory"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "excl"], "path": "saves/DIR"}, "expect": {"status": "exists"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/dir"}, "expect": {"one_of": [{"status": "is-dir"}, {"status": "io-error"}], "wire": "3.4.3"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/dir"}, "expect": {"one_of": [{"status": "is-dir"}, {"status": "io-error"}], "wire": "3.4.3"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "trunc"], "path": "saves/dir"}, "expect": {"one_of": [{"status": "is-dir"}, {"status": "io-error"}], "wire": "3.4.3"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "data/ro"}, "expect": {"status": "read-only"}, "note": "a directory no writable provider serves"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/no/such.txt"}, "expect": {"status": "not-found"}, "note": "a missing parent"},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/no/such"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/a.txt/below"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.4.3"}, "note": "a parent that is a file"},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/a.txt/sub"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.4.9"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/no"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "a.txt", "is_dir": false, "size": 3, "mtime": 0}, {"name": "dir", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read", "create"], "path": "saves/new.txt"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.4.3"}, "note": "OPEN_CREATE without OPEN_WRITE"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/new.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read", "trunc"], "path": "saves/a.txt"}, "expect": {"one_of": [{"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}, {"status": "bad-request"}], "wire": "3.4.3"}, "note": "OPEN_TRUNC without OPEN_WRITE"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"one_of": [{"status": "ok"}, {"status": "bad-fh"}], "wire": "3.4.3"}, "note": "fh 1 exists only if the OPEN gave it"}
+  ]
+}

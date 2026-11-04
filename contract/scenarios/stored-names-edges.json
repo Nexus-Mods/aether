@@ -1,0 +1,22 @@
+{
+  "name": "stored-names-edges",
+  "description": "STORED_NAMES (wire.md 3.4.12): the components the director has come back in their stored spelling even when a later one is unknown; `skip` at or past the number of components may be an empty reply or ST_BAD_REQUEST; a directory renamed to another case respells the path below it; after a delete the name is one the director does not have.",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "Data/Textures/Sky.DDS", "contents": "s"}], "writable": ["Data/Saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/missing/x"}, "expect": {"one_of": [{"reply": {"names": "Data/missing/x"}}, {"status": "not-found"}], "wire": "3.4.12"}, "note": "the known component as stored, never as sent"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 3, "path": "data/textures/sky.dds"}, "expect": {"one_of": [{"reply": {"names": ""}}, {"status": "bad-request"}], "wire": "3.4.12"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 4, "path": "data/textures/sky.dds"}, "expect": {"one_of": [{"reply": {"names": ""}}, {"status": "bad-request"}], "wire": "3.4.12"}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "Data/Saves/My Dir"}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "Data/Saves/my dir/F.TXT"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "rename", "root": 0, "from": "Data/Saves/my dir", "to": "Data/Saves/MY DIR"}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/saves/my dir/f.txt"}, "expect": {"reply": {"names": "Data/Saves/MY DIR/F.TXT"}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/saves/my dir/f.txt"}, "expect": {"status": "ok"}},
+    {"request": {"op": "delete", "root": 0, "path": "data/saves/my dir"}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/saves/my dir/f.txt"}, "expect": {"one_of": [{"reply": {"names": "Data/Saves/my dir/f.txt"}}, {"status": "not-found"}], "wire": "3.4.12"}}
+  ]
+}

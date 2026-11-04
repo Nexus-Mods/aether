@@ -180,16 +180,43 @@ over a section (the tests and CI run both).
 | `multi-handles-unique` | three processes' handles, all open at once, unique across them (2.8.1, 3.4.3) |
 | `multi-write-visible` | one process's writes, truncation and new file seen by another in GETATTR, READDIR, OPEN and READ (2.8.1, 3.4.1 to 3.4.5) |
 | `multi-registry-gen` | one process's registry writes move `reg_gen` in another's mapping and change its answers (2.8.1, 4.3, 4.5) |
+| `handles-deleted-file`, `handles-follow-rename` | a handle on a deleted or replaced file never reaches the file later at its name; a handle follows its file through a rename, its own or a directory's (3.4.7, 3.4.8) |
+| `rename-edges`, `rename-x-edges` | RENAME onto an ancestor, onto itself, a directory onto a file, a missing parent, two writable entries of one root; RENAME_X onto a directory, with a read-only end, in the caller's spelling (3.4.7, 3.4.13) |
+| `open-dirs-and-parents`, `paths-through-files` | write opens of directories, `OPEN_EXCL` and `OPEN_TRUNC` alone, read opens with write bits, creates under a missing parent or a file; paths below a file and READDIR of what is not a directory (3.4.2, 3.4.3, 3.4.9, 3.5) |
+| `names-stream-writable`, `case-fold-created` | named streams on a writable path, never stored as entries; names created in non-ASCII case pairs and a name a store may fold onto another (3.2) |
+| `write-offset-huge`, `write-read-handle`, `stored-names-edges` | sizes that cannot exist, zero-length WRITEs, READs at huge offsets; WRITE and SETATTR through a read handle; STORED_NAMES with unknown components, `skip` past the end, after a respell and a delete (3.4.4 to 3.4.6, 3.4.12) |
+
+**Where wire.md lets directors differ**, the step accepts each answer it
+names (`one_of`), and nothing later in the scenario depends on which one a
+director gave, unless the answers leave the same state:
+
+| Request | Answers accepted | wire.md | Scenarios |
+|---|---|---|---|
+| READDIR of a missing directory | `ST_NOT_FOUND`, an empty listing | 3.4.2 | `paths-through-files` |
+| READDIR of a file | `ST_NOT_A_DIRECTORY`, `ST_NOT_FOUND`, an empty listing | 3.4.2 | `paths-through-files` |
+| A path below a file, any opcode but GETATTR | `ST_NOT_FOUND`, `ST_NOT_A_DIRECTORY` (READDIR as above) | 3.5 | `paths-through-files` |
+| A create (OPEN, MKDIR, RENAME or RENAME_X `to`) under a file | `ST_NOT_FOUND`, `ST_NOT_A_DIRECTORY` | 3.4.3, 3.4.7, 3.4.9, 3.4.13 | `open-dirs-and-parents`, `rename-edges`, `rename-x-edges` |
+| A write open of a directory without `OPEN_EXCL` | `ST_IS_DIR`, `ST_IO_ERROR` | 3.4.3 | `open-dirs-and-parents` |
+| A read open with `OPEN_TRUNC` or `OPEN_CREATE` | the bit ignored, `ST_BAD_REQUEST` | 3.4.3 | `open-dirs-and-parents` |
+| A file renamed onto an empty directory | `ST_OK` (replaced), `ST_IO_ERROR` | 3.4.7 | `rename-edges`, `handles-follow-rename` |
+| RENAME_X onto a directory | `ST_IS_DIR`, `ST_IO_ERROR` | 3.4.13 | `rename-x-edges` |
+| READ, WRITE or SETATTR through a handle whose file was deleted or replaced | the file's last bytes (its writes seen by nobody), `ST_IO_ERROR`, `ST_NOT_FOUND` | 3.4.8 | `handles-deleted-file`, `handles-follow-rename` |
+| A WRITE or SETATTR to a size that cannot exist | `ST_NO_SPACE`, `ST_BAD_REQUEST` | 3.4.5, 3.4.6 | `write-offset-huge` |
+| WRITE through a handle opened without `OPEN_WRITE`, on a file a writable provider holds | honoured, `ST_READ_ONLY` | 3.4.5 | `write-read-handle` |
+| MKDIR of an existing directory no writable provider serves | `ST_EXISTS`, `ST_READ_ONLY` | 3.4.9 | `mkdir-existing-readonly` |
+| STORED_NAMES with `skip` at or past the number of components | an empty reply, `ST_BAD_REQUEST` | 3.4.12 | `stored-names-edges` |
+| A request naming a named stream | `ST_NOT_FOUND`, `ST_BAD_REQUEST`, or the stream a director holds | 3.2 | `names-stream`, `names-stream-writable` |
+| A create of a name a director's store would make one with another | created, `ST_EXISTS` | 3.2 | `case-fold-created` |
+
+GETATTR of a path below a file is found = 0 (or `ST_NOT_FOUND`, which the
+shim reads the same, 3.4.1), never `ST_NOT_A_DIRECTORY` (3.5).
 
 **Left out because wire.md does not fix the answer**, so no scenario
-asserts it: READDIR of a path that is not a directory; a path below a file
-(accepted as found=0, `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`); a write open,
-DELETE or RENAME of a missing path outside every writable provider; a create
-whose parent directory is missing; WRITE or SETATTR on a handle opened
-read-only; `ST_NO_SPACE`. (What a write past the end, or a SETATTR, puts in
-the gap is zeros, and a handle opened for writing alone serves READ: wire.md
-3.4.4 to 3.4.6 say so, and `write-growth` and `write-only-read` check
-them.)
+asserts it: a write open, DELETE or RENAME of a missing path outside every
+writable provider in a root that has one. (What a write past the end, or a
+SETATTR, puts in the gap is zeros, and a handle opened for writing alone
+serves READ: wire.md 3.4.4 to 3.4.6 say so, and `write-growth` and
+`write-only-read` check them.)
 
 **Left out because a scenario cannot send or receive it.** A scenario names
 opcodes and fields of the table and the statuses in `protocol.json`, so these
@@ -452,8 +479,8 @@ shrunk case valid and plays each through the adapter's own mount.
 | SETATTR | handles opened for writing: 0, half, the size, past it; directory handles | `ST_OK` (3.4.6); as WRITE on a directory handle (3.4.5) |
 | CLOSE | open handles, also ones whose file changed under them | `ST_OK` (3.4.10) |
 | READ, WRITE, SETATTR, CLOSE | closed handles and numbers never issued | `ST_BAD_FH` (3.5) |
-| RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers, the root at an end and a `to` inside `from` as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR`; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
-| RENAME_X across roots | files to a missing name (the caller's spelling) or onto a file (its stored spelling: 3.4.13 does not say whose spelling a replaced file keeps, and a director may keep the stored one); directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
+| RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, directories onto empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers (a directory onto a file `ST_IO_ERROR`), the root at an end and a `to` inside `from` as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR`; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
+| RENAME_X across roots | files to a missing name or onto a file, in the caller's spelling (which the file at `to` takes, 3.4.13); directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
 | DELETE | files, empty and non-empty directories the writable provider holds; missing names; read-only names; the root (writable as a whole); unserved roots | 3.4.8's answers, the root as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR` |
 | MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
 | STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
@@ -466,10 +493,15 @@ shrunk case valid and plays each through the adapter's own mount.
   writable entry's own directory and its ancestors are only read (GETATTR,
   READDIR, OPEN for reading), never written, deleted or renamed (README, "Who
   holds what").
-- Writes and creates with no fixed answer (as "Left out" above): a write open,
-  DELETE or RENAME of a missing name outside every writable provider in a
-  root that has one; a create whose parent is missing; READDIR of a missing
-  path or a file; a path below a file; a write open of a directory.
+- Writes with no fixed answer (as "Left out" above): a write open, DELETE
+  or RENAME of a missing name outside every writable provider in a root that
+  has one.
+- Requests whose answers wire.md fixes, some as a choice, that the scenarios
+  check and the generator does not send yet: a create whose parent is
+  missing or a file; READDIR of a missing path or a file; a path below a
+  file; a write open of a directory; a file renamed onto an empty directory
+  (a director may replace it or refuse, and the steps after would depend on
+  which).
 - Growth: a WRITE starts at most at the end of the bytes that are fixed, and
   after a SETATTR extends a file only the bytes before the old end are read.
   wire.md 3.4.5 and 3.4.6 fix the gap as zeros; `write-growth` checks it,
@@ -479,18 +511,22 @@ shrunk case valid and plays each through the adapter's own mount.
   handle serves, is not generated (`write-only-read` checks it).
 - A handle whose file changed through another handle or a path (a WRITE or
   SETATTR through another handle, a truncating open, a RENAME, RENAME_X or
-  DELETE of it or of a directory above it) is only closed afterwards: what it
-  reads then is not fixed.
-- RENAME_X onto a directory, and RENAME_X with a read-only end (3.4.13 names
-  no status).
+  DELETE of it or of a directory above it) is only closed afterwards. wire.md
+  3.4.4, 3.4.7 and 3.4.8 fix what it reads (every handle reads the file as it
+  is now, a handle follows its file through a rename, one whose file is gone
+  never reaches the file later at its name), and the `handles-*` scenarios
+  check it; the generator does not predict it yet.
+- RENAME_X onto a directory, and RENAME_X with a read-only end
+  (`rename-x-edges` checks them).
 - A RENAME whose `to` is an ancestor of `from`, or the same name spelled the
-  same way.
+  same way (`rename-edges` checks them).
 - Paths that leave their root (`escape-paths` covers them) and every
   non-canonical file path (3.2).
 - Registry requests near a limit (reply size, name length, depth), which
   `registry-limits` and `registry-key-too-large` cover, and a REG_CHANGED
   before any registry reply (its `since` has no numbering yet).
-- `ST_NO_SPACE`: sizes stay far below any cap.
+- `ST_NO_SPACE`: sizes stay far below any cap (`write-offset-huge` checks
+  sizes that cannot exist).
 - File names a Windows file system would refuse or compare differently from
   the wire's fold (no final sigma, no dotted capital I), so a director that
   stores names on disk is not failed for its file system.
@@ -498,9 +534,9 @@ shrunk case valid and plays each through the adapter's own mount.
 Three rules the generator relies on are wire.md sentences: a director writes every byte of a WRITE or fails
 it (3.4.5); GETATTR, READDIR and OPEN report a file's size as it is now,
 writes through handles still open included (3.4.1); a file with open handles
-is deleted or renamed like any other (3.4.7, 3.4.8). What a handle reads after
-its file was deleted or renamed stays the director's, so such a handle is only
-closed. No other assumption beyond wire.md remains.
+is deleted or renamed like any other (3.4.7, 3.4.8). A handle whose file was
+deleted or renamed is only closed, as above. No other assumption beyond
+wire.md remains.
 
 Sizes follow the director's ring: the generator learns `VFS_RING_PAYLOAD_CAP`
 and `VFS_ARENA_LEN` from a mount of an empty tree before the first case, and

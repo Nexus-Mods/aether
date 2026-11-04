@@ -31,7 +31,9 @@
 //! changed through another handle or a path (rename, delete, truncate);
 //! READDIR of a missing path or a file; a path below a file; paths that
 //! leave their root (`escape-paths` covers them); a RENAME_X onto a
-//! directory or with a read-only end; registry requests near a limit.
+//! directory or with a read-only end; a file renamed onto an empty
+//! directory (a director may replace it or refuse); registry requests near
+//! a limit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1787,12 +1789,11 @@ impl Gen {
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
                 self.missing_held(to_root, b >> 4, d)?,
             ),
-            // Onto an existing file the stored spelling is sent: a director
-            // may open the destination for writing and keep its name, and
-            // 3.4.13 does not say whose spelling wins.
+            // Onto an existing file, in the caller's spelling, which the
+            // file at `to` takes (3.4.13).
             1 => (
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
-                self.existing(to_root, b >> 4, 0, |n| {
+                self.existing_to(to_root, b >> 4, d, |n| {
                     !n.dir && self.held(to_root, &n.folded)
                 })?,
             ),
@@ -2452,33 +2453,38 @@ mod tests {
         }
     }
 
-    /// A director's RENAME_X may open an existing destination
-    /// write|create|trunc and keep its stored name, and wire.md 3.4.13 does not say whose spelling
-    /// wins, so onto an existing file the stored spelling is sent.
+    /// RENAME_X onto an existing file sends the caller's spelling, which
+    /// the file at `to` takes (wire.md 3.4.13), and the reference stores it.
     #[test]
-    fn a_rename_x_onto_a_file_sends_its_stored_spelling() {
+    fn a_rename_x_onto_a_file_takes_the_callers_spelling() {
         let (tree, roots) = build_tree(&two_roots());
-        let g = Gen::new(&tree, roots, Limits::default()).unwrap();
-        let mut seen = 0;
+        let mut respelled = 0;
         for a in 0..64u32 {
             for b in (1..200u32).step_by(5) {
                 for d in [0, 1, 0xFF, 0x1234_5678] {
+                    let mut g = Gen::new(&tree, roots.clone(), Limits::default()).unwrap();
                     let Some(p) = g.plan_rename_x(a, b, 0x5555, d) else {
                         continue;
                     };
                     if p.note != "replacing a file there" {
                         continue;
                     }
-                    let OwnedRequest::RenameX { to_root, to, .. } = &p.req else {
+                    let OwnedRequest::RenameX { to_root, to, .. } = p.req.clone() else {
                         panic!("{:?}", p.req)
                     };
-                    let stored = g.node(to_root.0, &fold(to)).unwrap().path.clone();
-                    assert_eq!(to, &stored);
-                    seen += 1;
+                    let stored = g.node(to_root.0, &fold(&to)).unwrap().path.clone();
+                    g.step(p).unwrap();
+                    assert_eq!(g.node(to_root.0, &fold(&to)).unwrap().path, to);
+                    if to != stored {
+                        respelled += 1;
+                    }
                 }
             }
         }
-        assert!(seen > 0, "no RENAME_X onto a file was planned");
+        assert!(
+            respelled > 0,
+            "no RENAME_X onto a file in another spelling was planned"
+        );
     }
 
     /// A director with a stager answers ST_NOT_FOUND for a file it does not

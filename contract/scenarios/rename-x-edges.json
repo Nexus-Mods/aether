@@ -1,0 +1,26 @@
+{
+  "name": "rename-x-edges",
+  "description": "RENAME_X between two roots (wire.md 3.4.13): a directory at `to` is ST_IS_DIR or ST_IO_ERROR; either end outside every writable provider is ST_READ_ONLY; on any refusal both roots are unchanged; the file at `to` takes the caller's spelling, as RENAME's does; a `to` whose parent is missing is ST_NOT_FOUND (3.4.7).",
+  "tree": {
+    "roots": [
+      {"id": 1, "files": [{"path": "w/a.txt", "contents": "aa"}, {"path": "data/r.txt", "contents": "r"}], "writable": ["w"]},
+      {"id": 2, "files": [{"path": "w/b.txt", "contents": "bbb"}, {"path": "data/q.txt", "contents": "q"}], "dirs": ["w/sub"], "writable": ["w"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename-x", "from_root": 1, "to_root": 2, "from": "w/a.txt", "to": "w/sub"}, "expect": {"one_of": [{"status": "is-dir"}, {"status": "io-error"}], "wire": "3.4.13"}, "note": "a directory at `to`"},
+    {"request": {"op": "getattr", "root": 1, "path": "w/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "rename-x", "from_root": 1, "to_root": 2, "from": "data/r.txt", "to": "w/r.txt"}, "expect": {"status": "read-only"}, "note": "`from` no writable provider serves"},
+    {"request": {"op": "getattr", "root": 1, "path": "data/r.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 2, "path": "w/r.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "rename-x", "from_root": 1, "to_root": 2, "from": "w/a.txt", "to": "data/new.txt"}, "expect": {"status": "read-only"}, "note": "`to` no writable provider serves"},
+    {"request": {"op": "getattr", "root": 1, "path": "w/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 2, "path": "data/new.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "rename-x", "from_root": 1, "to_root": 2, "from": "w/a.txt", "to": "w/none/x"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.4.7"}, "note": "`to`'s parent is missing"},
+    {"request": {"op": "getattr", "root": 1, "path": "w/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "rename-x", "from_root": 1, "to_root": 2, "from": "w/a.txt", "to": "w/B.TXT"}, "expect": {"status": "ok"}, "note": "replaces w/b.txt"},
+    {"request": {"op": "readdir", "root": 2, "path": "w"}, "expect": {"reply": {"entries": [{"name": "B.TXT", "is_dir": false, "size": 2, "mtime": 0}, {"name": "sub", "is_dir": true, "size": 0, "mtime": 0}]}}, "note": "the caller's spelling"},
+    {"request": {"op": "stored-names", "root": 2, "skip": 1, "path": "w/b.txt"}, "expect": {"reply": {"names": "B.TXT"}}},
+    {"request": {"op": "getattr", "root": 1, "path": "w/a.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}}
+  ]
+}

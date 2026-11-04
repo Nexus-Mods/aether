@@ -300,8 +300,10 @@ pub fn serve_tapped<N: Notifier, D: Director + ?Sized, T: Tap + ?Sized>(
 /// nothing, and `()` is the tap that does, so an untapped server pays only
 /// for a call the compiler removes.
 pub trait Tap {
-    /// Sees each request before the director does (an unknown opcode or a
-    /// payload that does not decode included: it works on the raw view).
+    /// Sees each request before the director does, except one whose header
+    /// claims a payload past the slot, which the ring answers `BadRequest`
+    /// first (`docs/wire.md` 2.5). An unknown opcode or a
+    /// payload that does not decode is seen: the tap works on the raw view.
     /// [`TapAction::Answer`] skips the director.
     fn on_request(&mut self, view: &RequestView<'_>) -> TapAction {
         let _ = view;

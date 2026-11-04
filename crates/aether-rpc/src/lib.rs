@@ -9,10 +9,10 @@
 //! payload, and a reserved or unknown opcode or a payload that does not
 //! decode is answered `Status::BadRequest`.
 //!
-//! A [`Tap`] on the serve loop ([`serve_tapped`]) sees each request and its
-//! reply as bytes and may answer early or rewrite the reply: the hook the
-//! shim's tests record and corrupt answers through. Untapped, it is `()` and
-//! costs nothing.
+//! A [`Tap`] on the serve loop ([`serve_tapped`]) sees each request the ring
+//! hands over, and its reply, as bytes and may answer early or rewrite the
+//! reply: the hook the shim's tests record and corrupt answers through.
+//! Untapped, it is `()` and costs nothing.
 //!
 //! Neither end adds an allocation to the ring's own: the client encodes the
 //! request straight into its slot and decodes the reply from a buffer the

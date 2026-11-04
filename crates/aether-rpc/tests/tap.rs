@@ -351,3 +351,60 @@ fn in_a_pair_the_first_answer_wins_and_both_taps_still_see_the_request() {
     });
     assert_eq!(*log.lock().unwrap(), ["b request", "b reply"]);
 }
+
+/// Panics in the chosen hook on its first request only.
+struct PanicOnce {
+    in_reply: bool,
+    fired: bool,
+}
+
+impl Tap for PanicOnce {
+    fn on_request(&mut self, _: &RequestView<'_>) -> TapAction {
+        if !self.in_reply && !std::mem::replace(&mut self.fired, true) {
+            panic!("the tap failed in on_request");
+        }
+        TapAction::Pass
+    }
+    fn on_reply(&mut self, _: &RequestView<'_>, _: &mut i32, _: &mut Vec<u8>) {
+        if self.in_reply && !std::mem::replace(&mut self.fired, true) {
+            panic!("the tap failed in on_reply");
+        }
+    }
+}
+
+// `docs/wire.md` 2.7: a handler that fails must still complete its slot.
+// The tap runs inside the ring's handler, so its panic is answered `IoError`
+// with no payload and serving goes on.
+fn a_panicking_tap_still_completes_its_slot(in_reply: bool) {
+    let tap = PanicOnce {
+        in_reply,
+        fired: false,
+    };
+    with_tap(tap, |c, _| {
+        let (status, reply) = call(c, &getattr("x"));
+        assert_eq!(status, Status::IoError.code());
+        assert!(reply.is_empty());
+        let (status, reply) = call(c, &getattr("x"));
+        assert_eq!(status, 0);
+        assert!(!reply.is_empty());
+    });
+}
+
+#[test]
+fn a_tap_that_panics_in_on_request_still_completes_its_slot_with_io_error() {
+    a_panicking_tap_still_completes_its_slot(false);
+}
+
+#[test]
+fn a_tap_that_panics_in_on_reply_still_completes_its_slot_with_io_error() {
+    a_panicking_tap_still_completes_its_slot(true);
+}
+
+#[test]
+fn in_a_pair_where_both_answer_the_first_decides() {
+    let pair = (AnswerAll(Status::IoError), AnswerAll(Status::NotFound));
+    with_tap(pair, |c, _| {
+        let (status, _) = call(c, &getattr("x"));
+        assert_eq!(status, Status::IoError.code());
+    });
+}

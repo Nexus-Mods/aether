@@ -53,7 +53,6 @@ are the only exceptions, and each is allowed by the wire.md text quoted
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and the directors start it differently. |
 | OPEN `immutable` | Not compared, but must be clear on a write open and on a directory. | 3.4.3: "Never set it for a write open or a directory". |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
-| GETATTR and OPEN `size` of a directory | Not compared when `is_dir` is set; `is_dir` is. | 3.4.1 and 3.4.3: "The size of a directory is the director's to choose" (3.4.2 fixes it only for READDIR entries). |
 | `mtime` (GETATTR, READDIR) | Not compared. | 3.2: "Which time a director reports for a path, if any, is the director's to choose". |
 | READ inline or bulk | Compared by data. | 3.4.4: the client "must accept either whatever flag it sent". |
 | STAGE_EXEC `path` | Not compared. | 3.4.14: the reply is the "on-disk Windows path to start it from", wherever the director staged it. |

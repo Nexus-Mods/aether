@@ -567,7 +567,8 @@ impl<'v> Obj<'v> {
                 name,
                 format!(
                     "{p:?} is not a canonical path (docs/wire.md 3.2: `/`-joined, \
-                     no empty, `.` or `..` component, `.` for the root), nor a \n                     path that leaves its root (it starts with `..`)"
+                     no empty, `.` or `..` component, `.` for the root), nor a \
+                     path that leaves its root (it starts with `..`)"
                 ),
             ));
         }

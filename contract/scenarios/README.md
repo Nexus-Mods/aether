@@ -121,7 +121,6 @@ to search for); there are no others (`crates/aether-conform/src/compare.rs`).
 | `mtime` (GETATTR, READDIR) | Not compared, and not checked for changed or unchanged after a write either (an earlier plan's idea, dropped: the time is the director's). A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2, lines 567-568: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first (`OwnedReply::resolve_bulk`). | 3.4.4, lines 783-784: the client "must accept either whatever flag it sent" |
 | STAGE_EXEC `path` | Not compared. | 3.4.14, lines 889-890: "the real, on-disk Windows path to start it from", wherever the director staged it |
-| GETATTR and OPEN `size` of a directory | Not compared when `is_dir` is set (`is_dir` is). | 3.4.1, 3.4.3: "The size of a directory is the director's to choose" (3.4.2 fixes it only for READDIR entries) |
 | Registry `version` | Compared up to one offset per session, fixed by the first registry reply; REG_CHANGED's `since` is sent shifted by it. | 4.3, lines 1035-1039: "The number a director's overlay starts from when it mounts a layer is the director's", versions may differ "by a constant", and "a REG_CHANGED `since` is in the numbering of the director it is sent to" |
 | REG_KEY `last_write` | Not compared. | 4.3, line 1070: a FILETIME, which the overlay stamps with the director's clock |
 

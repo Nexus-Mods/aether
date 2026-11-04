@@ -658,49 +658,55 @@ fn a_registry_key_the_overlay_refuses_is_a_load_error_naming_the_tree() {
     }
 }
 
-/// wire.md 3.4.1 and 3.4.3: a directory's size in GETATTR and OPEN replies is
-/// the director's; its `is_dir` and a file's size are not.
+/// wire.md 3.4.1 and 3.4.3: a directory's size is 0, so a director that
+/// reports another size for a directory in GETATTR or OPEN is not conformant.
 #[test]
-fn a_directorys_size_is_not_compared_in_getattr_or_open() {
+fn a_directorys_size_is_compared_in_getattr_and_open() {
     let dir = aether_testkit::tempdir().unwrap();
     let open =
         json!({"reply": {"fh": 1, "size": 0, "is_dir": true, "immutable": false, "mount_gen": 0}});
     let attr = json!({"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}});
-    let fattr = json!({"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}});
     let p = write(
         dir.path(),
         "dsize.json",
         &scenario(json!([
             {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data"}, "expect": open},
             {"request": {"op": "getattr", "root": 0, "path": "data"}, "expect": attr},
-            {"request": {"op": "getattr", "root": 0, "path": "data/a.esp"}, "expect": fattr},
         ])),
     );
     let s = load(&p).unwrap();
-    let step = |sess: &mut Session, i: usize, got: OwnedReply| {
-        sess.check(i, &s.steps[i].request, &s.steps[i].expect, &Ok(got))
+    let step = |i: usize, got: OwnedReply| {
+        Session::new().check(i, &s.steps[i].request, &s.steps[i].expect, &Ok(got))
     };
-    let dopen = |is_dir, size| {
+    let dopen = |size| {
         OwnedReply::Open(OpenResp {
             fh: 9,
             size,
-            is_dir,
+            is_dir: true,
             ..Default::default()
         })
     };
-    let attr = |found, is_dir, size| {
+    let attr = |size| {
         OwnedReply::GetAttr(AttrResp {
-            found,
-            is_dir,
+            found: true,
+            is_dir: true,
             size,
             mtime: 5,
         })
     };
-    assert!(step(&mut Session::new(), 0, dopen(true, 4096)).is_ok());
-    assert!(step(&mut Session::new(), 0, dopen(false, 0)).is_err());
-    assert!(step(&mut Session::new(), 1, attr(true, true, 4096)).is_ok());
-    assert!(step(&mut Session::new(), 1, attr(true, false, 0)).is_err());
-    assert!(step(&mut Session::new(), 1, attr(false, false, 0)).is_err());
-    assert!(step(&mut Session::new(), 2, attr(true, false, 3)).is_ok());
-    assert!(step(&mut Session::new(), 2, attr(true, false, 4)).is_err());
+    assert!(step(0, dopen(0)).is_ok());
+    assert!(step(0, dopen(4096)).is_err());
+    assert!(step(1, attr(0)).is_ok());
+    assert!(step(1, attr(4096)).is_err());
+}
+
+/// The load error for a path that is neither canonical nor an escape is one
+/// line.
+#[test]
+fn the_non_canonical_path_message_is_one_line() {
+    let e = load_error(
+        json!([{"request": {"op": "getattr", "root": 0, "path": "a//b"}, "expect": {"status": "ok"}}]),
+    );
+    assert!(e.contains("canonical") && !e.contains('\n'), "{e:?}");
+    assert!(!e.contains("  "), "{e:?}");
 }

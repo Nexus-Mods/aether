@@ -17,8 +17,8 @@ use super::{
     replace_key_hook_body, restore_key_hook_body, save_key_ex_hook_body, save_key_hook_body,
     save_merged_hook_body, set_info_key_hook_body, set_info_object_hook_body,
     set_security_hook_body, set_value_key_hook_body, setinfo_hook_body, unload_key2_hook_body,
-    unload_key_ex_hook_body, unload_key_hook_body, unlock_hook_body, unmap_view_hook_body,
-    write_hook_body,
+    unload_key_ex_hook_body, unload_key_hook_body, unlock_hook_body, unmap_view_ex_hook_body,
+    unmap_view_hook_body, write_hook_body,
 };
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes, UnicodeString,

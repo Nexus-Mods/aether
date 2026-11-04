@@ -1,7 +1,9 @@
-//! Sections and views: `NtCreateSection`, `NtMapViewOfSection`, `NtUnmapViewOfSection`.
+//! Sections and views: `NtCreateSection`, `NtMapViewOfSection`, `NtUnmapViewOfSection`(`Ex`).
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{ShimIoGuard, TRAMP_CREATE_SECTION, TRAMP_MAP_VIEW, TRAMP_UNMAP_VIEW};
+use super::{
+    ShimIoGuard, TRAMP_CREATE_SECTION, TRAMP_MAP_VIEW, TRAMP_UNMAP_VIEW, TRAMP_UNMAP_VIEW_EX,
+};
 use crate::ntdef::{
     NtCreateSectionFn, ObjectAttributes, SEC_IMAGE, STATUS_INVALID_FILE_FOR_SECTION,
     STATUS_INVALID_HANDLE, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
@@ -442,17 +444,45 @@ pub(super) unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) ->
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if !base.is_null() && crate::synth_section::is_synth_view(base as usize) {
-        let b = base as usize;
-        // Retire one reference; the backing VA outlives it unless the section
-        // handle is already closed and this was the last view — a BSA reader
-        // slides views over one open section and must keep the others.
-        crate::synth_section::unmap_view(b);
-        crate::lazy_section::on_view_unmapped(b);
+    if unmap_synth_view(base) {
         return STATUS_SUCCESS;
     }
     // SAFETY: the original NT function, called with valid NT arguments.
     unsafe { tramp(process, base) }
+}
+
+/// `NtUnmapViewOfSectionEx` hook, the call `UnmapViewOfFile` makes: as
+/// [`unmap_view_hook_body`]. The flags (`MEM_UNMAP_WITH_TRANSIENT_BOOST`,
+/// `MEM_PRESERVE_PLACEHOLDER`) say nothing a synthetic view needs.
+pub(super) unsafe fn unmap_view_ex_hook_body(
+    process: HANDLE,
+    base: *mut c_void,
+    flags: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::UnmapViewEx);
+    let tramp = match TRAMP_UNMAP_VIEW_EX.get() {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if unmap_synth_view(base) {
+        return STATUS_SUCCESS;
+    }
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(process, base, flags) }
+}
+
+/// Retire one reference to the synthetic view at `base`; `false` when it is
+/// not one. The backing VA outlives it unless the section handle is already
+/// closed and this was the last view: a BSA reader slides views over one open
+/// section and must keep the others.
+fn unmap_synth_view(base: *mut c_void) -> bool {
+    if base.is_null() || !crate::synth_section::is_synth_view(base as usize) {
+        return false;
+    }
+    let b = base as usize;
+    crate::synth_section::unmap_view(b);
+    crate::lazy_section::on_view_unmapped(b);
+    true
 }
 
 /// Where images served from the VFS are written for the loader to map: beside

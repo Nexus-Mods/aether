@@ -346,6 +346,13 @@ pub(crate) type NtUnmapViewOfSectionFn = unsafe extern "system" fn(
     *mut c_void, // BaseAddress
 ) -> NTSTATUS;
 
+/// `ntdll!NtUnmapViewOfSectionEx`: what KernelBase's `UnmapViewOfFile` calls.
+pub(crate) type NtUnmapViewOfSectionExFn = unsafe extern "system" fn(
+    HANDLE,      // ProcessHandle
+    *mut c_void, // BaseAddress
+    u32,         // Flags
+) -> NTSTATUS;
+
 /// `FileBasicInformation` (class 4).
 pub(crate) const FILE_BASIC_INFORMATION: u32 = 4;
 /// `FileStandardInformation` (class 5).

@@ -545,12 +545,13 @@ mod tests {
 
         let slot = claim_free(seg, &geom).unwrap();
         assert_eq!(slot, 0);
-        let req_id = publish_request(seg, &geom, slot, OP_GETATTR, 7, b"hello").unwrap();
+        let req_id =
+            publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 7, b"hello").unwrap();
 
         let taken = server_take(seg, &geom).unwrap();
         assert_eq!(taken, slot);
         let (opcode, flags, rid, payload) = read_request(seg, &geom, taken).unwrap();
-        assert_eq!(opcode, OP_GETATTR);
+        assert_eq!(opcode, Opcode::GetAttr as u32);
         assert_eq!(flags, 7);
         assert_eq!(rid, req_id);
         assert_eq!(payload, b"hello");
@@ -616,7 +617,7 @@ mod tests {
         let seg = owned.seg();
         for _ in 0..4 {
             let s = claim_free(seg, &geom).unwrap();
-            publish_request(seg, &geom, s, OP_GETATTR, 0, b"").unwrap();
+            publish_request(seg, &geom, s, Opcode::GetAttr as u32, 0, b"").unwrap();
         }
         assert_eq!(server_take_from(seg, &geom, 3), Some(3));
         assert_eq!(server_take_from(seg, &geom, 4), Some(0), "wraps");
@@ -632,7 +633,7 @@ mod tests {
         let (owned, geom) = ring(2, 32);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        publish_request(seg, &geom, slot, OP_GETATTR, 0, b"x").unwrap();
+        publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 0, b"x").unwrap();
         assert_eq!(abandon(seg, &geom, slot), Ok(Abandon::Freed));
         assert_eq!(slot_state(seg, &geom, slot), Some(ST_FREE));
         assert_eq!(server_take(seg, &geom), None);
@@ -649,7 +650,7 @@ mod tests {
 
         let slot = claim_free(seg, &geom).unwrap();
         assert_eq!(slot, 0);
-        let old_id = publish_request(seg, &geom, slot, OP_READ, 0, b"old").unwrap();
+        let old_id = publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"old").unwrap();
         assert_eq!(server_take(seg, &geom), Some(slot));
 
         // The client's deadline passes while the server is still at work.
@@ -662,7 +663,7 @@ mod tests {
         let next = claim_free(seg, &geom).unwrap();
         assert_eq!(next, 1, "the retired slot must not be claimable");
         assert_eq!(claim_free(seg, &geom), None);
-        let new_id = publish_request(seg, &geom, next, OP_READ, 0, b"new").unwrap();
+        let new_id = publish_request(seg, &geom, next, Opcode::Read as u32, 0, b"new").unwrap();
 
         // The late reply arrives: dropped, and the slot freed by the server.
         assert_eq!(
@@ -676,7 +677,7 @@ mod tests {
         // And the drained slot is an ordinary slot again.
         let again = claim_free(seg, &geom).unwrap();
         assert_eq!(again, slot);
-        let id = publish_request(seg, &geom, again, OP_READ, 0, b"fresh").unwrap();
+        let id = publish_request(seg, &geom, again, Opcode::Read as u32, 0, b"fresh").unwrap();
         assert_eq!(take_response(seg, &geom, again, id), Ok(None));
         assert_eq!(server_take(seg, &geom), Some(again));
         assert_eq!(server_take(seg, &geom), Some(next));
@@ -697,7 +698,7 @@ mod tests {
         let (owned, geom) = ring(1, 32);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        let id = publish_request(seg, &geom, slot, OP_GETATTR, 0, b"").unwrap();
+        let id = publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 0, b"").unwrap();
         server_take(seg, &geom).unwrap();
         assert_eq!(
             server_complete(seg, &geom, slot, id, 0, b"just in time"),
@@ -716,14 +717,15 @@ mod tests {
         let (owned, geom) = ring(1, 64);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        let old_id = publish_request(seg, &geom, slot, OP_READ, 0, b"old").unwrap();
+        let old_id = publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"old").unwrap();
         server_take(seg, &geom).unwrap();
 
         // The rule-breaking free, then a new request in the same slot, taken
         // by another server thread.
         free_slot(seg, &geom, slot).unwrap();
         assert_eq!(claim_free(seg, &geom), Some(slot));
-        let new_id = publish_request(seg, &geom, slot, OP_READ, 0, b"new request").unwrap();
+        let new_id =
+            publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"new request").unwrap();
         assert_ne!(new_id, old_id);
         assert_eq!(server_take(seg, &geom), Some(slot));
 
@@ -754,7 +756,7 @@ mod tests {
         let (owned, geom) = ring(1, 64);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        let id = publish_request(seg, &geom, slot, OP_READ, 0, b"q").unwrap();
+        let id = publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"q").unwrap();
         server_take(seg, &geom).unwrap();
         server_complete(seg, &geom, slot, id, 0, b"a").unwrap();
         assert_eq!(
@@ -773,7 +775,14 @@ mod tests {
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
         assert_eq!(
-            publish_request(seg, &geom, slot, OP_READ, 0, b"way too long payload"),
+            publish_request(
+                seg,
+                &geom,
+                slot,
+                Opcode::Read as u32,
+                0,
+                b"way too long payload"
+            ),
             Err(IpcError::PayloadTooLarge)
         );
     }

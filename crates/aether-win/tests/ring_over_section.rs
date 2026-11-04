@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use aether_ipc::layout::OP_GETATTR;
+use aether_ipc::layout::Opcode;
 use aether_ipc::ring::init;
 use aether_ipc::{RingClient, RingServer, SpinNotifier};
+use aether_protocol::Status;
 use aether_win::SharedMapping;
 
 fn section_name(tag: &str) -> String {
@@ -23,7 +24,7 @@ fn ring_round_trip_over_real_section() {
         scope.spawn(|| {
             let ring = RingServer::new(seg, SpinNotifier).unwrap();
             loop {
-                match ring.serve_one(|req| (0, req.payload.clone())) {
+                match ring.serve_one(|req| (Status::Ok.code(), req.payload.clone())) {
                     Ok(true) => {}
                     Ok(false) => {
                         if stop.load(Ordering::Relaxed) {
@@ -38,9 +39,9 @@ fn ring_round_trip_over_real_section() {
         // Client (this thread): submit a request over the real shared section.
         let client = RingClient::new(seg, SpinNotifier).unwrap();
         let resp = client
-            .submit(OP_GETATTR, 0, b"hello-shared-memory")
+            .submit(Opcode::GetAttr as u32, 0, b"hello-shared-memory")
             .unwrap();
-        assert_eq!(resp.status, 0);
+        assert_eq!(resp.status, Status::Ok.code());
         assert_eq!(resp.payload, b"hello-shared-memory");
 
         stop.store(true, Ordering::Relaxed);

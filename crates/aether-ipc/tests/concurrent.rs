@@ -17,7 +17,7 @@ use aether_ipc::{
     read_fragmented, DataArena, DataGate, Notifier, OwnedSeg, ReadPlan, RingClient, RingServer,
     SharedSeg, SpinNotifier, CLIENT_SPIN_BUDGET,
 };
-use aether_protocol as P;
+use aether_protocol::{Opcode, ReadReply, Reply, Request, RequestFlags, Status};
 
 /// Echo the payload back at once.
 const OP_ECHO: u32 = 900;
@@ -177,42 +177,55 @@ impl Fixture {
         );
         while !self.stop.load(Ordering::Relaxed) {
             ring.serve_one(|req| match req.opcode {
-                OP_ECHO => (P::ST_OK, req.payload.clone()),
+                OP_ECHO => (Status::Ok.code(), req.payload.clone()),
                 OP_NAP => {
                     self.until("the client published", || {
                         self.client_published.load(Ordering::SeqCst)
                     });
                     let ms = u64::from_le_bytes(req.payload[..8].try_into().unwrap());
                     self.napped_ms.fetch_add(ms, Ordering::SeqCst);
-                    (P::ST_OK, b"napped".to_vec())
+                    (Status::Ok.code(), b"napped".to_vec())
                 }
                 OP_HOLD => {
                     self.hold();
-                    (P::ST_OK, b"released".to_vec())
+                    (Status::Ok.code(), b"released".to_vec())
                 }
-                P::OP_READ => {
-                    let r = P::decode_read_req(&req.payload).unwrap();
-                    if r.fh == FH_HELD {
+                op if op == Opcode::Read as u32 => {
+                    let Ok(Request::Read {
+                        slot_flags,
+                        fh,
+                        offset,
+                        len,
+                    }) = Request::decode(Opcode::Read, req.flags, &req.payload)
+                    else {
+                        panic!("not a READ request");
+                    };
+                    if fh == FH_HELD {
                         self.hold();
                     }
-                    let len = r.len as usize;
-                    if req.flags & P::FLAG_READ_BULK != 0 {
+                    let len = len as usize;
+                    let mut reply = Vec::new();
+                    if slot_flags.contains(RequestFlags::READ_BULK) {
                         let (off, n) = arena
                             .fill_bank(req.slot, len, |buf| {
                                 for (j, b) in buf.iter_mut().enumerate() {
-                                    *b = byte(r.fh, r.offset + j as u64);
+                                    *b = byte(fh, offset + j as u64);
                                 }
                                 Ok(buf.len())
                             })
                             .unwrap();
-                        (P::ST_OK, P::encode_read_resp_bulk(n as u32, off))
+                        Reply::Read(ReadReply::Bulk {
+                            len: n as u32,
+                            arena_offset: off,
+                        })
+                        .encode(&mut reply);
                     } else {
-                        let data: Vec<u8> =
-                            (0..len).map(|j| byte(r.fh, r.offset + j as u64)).collect();
-                        (P::ST_OK, P::encode_read_resp(&data))
+                        let data: Vec<u8> = (0..len).map(|j| byte(fh, offset + j as u64)).collect();
+                        Reply::Read(ReadReply::Inline(&data)).encode(&mut reply);
                     }
+                    (Status::Ok.code(), reply)
                 }
-                _ => (P::ST_NOT_SUPPORTED, Vec::new()),
+                _ => (Status::NotSupported.code(), Vec::new()),
             })
             .unwrap();
         }
@@ -450,7 +463,7 @@ fn reads_that_timed_out_keep_their_permits_until_the_director_is_done() {
                 })
                 .with_deadline(Duration::from_millis(40));
             let r = read_fragmented(&impatient, &gate, &plan, FH_HELD, 0, &mut buf);
-            assert_eq!(r, Err(P::ST_IO_ERROR));
+            assert_eq!(r, Err(Status::IoError.code()));
             assert_eq!(fx.held(), sent, "the director is still inside read {sent}");
             assert_eq!(gate.in_flight(), sent, "so its permit is still out");
             assert_eq!(gate.retired(), sent);
@@ -459,7 +472,7 @@ fn reads_that_timed_out_keep_their_permits_until_the_director_is_done() {
 
         // The fourth: refused at the gate, never sent.
         let r = read_fragmented(&impatient, &gate, &plan, FH_HELD, 0, &mut buf);
-        assert_eq!(r, Err(P::ST_IO_ERROR));
+        assert_eq!(r, Err(Status::IoError.code()));
         assert_eq!(
             fx.slots_in(ST_ABANDONED),
             3,
@@ -583,7 +596,11 @@ fn a_timed_out_request_retires_its_slot_until_the_late_reply_is_drained() {
             .with_deadline(Duration::from_millis(40));
         let mut buf = vec![0u8; BANK];
         let r = read_fragmented(&impatient, &gate, &plan, FH_HELD, 0, &mut buf);
-        assert_eq!(r, Err(P::ST_IO_ERROR), "the read must fail, not hang");
+        assert_eq!(
+            r,
+            Err(Status::IoError.code()),
+            "the read must fail, not hang"
+        );
         assert_eq!(
             fx.held(),
             1,
@@ -841,7 +858,7 @@ fn slots_are_reused_across_threads_without_crosstalk() {
                     for i in 0..3_000u32 {
                         let payload = [t.to_le_bytes(), i.to_le_bytes()].concat();
                         let r = c.submit(OP_ECHO, 0, &payload).unwrap();
-                        assert_eq!(r.status, P::ST_OK);
+                        assert_eq!(r.status, Status::Ok.code());
                         assert_eq!(r.payload, payload, "thread {t} request {i}");
                     }
                 });

@@ -162,6 +162,7 @@ version = "0.1.0"
 dependencies = [
  "aether-env",
  "aether-ipc",
+ "aether-protocol",
  "windows-sys 0.61.2",
 ]
 

@@ -21,5 +21,9 @@ windows-sys = { workspace = true, features = [
   "Wdk_Storage_FileSystem",
 ] }
 
+[dev-dependencies]
+# `tests/ring_over_section.rs`: the status a reply carries.
+aether-protocol.workspace = true
+
 [lints]
 workspace = true

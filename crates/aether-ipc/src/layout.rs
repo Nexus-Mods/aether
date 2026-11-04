@@ -9,9 +9,9 @@ pub const MAGIC: u32 = 0x5646_4950;
 /// shape into a current director.
 ///
 /// - **1** — original: path-carrying payloads were a bare path
-///   (`encode_path_req`) or `flags|path` (`encode_open_req`).
+///   or `flags|path` (OPEN).
 /// - **2** — stage 2b task 5: every path-carrying payload gained a leading
-///   `root:u32` (see `aether_protocol::encode_path_req`). A version-1 shim
+///   `root:u32` (see `aether_protocol::Request`). A version-1 shim
 ///   talking to a version-2 director would have the first four bytes of its
 ///   path read as a root id and the remainder as a truncated path —
 ///   plausible-looking garbage, never an error. Bumping this turns that into
@@ -47,14 +47,9 @@ pub const ST_COMPLETED: u32 = 4;
 /// read by a later request.
 pub const ST_ABANDONED: u32 = 5;
 
-// Opcode catalog: defined once, in `aether-protocol`; the ring never interprets
-// these. Re-exported here so `layout::OP_*` keeps working.
-pub use aether_protocol::{
-    OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR,
-    OP_REG_CHANGED, OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY,
-    OP_REG_LOOKUP, OP_REG_RENAME_KEY, OP_REG_SET_VALUE, OP_RENAME, OP_RENAME_X, OP_SETATTR,
-    OP_STAGE_EXEC, OP_STORED_NAMES, OP_WRITE,
-};
+// Opcode catalog: defined once, in `aether-protocol`'s table; the ring never
+// interprets these. Re-exported here so the ring's users name one type.
+pub use aether_protocol::Opcode;
 
 #[repr(C)]
 pub struct RingHeader {
@@ -152,35 +147,40 @@ mod tests {
         assert_eq!(align8(33), 40);
     }
 
-    /// Every `layout::OP_*` is the aether-protocol opcode of the same name, and
-    /// aether-protocol lists no opcode the layout lacks.
+    /// Every opcode the layout names is the aether-protocol opcode of the
+    /// same name, and aether-protocol lists no opcode the layout lacks.
     #[test]
     fn every_opcode_here_is_the_protocol_opcode() {
-        let here: &[(&str, u32)] = &[
-            ("getattr", OP_GETATTR),
-            ("readdir", OP_READDIR),
-            ("open", OP_OPEN),
-            ("read", OP_READ),
-            ("write", OP_WRITE),
-            ("setattr", OP_SETATTR),
-            ("rename", OP_RENAME),
-            ("delete", OP_DELETE),
-            ("mkdir", OP_MKDIR),
-            ("close", OP_CLOSE),
-            ("heartbeat", OP_HEARTBEAT),
-            ("stored-names", OP_STORED_NAMES),
-            ("reg-lookup", OP_REG_LOOKUP),
-            ("reg-key", OP_REG_KEY),
-            ("reg-set-value", OP_REG_SET_VALUE),
-            ("reg-delete-value", OP_REG_DELETE_VALUE),
-            ("reg-create-key", OP_REG_CREATE_KEY),
-            ("reg-delete-key", OP_REG_DELETE_KEY),
-            ("reg-rename-key", OP_REG_RENAME_KEY),
-            ("reg-changed", OP_REG_CHANGED),
-            ("rename-x", OP_RENAME_X),
-            ("stage-exec", OP_STAGE_EXEC),
+        let here: &[(&str, Opcode)] = &[
+            ("getattr", Opcode::GetAttr),
+            ("readdir", Opcode::ReadDir),
+            ("open", Opcode::Open),
+            ("read", Opcode::Read),
+            ("write", Opcode::Write),
+            ("setattr", Opcode::SetAttr),
+            ("rename", Opcode::Rename),
+            ("delete", Opcode::Delete),
+            ("mkdir", Opcode::Mkdir),
+            ("close", Opcode::Close),
+            ("heartbeat", Opcode::Heartbeat),
+            ("stored-names", Opcode::StoredNames),
+            ("reg-lookup", Opcode::RegLookup),
+            ("reg-key", Opcode::RegKey),
+            ("reg-set-value", Opcode::RegSetValue),
+            ("reg-delete-value", Opcode::RegDeleteValue),
+            ("reg-create-key", Opcode::RegCreateKey),
+            ("reg-delete-key", Opcode::RegDeleteKey),
+            ("reg-rename-key", Opcode::RegRenameKey),
+            ("reg-changed", Opcode::RegChanged),
+            ("rename-x", Opcode::RenameX),
+            ("stage-exec", Opcode::StageExec),
         ];
-        assert_eq!(here, aether_protocol::OPCODES);
+        let here: Vec<(&str, u32)> = here.iter().map(|(n, o)| (*n, *o as u32)).collect();
+        let protocol: Vec<(&str, u32)> = aether_protocol::Opcode::ALL
+            .iter()
+            .map(|o| (o.name(), *o as u32))
+            .collect();
+        assert_eq!(here, protocol);
     }
 
     /// The historical numbers (from the retired protocol descriptor), as

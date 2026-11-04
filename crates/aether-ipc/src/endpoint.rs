@@ -464,8 +464,8 @@ impl<'a, N: Notifier> RingServer<'a, N> {
     ///
     /// Every slot it takes is completed (`docs/wire.md` 2.5), unlike
     /// [`Self::serve_one`]: a request whose header claims a payload longer
-    /// than `payload_cap` is answered `ST_BAD_REQUEST` without calling
-    /// `handler`, and a `handler` that panics is answered `ST_IO_ERROR`. Both
+    /// than `payload_cap` is answered `Status::BadRequest` without calling
+    /// `handler`, and a `handler` that panics is answered `Status::IoError`. Both
     /// with an empty payload, and both count as handled (`Ok(true)`).
     pub fn serve_one_into(
         &self,
@@ -531,10 +531,12 @@ impl<'a, N: Notifier> RingServer<'a, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::OP_GETATTR;
     use crate::notifier::SpinNotifier;
     use crate::ring::{self, init};
     use crate::seg::OwnedSeg;
+    use aether_protocol::{Opcode, Status};
+
+    const GETATTR: u32 = Opcode::GetAttr as u32;
 
     #[test]
     fn serve_one_handles_a_prepublished_request() {
@@ -545,12 +547,12 @@ mod tests {
         let seg = owned.seg();
 
         let slot = ring::claim_free(seg, &geom).unwrap();
-        let req_id = ring::publish_request(seg, &geom, slot, OP_GETATTR, 3, b"ping").unwrap();
+        let req_id = ring::publish_request(seg, &geom, slot, GETATTR, 3, b"ping").unwrap();
 
         let server = RingServer::new(seg, SpinNotifier).unwrap();
         let handled = server
             .serve_one(|req| {
-                assert_eq!(req.opcode, OP_GETATTR);
+                assert_eq!(req.opcode, GETATTR);
                 assert_eq!(req.flags, 3);
                 assert_eq!(req.payload, b"ping");
                 (99, b"pong".to_vec())
@@ -583,7 +585,7 @@ mod tests {
                 let server = RingServer::new(seg, SpinNotifier).unwrap();
                 while !server
                     .serve_one(|req| {
-                        assert_eq!((req.opcode, req.flags), (OP_GETATTR, 5));
+                        assert_eq!((req.opcode, req.flags), (GETATTR, 5));
                         assert_eq!(req.payload, b"ping");
                         (7, b"pong!".to_vec())
                     })
@@ -594,7 +596,7 @@ mod tests {
             let mut reply = Vec::with_capacity(16);
             let status = client
                 .submit_in_place(
-                    OP_GETATTR,
+                    GETATTR,
                     5,
                     |slot| {
                         assert_eq!(slot.len(), 128);
@@ -615,7 +617,7 @@ mod tests {
         let client = RingClient::new(owned.seg(), SpinNotifier).unwrap();
         for written in [None, Some(129)] {
             for _ in 0..3 {
-                let r = client.submit_in_place(OP_GETATTR, 0, |_| written, &mut Vec::new());
+                let r = client.submit_in_place(GETATTR, 0, |_| written, &mut Vec::new());
                 assert_eq!(r, Err(IpcError::PayloadTooLarge));
             }
         }
@@ -633,7 +635,7 @@ mod tests {
         let geom = init(owned.seg(), 2, 128).unwrap();
         let seg = owned.seg();
         let slot = ring::claim_free(seg, &geom).unwrap();
-        let req_id = ring::publish_request(seg, &geom, slot, OP_GETATTR, 3, b"ping").unwrap();
+        let req_id = ring::publish_request(seg, &geom, slot, GETATTR, 3, b"ping").unwrap();
 
         let server = RingServer::new(seg, SpinNotifier).unwrap();
         assert_eq!(server.geom(), geom);
@@ -643,7 +645,7 @@ mod tests {
             .serve_one_into(&mut req, &mut reply, |r, out| {
                 assert_eq!(
                     (r.slot, r.opcode, r.flags, r.req_id),
-                    (slot, OP_GETATTR, 3, req_id)
+                    (slot, GETATTR, 3, req_id)
                 );
                 assert_eq!(r.payload, b"ping");
                 assert!(out.is_empty());
@@ -667,7 +669,7 @@ mod tests {
         let seg = owned.seg();
         let geom = init(seg, 2, 128).unwrap();
         let slot = ring::claim_free(seg, &geom).unwrap();
-        let req_id = ring::publish_request(seg, &geom, slot, OP_GETATTR, 0, b"ping").unwrap();
+        let req_id = ring::publish_request(seg, &geom, slot, GETATTR, 0, b"ping").unwrap();
         seg.write_bytes(
             geom.slot_off(slot) + crate::layout::SH_PAYLOAD_LEN,
             &payload_len.to_le_bytes(),
@@ -688,7 +690,7 @@ mod tests {
         let (status, resp) = ring::take_response(seg, &geom, slot, req_id)
             .unwrap()
             .unwrap();
-        assert_eq!((status, resp.len()), (aether_protocol::ST_BAD_REQUEST, 0));
+        assert_eq!((status, resp.len()), (Status::BadRequest.code(), 0));
     }
 
     #[test]
@@ -707,6 +709,6 @@ mod tests {
         let (status, resp) = ring::take_response(seg, &geom, slot, req_id)
             .unwrap()
             .unwrap();
-        assert_eq!((status, resp.len()), (aether_protocol::ST_IO_ERROR, 0));
+        assert_eq!((status, resp.len()), (Status::IoError.code(), 0));
     }
 }

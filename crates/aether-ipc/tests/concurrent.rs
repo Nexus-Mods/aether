@@ -163,6 +163,7 @@ impl Fixture {
             depth_stream: 8,
             stream_bytes: 4 * BANK,
             arena_len: self.arena_len,
+            arena_offset: self.arena_off,
         }
     }
 

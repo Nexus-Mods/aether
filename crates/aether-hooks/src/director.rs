@@ -383,6 +383,8 @@ pub struct FuseClient {
     /// The arena's length, or 0 when the ring has none this client uses
     /// ([`arena_rule`]).
     arena_len: usize,
+    /// The mapping offset the arena starts at.
+    arena_offset: usize,
     /// Most bytes one inline READ asks for ([`arena_rule`]).
     inline_chunk: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
@@ -482,6 +484,11 @@ impl FuseClient {
         // header (a ring that names none is taken to have the default four).
         let gate = DataGate::for_ring(mapping.seg(), &geom);
         let (arena_len, inline_chunk) = arena_rule(arena_len, geom.slot_count, payload_cap);
+        // Where the arena starts (`docs/wire.md` 2.1): what the environment
+        // says, else right after the last slot, where both directors put it.
+        let arena_offset = aether_env::text(aether_env::ARENA_OFFSET)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| geom.slot_off(geom.slot_count));
 
         // The staged launch directory is a second spelling of root 0, not a
         // root of its own: a staged game resolves `Data\` relative to its own
@@ -526,6 +533,7 @@ impl FuseClient {
             started: std::time::Instant::now(),
             times: std::sync::atomic::AtomicU8::new(TIMES_UNKNOWN),
             arena_len,
+            arena_offset,
             inline_chunk,
             server_ev,
             gate,
@@ -827,6 +835,7 @@ impl FuseClient {
             depth_stream: PIPELINE_DEPTH_STREAM,
             stream_bytes: STREAM_BYTES,
             arena_len: self.arena_len,
+            arena_offset: self.arena_offset,
         };
         aether_ipc::read_fragmented(&self.client(), &self.gate, &plan, fh, offset, buf)
     }

@@ -778,6 +778,17 @@ extern "system" {
         offset: *const i64,
         key: *const u32,
     ) -> i32;
+    fn NtReadFile(
+        handle: *mut c_void,
+        event: *mut c_void,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut IoStatusBlock,
+        buffer: *mut c_void,
+        length: u32,
+        offset: *const i64,
+        key: *const u32,
+    ) -> i32;
     fn NtCreateSection(
         section: *mut *mut c_void,
         access: u32,
@@ -821,6 +832,7 @@ const FILE_DIRECTORY_FILE: u32 = 0x01;
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 const FILE_END_OF_FILE_INFORMATION: u32 = 20;
+const FILE_POSITION_INFORMATION: u32 = 14;
 const FILE_DIRECTORY_INFORMATION: u32 = 1;
 
 /// `NtCreateFile` of an absolute path: its status and handle.
@@ -939,6 +951,123 @@ fn a_size_from_a_buffer_off_alignment_is_set() {
         served.fake.contents("save/odd.bin").map(|c| c.len()),
         Some(10)
     );
+}
+
+/// [`a_size_from_a_buffer_off_alignment_is_set`] for the file position.
+#[test]
+fn a_position_from_a_buffer_off_alignment_is_set() {
+    isolate!();
+    let dir = aether_testkit::tempdir().expect("temp folder");
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::mem::forget(dir);
+    fakedirector::install_with(&root, file_director(), Options::default());
+    std::mem::forget(aether_hooks::install().expect("install"));
+    let ctx = Ctx {
+        root,
+        key: 0,
+        image: PathBuf::new(),
+    };
+    let panics = aether_hooks::hook_panics_total();
+    let (st, h) = nt_open_abs(&p(&ctx, "save/data.bin"), FILE_READ_DATA);
+    assert_eq!(st, STATUS_SUCCESS);
+    let mut buf = [0u64; 2];
+    // SAFETY: the two u64s' 16 bytes, viewed as bytes.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), 16) };
+    bytes[1..9].copy_from_slice(&1000i64.to_le_bytes());
+    let st = nt_set_info_raw(h, &mut bytes[1..9], FILE_POSITION_INFORMATION);
+    assert_eq!(st, STATUS_SUCCESS);
+    assert_eq!(
+        aether_hooks::hook_panics_total(),
+        panics,
+        "no hook panicked"
+    );
+    // A read at the file pointer starts there.
+    let mut got = [0u8; 16];
+    let (st, n) = read_at_pointer(h, &mut got);
+    close(h);
+    assert_eq!((st, n), (STATUS_SUCCESS, 16));
+    assert_eq!(got, pattern(DATA_LEN)[1000..1016]);
+}
+
+/// `NtReadFile` at the file pointer: the status and `Information`.
+fn read_at_pointer(h: *mut c_void, buf: &mut [u8]) -> (i32, usize) {
+    let mut iosb = IoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    // SAFETY: a synchronous handle this test opened, `buf` writable.
+    let st = unsafe {
+        NtReadFile(
+            h,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut iosb,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    };
+    (st, iosb.information)
+}
+
+/// wire.md 2.1: the arena starts at `VFS_ARENA_OFFSET`, which need not be
+/// the end of the last slot. With the arena 64 KiB and 8 bytes past it,
+/// every bulk READ is served, and a reply naming another slot's bank, or
+/// past the arena, still fails.
+#[test]
+fn an_arena_away_from_the_ring_serves_every_bulk_read() {
+    isolate!();
+    let dir = aether_testkit::tempdir().expect("temp folder");
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::mem::forget(dir);
+    let served = fakedirector::install_with(
+        &root,
+        file_director(),
+        Options {
+            arena_gap: 64 * 1024 + 8,
+            deadline: Some(DEADLINE),
+            ..Options::default()
+        },
+    );
+    std::mem::forget(aether_hooks::install().expect("install"));
+    let ctx: &'static Ctx = Box::leak(Box::new(Ctx {
+        root,
+        key: 0,
+        image: PathBuf::new(),
+    }));
+    let ok = Ok(Expect::Nt(STATUS_SUCCESS));
+    let mark = served.recorder.mark();
+    assert_eq!(file_call(ctx, HookedOp::ReadBulk, 0), ok, "a bulk read");
+    assert_eq!(file_call(ctx, HookedOp::SectionFill, 0), ok, "a section");
+    assert!(
+        served
+            .recorder
+            .since(mark)
+            .iter()
+            .any(|r| r.op() == Some(Opcode::Read) && r.bulk_len > 0),
+        "bulk replies were served"
+    );
+    for lie in [BulkLie::PastBank, BulkLie::PastArena] {
+        let id = served.faults.arm(
+            Match {
+                op: Some(Opcode::Read),
+                times: Some(1),
+                ..Match::default()
+            },
+            Fault::BulkOutside(lie),
+        );
+        assert_eq!(
+            file_call(ctx, HookedOp::ReadBulk, 0),
+            Ok(Expect::Nt(STATUS_UNSUCCESSFUL)),
+            "{lie:?}"
+        );
+        assert_eq!(served.faults.applied(id), 1, "{lie:?} fired");
+    }
+    assert_eq!(file_call(ctx, HookedOp::ReadBulk, 0), ok, "and then served");
 }
 
 /// An NT status as what a call saw.

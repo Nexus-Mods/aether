@@ -556,24 +556,54 @@ pub struct ReadPlan {
     /// Requests in flight for a read of at least `stream_bytes`.
     pub depth_stream: usize,
     pub stream_bytes: usize,
-    /// The arena's length, banked one per slot after the ring
-    /// (`docs/wire.md` 2.6), or 0 when this client knows of none. With an
-    /// arena, a bulk reply's data must lie in its own slot's bank; without
-    /// one, anywhere in the mapping.
+    /// The arena's length, banked one per slot (`docs/wire.md` 2.6), or 0
+    /// when this client uses none. With an arena, a bulk reply's data must
+    /// lie in its own slot's bank; without one, anywhere in the mapping.
     pub arena_len: usize,
+    /// The mapping offset the arena starts at (`VFS_ARENA_OFFSET`,
+    /// `docs/wire.md` 2.1). Unused when `arena_len` is 0.
+    pub arena_offset: usize,
 }
 
-/// Where a bulk READ reply on `slot` may put its data: `[start, end)` of the
-/// slot's bank (`docs/wire.md` 2.6), or the whole mapping when `arena_len`
-/// is 0.
-fn bank_of(geom: &Geom, arena_len: usize, mapping_len: usize, slot: u32) -> (u64, u64) {
-    if arena_len == 0 {
-        return (0, mapping_len as u64);
+/// Where bulk READ replies may put their data (`docs/wire.md` 2.6): one
+/// bank per slot from the arena's start, or anywhere in the mapping when
+/// there is no arena. Worked out once per read.
+#[derive(Debug, Clone, Copy)]
+struct Banks {
+    start: u64,
+    /// 0: no arena.
+    size: u64,
+    count: u32,
+    mapping: u64,
+}
+
+impl Banks {
+    fn of(plan: &ReadPlan, geom: &Geom, mapping_len: usize) -> Banks {
+        let count = geom.slot_count.max(1);
+        let size = if plan.arena_len == 0 {
+            0
+        } else {
+            (plan.arena_len / count as usize).max(4096) as u64
+        };
+        Banks {
+            start: plan.arena_offset as u64,
+            size,
+            count,
+            mapping: mapping_len as u64,
+        }
     }
-    let banks = geom.slot_count.max(1);
-    let size = (arena_len / banks as usize).max(4096) as u64;
-    let start = geom.slot_off(geom.slot_count) as u64 + u64::from(slot % banks) * size;
-    (start, start + size)
+
+    /// Whether `[offset, offset + n)` lies where a reply on `slot` may put
+    /// its data.
+    fn hold(&self, slot: u32, offset: u64, n: u64) -> bool {
+        let (lo, hi) = if self.size == 0 {
+            (0, self.mapping)
+        } else {
+            let lo = self.start + u64::from(slot % self.count) * self.size;
+            (lo, lo + self.size)
+        };
+        offset >= lo && offset.checked_add(n).is_some_and(|end| end <= hi)
+    }
 }
 
 /// Read `[offset, offset + buf.len())` of `fh` into `buf`, as pipelined ring
@@ -604,6 +634,7 @@ pub fn read_fragmented<N: Notifier>(
         plan.depth
     }
     .clamp(1, slots);
+    let banks = Banks::of(plan, &c.geom(), seg.len());
     let mut filled = 0usize;
 
     while filled < buf.len() {
@@ -705,9 +736,7 @@ pub fn read_fragmented<N: Notifier>(
                     let n = bn as usize;
                     // The data must lie in this slot's bank (2.6): anywhere
                     // else is another request's bytes, or none.
-                    let (start, end) = bank_of(&c.geom(), plan.arena_len, seg.len(), *slot);
-                    let inside =
-                        aoff >= start && aoff.checked_add(n as u64).is_some_and(|stop| stop <= end);
+                    let inside = banks.hold(*slot, aoff, n as u64);
                     // Shared arena → destination (one memcpy; not via ring).
                     if n > 0 && (!inside || seg.copy_to(aoff as usize, &mut dest[..n]).is_none()) {
                         copy_err = Some(Status::IoError.code());

@@ -112,6 +112,10 @@ pub(crate) struct Options {
     pub payload_cap: u32,
     /// The arena's length, banked per slot; 0 forces every READ inline.
     pub arena_len: usize,
+    /// Bytes between the end of the last slot and the arena's start
+    /// (`VFS_ARENA_OFFSET`, `docs/wire.md` 2.1): 0 puts the arena right after
+    /// the ring, as both directors do; wire.md lets a director put it anywhere.
+    pub arena_gap: usize,
     /// The worker count the ring header states (`ring::set_worker_hint`); 0
     /// states none. The fake serves on that many threads, at most one per
     /// slot, and on `aether_ipc::DEFAULT_WORKER_COUNT` when it is 0.
@@ -147,6 +151,7 @@ impl Default for Options {
             slots: SLOTS,
             payload_cap: PAYLOAD_CAP,
             arena_len: ARENA_LEN,
+            arena_gap: 0,
             worker_hint: 0,
             ring: RingKind::Section,
             wake_wait_ms: WAKE_WAIT_MS,
@@ -258,6 +263,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
         slots,
         payload_cap,
         arena_len,
+        arena_gap,
         worker_hint,
         ring,
         wake_wait_ms,
@@ -267,7 +273,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
         tap,
     } = opts;
     let fake: &'static Fake = Box::leak(Box::new(fake));
-    let arena_offset = ring_bytes(slots, payload_cap);
+    let arena_offset = ring_bytes(slots, payload_cap) + arena_gap;
     // Whole mapping, ring first then arena: `VFS_RING_BYTES` names the
     // whole thing because the shim maps all of it and a bulk response's
     // offset is mapping-absolute.

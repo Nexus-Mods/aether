@@ -34,6 +34,25 @@ read-only lower layer; and what both directors do: a WRITE writes every byte or
 fails, DELETE and RENAME of a non-empty directory, the live size of a file with
 open handles.
 
+Later on this branch, still with no wire change: conformance checks what the
+shim caches on a director's word (two `immutable` reads of one path, size and
+`mount_gen` return the same bytes; `reg_gen` is non-zero once a registry is
+served and moves forward before every registry write is answered), plays
+several clients on one ring (scenario steps take a `client`, each further
+client a separate process; `run --concurrent N` keeps requests in flight on
+every slot and bank), and `run --limits` sends the shim's real read sizes,
+listings near the payload cap, abandoned slots and the other limits the shim
+relies on. The mount's environment is checked against the scenario's tree.
+`reference-adapter` takes `--no-arena`. The reference director answers
+`immutable` on a read open of a file a read-only provider holds, and
+`ST_READ_ONLY` to WRITE and SETATTR through such a handle, and never answers
+an inline READ longer than `payload_cap - 8`.
+
+Breaking for code that builds one: `aether_rpc::ReadSlot` has a new public
+field, `inline_cap`, the most an inline READ reply may carry, set by the serve
+loop. Releases now run `bin/natives-key.tests.ps1` before computing the
+natives key.
+
 ## Unreleased (the wire is one typed table)
 
 The wire does not change: every golden vector, the wire version (4),

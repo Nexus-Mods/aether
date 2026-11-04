@@ -885,9 +885,9 @@ directory moves with everything under it. A file or an empty directory at
 `to` is replaced; a directory at `to` with anything under it is
 `ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
 inside `from`, is `ST_BAD_REQUEST` from a writable layer provider and the
-reference director, `ST_IO_ERROR` from Cairn's overlay on a disk-backed upper
-(its `--write` folder: `provider/compose.clj`, `rename!`, whose move of
-the upper's root fails, and which never moves a lower directory). A missing `from` is
+reference director, `ST_IO_ERROR` from Cairn's overlay (`provider/compose.clj`,
+`rename!`, which never moves a directory that only its lower layer holds, as
+it holds the root). A missing `from` is
 `ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`.
 (Cairn's writable layer, `provider/layer.clj`, `rename!`; the reference
 director.) A file with open handles is renamed like any other.
@@ -900,10 +900,10 @@ For a name the writable provider holds (for names that exist only in a
 read-only layer beneath it, see "Names only in a read-only lower" after
 3.4.9): a file, or a directory with nothing under it, is deleted. A directory
 with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
-is `ST_BAD_REQUEST` from a writable layer provider and the reference director,
-`ST_IO_ERROR` from Cairn's overlay on a disk-backed upper (its
-`--write` folder: `provider/compose.clj`, `delete!`, whose delete of the
-upper's root fails). A missing path is `ST_NOT_FOUND`; a path outside
+is `ST_BAD_REQUEST` (a writable layer provider, the reference director) or
+`ST_IO_ERROR`, and is never deleted. Cairn's overlay answers `ST_OK` today and
+hides the root behind a whiteout (`provider/compose.clj`, `delete!`): a bug,
+which conformance reports. A missing path is `ST_NOT_FOUND`; a path outside
 every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
 `provider/layer.clj`, `delete!`; the reference director.) A file with open
 handles is deleted like any other: Cairn's write layer drops its data at the

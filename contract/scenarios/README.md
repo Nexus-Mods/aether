@@ -104,9 +104,10 @@ components (`a/../..`) is not sent. Registry paths are sent as written.
   where wire.md allows more than one, and `wire` names the section that does.
 
 A step may carry a `note`. An unknown op, field, flag, state or status, a
-missing field, a non-canonical path or a bad tree is a load error naming the
-file, the step and the field (`saves.json: step 3: request.flags: unknown
-flag "sideways", ...`).
+missing field, a non-canonical path, a bad tree, or an OPEN that expects a
+handle number still open in the scenario (wire.md 3.4.3: unique among open
+handles) is a load error naming the file, the step and the field
+(`saves.json: step 3: request.flags: unknown flag "sideways", ...`).
 
 ## Comparison rules
 

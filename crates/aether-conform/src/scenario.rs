@@ -667,12 +667,59 @@ fn parse_scenario(v: &Value) -> R<Scenario> {
         .enumerate()
         .map(|(i, s)| parse_step(i, s))
         .collect::<R<Vec<Step>>>()?;
+    check_handles(&steps)?;
     Ok(Scenario {
         name,
         description,
         tree,
         steps,
     })
+}
+
+/// Refuses an OPEN that expects a handle number still open in the scenario
+/// (opened by an earlier OPEN and not closed since by a CLOSE that may
+/// succeed). wire.md 3.4.3: `fh` is "unique among open handles", so such a
+/// step could only pass for a director that issued one handle twice.
+fn check_handles(steps: &[Step]) -> R<()> {
+    fn opened(e: &Expect) -> Vec<u64> {
+        match e {
+            Expect::Reply(OwnedReply::Open(o)) => vec![o.fh],
+            Expect::OneOf(alts) => alts.iter().flat_map(opened).collect(),
+            _ => Vec::new(),
+        }
+    }
+    fn may_succeed(e: &Expect) -> bool {
+        match e {
+            Expect::Reply(OwnedReply::Empty) => true,
+            Expect::OneOf(alts) => alts.iter().any(may_succeed),
+            _ => false,
+        }
+    }
+    let mut open = BTreeSet::new();
+    for (i, st) in steps.iter().enumerate() {
+        match &st.request {
+            OwnedRequest::Open { .. } => {
+                for fh in opened(&st.expect) {
+                    if open.contains(&fh) {
+                        return Err(Bad {
+                            step: Some(i),
+                            field: "expect.reply.fh".into(),
+                            message: format!(
+                                "handle {fh} is still open (wire.md 3.4.3: unique among open \
+                                 handles); close it first or expect another number"
+                            ),
+                        });
+                    }
+                }
+                open.extend(opened(&st.expect));
+            }
+            OwnedRequest::Close { fh } if may_succeed(&st.expect) => {
+                open.remove(fh);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn parse_step(i: usize, v: &Value) -> R<Step> {

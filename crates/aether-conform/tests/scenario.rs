@@ -152,6 +152,47 @@ fn heartbeat_ok() -> Value {
     json!({"request": {"op": "heartbeat"}, "expect": {"status": "ok"}})
 }
 
+/// Handles are unique among open handles (wire.md 3.4.3), so an OPEN that
+/// expects a number still open in the scenario cannot be right: the
+/// comparison would accept a director that issued one handle twice.
+#[test]
+fn an_open_expecting_a_handle_still_open_is_a_load_error() {
+    let open = |fh: u64| {
+        json!({"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
+               "expect": {"reply": {"fh": fh, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}})
+    };
+    let close = |fh: u64| json!({"request": {"op": "close", "fh": fh}, "expect": {"status": "ok"}});
+    let e = load_error(json!([open(1), heartbeat_ok(), open(1)]));
+    assert!(
+        e.contains("bad.json") && e.contains("step 2") && e.contains("expect.reply.fh"),
+        "{e}"
+    );
+    assert!(e.contains("still open"), "{e}");
+    // Also as one alternative of a one_of.
+    let alt = json!({"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
+        "expect": {"one_of": [{"status": "not-found"},
+                              {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}],
+                   "wire": "3.4.3"}});
+    let e = load_error(json!([open(1), alt]));
+    assert!(e.contains("step 1") && e.contains("still open"), "{e}");
+
+    // After a CLOSE the number may come back, and other numbers are fine.
+    let dir = aether_testkit::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "ok.json",
+        &scenario(json!([
+            open(1),
+            open(2),
+            close(1),
+            open(1),
+            close(1),
+            close(2)
+        ])),
+    );
+    load(&p).unwrap();
+}
+
 #[test]
 fn an_unknown_op_names_the_file_the_step_and_the_field() {
     let e = load_error(
@@ -487,6 +528,7 @@ fn immutable_is_the_directors_except_on_a_write_open() {
         "imm.json",
         &scenario(json!([
             {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"}, "expect": reply},
+            {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
             {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/x"}, "expect": reply},
         ])),
     );
@@ -505,7 +547,7 @@ fn immutable_is_the_directors_except_on_a_write_open() {
         .unwrap();
     let mut sess = Session::new();
     assert!(sess
-        .check(1, &s.steps[1].request, &s.steps[1].expect, &imm(5))
+        .check(2, &s.steps[2].request, &s.steps[2].expect, &imm(5))
         .is_err());
 }
 

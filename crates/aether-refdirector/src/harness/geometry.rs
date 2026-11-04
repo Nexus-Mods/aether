@@ -40,6 +40,15 @@ impl Geometry {
         arena_gap: 0,
     };
 
+    /// The default geometry of `docs/wire.md` 2.7: 32 slots, a 1 MiB cap and
+    /// a 32 MiB arena (32 banks of 1 MiB), the arena right after the ring.
+    pub const PRODUCTION: Geometry = Geometry {
+        slots: 32,
+        payload_cap: 1024 * 1024,
+        arena_len: 32 * 1024 * 1024,
+        arena_gap: 0,
+    };
+
     /// The control ring's length (header and slots).
     pub fn ring_bytes(&self) -> usize {
         let stride = (32 + self.payload_cap as usize).next_multiple_of(8);
@@ -93,6 +102,16 @@ mod tests {
         assert!(g.map_bytes() >= g.arena_offset() + g.arena_len);
         let a = g.arena().unwrap();
         assert_eq!((a.bank_size, a.banks), (256 * 1024, 8));
+    }
+
+    /// The numbers of `docs/wire.md` 2.7's table.
+    #[test]
+    fn the_production_geometry_is_wire_md_s_default() {
+        let g = Geometry::PRODUCTION;
+        assert_eq!(g.ring_bytes(), 33_555_504);
+        assert_eq!(g.arena_offset(), 33_555_504);
+        assert_eq!(g.map_bytes(), 67_174_400);
+        assert_eq!(g.arena().unwrap().bank_size, 1024 * 1024);
     }
 
     #[test]

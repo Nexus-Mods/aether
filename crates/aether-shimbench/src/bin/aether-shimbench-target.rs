@@ -1,4 +1,4 @@
-//! Makes one kind of Win32 call many times and times each:
+//! Makes one kind of Win32 call many times and times it:
 //!
 //! ```text
 //! aether-shimbench-target [--lenient] [--out FILE] [--sync NAME] <case> <iterations> <path>
@@ -6,10 +6,18 @@
 //!
 //! `<path>` is what the case works on (a file, or `data/list` for
 //! `findfirst-100`). The target makes [`aether_shimbench::warmup`] untimed
-//! calls, then `<iterations>` timed ones, and writes one JSON line (the
-//! case, the counts and the per-call nanoseconds' summary) to `FILE`, or to
-//! standard output without `--out`. A process the injector starts writes to
-//! the console, not to a pipe, so the launcher always passes `--out`.
+//! calls, then at least `<iterations>` timed ones, and writes one JSON line
+//! (the case, the counts, how they were timed and the per-call nanoseconds'
+//! summary) to `FILE`, or to standard output without `--out`.
+//!
+//! Calls are timed in batches ([`aether_shimbench::batch_size`]): each batch
+//! lasts at least 100 steps of the timer (`QueryPerformanceCounter`, whose
+//! step the line gives as `timer_ns`), and a sample is the batch's time over
+//! its calls, so a call shorter than the timer's step is measured, not
+//! rounded to it. The batch size follows the warm-up's mean call time.
+//!
+//! A process the injector starts writes to the console, not to a pipe, so
+//! the launcher always passes `--out`.
 //!
 //! Every call is checked (it succeeds, a read returns its length, a listing
 //! has its 100 names, a final path ends in the file's name); the first that
@@ -37,7 +45,7 @@ fn main() {
 #[cfg(windows)]
 #[allow(unsafe_code)] // Win32 calls
 mod windows {
-    use aether_shimbench::{target_line, warmup, Case, Summary, LISTED, MIB};
+    use aether_shimbench::{batch_size, target_line, warmup, Case, Summary, Timing, LISTED, MIB};
     use std::path::Path;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{
@@ -50,6 +58,7 @@ mod windows {
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FILE_ATTRIBUTE_DATA,
         WIN32_FIND_DATAW,
     };
+    use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
     use windows_sys::Win32::System::Threading::{
         OpenEventW, SetEvent, WaitForSingleObject, SYNCHRONIZATION_SYNCHRONIZE,
     };
@@ -109,19 +118,31 @@ mod windows {
             Ok(c) => c,
             Err(e) => fail(args.case, &format!("setup: {e}")),
         };
-        for _ in 0..warmup(args.iterations) {
+        let warm = warmup(args.iterations);
+        let t = Instant::now();
+        for _ in 0..warm {
             check(&args, call.run());
         }
+        let warm_mean = t.elapsed().as_nanos() as u64 / warm;
+        let timer_ns = timer_resolution_ns();
+        let batch = batch_size(warm_mean, timer_ns);
+        let timing = Timing {
+            batch,
+            batches: args.iterations.div_ceil(batch),
+            timer_ns,
+        };
         let sync = args.sync.as_deref().map(Handshake::open);
         if let Some(s) = &sync {
             s.handshake("begin", "go");
         }
-        let mut ns = vec![0u64; args.iterations as usize];
+        let mut ns = vec![0u64; timing.batches as usize];
         for slot in ns.iter_mut() {
             let t = Instant::now();
-            let r = call.run();
-            *slot = t.elapsed().as_nanos() as u64;
-            check(&args, r);
+            for _ in 0..batch {
+                let r = call.run();
+                check(&args, r);
+            }
+            *slot = t.elapsed().as_nanos() as u64 / batch;
         }
         if let Some(s) = &sync {
             s.handshake("end", "done");
@@ -130,6 +151,7 @@ mod windows {
         let line = target_line(
             args.case,
             args.iterations,
+            timing,
             args.lenient,
             Summary::of(&mut ns),
         );
@@ -208,6 +230,14 @@ mod windows {
             .encode_wide()
             .chain(core::iter::once(0))
             .collect()
+    }
+
+    /// The step of `Instant` (`QueryPerformanceCounter`), in nanoseconds.
+    fn timer_resolution_ns() -> u64 {
+        let mut freq = 0i64;
+        // SAFETY: writes one i64.
+        unsafe { QueryPerformanceFrequency(&mut freq) };
+        (1_000_000_000u64).div_ceil(freq.max(1) as u64)
     }
 
     fn last_error() -> u32 {

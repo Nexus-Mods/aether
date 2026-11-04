@@ -12,7 +12,7 @@
 
 use aether_protocol::{Opcode, Status};
 use aether_refdirector::harness::{Fault, Match};
-use aether_shimbench::launch::{Artifacts, Bench, DirectorKind, ShimOptions};
+use aether_shimbench::launch::{Artifacts, Bench, DirectorKind, GeometryKind, ShimOptions};
 use aether_shimbench::Case;
 use serde_json::Value;
 use std::process::Command;
@@ -73,7 +73,15 @@ fn every_case_runs_natively_and_under_the_shim() {
     let dir = aether_testkit::tempdir().expect("a folder for the report");
     let out = dir.path().join("report.json");
     let st = Command::new(env!("CARGO_BIN_EXE_aether-shimbench"))
-        .args(["--iterations", "10", "--timeout", "120", "--out"])
+        .args([
+            "--geometry",
+            "shim-tests",
+            "--iterations",
+            "10",
+            "--timeout",
+            "120",
+        ])
+        .arg("--out")
         .arg(&out)
         .status()
         .expect("run aether-shimbench");
@@ -91,6 +99,11 @@ fn every_case_runs_natively_and_under_the_shim() {
         );
     }
     assert_eq!(report["director"], "reference");
+    assert_eq!(report["geometry"]["name"], "shim-tests");
+    assert!(
+        report["timer_ns"].as_u64().is_some_and(|t| t > 0),
+        "timer_ns"
+    );
     assert_eq!(report["iterations"], 10);
     let cases = report["cases"].as_array().expect("cases");
     let names: Vec<&str> = cases.iter().map(|c| c["name"].as_str().unwrap()).collect();
@@ -101,7 +114,16 @@ fn every_case_runs_natively_and_under_the_shim() {
         let name = case.name();
         assert!(c.get("error").is_none(), "{name}: {}", c["error"]);
         for side in ["native", "shim"] {
-            assert_eq!(c[side]["count"], 10, "{name}: {side} timed 10 calls");
+            // Batches of `batch` calls, at least the 10 asked for.
+            let (count, batch, calls) = (
+                c[side]["count"].as_u64().unwrap(),
+                c[side]["batch"].as_u64().unwrap(),
+                c[side]["calls"].as_u64().unwrap(),
+            );
+            assert!(
+                batch >= 1 && count * batch == calls && calls >= 10,
+                "{name}: {side}"
+            );
             for q in ["min", "p50", "p90", "p99", "p999", "max", "mean"] {
                 assert!(c[side][q].is_u64(), "{name}: {side}.{q}");
             }
@@ -135,7 +157,7 @@ fn every_case_runs_natively_and_under_the_shim() {
     }
 }
 
-/// S15, the cross-process half: a director that answers the attach's
+/// The cross-process half of a failed attach: a director that answers the
 /// HEARTBEAT with an error fails the launch. The shim writes
 /// `fuse-failed:` to the ready file (`docs/wire.md` 6.2) and the injector
 /// kills the target, writes the same verdict to `<ready>.injector-error` and
@@ -145,7 +167,8 @@ fn a_director_that_refuses_heartbeat_fails_the_launch_with_fuse_failed() {
     let Some(artifacts) = artifacts() else {
         return;
     };
-    let bench = Bench::new(artifacts, Duration::from_secs(120)).expect("the bench's folders");
+    let bench = Bench::new(artifacts, GeometryKind::ShimTests, Duration::from_secs(120))
+        .expect("the bench's folders");
     let refuse = Match {
         op: Some(Opcode::Heartbeat),
         ..Match::default()

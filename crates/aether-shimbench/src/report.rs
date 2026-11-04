@@ -4,47 +4,62 @@
 //!
 //! ```text
 //! { "machine": { "cpu", "cores", "os", "build": { "profile", "rustc", "git" } },
-//!   "director": "reference", "iterations": 100000, "warmup": 10000,
-//!   "geometry": { "slots", "payload_cap", "arena_len", "serve_threads" },
+//!   "director": "reference", "iterations": 100000, "warmup": 10000, "timer_ns": 100,
+//!   "geometry": { "name": "production", "slots", "payload_cap", "arena_len",
+//!                 "serve_threads" },
 //!   "cases": [ { "name": "getattr-in-root",
-//!                "native": { "count", "min", "p50", "p90", "p99", "p999", "max", "mean" },
+//!                "native": { "count", "min", "p50", "p90", "p99", "p999", "max", "mean",
+//!                            "batch", "calls" },
 //!                "shim":   { ... },
 //!                "overhead_ns": { "p50", "p90", "p99" },
 //!                "round_trips_per_call": 1.0, "ring_bytes_per_call": 32.0 },
 //!              { "name": "...", "error": "..." } ] }
 //! ```
 //!
-//! Every latency is nanoseconds per call. `overhead_ns` is the shim's value
+//! Every latency is nanoseconds per call. A sample is one batch of `batch`
+//! calls timed together and divided by `batch` (`count` samples, `calls`
+//! calls), a batch lasting at least 100 steps of the timer, whose step is
+//! `timer_ns`: so a call shorter than the step is measured, and a quantile
+//! is over batch means, not single calls. `overhead_ns` is the shim's value
 //! less the native one at the same quantile, so it can be negative where the
 //! two are within noise.
 #![allow(unsafe_code)] // registry reads
 
-use crate::launch::{Counted, DirectorKind, TargetOutput, SERVE_THREADS};
+use crate::launch::{Counted, DirectorKind, GeometryKind, TargetOutput, SERVE_THREADS};
 use crate::{warmup, Case};
-use aether_refdirector::harness::Geometry;
 use serde_json::{json, Value};
 
 /// One case's result.
 pub enum CaseResult {
     Measured {
-        native: TargetOutput,
-        shim: TargetOutput,
+        native: Box<TargetOutput>,
+        shim: Box<TargetOutput>,
         counted: Counted,
-        iterations: u64,
     },
     Failed(String),
 }
 
 /// The report of a run.
-pub fn build(director: DirectorKind, iterations: u64, results: &[(Case, CaseResult)]) -> Value {
-    let g = Geometry::SHIM_TESTS;
+pub fn build(
+    director: DirectorKind,
+    geometry: GeometryKind,
+    iterations: u64,
+    results: &[(Case, CaseResult)],
+) -> Value {
+    let g = geometry.geometry();
     let cases: Vec<Value> = results.iter().map(|(c, r)| case_json(*c, r)).collect();
+    let timer_ns = results.iter().find_map(|(_, r)| match r {
+        CaseResult::Measured { native, .. } => Some(native.timer_ns),
+        CaseResult::Failed(_) => None,
+    });
     json!({
         "machine": machine(),
         "director": director.name(),
         "iterations": iterations,
         "warmup": warmup(iterations),
+        "timer_ns": timer_ns,
         "geometry": {
+            "name": geometry.name(),
             "slots": g.slots,
             "payload_cap": g.payload_cap,
             "arena_len": g.arena_len,
@@ -61,15 +76,21 @@ fn case_json(case: Case, r: &CaseResult) -> Value {
             native,
             shim,
             counted,
-            iterations,
         } => {
             let (n, s) = (native.ns, shim.ns);
             let d = |a: u64, b: u64| a as i64 - b as i64;
-            let per = |v: u64| v as f64 / (*iterations).max(1) as f64;
+            // The recorder counted every call of the shim run's batches.
+            let per = |v: u64| v as f64 / shim.calls.max(1) as f64;
+            let side = |o: &TargetOutput| {
+                let mut v = o.ns.to_json();
+                v["batch"] = o.line["batch"].clone();
+                v["calls"] = json!(o.calls);
+                v
+            };
             json!({
                 "name": case.name(),
-                "native": n.to_json(),
-                "shim": s.to_json(),
+                "native": side(native),
+                "shim": side(shim),
                 "overhead_ns": {
                     "p50": d(s.p50, n.p50),
                     "p90": d(s.p90, n.p90),
@@ -85,10 +106,13 @@ fn case_json(case: Case, r: &CaseResult) -> Value {
 /// The report as a table, one line per case.
 pub fn table(report: &Value) -> String {
     let mut out = format!(
-        "director {}, {} calls per case after {} untimed; nanoseconds per call\n",
+        "director {}, geometry {}, at least {} calls per case after {} untimed, timed in \
+         batches of at least 100 timer steps of {} ns; nanoseconds per call\n",
         report["director"].as_str().unwrap_or("?"),
+        report["geometry"]["name"].as_str().unwrap_or("?"),
         report["iterations"],
         report["warmup"],
+        report["timer_ns"],
     );
     out.push_str(&format!(
         "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>10}\n",
@@ -133,8 +157,14 @@ pub struct Comparison {
 }
 
 /// `now` against `base`, which must be from the same machine (CPU, cores
-/// and OS; the build may differ) and the same director.
+/// and OS; the build may differ), the same director and the same geometry.
 pub fn compare(now: &Value, base: &Value) -> Result<Comparison, String> {
+    if now["geometry"] != base["geometry"] {
+        return Err(format!(
+            "the baseline was recorded at another geometry ({} here, {} there)",
+            now["geometry"], base["geometry"]
+        ));
+    }
     for k in ["cpu", "cores", "os"] {
         if now["machine"][k] != base["machine"][k] {
             return Err(format!(
@@ -320,6 +350,16 @@ mod tests {
     fn a_baseline_from_another_machine_is_refused() {
         let e = compare(&report("a", 100), &report("b", 100)).err().unwrap();
         assert!(e.contains("another machine"), "{e}");
+    }
+
+    #[test]
+    fn a_baseline_at_another_geometry_is_refused() {
+        let mut base = report("a", 100);
+        base["geometry"] = json!({ "name": "shim-tests" });
+        let mut now = report("a", 100);
+        now["geometry"] = json!({ "name": "production" });
+        let e = compare(&now, &base).err().unwrap();
+        assert!(e.contains("another geometry"), "{e}");
     }
 
     #[test]

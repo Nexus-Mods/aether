@@ -1,10 +1,11 @@
 //! Running the target: natively, as a child of this process, and under the
 //! shim, as `aether-injector`'s target with a ring this process serves.
 //!
-//! A shim run lays out a fresh ring in a named section at
-//! [`Geometry::SHIM_TESTS`] (the geometry the shim's counted costs are
-//! recorded at, so a case's requests per call line up with that record),
-//! serves it on [`SERVE_THREADS`] threads, each with its own
+//! A shim run lays out a fresh ring in a named section at the bench's
+//! [`GeometryKind`]: by default `docs/wire.md` 2.7's production geometry,
+//! or [`Geometry::SHIM_TESTS`], the one the shim's counted costs are
+//! recorded at, so that a case's requests per call line up with that
+//! record. It serves the ring on [`SERVE_THREADS`] threads, each with its own
 //! `aether_win::EventNotifier` on the director's two events (`docs/wire.md`
 //! 2.9), and starts
 //!
@@ -68,6 +69,39 @@ impl DirectorKind {
             "reference" => Some(DirectorKind::Reference),
             "null" => Some(DirectorKind::Null),
             _ => None,
+        }
+    }
+}
+
+/// The ring's geometry in a shim run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeometryKind {
+    /// [`Geometry::PRODUCTION`] (`docs/wire.md` 2.7): what a game is served.
+    Production,
+    /// [`Geometry::SHIM_TESTS`]: the counts match the shim's cost record.
+    ShimTests,
+}
+
+impl GeometryKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            GeometryKind::Production => "production",
+            GeometryKind::ShimTests => "shim-tests",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<GeometryKind> {
+        match s {
+            "production" => Some(GeometryKind::Production),
+            "shim-tests" => Some(GeometryKind::ShimTests),
+            _ => None,
+        }
+    }
+
+    pub fn geometry(self) -> Geometry {
+        match self {
+            GeometryKind::Production => Geometry::PRODUCTION,
+            GeometryKind::ShimTests => Geometry::SHIM_TESTS,
         }
     }
 }
@@ -169,7 +203,12 @@ pub fn reference() -> Reference {
 /// The target's line, read back.
 #[derive(Debug, Clone)]
 pub struct TargetOutput {
+    /// Per-call nanoseconds, one sample per timed batch.
     pub ns: Summary,
+    /// The calls timed (every batch's).
+    pub calls: u64,
+    /// The timer's step, in nanoseconds.
+    pub timer_ns: u64,
     pub line: Value,
 }
 
@@ -180,7 +219,17 @@ fn parse_output(text: &str) -> Result<TargetOutput, String> {
         .get("ns")
         .and_then(Summary::from_json)
         .ok_or_else(|| format!("the target's line has no summary: {line}"))?;
-    Ok(TargetOutput { ns, line })
+    let field = |k: &str| {
+        line.get(k)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("the target's line has no {k}: {line}"))
+    };
+    Ok(TargetOutput {
+        ns,
+        calls: field("calls")?,
+        timer_ns: field("timer_ns")?,
+        line,
+    })
 }
 
 /// Requests counted during a timed loop.
@@ -249,15 +298,22 @@ impl ShimOutcome {
 pub struct Bench {
     pub artifacts: Artifacts,
     pub workspace: Workspace,
+    /// The ring's geometry in a shim run.
+    pub geometry: GeometryKind,
     /// How long one run may take before its process is killed.
     pub timeout: Duration,
 }
 
 impl Bench {
-    pub fn new(artifacts: Artifacts, timeout: Duration) -> std::io::Result<Bench> {
+    pub fn new(
+        artifacts: Artifacts,
+        geometry: GeometryKind,
+        timeout: Duration,
+    ) -> std::io::Result<Bench> {
         Ok(Bench {
             artifacts,
             workspace: Workspace::new()?,
+            geometry,
             timeout,
         })
     }
@@ -294,7 +350,7 @@ impl Bench {
         opts: &ShimOptions,
     ) -> Result<ShimOutcome, String> {
         let recorder = Recorder::headers_only();
-        let g = Geometry::SHIM_TESTS;
+        let g = self.geometry.geometry();
         if opts.attach_faults.is_empty() {
             self.serve_and_launch(case, iterations, opts.director, recorder.clone(), &recorder)
         } else {
@@ -324,7 +380,7 @@ impl Bench {
         fn io(what: &'static str) -> impl Fn(std::io::Error) -> String {
             move |e| format!("{what}: {e}")
         }
-        let g = Geometry::SHIM_TESTS;
+        let g = self.geometry.geometry();
         let name = unique_name();
         let section = format!("{name}-ring");
         let (server_ev, client_ev) = (format!("{name}-server"), format!("{name}-client"));

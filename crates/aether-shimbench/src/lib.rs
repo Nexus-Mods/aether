@@ -198,12 +198,48 @@ pub fn warmup(iterations: u64) -> u64 {
     (iterations / 10).clamp(10, 10_000)
 }
 
-/// The line the target writes: the case, its counts and the summary.
-pub fn target_line(case: Case, iterations: u64, lenient: bool, ns: Summary) -> Value {
+/// How many timer ticks a timed batch should last at least: at 100 ticks
+/// the timer's step is at most 1% of a batch.
+pub const BATCH_TICKS: u64 = 100;
+/// The most calls in one batch.
+pub const MAX_BATCH: u64 = 1000;
+
+/// How many calls the target times together, so that a batch of calls
+/// averaging `mean_ns` lasts [`BATCH_TICKS`] steps of a timer that steps
+/// by `resolution_ns`: 1 for calls that long already, at most [`MAX_BATCH`].
+/// A sample is then the batch's time divided by its calls.
+pub fn batch_size(mean_ns: u64, resolution_ns: u64) -> u64 {
+    (BATCH_TICKS * resolution_ns.max(1))
+        .div_ceil(mean_ns.max(1))
+        .clamp(1, MAX_BATCH)
+}
+
+/// How the target timed a case: `batches` samples of `batch` calls each,
+/// with a timer that steps by `timer_ns`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    pub batch: u64,
+    pub batches: u64,
+    pub timer_ns: u64,
+}
+
+impl Timing {
+    /// The timed calls: `batch * batches`, at least the iterations asked for.
+    pub fn calls(&self) -> u64 {
+        self.batch * self.batches
+    }
+}
+
+/// The line the target writes: the case, its counts, how it timed them and
+/// the summary of per-call nanoseconds (one sample per batch).
+pub fn target_line(case: Case, iterations: u64, t: Timing, lenient: bool, ns: Summary) -> Value {
     json!({
         "case": case.name(),
         "iterations": iterations,
         "warmup": warmup(iterations),
+        "batch": t.batch,
+        "calls": t.calls(),
+        "timer_ns": t.timer_ns,
         "lenient": lenient,
         "ns": ns.to_json(),
     })
@@ -230,6 +266,20 @@ mod tests {
         assert_eq!(s.mean, 500);
         assert_eq!(Summary::from_json(&s.to_json()), Some(s));
         assert_eq!(Summary::of(&mut []), Summary::default());
+    }
+
+    #[test]
+    fn a_batch_lasts_a_hundred_timer_steps() {
+        // 100 ns calls on a 100 ns timer: 100 calls make 100 steps.
+        assert_eq!(batch_size(100, 100), 100);
+        assert_eq!(batch_size(15_000, 100), 1);
+        assert_eq!(batch_size(0, 100), MAX_BATCH);
+        let t = Timing {
+            batch: 100,
+            batches: 3,
+            timer_ns: 100,
+        };
+        assert_eq!(t.calls(), 300);
     }
 
     #[test]

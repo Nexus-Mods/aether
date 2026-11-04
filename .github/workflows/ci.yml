@@ -78,10 +78,12 @@ jobs:
       # every case natively and in a process the injector started with the
       # shim, 10 calls each, in a few seconds. The timings are a shared
       # runner's and nothing compares them; the requests per call are
-      # checked against costs.txt by the crate's tests in the step above.
+      # checked against costs.txt by the crate's tests in the step above,
+      # which is why this run (like those tests) asks for the shim tests'
+      # geometry rather than the default production one.
       - name: Shim benchmark (smoke)
         timeout-minutes: 5
-        run: target/debug/aether-shimbench --iterations 10 --out target/bench/shim-smoke.json
+        run: target/debug/aether-shimbench --geometry shim-tests --iterations 10 --out target/bench/shim-smoke.json
       # What every director must do (contract/scenarios), the malformed
       # requests, 1024 generated cases compared with the reference, and 256
       # rounds of 4 clients at once (docs/conformance.md), played against the

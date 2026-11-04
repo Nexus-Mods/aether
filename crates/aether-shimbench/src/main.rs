@@ -2,14 +2,18 @@
 //! natively:
 //!
 //! ```text
-//! aether-shimbench [--director reference|null] [--iterations N] [--cases LIST]
-//!                  [--out FILE] [--baseline FILE] [--fail-over PCT] [--timeout SECS]
+//! aether-shimbench [--director reference|null] [--geometry production|shim-tests]
+//!                  [--iterations N] [--cases LIST] [--out FILE] [--baseline FILE]
+//!                  [--fail-over PCT] [--timeout SECS]
 //! ```
 //!
 //! Per case (`--cases a,b,...`, default all) it runs `aether-shimbench-target`
 //! natively and then under the shim (see the library's docs), prints a table
-//! and writes the JSON report to `--out`. `--baseline` prints the change
-//! against a report from the same machine; only `--fail-over PCT` makes a
+//! and writes the JSON report to `--out`. The shim's ring has `docs/wire.md`
+//! 2.7's production geometry unless `--geometry shim-tests` asks for the one
+//! the shim's counted costs are recorded at (whose requests per call then
+//! match `crates/aether-hooks/tests/harness/costs.txt`). `--baseline` prints
+//! the change against a report from the same machine and geometry; only `--fail-over PCT` makes a
 //! rise of a shim p50 above `PCT` percent exit non-zero, and nothing on CI
 //! passes it: these are one machine's timings.
 //!
@@ -34,7 +38,7 @@ fn main() {
 
 #[cfg(windows)]
 mod windows {
-    use aether_shimbench::launch::{Artifacts, Bench, DirectorKind, ShimOptions};
+    use aether_shimbench::launch::{Artifacts, Bench, DirectorKind, GeometryKind, ShimOptions};
     use aether_shimbench::report::{self, CaseResult};
     use aether_shimbench::Case;
     use std::path::PathBuf;
@@ -42,6 +46,7 @@ mod windows {
 
     struct Args {
         director: DirectorKind,
+        geometry: GeometryKind,
         iterations: u64,
         cases: Vec<Case>,
         out: Option<PathBuf>,
@@ -54,8 +59,8 @@ mod windows {
         let names: Vec<&str> = Case::ALL.iter().map(|c| c.name()).collect();
         eprintln!(
             "aether-shimbench: {why}\nusage: aether-shimbench [--director reference|null] \
-             [--iterations N] [--cases LIST] [--out FILE] [--baseline FILE] [--fail-over PCT] \
-             [--timeout SECS]\ncases: {}",
+             [--geometry production|shim-tests] [--iterations N] [--cases LIST] [--out FILE] \
+             [--baseline FILE] [--fail-over PCT] [--timeout SECS]\ncases: {}",
             names.join(",")
         );
         std::process::exit(2);
@@ -64,6 +69,7 @@ mod windows {
     fn parse() -> Args {
         let mut args = Args {
             director: DirectorKind::Reference,
+            geometry: GeometryKind::Production,
             iterations: 10_000,
             cases: Case::ALL.to_vec(),
             out: None,
@@ -82,6 +88,11 @@ mod windows {
                     let v = value();
                     args.director = DirectorKind::parse(&v)
                         .unwrap_or_else(|| usage(&format!("no director {v}")));
+                }
+                "--geometry" => {
+                    let v = value();
+                    args.geometry = GeometryKind::parse(&v)
+                        .unwrap_or_else(|| usage(&format!("no geometry {v}")));
                 }
                 "--iterations" => {
                     args.iterations = value()
@@ -123,7 +134,7 @@ mod windows {
     pub fn main() -> i32 {
         let args = parse();
         let artifacts = Artifacts::locate().unwrap_or_else(|e| usage(&e));
-        let bench = Bench::new(artifacts, args.timeout)
+        let bench = Bench::new(artifacts, args.geometry, args.timeout)
             .unwrap_or_else(|e| usage(&format!("the bench's folders: {e}")));
         let opts = ShimOptions {
             director: args.director,
@@ -138,15 +149,14 @@ mod windows {
                     .result()
                     .map_err(|e| format!("under the shim: {e}"))?;
                 Ok(CaseResult::Measured {
-                    native,
-                    shim,
+                    native: Box::new(native),
+                    shim: Box::new(shim),
                     counted,
-                    iterations: args.iterations,
                 })
             });
             results.push((case, r.unwrap_or_else(CaseResult::Failed)));
         }
-        let report = report::build(args.director, args.iterations, &results);
+        let report = report::build(args.director, args.geometry, args.iterations, &results);
         print!("{}", report::table(&report));
         if let Some(out) = &args.out {
             if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {

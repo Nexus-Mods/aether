@@ -1,6 +1,6 @@
 {
   "name": "handles-deleted-file",
-  "description": "A file deleted while a handle is open on it, and a new file created at its name: the old handle may read the deleted file's last bytes or fail, its WRITE and SETATTR change nothing anyone else sees, it never reaches the new file, and its CLOSE is ST_OK (wire.md 3.4.8). The name is free at once (3.4.8: \"A file with open handles is deleted like any other\").",
+  "description": "A file deleted while a handle is open on it, and a new file created at its name: the old handle may read the deleted file's last bytes or fail, what it writes reaches nothing by a name, it never reaches the new file, and its CLOSE is ST_OK (wire.md 3.4.8). The name is free at once (3.4.8: \"A file with open handles is deleted like any other\").",
   "tree": {
     "roots": [
       {"id": 0, "files": [{"path": "saves/a.txt", "contents": "old!"}], "writable": ["saves"]}

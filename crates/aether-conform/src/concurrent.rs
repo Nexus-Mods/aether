@@ -30,9 +30,12 @@
 //! atomically: of OPEN_EXCL creates of one name, or REG_CREATE_KEYs of one
 //! key, exactly one succeeds; MKDIRs of one name are each `ST_OK` or
 //! `ST_EXISTS` and leave a directory; WRITEs to disjoint ranges all land;
-//! append WRITEs each land whole at an end; and a GETATTR, OPEN or READDIR
-//! in flight with a RENAME or DELETE sees the state before it or after it,
-//! never a mixture.
+//! append WRITEs each land whole at an end; a GETATTR, OPEN or READDIR in
+//! flight with a RENAME or DELETE sees the state before it or after it,
+//! never a mixture; of a create and a MKDIR of one name exactly one
+//! succeeds and the name is one entry of its kind; and a create in a
+//! directory being renamed lands under its new name or is refused. Each
+//! round meets in a directory of its own, `meet/r<round>`.
 //!
 //! **Playing it.** The combined tree is mounted through the adapter. The
 //! clients, one thread each with its own mapping of the ring
@@ -1184,8 +1187,17 @@ fn record(k: usize, j: usize) -> Vec<u8> {
 /// requests in flight together take effect: atomically.
 fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Result<(), String> {
     let data = n.min(limit.max(1) as usize).max(1);
-    let path = |what: &str| format!("{MEET_DIR}/{what}{r}");
+    // Each round in a directory of its own, so a listing of it holds this
+    // round's names only, however many rounds came before.
+    let here = format!("{MEET_DIR}/r{r}");
+    let path = |what: &str| format!("{here}/{what}{r}");
     let fails = |what: &str, why: String| Err(format!("{what} (wire.md 2.8.1): {why}"));
+    let made = OwnedRequest::Mkdir {
+        root: RootId(0),
+        mode: 0o755,
+        path: here.clone(),
+    };
+    alone(ring, &made, cov)?.map_err(|st| format!("{made:?}: {st:?}"))?;
 
     // OPEN_EXCL creates of one name: exactly one succeeds, the rest find it.
     let excl = OwnedRequest::Open {
@@ -1433,7 +1445,7 @@ fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Re
         }
         reqs.push(OwnedRequest::ReadDir {
             root: RootId(0),
-            path: MEET_DIR.into(),
+            path: here.clone(),
         });
         let got = together(ring, &reqs, cov)?;
         if got[0] != Ok(OwnedReply::Empty) {
@@ -1441,14 +1453,15 @@ fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Re
         }
         let mut i = 1;
         for name in &watched {
+            // Each lookup whole, the file as it was or no file: separate
+            // requests may land on either side of the change.
             for g in &got[i..i + 2] {
-                let present = match g {
-                    Ok(OwnedReply::GetAttr(x)) if !x.found => false,
-                    Ok(OwnedReply::GetAttr(x)) if x.size == size && !x.is_dir => true,
-                    Err(Status::NotFound) => false,
+                match g {
+                    Ok(OwnedReply::GetAttr(x)) if !x.found => {}
+                    Ok(OwnedReply::GetAttr(x)) if x.size == size && !x.is_dir => {}
+                    Err(Status::NotFound) => {}
                     Ok(OwnedReply::Open(o)) if o.size == size && !o.is_dir => {
                         let _ = alone(ring, &OwnedRequest::Close { fh: o.fh }, cov)?;
-                        true
                     }
                     other => {
                         return fails(
@@ -1456,8 +1469,7 @@ fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Re
                             format!("got {}", render_got(other)),
                         )
                     }
-                };
-                let _ = present;
+                }
             }
             i += 2;
         }
@@ -1473,7 +1485,7 @@ fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Re
             };
             if mixed {
                 return fails(
-                    &format!("READDIR of {MEET_DIR} in flight with {change:?}"),
+                    &format!("READDIR of {here} in flight with {change:?}"),
                     format!(
                         "it lists {}, neither the state before nor the state after",
                         entries
@@ -1486,10 +1498,157 @@ fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Re
             }
         } else {
             return fails(
-                &format!("READDIR of {MEET_DIR} in flight with {change:?}"),
+                &format!("READDIR of {here} in flight with {change:?}"),
                 render_got(&got[i]),
             );
         }
+    }
+
+    kinds_meet(ring, &here, &path("kind"), cov)?;
+    parent_meet(ring, &path("d"), &path("e"), cov)?;
+    Ok(())
+}
+
+/// A create and a MKDIR of one missing name in flight together: at most one
+/// succeeds, and the name is then one entry of the winner's kind, listed
+/// once in `dir` (wire.md 2.8.1).
+fn kinds_meet(ring: &Attached, dir: &str, name: &str, cov: &mut Coverage) -> Result<(), String> {
+    let fails = |why: String| {
+        Err(format!(
+            "a create and a MKDIR of {name} at once (wire.md 2.8.1): {why}"
+        ))
+    };
+    let create = OwnedRequest::Open {
+        root: RootId(0),
+        flags: OpenFlags::WRITE | OpenFlags::CREATE,
+        path: name.to_string(),
+    };
+    let mkdir = OwnedRequest::Mkdir {
+        root: RootId(0),
+        mode: 0o755,
+        path: name.to_string(),
+    };
+    let got = together(ring, &[create, mkdir], cov)?;
+    let file = match &got[0] {
+        Ok(OwnedReply::Open(o)) if !o.is_dir => {
+            let _ = alone(ring, &OwnedRequest::Close { fh: o.fh }, cov)?;
+            true
+        }
+        Err(Status::IsDir | Status::IoError) => false,
+        other => return fails(format!("the create got {}", render_got(other))),
+    };
+    let made_dir = match &got[1] {
+        Ok(OwnedReply::Empty) => true,
+        Err(Status::IoError | Status::Exists) => false,
+        other => return fails(format!("the MKDIR got {}", render_got(other))),
+    };
+    if file == made_dir {
+        return fails(format!(
+            "the create {} and the MKDIR {}: one of them, never both or neither",
+            render_got(&got[0]),
+            render_got(&got[1])
+        ));
+    }
+    let attr = alone(
+        ring,
+        &OwnedRequest::GetAttr {
+            root: RootId(0),
+            path: name.to_string(),
+        },
+        cov,
+    )?;
+    if !matches!(&attr, Ok(OwnedReply::GetAttr(a)) if a.found && a.is_dir == made_dir) {
+        return fails(format!(
+            "the {} won, then GETATTR {}",
+            if file { "create" } else { "MKDIR" },
+            render_got(&attr)
+        ));
+    }
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    match alone(
+        ring,
+        &OwnedRequest::ReadDir {
+            root: RootId(0),
+            path: dir.to_string(),
+        },
+        cov,
+    )? {
+        Ok(OwnedReply::ReadDir(es)) => {
+            let n = es.iter().filter(|e| e.name == leaf).count();
+            if n != 1 {
+                return fails(format!("READDIR of {dir} lists it {n} times"));
+            }
+        }
+        other => return fails(format!("READDIR of {dir} got {}", render_got(&other))),
+    }
+    Ok(())
+}
+
+/// A create of `from/x` in flight with a RENAME of the directory `from` to
+/// `to`: the file lands under `to` (the create first) or nowhere (the
+/// RENAME first, the create's parent missing), never under `from`, which
+/// is gone (wire.md 2.8.1).
+fn parent_meet(ring: &Attached, from: &str, to: &str, cov: &mut Coverage) -> Result<(), String> {
+    let fails = |why: String| {
+        Err(format!(
+            "a create in {from} with a RENAME of it to {to} at once (wire.md 2.8.1): {why}"
+        ))
+    };
+    let made = OwnedRequest::Mkdir {
+        root: RootId(0),
+        mode: 0o755,
+        path: from.to_string(),
+    };
+    alone(ring, &made, cov)?.map_err(|st| format!("{made:?}: {st:?}"))?;
+    let create = OwnedRequest::Open {
+        root: RootId(0),
+        flags: OpenFlags::WRITE | OpenFlags::CREATE,
+        path: format!("{from}/x"),
+    };
+    let rename = OwnedRequest::Rename {
+        root: RootId(0),
+        from: from.to_string(),
+        to: to.to_string(),
+    };
+    let got = together(ring, &[create, rename], cov)?;
+    if got[1] != Ok(OwnedReply::Empty) {
+        return fails(format!("the RENAME got {}", render_got(&got[1])));
+    }
+    let created = match &got[0] {
+        Ok(OwnedReply::Open(o)) => {
+            let _ = alone(ring, &OwnedRequest::Close { fh: o.fh }, cov)?;
+            true
+        }
+        Err(Status::NotFound) => false,
+        other => return fails(format!("the create got {}", render_got(other))),
+    };
+    let found = |p: String, cov: &mut Coverage| -> Result<bool, String> {
+        match alone(
+            ring,
+            &OwnedRequest::GetAttr {
+                root: RootId(0),
+                path: p.clone(),
+            },
+            cov,
+        )? {
+            Ok(OwnedReply::GetAttr(a)) => Ok(a.found),
+            Err(Status::NotFound) => Ok(false),
+            other => Err(format!("GETATTR {p} got {}", render_got(&other))),
+        }
+    };
+    let (old, new, old_dir) = (
+        found(format!("{from}/x"), cov)?,
+        found(format!("{to}/x"), cov)?,
+        found(from.to_string(), cov)?,
+    );
+    if old || old_dir || new != created {
+        return fails(format!(
+            "the create {}, then {from} {}, {from}/x {}, {to}/x {}",
+            render_got(&got[0]),
+            if old_dir { "found" } else { "missing" },
+            if old { "found" } else { "missing" },
+            if new { "found" } else { "missing" },
+        ));
     }
     Ok(())
 }

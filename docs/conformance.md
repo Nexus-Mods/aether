@@ -66,6 +66,10 @@ For every scenario, and for each generated case and the malformed part:
   data, and must lie inside the mapping (2.6). An error status must come
   with an empty payload (3.1: "A director answers every error with an empty
   payload"), whatever the step expects.
+- **`immutable` on a file a writable provider holds** (3.4.3: "never set
+  it for a file a writable provider holds"): an OPEN reply that sets it for
+  a path under one of the tree's `writable` entries fails, whatever the step
+  expects.
 - **What an OK reply holds beyond what the shim decodes.** The shim's file-op
   decoders ignore trailing bytes (3.2, "Lenient vs strict") and it reads
   REG_KEY's children into a map (4.3), so a reply can decode and still not be
@@ -119,7 +123,7 @@ are the only exceptions, and each is allowed by the wire.md text quoted:
 |---|---|---|
 | OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. Never 0. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles"; the shim keeps 0 for a directory it made. |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and where a director starts it is its own. |
-| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). The reply's other flag bits and bytes 18-19 must be zero. | 3.4.3: "Never set it for a write open or a directory"; "other bits zero"; 7. |
+| OPEN `immutable` | Not compared, but must be clear on a write open, on a directory and on a file under a `writable` entry, and reads through immutable handles are checked against each other ("What the shim caches", above). The reply's other flag bits and bytes 18-19 must be zero. | 3.4.3: "Never set it for a write open or a directory"; "never set it for a file a writable provider holds"; "other bits zero"; 7. |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared, but below 2^40 (the year 36812): a time in milliseconds is past it. | 3.2: "Which time a director reports for a path, if any, is the director's to choose"; "`mtime` is seconds since the Unix epoch". |
 | READ inline or bulk | Compared by data. | 3.4.4: the client "must accept either whatever flag it sent". |
@@ -195,7 +199,7 @@ over a section (the tests and CI run both).
 | `multi-registry-gen` | one process's registry writes move `reg_gen` in another's mapping and change its answers (2.8.1, 4.3, 4.5) |
 | `multi-registry-overlay` | a key one process creates, gives values and renames, another reads under both names and deletes, and the first sees deleted (2.8.1, 4.3, 4.5) |
 | `handles-two-on-one-file`, `append-tracks-end`, `regrow-after-truncate` | two handles open on one file: each sees the other's WRITEs and SETATTRs at once, sizes live while both are open, an append lands at the end as it is now, a regrown file reads zeros where a cut was (3.4.1, 3.4.3 to 3.4.6) |
-| `handles-deleted-file`, `handles-follow-rename` | a handle on a deleted or replaced file never reaches the file later at its name; a handle follows its file through a rename, its own or a directory's (3.4.7, 3.4.8) |
+| `handles-deleted-file`, `handles-deleted-file-shared`, `handles-follow-rename` | a handle on a deleted or replaced file never reaches the file later at its name, and two such handles share the file a director keeps; a handle follows its file through a rename, its own or a directory's (3.4.7, 3.4.8) |
 | `rename-edges`, `rename-x-edges`, `mkdir-child-rename-parent` | RENAME onto an ancestor, onto itself, a directory onto a file, a missing parent, two writable entries of one root; RENAME_X onto a directory, with a read-only end, in the caller's spelling; a renamed directory's old name made again is empty (3.4.7, 3.4.9, 3.4.13) |
 | `open-dirs-and-parents`, `paths-through-files` | write opens of directories, `OPEN_EXCL` and `OPEN_TRUNC` alone, read opens with write bits, creates under a missing parent or a file; paths below a file and READDIR of what is not a directory (3.4.2, 3.4.3, 3.4.9, 3.5) |
 | `names-stream-writable`, `case-fold-created` | named streams on a writable path, never stored as entries; names created in non-ASCII case pairs and a name a store may fold onto another (3.2) |
@@ -223,7 +227,7 @@ director gave, unless the answers leave the same state:
 | A read open with `OPEN_TRUNC` or `OPEN_CREATE` | the bit ignored, `ST_BAD_REQUEST` | 3.4.3 | `open-dirs-and-parents` |
 | A file renamed onto an empty directory | `ST_OK` (replaced), `ST_IO_ERROR` | 3.4.7 | `rename-edges`, `handles-follow-rename` |
 | RENAME_X onto a directory | `ST_IS_DIR`, `ST_IO_ERROR` | 3.4.13 | `rename-x-edges` |
-| READ, WRITE or SETATTR through a handle whose file was deleted or replaced | the file's last bytes (its writes seen by nobody), `ST_IO_ERROR`, `ST_NOT_FOUND` | 3.4.8 | `handles-deleted-file`, `handles-follow-rename` |
+| READ, WRITE or SETATTR through a handle whose file was deleted or replaced | the kept file's bytes (shared by its open handles, reached by no name), `ST_IO_ERROR`, `ST_NOT_FOUND` | 3.4.8 | `handles-deleted-file`, `handles-deleted-file-shared`, `handles-follow-rename` |
 | A WRITE or SETATTR to a size that cannot exist | `ST_NO_SPACE`, `ST_BAD_REQUEST` | 3.4.5, 3.4.6 | `write-offset-huge` |
 | WRITE through a handle opened without `OPEN_WRITE`, on a file a writable provider holds | honoured, `ST_READ_ONLY` | 3.4.5 | `write-read-handle` |
 | MKDIR of an existing directory no writable provider serves | `ST_EXISTS`, `ST_READ_ONLY` | 3.4.9 | `mkdir-existing-readonly` |
@@ -355,9 +359,11 @@ Each answer must have its own file's size or bytes.
 Before the sweep, the clients meet: requests on one name, file or key, in
 flight together, each from a slot of its own (data requests below the data
 limit), whose outcome wire.md 2.8.1 makes predictable, since each request
-takes effect atomically. Each meeting is in the writable directory `meet/`
-of root 0, or below a key of the registry layer the combined tree has for
-them (the cases' own trees have none), with names of the round's own:
+takes effect atomically. Each round's meetings are in a directory of its
+own, `meet/r<round>/`, made at the round's start in the writable directory
+`meet/` of root 0 (so a listing holds that round's names only, however many
+rounds came before), or below a key of the registry layer the combined tree
+has for them (the cases' own trees have none):
 
 | Meeting | What must hold (2.8.1) |
 |---|---|
@@ -367,6 +373,8 @@ them (the cases' own trees have none), with names of the round's own:
 | WRITEs to disjoint, unaligned ranges of one file, each through a handle of its own | every one `written` whole, and the file read back inline and in bulk holds them all |
 | append WRITEs of records, each tagged with its client and number, in waves | the file is the records' total length, and every record is whole |
 | RENAME, then DELETE, of a file with a GETATTR, an OPEN and a READDIR of its names | each lookup the file whole or not there, and the listing never both names or neither |
+| a create (`write`, `create`) and a MKDIR of one new name | exactly one succeeds, GETATTR finds the winner's kind, and the round's listing has the name once |
+| a create of `d/x` and a RENAME of the directory `d` to `e` | the RENAME `ST_OK`; the create `ST_OK` with `e/x` there, or `ST_NOT_FOUND` with `x` nowhere; never `d` or `d/x` after |
 
 **What fails a round**, besides a step whose answer is not its client's
 expectation:

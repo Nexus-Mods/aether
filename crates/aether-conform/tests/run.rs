@@ -454,10 +454,11 @@ fn committed_against(how: &str) -> Vec<(String, bool, Vec<String>)> {
         .collect()
 }
 
-/// wire.md 3.4.3: a director that calls a writable file's read opens
-/// immutable under one `mount_gen`, and lets the file change while its size
-/// stays, fails the read-cache check, and only that: in the scenarios that
-/// read a file back through a read open after changing it.
+/// wire.md 3.4.3: `immutable` is never set for a file a writable provider
+/// holds. A director that calls a writable file's read opens immutable
+/// fails the direct check on every such OPEN and, where the file then
+/// changes at its size, the read-cache check; both cite 3.4.3, and the
+/// scenarios with no such OPEN pass.
 #[test]
 fn a_director_marking_writable_files_immutable_fails_the_read_cache_check() {
     let results = committed_against("stale-immutable");
@@ -466,24 +467,32 @@ fn a_director_marking_writable_files_immutable_fails_the_read_cache_check() {
         .filter(|(_, p, _)| !p)
         .map(|(n, ..)| n.as_str())
         .collect();
-    assert_eq!(
-        failed,
-        [
-            "bulk-read-sees-writes",
-            "cache-content-change-same-size",
-            "cache-overwrite-same-size",
-            "truncate-then-read",
-            "write-then-read"
-        ],
-        "{results:?}"
-    );
-    for (name, _, notes) in results.iter().filter(|(_, p, _)| !p) {
-        assert!(!notes.is_empty(), "{name}");
-        for n in notes {
-            assert!(n.contains("wire.md 3.4.3"), "{name}: {n}");
-            assert!(n.contains("stale bytes"), "{name}: {n}");
-        }
+    for name in [
+        "cache-overwrite-same-size",
+        "cache-content-change-same-size",
+        "write-then-read",
+    ] {
+        assert!(failed.contains(&name), "{name}: {results:?}");
     }
+    for name in [
+        "cache-immutable-readonly",
+        "read-offset-extremes",
+        "heartbeat",
+    ] {
+        assert!(!failed.contains(&name), "{name}: {results:?}");
+    }
+    let notes: Vec<&String> = results.iter().flat_map(|(_, _, n)| n).collect();
+    assert!(
+        notes.iter().all(|n| n.contains("wire.md 3.4.3")),
+        "{notes:?}"
+    );
+    assert!(notes.iter().any(|n| n.contains("stale bytes")), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("a file a writable provider holds")),
+        "{notes:?}"
+    );
 }
 
 /// wire.md 4.5: a director that never moves `reg_gen` after a write fails
@@ -842,8 +851,9 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
     assert_eq!(failed(&entries), ["concurrent"], "{all}");
     // Failed for a reply in the wrong slot, not a timeout. Which mismatch
     // shows first depends on which two requests were swapped: another
-    // client's answer, a status meant for another request, or a payload of
-    // another opcode's shape that does not decode.
+    // client's answer, a status meant for another request, a payload of
+    // another opcode's shape that does not decode, or a meeting whose two
+    // requests got each other's answers.
     let concurrent = entry(&entries, "concurrent");
     let error = concurrent.2.as_deref().unwrap_or("");
     assert!(!error.contains("no answer within"), "{concurrent:?}");
@@ -853,6 +863,7 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
             || s.starts_with("none of the allowed")
             || s.contains("does not decode")
             || s.contains(" got Got(")
+            || s.contains("meeting:")
     };
     assert!(
         mismatch(error) || concurrent.3.iter().any(|n| mismatch(n)),
@@ -1625,4 +1636,36 @@ fn a_director_sending_unsorted_key_children_fails() {
         notes.iter().any(|n| n.contains("sorted by `folded`")),
         "{notes:?}"
     );
+}
+
+/// wire.md 3.4.8: a director may keep a deleted or replaced file for its
+/// open handles, one file to all of them. One that does passes the
+/// committed suite and the generated cases.
+#[test]
+fn a_director_keeping_deleted_files_for_their_handles_passes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let failures = aether_testkit::tempdir().unwrap();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave keep-deleted",
+        &dir,
+        "20",
+        &[
+            "--generate",
+            "--cases",
+            "512",
+            "--seed",
+            "1",
+            "--failures",
+            failures.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// wire.md 3.4.8, 3.4.4: a kept file is one file to all its handles. A
+/// director keeping a copy per handle fails.
+#[test]
+fn a_director_keeping_a_copy_per_gone_handle_fails() {
+    caught_by("gone-handles-private", "handles-deleted-file-shared");
 }

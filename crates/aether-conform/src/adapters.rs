@@ -355,6 +355,23 @@ pub enum Break {
     /// REG_KEY replies list a node's children in reverse order (wire.md 4.3:
     /// "sorted by `folded` in byte order"), which the shim's map would hide.
     UnsortedChildren,
+    /// Not a broken rule: a file deleted, or replaced by a RENAME, while
+    /// handles are open on it is kept for them, one file they all read and
+    /// write, as NTFS keeps a file deleted with `FILE_SHARE_DELETE` (wire.md
+    /// 3.4.8). A run must pass it.
+    KeepDeleted,
+    /// A file deleted, or replaced by a RENAME, while handles are open on it
+    /// is kept as a copy per handle, so a WRITE through one is not seen
+    /// through another (wire.md 3.4.8: a kept file is one file to all its
+    /// handles; 3.4.4).
+    GoneHandlesPrivate,
+    /// An OPEN_CREATE of a missing name checks the name and its parent,
+    /// waits, then makes the file whatever happened meanwhile: a directory
+    /// made at the name is removed for it, a parent renamed away is made
+    /// again (wire.md 2.8.1: a create and a MKDIR of one name leave one
+    /// entry of one kind; a create under a renamed directory lands under one
+    /// of its names or is refused).
+    RacyCreate,
 }
 
 impl Break {
@@ -434,6 +451,9 @@ impl Break {
             "delete-pending-until-close" => Some(Break::DeletePendingUntilClose),
             "reply-trailing" => Some(Break::ReplyTrailing),
             "unsorted-children" => Some(Break::UnsortedChildren),
+            "keep-deleted" => Some(Break::KeepDeleted),
+            "gone-handles-private" => Some(Break::GoneHandlesPrivate),
+            "racy-create" => Some(Break::RacyCreate),
             _ => None,
         }
     }
@@ -549,6 +569,7 @@ fn mount(
         held: Arc::default(),
         view: Vec::new(),
         echo: String::new(),
+        arrivals: Arc::default(),
         tree: Arc::new(Mounts::of(&s.tree)),
     };
 
@@ -738,6 +759,7 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 held: d.held.clone(),
                 view: Vec::new(),
                 echo: String::new(),
+                arrivals: d.arrivals.clone(),
                 tree: d.tree.clone(),
             };
             std::thread::spawn(move || {
@@ -1117,6 +1139,9 @@ struct Served {
     view: Vec<u8>,
     /// [`Break::SkipPastEndEcho`]'s STORED_NAMES answer.
     echo: String,
+    /// How many file and registry requests have reached the serve threads,
+    /// shared by them: what the breaks of 2.8.1's atomicity wait on.
+    arrivals: Arc<std::sync::atomic::AtomicU64>,
     /// The tree's files as mounted, by (root, folded path), and its roots:
     /// for the breaks that copy mounted bytes or act on every root.
     tree: Arc<Mounts>,
@@ -1187,15 +1212,23 @@ struct Held {
     /// [`Break::BulkCache`]'s bulk replies, by (root, folded path, offset,
     /// length).
     bulk: BTreeMap<(u32, String, u64, u32), Vec<u8>>,
+    /// [`Break::KeepDeleted`]'s and [`Break::GoneHandlesPrivate`]'s kept
+    /// files, and which one each handle on a gone file reads.
+    kept: Vec<Vec<u8>>,
+    kept_by: BTreeMap<u64, usize>,
 }
 
 /// What was below a directory: each path below it as stored, and a file's
 /// bytes (`None` for a directory), parents first.
 type Subtree = Vec<(String, Option<Vec<u8>>)>;
 
-/// How long the breaks of 2.8.1's atomicity wait between the halves of a
-/// request, so that a request in flight with it falls between them.
+/// How long the breaks of 2.8.1's atomicity hold the middle of a request
+/// once another request has arrived, so that it is served in that middle.
 const RACE_HOLD: std::time::Duration = std::time::Duration::from_millis(30);
+/// How long they wait for another request to arrive at all: a meeting's
+/// requests are in flight together, so one comes at once unless every
+/// other was served already.
+const RACE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A registry key the breaks write to and delete, which no scenario names.
 const HIDDEN_KEY: &str = r"\Registry\Machine\Software\AetherConformBreak";
@@ -1386,6 +1419,70 @@ impl Served {
         }
     }
 
+    /// A request has reached this serve thread.
+    fn arrive(&self) {
+        self.arrivals.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The middle of a request a 2.8.1 break splits: held until another
+    /// request has arrived (at most [`RACE_WAIT`]) and then [`RACE_HOLD`]
+    /// more, so that a request in flight with this one is served while the
+    /// state is half changed, whatever the scheduling.
+    fn hold_for_another(&self) {
+        let at = self.arrivals.load(Ordering::Acquire);
+        let since = std::time::Instant::now();
+        while self.arrivals.load(Ordering::Acquire) == at && since.elapsed() < RACE_WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        std::thread::sleep(RACE_HOLD);
+    }
+
+    /// For [`Break::KeepDeleted`] and [`Break::GoneHandlesPrivate`]: the
+    /// bytes of every open file handle the reference still serves, before
+    /// a request that may end a file.
+    fn live_files(&mut self) -> BTreeMap<u64, Vec<u8>> {
+        if !matches!(
+            self.broken,
+            Some(Break::KeepDeleted | Break::GoneHandlesPrivate)
+        ) {
+            return BTreeMap::new();
+        }
+        let fhs: Vec<u64> = self.held().paths.keys().copied().collect();
+        let mut out = BTreeMap::new();
+        for fh in fhs {
+            if self.held().kept_by.contains_key(&fh) {
+                continue;
+            }
+            if let Ok(b) = self.bytes(fh) {
+                out.insert(fh, b);
+            }
+        }
+        out
+    }
+
+    /// The handles of `before` whose file the request just ended keep it:
+    /// one copy for all ([`Break::KeepDeleted`]) or one each
+    /// ([`Break::GoneHandlesPrivate`]). A DELETE or RENAME ends at most one
+    /// file.
+    fn keep_gone(&mut self, before: BTreeMap<u64, Vec<u8>>) {
+        let mut shared = None;
+        for (fh, bytes) in before {
+            if self.bytes(fh).is_ok() {
+                continue;
+            }
+            let mut h = self.held();
+            let at = match (self.broken, shared) {
+                (Some(Break::KeepDeleted), Some(at)) => at,
+                _ => {
+                    h.kept.push(bytes);
+                    h.kept.len() - 1
+                }
+            };
+            shared = Some(at);
+            h.kept_by.insert(fh, at);
+        }
+    }
+
     /// [`Break::WriteAtClose`]: the WRITEs handle `fh` kept, made now.
     fn flush(&mut self, fh: u64) -> Result<(), Status> {
         let kept = self.held().pending.remove(&fh).unwrap_or_default();
@@ -1431,6 +1528,7 @@ impl Served {
 
 impl Director for Served {
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
+        self.arrive();
         let path = self.base(path);
         if self.broken == Some(Break::RootNotFound) && path == "." {
             return Ok(AttrResp {
@@ -1472,6 +1570,7 @@ impl Director for Served {
         Ok(a)
     }
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
+        self.arrive();
         if self.broken == Some(Break::ReaddirFileListsItself) {
             if let Ok(a) = self.reference.get_attr(root, path) {
                 if a.found && !a.is_dir {
@@ -1525,6 +1624,7 @@ impl Director for Served {
         Ok(())
     }
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
+        self.arrive();
         let path = self.base(path);
         let own_end = self.broken == Some(Break::AppendOwnEnd) && flags.contains(OpenFlags::APPEND);
         let flags = if own_end {
@@ -1546,11 +1646,23 @@ impl Director for Served {
             && flags.contains(OpenFlags::CREATE | OpenFlags::EXCL)
             && !existed
         {
-            std::thread::sleep(RACE_HOLD);
+            self.hold_for_another();
             flags - OpenFlags::EXCL
         } else {
             flags
         };
+        if self.broken == Some(Break::RacyCreate) && flags.contains(OpenFlags::CREATE) && !existed {
+            let parent = path.rsplit_once('/').map(|(p, _)| p.to_string());
+            self.hold_for_another();
+            if self.is_dir(root, path) {
+                let _ = self.reference.delete(root, path);
+            }
+            if let Some(p) = parent {
+                if !self.is_dir(root, &p) {
+                    let _ = self.reference.mkdir(root, 0o755, &p);
+                }
+            }
+        }
         let mut opened = self.reference.open(root, flags, path);
         if opened == Err(Status::NotFound)
             && flags.contains(OpenFlags::CREATE)
@@ -1615,6 +1727,7 @@ impl Director for Served {
         offset: u64,
         len: u32,
     ) -> Result<ReadReply<'_>, Status> {
+        self.arrive();
         let at = match self.broken {
             Some(Break::BankZero) => ReadSlot { slot: 0, ..at },
             _ => at,
@@ -1622,7 +1735,16 @@ impl Director for Served {
         if self.broken == Some(Break::FhZeroOk) && fh == 0 {
             return Ok(ReadReply::Inline(&[]));
         }
+        let slot_cap = at.inline_cap;
         let fh = self.fh_in(fh);
+        let gone = self.held().kept_by.get(&fh).copied();
+        if let Some(at) = gone {
+            let b = self.held().kept[at].clone();
+            let start = offset.min(b.len() as u64) as usize;
+            let n = (b.len() - start).min(len as usize).min(slot_cap);
+            self.view = b[start..start + n].to_vec();
+            return Ok(ReadReply::Inline(&self.view));
+        }
         let fh = self.at_path(fh, false)?.unwrap_or(fh);
         let kept = self.held().pending.get(&fh).cloned();
         if let Some(kept) = kept {
@@ -1723,10 +1845,24 @@ impl Director for Served {
         }
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
+        self.arrive();
         if self.broken == Some(Break::FhZeroOk) && fh == 0 {
             return Ok(data.len() as u32);
         }
         let fh = self.fh_in(fh);
+        let gone = self.held().kept_by.get(&fh).copied();
+        if let Some(at) = gone {
+            let mut h = self.held();
+            let b = &mut h.kept[at];
+            let end = offset as usize + data.len();
+            if !data.is_empty() {
+                if b.len() < end {
+                    b.resize(end, 0);
+                }
+                b[offset as usize..end].copy_from_slice(data);
+            }
+            return Ok(data.len() as u32);
+        }
         let fh = self.at_path(fh, true)?.unwrap_or(fh);
         if self.broken == Some(Break::WriteAtClose) && !data.is_empty() {
             // Checked as the reference checks it, then kept.
@@ -1756,7 +1892,7 @@ impl Director for Served {
         {
             let half = data.len() / 2;
             self.reference.write(fh, 0, &data[..half])?;
-            std::thread::sleep(RACE_HOLD);
+            self.hold_for_another();
             self.reference.write(fh, 0, &data[half..])?;
             return Ok(data.len() as u32);
         }
@@ -1766,7 +1902,7 @@ impl Director for Served {
             && !self.held().appends.contains(&fh)
         {
             let mut whole = self.bytes(fh)?;
-            std::thread::sleep(RACE_HOLD);
+            self.hold_for_another();
             let end = offset as usize + data.len();
             if whole.len() < end {
                 whole.resize(end, 0);
@@ -1819,10 +1955,16 @@ impl Director for Served {
         self.reference.write(fh, offset, data)
     }
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
+        self.arrive();
         if self.broken == Some(Break::FhZeroOk) && fh == 0 {
             return Ok(());
         }
         let fh = self.fh_in(fh);
+        let gone = self.held().kept_by.get(&fh).copied();
+        if let Some(at) = gone {
+            self.held().kept[at].resize(size as usize, 0);
+            return Ok(());
+        }
         let fh = self.at_path(fh, true)?.unwrap_or(fh);
         self.flush(fh)?;
         if self.broken == Some(Break::HugeWriteOk) && size > aether_refdirector::MAX_FILE_LEN as u64
@@ -1867,6 +2009,7 @@ impl Director for Served {
         }
     }
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
+        self.arrive();
         let (f, t) = (aether_casefold::fold(from), aether_casefold::fold(to));
         let broken = self.broken;
         match broken {
@@ -1900,7 +2043,7 @@ impl Director for Served {
                 {
                     let _ = self.reference.write(o.fh, 0, &bytes.unwrap_or_default());
                     let _ = self.reference.close(o.fh);
-                    std::thread::sleep(RACE_HOLD);
+                    self.hold_for_another();
                     let _ = self.reference.delete(root, from);
                 }
                 return Ok(());
@@ -1942,7 +2085,9 @@ impl Director for Served {
         } else {
             Vec::new()
         };
+        let live = self.live_files();
         self.reference.rename(root, from, to)?;
+        self.keep_gone(live);
         if ghosts {
             self.held()
                 .ghosts
@@ -1959,6 +2104,7 @@ impl Director for Served {
         Ok(())
     }
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
+        self.arrive();
         let key = (root.0, aether_casefold::fold(path));
         if self.broken == Some(Break::DeletePendingUntilClose) && self.is_dir(root, path) {
             let below = format!("{}/", key.1);
@@ -1979,7 +2125,11 @@ impl Director for Served {
                     .ok()
             })
             .flatten();
+        let live = self.live_files();
         let r = self.reference.delete(root, path);
+        if r.is_ok() {
+            self.keep_gone(live);
+        }
         if r == Err(Status::IoError)
             && self.broken == Some(Break::DeleteDirIgnoresEmptyDirs)
             && self.is_dir(root, path)
@@ -2011,6 +2161,7 @@ impl Director for Served {
         Ok(())
     }
     fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
+        self.arrive();
         let mut made = self.reference.mkdir(root, mode, path);
         if made == Err(Status::NotFound) && self.no_parent(root, path)? {
             made = self.reference.mkdir(root, mode, path);
@@ -2043,11 +2194,13 @@ impl Director for Served {
         Ok(())
     }
     fn close(&mut self, fh: u64) -> Result<(), Status> {
+        self.arrive();
         if self.broken == Some(Break::FhZeroOk) && fh == 0 {
             return Ok(());
         }
         let fh = self.fh_in(fh);
         let _ = self.flush(fh);
+        self.held().kept_by.remove(&fh);
         self.held().appends.remove(&fh);
         let at = self.held().by_path.remove(&fh).and_then(|e| e.3);
         if let Some(t) = at {
@@ -2073,6 +2226,7 @@ impl Director for Served {
         self.reference.heartbeat()
     }
     fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
+        self.arrive();
         if self.broken == Some(Break::SkipPastEndEcho) && skip as usize >= path.split('/').count() {
             self.echo = path.rsplit('/').next().unwrap_or(path).to_string();
             return Ok(&self.echo);
@@ -2102,10 +2256,12 @@ impl Director for Served {
         self.reference.stored_names(root, skip, path)
     }
     fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {
+        self.arrive();
         self.hive(path)?;
         self.reference.reg_lookup(path)
     }
     fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
+        self.arrive();
         self.hive(path)?;
         // Counted once the answer is made, so a write let go by the count
         // cannot reach it.
@@ -2124,6 +2280,7 @@ impl Director for Served {
         ty: u32,
         data: &[u8],
     ) -> Result<u64, Status> {
+        self.arrive();
         if let (Some(Break::BumpBeforeWrite), Some(ring)) = (self.broken, &self.ring) {
             let (n, cv) = &*self.reg_reads;
             let reads = n.lock().unwrap_or_else(|e| e.into_inner());
@@ -2165,6 +2322,7 @@ impl Director for Served {
         self.refused(r)
     }
     fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {
+        self.arrive();
         if self.broken == Some(Break::ValueNameBytes) && name.len() > 16_383 {
             return Err(Status::BadRequest);
         }
@@ -2172,13 +2330,14 @@ impl Director for Served {
         self.refused(r)
     }
     fn reg_create_key(&mut self, path: &str, volatile: bool) -> Result<u64, Status> {
+        self.arrive();
         if self.broken == Some(Break::RacyRegCreate)
             && self
                 .reference
                 .reg_lookup(path)
                 .is_ok_and(|l| l.state == aether_protocol::Lookup::Absent)
         {
-            std::thread::sleep(RACE_HOLD);
+            self.hold_for_another();
             return match self.reference.reg_create_key(path, volatile) {
                 Err(Status::Exists) => self.reference.reg_lookup(path).map(|l| l.version),
                 r => r,
@@ -2198,6 +2357,7 @@ impl Director for Served {
         self.refused(r)
     }
     fn reg_delete_key(&mut self, path: &str) -> Result<u64, Status> {
+        self.arrive();
         if self.broken == Some(Break::DeleteUnrecordedNotFound)
             && path.split('\\').count() <= 64
             && path.split('\\').all(|c| c.chars().count() <= 255)
@@ -2233,6 +2393,7 @@ impl Director for Served {
         self.refused(r)
     }
     fn reg_rename_key(&mut self, path: &str, new_leaf: &str) -> Result<u64, Status> {
+        self.arrive();
         let r = self.reference.reg_rename_key(path, new_leaf);
         if r.is_ok() && self.broken == Some(Break::RenameUnchanged) {
             self.held().renamed_away.insert(aether_casefold::fold(path));
@@ -2245,6 +2406,7 @@ impl Director for Served {
         subtree: bool,
         since: u64,
     ) -> Result<ChangedReply, Status> {
+        self.arrive();
         let mut c = self.reference.reg_changed(path, subtree, since)?;
         if self.broken == Some(Break::RenameUnchanged)
             && self
@@ -2263,6 +2425,7 @@ impl Director for Served {
         from: &str,
         to: &str,
     ) -> Result<(), Status> {
+        self.arrive();
         if self.broken == Some(Break::RenameXOntoDirOk)
             && from_root != to_root
             && self.is_dir(to_root, to)
@@ -2468,6 +2631,7 @@ mod tests {
             held: Arc::default(),
             view: Vec::new(),
             echo: String::new(),
+            arrivals: Arc::default(),
             tree: Arc::default(),
         };
         let two = Served {
@@ -2481,6 +2645,7 @@ mod tests {
             held: one.held.clone(),
             view: Vec::new(),
             echo: String::new(),
+            arrivals: one.arrivals.clone(),
             tree: one.tree.clone(),
             ..one
         };

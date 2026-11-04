@@ -137,7 +137,7 @@ text quoted from the section named; there are no others.
 |---|---|---|
 | OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number: the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. Never 0 (3.4.3: the shim keeps 0 for a directory it made). | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles" |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; where a director starts it is its own |
-| OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory" |
+| OPEN `immutable` | Not compared, except that it must be clear on a write open, on a directory and on a file under a `writable` entry; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory"; "never set it for a file a writable provider holds" |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared (but it must be below 2^40, the year 36812, as seconds are: 3.2, "`mtime` is seconds since the Unix epoch"), and not checked for changed or unchanged after a write either: the time is the director's. A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first. | 3.4.4: the client "must accept either whatever flag it sent" |
@@ -160,7 +160,7 @@ state):
 | A read open with `trunc` or `create` | the bit ignored, or `bad-request` | 3.4.3 |
 | A file renamed onto an empty directory | `ok` (replaced) or `io-error` | 3.4.7 |
 | RENAME_X onto a directory | `is-dir` or `io-error` | 3.4.13 |
-| READ, WRITE, SETATTR through a handle whose file was deleted or replaced | the file's last bytes (writes seen by nobody), `io-error` or `not-found` | 3.4.8 |
+| READ, WRITE, SETATTR through a handle whose file was deleted or replaced | the kept file's bytes (shared by its open handles, reached by no name), `io-error` or `not-found` | 3.4.8 |
 | A WRITE or SETATTR to a size that cannot exist | `no-space` or `bad-request` | 3.4.5, 3.4.6 |
 | WRITE or SETATTR through a handle opened without `write`, on a file a writable provider holds | honoured, or `read-only` | 3.4.5 |
 | MKDIR of an existing directory no writable provider serves | `exists` or `read-only` | 3.4.9 |
@@ -206,7 +206,7 @@ what it checks and cites wire.md.
 | READDIR | `readdir-listing`, `readdir-case`, `readdir-roots-and-changes`, `readdir-unknown-root`, `paths-through-files` |
 | OPEN | `open-read`, `open-flags-zero`, `open-errors`, `open-write-existing-readonly-path`, `open-dirs-and-parents` |
 | READ | `read-inline`, `read-eof`, `read-bulk`, `read-bulk-threshold`, `read-offset-extremes` |
-| Handles | `handles-unique`, `handles-bad`, `handles-closed`, `handles-dir`, `handles-fh-zero`, `handles-two-on-one-file`, `handles-deleted-file`, `handles-follow-rename` |
+| Handles | `handles-unique`, `handles-bad`, `handles-closed`, `handles-dir`, `handles-fh-zero`, `handles-two-on-one-file`, `handles-deleted-file`, `handles-deleted-file-shared`, `handles-follow-rename` |
 | Writing and reading back | `write-create`, `write-overwrite`, `write-append`, `write-trunc`, `write-setattr`, `write-setattr-size`, `write-growth`, `write-only-read`, `write-read-handle`, `write-offset-huge`, `write-case-spelling`, `write-excl-fold`, `write-then-read`, `append-tracks-end`, `regrow-after-truncate`, `truncate-then-read`, `extend-then-read-gap`, `bulk-read-sees-writes` |
 | The read cache | `cache-immutable-readonly`, `cache-overwrite-same-size`, `cache-content-change-same-size` |
 | RENAME | `rename-file`, `rename-dir`, `rename-replace`, `rename-respell`, `rename-refused`, `rename-root`, `rename-unknown-root`, `rename-onto-full-dir`, `rename-case-fold-source`, `rename-edges`, `write-rename-read`, `rename-dir-open-child`, `rename-dir-case-only` |
@@ -229,7 +229,7 @@ of their own, to be read as the contract's example of them; generated cases
 | Truncate, then read | `truncate-then-read` |
 | Extend past the end, then read the gap | `extend-then-read-gap` |
 | Two handles on one file | `handles-two-on-one-file` |
-| Delete with a handle open, then create again | `handles-deleted-file`, `delete-dir-after-open-child` |
+| Delete with a handle open, then create again | `handles-deleted-file`, `handles-deleted-file-shared`, `delete-dir-after-open-child` |
 | Rename a directory, then open a child by the old and the new path | `rename-dir-open-child` |
 | A case-only rename, then READDIR and STORED_NAMES | `rename-dir-case-only` |
 | RENAME_X across roots, then read in both | `rename-x-read-both` |

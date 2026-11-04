@@ -491,11 +491,16 @@ fn concurrent_disjoint_writes_all_land() {
 
 #[test]
 fn a_rename_is_never_seen_half_done() {
-    // A lookup in flight with the RENAME falls in its middle only when the
-    // threads interleave so, so the rounds are many.
-    a_meeting_catches(
-        "rename-in-steps",
-        32,
-        "neither the state before nor the state after",
-    );
+    // The break holds the RENAME's middle until another request of the
+    // meeting has arrived (`hold_for_another`), so a lookup lands in it
+    // whatever the scheduling; a few rounds are a margin, not a hope. The
+    // lookup may land while the copy at `from` is still being written, or
+    // the listing between the halves: either is a request in flight with the
+    // RENAME seeing a mixture.
+    a_meeting_catches("rename-in-steps", 8, "in flight with Rename");
+}
+
+#[test]
+fn a_create_racing_a_kind_change_or_a_rename_lands_whole() {
+    a_meeting_catches("racy-create", 8, "a create");
 }

@@ -429,6 +429,18 @@ pub(crate) fn play(
                 }
             }
         }
+        if let (Sent::Answer(Ok(OwnedReply::Open(o))), OwnedRequest::Open { root, path, .. }) =
+            (&sent, &req)
+        {
+            if o.immutable && !o.is_dir && writable_holds(&s.tree, *root, path) {
+                notes.insert(
+                    0,
+                    "immutable set on a file a writable provider holds (wire.md 3.4.3: \"never set it for a file a writable provider holds\")"
+                        .into(),
+                );
+                passed = false;
+            }
+        }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
         let answer = match &sent {
             Sent::Answer(Ok(_)) => Some("ok".to_string()),
@@ -451,6 +463,23 @@ pub(crate) fn play(
         });
     }
     Ok(())
+}
+
+/// Whether `path` in `root` lies under one of the tree's `writable`
+/// entries, so the writable provider holds it (contract/scenarios/README.md,
+/// "Who holds what"), compared by the fold (wire.md 3.2).
+fn writable_holds(
+    tree: &aether_refdirector::tree::Tree,
+    root: aether_protocol::RootId,
+    path: &str,
+) -> bool {
+    let p = aether_casefold::fold(path);
+    tree.roots.iter().filter(|r| r.id == root.0).any(|r| {
+        r.writable.iter().any(|w| {
+            let w = aether_casefold::fold(w);
+            w == "." || p == w || p.starts_with(&format!("{w}/"))
+        })
+    })
 }
 
 /// The scenario's clients other than 0, each a process of its own.

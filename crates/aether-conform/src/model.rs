@@ -802,21 +802,23 @@ struct Handle {
 /// file).
 #[derive(Debug, Clone)]
 struct Gone {
-    /// The file's bytes when it went: what a director that goes on reading
-    /// it serves.
+    /// The file's bytes when it went: what a director that keeps it serves.
     snap: Vec<u8>,
+    /// The file it held: every handle on one gone file shares it (wire.md
+    /// 3.4.8: a kept file is one file to all its handles).
+    of: u64,
     /// Deleted or replaced: a WRITE or SETATTR through it is `ST_OK`
-    /// (changing nothing anyone else sees), `ST_IO_ERROR` or
-    /// `ST_NOT_FOUND`. A handle a RENAME_X moved is never written through,
+    /// (seen by the file's other handles, by nothing through a name),
+    /// `ST_IO_ERROR` or `ST_NOT_FOUND`. A handle a RENAME_X moved is never written through,
     /// since a director that follows the file writes the file at `to`.
     writes: bool,
     /// The file a RENAME_X moved, which a director may follow: once
     /// anything changes it, the handle's READs depend on whether the
     /// director followed, and the handle is spent.
     follows: Option<u64>,
-    /// A WRITE or SETATTR went through it, or the file it may follow
-    /// changed: what it reads now depends on the director's choice, so it
-    /// is only written to and closed.
+    /// A WRITE or SETATTR went through it or another handle of its file, or
+    /// the file it may follow changed: what it reads now depends on the
+    /// director's choice, so it is only written to and closed.
     spent: bool,
 }
 
@@ -1347,6 +1349,25 @@ impl Gen {
             .collect()
     }
 
+    /// A WRITE or SETATTR went through gone handle `fh`. The oracle fails
+    /// it, but a director that keeps the file answers it `ST_OK`, and then
+    /// every handle of that file reads the change (wire.md 3.4.8): each of
+    /// them is spent, whatever the oracle answered.
+    fn spend(&mut self, fh: u64) {
+        let of = self
+            .handles
+            .get(&fh)
+            .and_then(|h| h.gone.as_ref())
+            .map(|g| g.of);
+        for h in self.handles.values_mut() {
+            if let Some(g) = h.gone.as_mut() {
+                if Some(g.of) == of {
+                    g.spent = true;
+                }
+            }
+        }
+    }
+
     /// The file `id` changed: a handle that may follow it there (RENAME_X)
     /// is spent.
     fn changed_file(&mut self, id: u64) {
@@ -1375,6 +1396,7 @@ impl Gen {
                     h.file = None;
                     h.gone = Some(Gone {
                         snap: snaps.get(&id).cloned().unwrap_or_default(),
+                        of: id,
                         writes: true,
                         follows: None,
                         spent: false,
@@ -1948,8 +1970,9 @@ impl Gen {
     }
 
     /// What a WRITE or SETATTR through a handle whose file was deleted or
-    /// replaced answers (3.4.8): `ST_OK`, changing nothing anyone else
-    /// sees, or a failure. The handle is spent after it.
+    /// replaced answers (3.4.8): `ST_OK`, seen by that file's other handles
+    /// and by nothing through a name, or a failure. Every handle of the file
+    /// is spent after it.
     fn orphan_change(&self, req: OwnedRequest, ok: OwnedReply, fh: u64) -> Option<Plan> {
         Some(Plan {
             req,
@@ -1959,7 +1982,7 @@ impl Gen {
                 Expect::Status(Status::NotFound),
             ]),
             wire: "3.4.8",
-            note: "a handle whose file is gone: changes nothing anyone else sees, or fails".into(),
+            note: "a handle whose file is gone: its file's other handles see it, no name does; or it fails".into(),
             effect: Effect::Spent(fh),
             then: Then::Nothing,
         })
@@ -3109,6 +3132,9 @@ impl Gen {
             self.record_version(r);
             self.apply(&plan, r, &snaps);
         }
+        if let Effect::Spent(fh) = plan.effect {
+            self.spend(fh);
+        }
         self.touch(&plan.req, &got);
         if got.is_ok() {
             match &plan.req {
@@ -3316,11 +3342,8 @@ impl Gen {
                 }
                 self.refresh();
             }
-            Effect::Spent(fh) => {
-                if let Some(g) = self.handles.get_mut(fh).and_then(|h| h.gone.as_mut()) {
-                    g.spent = true;
-                }
-            }
+            // Spent whatever the oracle answered (`Gen::spend`).
+            Effect::Spent(_) => {}
             Effect::Closed(fh) => {
                 self.handles.remove(fh);
                 self.closed.push(*fh);
@@ -3354,6 +3377,7 @@ impl Gen {
                                     h.file = None;
                                     h.gone = Some(Gone {
                                         snap: snaps.get(&id).cloned().unwrap_or_default(),
+                                        of: id,
                                         writes: false,
                                         follows: Some(id),
                                         spent: false,
@@ -3779,7 +3803,7 @@ mod tests {
     fn every_interaction_is_generated() {
         let notes = [
             "a handle whose file is gone: its last bytes, or a failure",
-            "a handle whose file is gone: changes nothing anyone else sees, or fails",
+            "a handle whose file is gone: its file's other handles see it, no name does; or it fails",
             "past the end: the gap reads as zeros",
             "an extension: it reads as zeros",
             "past the largest file a director can hold; the file is unchanged",

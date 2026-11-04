@@ -359,6 +359,38 @@ impl Graph {
     fn new_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// `Status::NotFound` unless the parent of table key `k` is a directory
+    /// (`docs/wire.md` 3.4.3, 3.4.7, 3.4.9, 3.4.13): a root, a directory the
+    /// table holds, or one it implies (something below it, or a writable
+    /// prefix inside it). A file there is a missing directory too.
+    fn parent_exists(
+        &self,
+        dirs: &HashMap<String, String>,
+        files: &HashMap<String, Entry>,
+        k: &str,
+    ) -> Result<(), Status> {
+        let (root, rest) = match k.strip_prefix('@').and_then(|r| r.split_once('/')) {
+            Some((id, rest)) => (&k[..id.len() + 2], rest),
+            None => ("", k),
+        };
+        let Some((parent, _)) = rest.rsplit_once('/') else {
+            return Ok(());
+        };
+        let parent = format!("{root}{parent}");
+        if files.contains_key(&parent) {
+            return Err(Status::NotFound);
+        }
+        let below = format!("{parent}/");
+        let implied = dirs.contains_key(&parent)
+            || has_children(dirs, files, &parent)
+            || self.writable.iter().any(|w| w.starts_with(&below));
+        if implied {
+            Ok(())
+        } else {
+            Err(Status::NotFound)
+        }
+    }
 }
 
 /// The table key the file with identity `id` is at now: `hint` (where its
@@ -675,7 +707,8 @@ impl Reference {
     /// says: the root at either end, or a target
     /// inside the source, is `Status::BadRequest`; a directory moves with
     /// everything under it; a non-empty directory at the target is
-    /// `Status::IoError`, and an empty one or a file is replaced. Across
+    /// `Status::IoError`, and an empty one or a file is replaced. A `to`
+    /// whose parent is missing, or a file, is `Status::NotFound`. Across
     /// roots (RENAME_X, which refuses a directory source before this) a
     /// directory at the target, the target root itself included, is
     /// `Status::IsDir` and a file is replaced.
@@ -704,6 +737,7 @@ impl Reference {
         if !g.is_writable(&from) || !g.is_writable(&to_key) {
             return Err(Status::ReadOnly);
         }
+        g.parent_exists(&dirs, &files, &to_key)?;
         // A root is a directory too, though `dirs` does not hold it: within a
         // root it was refused above, across roots it is `IsDir` here.
         if to_key != from && (is_dir_in(&dirs, &to_key) || is_root_key(&to_key)) {
@@ -928,6 +962,7 @@ impl Director for Reference {
                 if !flags.contains(OpenFlags::CREATE) {
                     return Err(Status::NotFound);
                 }
+                g.parent_exists(&dirs, &files, &vpath)?;
                 // A create keeps the caller's spelling (wire.md 3.2).
                 let name = created_spelling(&dirs, &files, root.0, path);
                 files.insert(
@@ -1136,8 +1171,8 @@ impl Director for Reference {
     /// `ST_EXISTS`); an existing file `Status::IoError` where a writable
     /// provider serves it and `Status::Exists` where none does (3.4.9);
     /// outside every writable prefix it refuses as a write
-    /// open does (3.4.3). Parents are not checked, as a creating OPEN does
-    /// not check them.
+    /// open does (3.4.3). A missing parent, or a file there, is
+    /// `Status::NotFound`, as for a creating OPEN.
     fn mkdir(&mut self, root: RootId, _: u32, path: &str) -> Result<(), Status> {
         let g = &self.graph;
         let vpath = g.resolve(root, path)?;
@@ -1163,6 +1198,7 @@ impl Director for Reference {
                 Status::ReadOnly
             });
         }
+        g.parent_exists(&dirs, &files, &vpath)?;
         let name = created_spelling(&dirs, &files, root.0, path);
         drop(files);
         dirs.insert(vpath, name);

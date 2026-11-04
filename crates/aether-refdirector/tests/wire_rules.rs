@@ -615,3 +615,53 @@ fn a_handle_follows_its_file_to_another_root() {
     assert_eq!(d.close(o), Ok(()));
     assert_eq!(d.close(fh), Ok(()));
 }
+
+/// 3.4.3, 3.4.7, 3.4.9, 3.4.13: a create whose parent is missing, or is a
+/// file, is refused (the reference answers Status::NotFound for both), and
+/// nothing is created or moved.
+#[test]
+fn a_create_under_a_missing_parent_or_a_file_is_not_found() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("saves")
+        .with("saves/a.txt", b"abc".to_vec(), ReadStyle::Whole)
+        .with_root(1);
+    for p in ["saves/no/such.txt", "saves/a.txt/below", "none/x"] {
+        assert_eq!(
+            d.open(R0, RW | OpenFlags::CREATE, p).map(|_| ()),
+            Err(Status::NotFound),
+            "{p}"
+        );
+        assert_eq!(d.mkdir(R0, 0o755, p), Err(Status::NotFound), "{p}");
+        // Below `from` itself, a `to` inside `from` is answered first.
+        let inside = p.starts_with("saves/a.txt/");
+        let want = if inside {
+            Status::BadRequest
+        } else {
+            Status::NotFound
+        };
+        assert_eq!(d.rename(R0, "saves/a.txt", p), Err(want), "{p}");
+        assert_eq!(
+            d.rename_x(R0, r1, "saves/a.txt", p),
+            Err(Status::NotFound),
+            "{p}"
+        );
+        assert!(!d.get_attr(R0, p).unwrap().found, "{p}");
+    }
+    assert_eq!(names(&mut d, R0, "."), vec![("saves".to_string(), true)]);
+    assert_eq!(
+        names(&mut d, R0, "saves"),
+        vec![("a.txt".to_string(), false)]
+    );
+    assert_eq!(names(&mut d, r1, "."), Vec::new());
+    assert_eq!(d.contents("saves/a.txt"), Some(b"abc".to_vec()));
+    // A parent the reference implies (a file below it, a writable prefix)
+    // is a directory.
+    let mut implied = Reference::new()
+        .writable_under("w/")
+        .with("data/deep/f", vec![1], ReadStyle::Whole)
+        .writable_under("data/");
+    assert!(implied.open(R0, RW | OpenFlags::CREATE, "w/new").is_ok());
+    assert_eq!(implied.mkdir(R0, 0o755, "data/deep/sub"), Ok(()));
+}

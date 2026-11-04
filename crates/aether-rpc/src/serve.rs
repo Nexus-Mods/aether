@@ -7,7 +7,7 @@
 //! is decided once, in the match in `answer`, and checked against the table's
 //! own decoder by the round-trip tests.
 
-use aether_ipc::{IpcError, Notifier, RequestView, RingServer};
+use aether_ipc::{DataArena, IpcError, Notifier, RequestView, RingServer};
 use aether_protocol::{
     AttrResp, ChangedReply, DirEntries, DirEntry, KeyReply, LookupReply, Opcode, OpenFlags,
     OpenResp, ReadReply, Reply, Request, RequestFlags, RootId, Status,
@@ -24,11 +24,12 @@ pub trait Director {
     /// called).
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status>;
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status>;
-    /// `slot` is the ring slot the request came in on: a bulk reply's data
-    /// goes in that slot's arena bank (`docs/wire.md` 2.6).
+    /// `at` is the ring slot the request came in on and, when the server was
+    /// given one ([`serve_with_arena`]), the bulk arena: a bulk reply's data
+    /// goes in that slot's bank (`docs/wire.md` 2.6).
     fn read(
         &mut self,
-        slot: u32,
+        at: ReadSlot<'_>,
         slot_flags: RequestFlags,
         fh: u64,
         offset: u64,
@@ -81,6 +82,24 @@ pub trait Director {
         let _ = opcode;
         Status::BadRequest
     }
+
+    /// The status for a payload that does not decode as `op`'s request
+    /// (`flags` are the slot flags it came with). Sent with an empty payload,
+    /// `Status::Ok` included.
+    fn undecodable(&mut self, op: Opcode, flags: u32, payload: &[u8]) -> Status {
+        let _ = (op, flags, payload);
+        Status::BadRequest
+    }
+}
+
+/// Where a READ came in: its ring slot and the server's bulk arena, if it
+/// has one. A director that answers in bulk fills the slot's bank
+/// ([`DataArena::fill_bank`] with `slot`) and replies with the offset it
+/// gives.
+#[derive(Clone, Copy)]
+pub struct ReadSlot<'s> {
+    pub slot: u32,
+    pub arena: Option<&'s DataArena<'s>>,
 }
 
 /// A READDIR reply being built: [`Director::read_dir`] pushes entries, and
@@ -101,6 +120,21 @@ struct Row {
 }
 
 impl Listing {
+    /// The entries pushed so far, in order.
+    pub fn iter(&self) -> impl Iterator<Item = DirEntry<'_>> {
+        let mut start = 0;
+        self.rows.iter().map(move |r| {
+            let name = &self.names[start..r.name_end];
+            start = r.name_end;
+            DirEntry {
+                name,
+                is_dir: r.is_dir,
+                size: r.size,
+                mtime: r.mtime,
+            }
+        })
+    }
+
     pub fn push(&mut self, entry: DirEntry<'_>) {
         self.names.push_str(entry.name);
         self.rows.push(Row {
@@ -129,21 +163,7 @@ impl Listing {
         // The table encodes a listing from a slice of entries that borrow
         // their names; one is built per reply (the server's only allocation
         // beyond the ring's, once the scratch buffers are warm).
-        let mut start = 0;
-        let entries: Vec<DirEntry<'_>> = self
-            .rows
-            .iter()
-            .map(|r| {
-                let name = &self.names[start..r.name_end];
-                start = r.name_end;
-                DirEntry {
-                    name,
-                    is_dir: r.is_dir,
-                    size: r.size,
-                    mtime: r.mtime,
-                }
-            })
-            .collect();
+        let entries: Vec<DirEntry<'_>> = self.iter().collect();
         Reply::ReadDir(DirEntries::new(&entries)).encode(out);
     }
 }
@@ -170,8 +190,9 @@ pub fn serve_one<N: Notifier, D: Director + ?Sized>(
 /// [`serve_one`] with its buffers in `scratch`.
 ///
 /// A reserved or unknown opcode is answered by [`Director::unknown`]; a
-/// payload that does not decode as its opcode's request, `Status::BadRequest`.
-/// Every status but `Status::Ok` goes with an empty payload.
+/// payload that does not decode as its opcode's request, by
+/// [`Director::undecodable`] (both `Status::BadRequest` unless the director
+/// says otherwise). Every status but `Status::Ok` goes with an empty payload.
 ///
 /// A registry reply longer than `payload_cap - 8` is answered
 /// `Status::ReplyTooLarge` (`docs/wire.md` 4.3: required for REG_KEY, and
@@ -188,6 +209,17 @@ pub fn serve_one_with<N: Notifier, D: Director + ?Sized>(
     d: &mut D,
     scratch: &mut Scratch,
 ) -> Result<bool, IpcError> {
+    serve_one_with_arena(server, None, d, scratch)
+}
+
+/// [`serve_one_with`] for a server with a bulk arena, which
+/// [`Director::read`] is handed with the request's slot.
+pub fn serve_one_with_arena<N: Notifier, D: Director + ?Sized>(
+    server: &RingServer<'_, N>,
+    arena: Option<&DataArena<'_>>,
+    d: &mut D,
+    scratch: &mut Scratch,
+) -> Result<bool, IpcError> {
     let registry_cap = (server.geom().payload_cap as usize).saturating_sub(8);
     let Scratch {
         req,
@@ -195,7 +227,7 @@ pub fn serve_one_with<N: Notifier, D: Director + ?Sized>(
         listing,
     } = scratch;
     server.serve_one_into(req, reply, |view, out| {
-        let status = dispatch(d, view, registry_cap, listing, out);
+        let status = dispatch(d, view, arena, registry_cap, listing, out);
         if status != Status::Ok {
             out.clear();
         }
@@ -210,9 +242,19 @@ pub fn serve<N: Notifier, D: Director + ?Sized>(
     d: &mut D,
     stop: &AtomicBool,
 ) -> Result<(), IpcError> {
+    serve_with_arena(server, None, d, stop)
+}
+
+/// [`serve`] for a server with a bulk arena ([`serve_one_with_arena`]).
+pub fn serve_with_arena<N: Notifier, D: Director + ?Sized>(
+    server: &RingServer<'_, N>,
+    arena: Option<&DataArena<'_>>,
+    d: &mut D,
+    stop: &AtomicBool,
+) -> Result<(), IpcError> {
     let mut scratch = Scratch::default();
     while !stop.load(Ordering::Acquire) {
-        serve_one_with(server, d, &mut scratch)?;
+        serve_one_with_arena(server, arena, d, &mut scratch)?;
     }
     Ok(())
 }
@@ -222,6 +264,7 @@ pub fn serve<N: Notifier, D: Director + ?Sized>(
 fn dispatch<D: Director + ?Sized>(
     d: &mut D,
     view: &RequestView<'_>,
+    arena: Option<&DataArena<'_>>,
     registry_cap: usize,
     listing: &mut Listing,
     out: &mut Vec<u8>,
@@ -230,9 +273,13 @@ fn dispatch<D: Director + ?Sized>(
         return d.unknown(view.opcode);
     };
     let Ok(req) = Request::decode(op, view.flags, view.payload) else {
-        return Status::BadRequest;
+        return d.undecodable(op, view.flags, view.payload);
     };
-    match answer(d, view.slot, req, listing, out) {
+    let at = ReadSlot {
+        slot: view.slot,
+        arena,
+    };
+    match answer(d, at, req, listing, out) {
         Ok(()) if is_registry(op) && out.len() > registry_cap => Status::ReplyTooLarge,
         Ok(()) => Status::Ok,
         Err(Status::Ok) => Status::IoError,
@@ -260,7 +307,7 @@ fn is_registry(op: Opcode) -> bool {
 /// variant of its opcode.
 fn answer<D: Director + ?Sized>(
     d: &mut D,
-    slot: u32,
+    at: ReadSlot<'_>,
     req: Request<'_>,
     listing: &mut Listing,
     out: &mut Vec<u8>,
@@ -279,7 +326,7 @@ fn answer<D: Director + ?Sized>(
             fh,
             offset,
             len,
-        } => Reply::Read(d.read(slot, slot_flags, fh, offset, len)?),
+        } => Reply::Read(d.read(at, slot_flags, fh, offset, len)?),
         Request::Write { fh, offset, data } => Reply::Write(d.write(fh, offset, data)?),
         Request::SetAttr { fh, size } => empty(d.set_attr(fh, size))?,
         Request::Rename { root, from, to } => empty(d.rename(root, from, to))?,

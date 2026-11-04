@@ -9,7 +9,7 @@ use aether_protocol::{
     AttrResp, ChangedReply, KeyReply, LookupReply, OpenFlags, OpenResp, ReadReply, Request,
     RequestFlags, RootId, Status,
 };
-use aether_rpc::{serve, Client, Director, Listing};
+use aether_rpc::{serve, Client, Director, Listing, ReadSlot};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,7 +91,7 @@ impl Director for Fixed {
     }
     fn read(
         &mut self,
-        _: u32,
+        _: ReadSlot<'_>,
         _: RequestFlags,
         _: u64,
         _: u64,

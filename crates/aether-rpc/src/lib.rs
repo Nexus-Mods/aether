@@ -19,4 +19,7 @@ mod client;
 mod serve;
 
 pub use client::{CallError, Client};
-pub use serve::{serve, serve_one, serve_one_with, Director, Listing, Scratch};
+pub use serve::{
+    serve, serve_one, serve_one_with, serve_one_with_arena, serve_with_arena, Director, Listing,
+    ReadSlot, Scratch,
+};

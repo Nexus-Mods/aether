@@ -4,13 +4,13 @@
 //! with empty payloads).
 
 use aether_ipc::ring;
-use aether_ipc::{IpcError, OwnedSeg, RingClient, RingServer, SpinNotifier};
+use aether_ipc::{DataArena, IpcError, OwnedSeg, RingClient, RingServer, SpinNotifier};
 use aether_protocol::{
-    AttrResp, ChangedReply, DirEntries, DirEntry, KeyReply, Lookup, LookupReply, OpenFlags,
+    AttrResp, ChangedReply, DirEntries, DirEntry, KeyReply, Lookup, LookupReply, Opcode, OpenFlags,
     OpenResp, ReadReply, Reply, Request, RequestFlags, RootId, Status,
 };
 use aether_registry::Node;
-use aether_rpc::{serve, CallError, Client, Director, Listing};
+use aether_rpc::{serve, serve_with_arena, CallError, Client, Director, Listing, ReadSlot};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -96,8 +96,8 @@ impl Director for Echo {
     }
     fn read(
         &mut self,
-        _slot: u32,
-        _slot_flags: RequestFlags,
+        at: ReadSlot<'_>,
+        slot_flags: RequestFlags,
         fh: u64,
         offset: u64,
         len: u32,
@@ -107,6 +107,21 @@ impl Director for Echo {
         let to = (from + len as usize).min(all.len());
         if fh == 0 {
             return Err(Status::BadFh);
+        }
+        // Bulk when asked and the server has an arena: the bytes go in the
+        // slot's bank, the slot number in `fh`'s place is checked by the test.
+        if let (true, Some(arena)) = (slot_flags.contains(RequestFlags::READ_BULK), at.arena) {
+            let src = &all[from..to];
+            let (off, n) = arena
+                .fill_bank(at.slot, src.len(), |buf| {
+                    buf[..src.len()].copy_from_slice(src);
+                    Ok(src.len())
+                })
+                .map_err(|_| Status::IoError)?;
+            return Ok(ReadReply::Bulk {
+                len: n as u32,
+                arena_offset: off,
+            });
         }
         Ok(ReadReply::Inline(&all[from..to]))
     }
@@ -213,6 +228,15 @@ impl Director for Echo {
     fn stage_exec(&mut self, _root: RootId, path: &str) -> Result<&str, Status> {
         missing(path)?;
         Ok(self.say(&["C:/staged/", path]))
+    }
+    /// CLOSE and SETATTR have answers of their own for a payload that does
+    /// not decode; every other opcode keeps the default.
+    fn undecodable(&mut self, op: Opcode, _flags: u32, _payload: &[u8]) -> Status {
+        match op {
+            Opcode::Close => Status::NotFound,
+            Opcode::SetAttr => Status::Ok,
+            _ => Status::BadRequest,
+        }
     }
 }
 
@@ -773,4 +797,67 @@ fn the_request_reaches_the_ring_as_its_table_encoding() {
             want
         ))
     );
+}
+
+#[test]
+fn an_undecodable_request_is_answered_by_the_director() {
+    with_director(Echo::default(), |client| {
+        assert_eq!(
+            raw(client, Opcode::Close as u32, b"\x01"),
+            (Status::NotFound.code(), Vec::new())
+        );
+        // OK goes with an empty payload, the one SETATTR has.
+        assert_eq!(
+            raw(client, Opcode::SetAttr as u32, b"\x01"),
+            (Status::Ok.code(), Vec::new())
+        );
+        assert_eq!(
+            raw(client, Opcode::Write as u32, b"\x01"),
+            (Status::BadRequest.code(), Vec::new())
+        );
+    });
+}
+
+#[test]
+fn a_server_with_an_arena_hands_read_its_slot_and_the_arena() {
+    let ring_len = 64 * 1024;
+    let bank = 4096;
+    let owned = OwnedSeg::new(ring_len + SLOTS as usize * bank);
+    ring::init(owned.seg(), SLOTS, CAP).unwrap();
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let served = s.spawn(|| {
+            let server = RingServer::new(owned.seg(), SpinNotifier).unwrap();
+            let arena =
+                DataArena::new(owned.seg(), ring_len, SLOTS as usize * bank, SLOTS as usize);
+            serve_with_arena(&server, Some(&arena), &mut Echo::default(), &stop)
+        });
+        let client = RingClient::new(owned.seg(), SpinNotifier)
+            .unwrap()
+            .with_deadline(Duration::from_secs(10));
+        let mut body = Vec::new();
+        Request::Read {
+            slot_flags: RequestFlags::READ_BULK,
+            fh: 1,
+            offset: 2,
+            len: 5,
+        }
+        .encode(&mut body);
+        let r = client
+            .submit(Opcode::Read as u32, RequestFlags::READ_BULK.bits(), &body)
+            .unwrap();
+        stop.store(true, Ordering::Release);
+        served.join().unwrap().unwrap();
+        assert_eq!(r.status, 0);
+        let Ok(Reply::Read(ReadReply::Bulk { len, arena_offset })) =
+            Reply::decode(Opcode::Read, 0, &r.payload)
+        else {
+            panic!("expected a bulk reply, got {:?}", r.payload);
+        };
+        assert_eq!(len, 5);
+        let off = arena_offset as usize;
+        assert_eq!((off - ring_len) % bank, 0, "the start of a bank");
+        assert!(off < ring_len + SLOTS as usize * bank);
+        assert_eq!(owned.seg().read_bytes(off, 5).unwrap(), b"23456");
+    });
 }

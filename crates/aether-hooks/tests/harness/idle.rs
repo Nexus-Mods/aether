@@ -1,6 +1,6 @@
 //! What the fake director costs while nothing is asked of it: its idle serve
-//! threads back off instead of polling the ring flat out (Task 3's review,
-//! I1), so the test processes that run beside each other on CI's 2-vCPU
+//! threads back off instead of polling the ring flat out, so the test
+//! processes that run beside each other on CI's 2-vCPU
 //! runners do not starve each other's timed waits.
 #![allow(unsafe_code)] // GetProcessTimes
 

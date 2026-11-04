@@ -236,14 +236,14 @@ fn a_failed_stored_names_leaves_the_caller_s_spelling_and_caches_nothing() {
     assert_teaches_nothing(Fault::Status(Status::IoError));
 }
 
-/// S8: `ST_NOT_FOUND` is a director's answer for a path it does not hold.
+/// `docs/wire.md` 3.4.12: `ST_NOT_FOUND` is a director's answer for a path it does not hold.
 #[test]
 fn stored_names_not_found_falls_back_and_teaches_nothing() {
     isolate!();
     assert_teaches_nothing(Fault::Status(Status::NotFound));
 }
 
-/// S11: a director that serves a writable root as an overlay keeps a
+/// A director that serves a writable root as an overlay keeps a
 /// lower-only name's spelling across a case-only rename (`docs/wire.md`
 /// 3.4.9, "Names only in a read-only lower").
 #[test]

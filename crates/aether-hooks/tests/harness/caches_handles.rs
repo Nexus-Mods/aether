@@ -180,8 +180,8 @@ fn attributes_ex(p: &Path) -> WIN32_FILE_ATTRIBUTE_DATA {
     data
 }
 
-/// S9 (`docs/wire.md` 3.4.3: `fh` is any u64 but 0; the shim gives 0 no
-/// meaning, so 0 is tried too): a director whose
+/// `docs/wire.md` 3.4.3: `fh` is any u64 but 0; the shim gives 0 no
+/// meaning, so 0 is tried too. A director whose
 /// handles count up from `base`. Open, read, write and close each carry
 /// the handle as issued, and a second handle is the next one.
 fn handles_from(base: u64) {
@@ -227,7 +227,7 @@ fn handles_with_the_top_bit_set_work() {
     handles_from((1 << 63) + 1);
 }
 
-/// S9: a director that issues a closed `fh` again (`Reference::reissue_fh`,
+/// A director that issues a closed `fh` again (`Reference::reissue_fh`,
 /// wire.md 3.4.3 "unique among open handles"). The new handle carries
 /// nothing over: not the first handle's delete-on-close, not its file's
 /// cached blocks.
@@ -348,7 +348,7 @@ fn listed_time(dir: &Path, name: &str) -> i64 {
 /// (`docs/wire.md` 3.2): 2024-01-01T00:00:00Z.
 const PLACEHOLDER: i64 = 133_485_408_000_000_000;
 
-/// S13 (`docs/wire.md` 3.2, "Timestamps"): one non-zero `mtime` is one
+/// `docs/wire.md` 3.2, "Timestamps": one non-zero `mtime` is one
 /// `LastWriteTime` in a listing, in every query by path and in every query
 /// by handle. A handle asks GETATTR once, on its first time query, and
 /// again after a write through it.
@@ -606,7 +606,7 @@ fn a_write_past_the_end_raises_the_handle_s_size_without_asking() {
 }
 
 /// There is no attribute cache: each query by path is one GETATTR. A cache
-/// added later shows up here, and in Task 7's record, as fewer.
+/// would show up here, and in `costs.txt`, as fewer.
 #[test]
 fn getattr_by_path_crosses_every_time() {
     isolate!();
@@ -620,8 +620,8 @@ fn getattr_by_path_crosses_every_time() {
     assert_eq!(ops(served, mark), [Some(Opcode::GetAttr); 3]);
 }
 
-/// The requests an open of a missing file sends: the baseline Task 7
-/// gates. There is no negative cache, so a second open sends them again.
+/// The requests an open of a missing file sends, as `costs.txt` counts
+/// them. There is no negative cache, so a second open sends them again.
 #[test]
 fn a_failed_open_s_requests_are_what_they_are() {
     isolate!();

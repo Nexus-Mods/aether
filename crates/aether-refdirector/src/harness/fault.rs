@@ -32,7 +32,13 @@ pub struct Match {
     /// `@<root>/` before it for another root. A request on a handle (READ,
     /// WRITE, SETATTR, CLOSE) has the path its OPEN named, when the OPEN
     /// crossed this tap and was answered OK; RENAME and RENAME_X match by
-    /// their source. A request with no path never matches a prefix.
+    /// their source. A request with no path never matches a prefix. It is a
+    /// string prefix, not a component prefix: `data` matches `database/x`.
+    ///
+    /// A handle's path is forgotten when its CLOSE is answered. With a
+    /// director that issues a closed `fh` again and several serve threads,
+    /// that CLOSE's reply can come after the OPEN that reissued the number,
+    /// and the new handle then matches no prefix.
     pub path_prefix: Option<String>,
     pub nth: Option<u32>,
     pub times: Option<u32>,

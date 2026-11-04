@@ -123,7 +123,7 @@ fn mkdir_over_a_lower_only_file_makes_a_directory() {
     assert_ne!(attrs & ntapi::FILE_ATTRIBUTE_DIRECTORY, 0, "{attrs:#x}");
 }
 
-/// S17 (`docs/wire.md` 3.4.3): bits 1 to 7 of an OPEN reply's flags byte
+/// `docs/wire.md` 3.4.3: bits 1 to 7 of an OPEN reply's flags byte
 /// are reserved. A handle answered with them set works, and only bit 0
 /// says immutable: a mutable file stays uncached, an immutable one cached.
 #[test]
@@ -199,7 +199,7 @@ fn directory_sizes_4096(r: &mut OwnedReplyBytes) {
     }
 }
 
-/// S17, a pin of `docs/wire.md` 3.4.2: a directory entry's `size` is copied
+/// A pin of `docs/wire.md` 3.4.2: a directory entry's `size` is copied
 /// into both `EndOfFile` and `AllocationSize`, 0 or not.
 #[test]
 fn a_directory_size_that_is_not_zero_is_shown_as_sent() {
@@ -245,7 +245,7 @@ fn a_directory_size_that_is_not_zero_is_shown_as_sent() {
     assert!(served.faults.applied(id) >= 2);
 }
 
-/// S17 (`docs/wire.md` 3.4.7, 3.4.8): a director may answer RENAME or
+/// `docs/wire.md` 3.4.7, 3.4.8: a director may answer RENAME or
 /// DELETE of the root `ST_IO_ERROR` rather than `ST_BAD_REQUEST`. Either
 /// is a failure the shim reports as `STATUS_UNSUCCESSFUL`.
 #[test]

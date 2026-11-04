@@ -276,9 +276,9 @@ fn the_cache_starts_over_past_its_bound() {
     );
 }
 
-/// S16: a director that moves the generation only after it has replied to a write leaves
+/// A director that moves the generation only after it has replied to a write leaves
 /// every other process serving stale answers until it does. wire.md 4.5 requires the move
-/// before the reply for this reason; conformance C9 checks directors make it.
+/// before the reply for this reason, and `aether-conform` checks directors make it.
 #[test]
 fn a_director_that_bumps_after_replying_leaves_a_second_client_stale() {
     isolate!();
@@ -495,7 +495,7 @@ fn after_create(s: &Served, m: Mark) -> Vec<(Option<Opcode>, i32, Option<Lookup>
         .collect()
 }
 
-/// S14: another process created the key first (REG_CREATE_KEY answered `ST_EXISTS`), but the
+/// Another process created the key first (REG_CREATE_KEY answered `ST_EXISTS`), but the
 /// lookup after it says absent. wire.md 4.4: a fresh REG_LOOKUP, then `STATUS_UNSUCCESSFUL`.
 #[test]
 fn a_create_answered_exists_then_lookup_absent_fails_unsuccessful() {
@@ -574,7 +574,7 @@ fn created_but_exists(r: &mut OwnedReplyBytes) {
     }
 }
 
-/// S14, the other way: the key was created by someone else first, so the lookup after the
+/// wire.md 4.4, the other way: the key was created by someone else first, so the lookup after the
 /// `ST_EXISTS` says present and the create opens it.
 #[test]
 fn a_create_answered_exists_then_lookup_present_opens_the_key() {

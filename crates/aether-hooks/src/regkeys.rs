@@ -1728,7 +1728,7 @@ pub(crate) mod tests {
     }
 
     /// Entry points whose `NtQueryKey` fails every name query: with `not_a_key`, as for a
-    /// handle that is not a key; otherwise with a status that tells nothing (S1).
+    /// handle that is not a key; otherwise with a status that tells nothing.
     pub(crate) fn real_whose_name_query_fails(not_a_key: bool) -> Real {
         Real {
             open_ex: None,

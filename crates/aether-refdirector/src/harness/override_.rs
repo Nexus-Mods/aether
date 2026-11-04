@@ -17,8 +17,8 @@ pub struct OpenEdit {
     pub size: Option<u64>,
     /// Bits 1 to 7 of the reply's flags byte, which wire.md 3.4.3 says are
     /// zero: the byte becomes `immutable` (bit 0) with these bits over it
-    /// (bit 0 of this value is ignored). For a director that sets them
-    /// (S17); a client reads bit 0 only.
+    /// (bit 0 of this value is ignored). For a director that sets them; a
+    /// client reads bit 0 only.
     pub reserved_flags: Option<u8>,
 }
 
@@ -30,7 +30,10 @@ pub struct OpenEdit {
 /// handle on the same rules.
 ///
 /// Prefixes are compared folded and spelled as [`key`] spells a table key
-/// (bare for root 0, `@<root>/` before it for another root). Every rule
+/// (bare for root 0, `@<root>/` before it for another root). A prefix is a
+/// string prefix, not a component prefix: `data` matches `database/x`. The
+/// rules' lock is held while a matching reply is decoded, edited and
+/// encoded again. Every rule
 /// whose prefix matches applies, in the order added, so a later one wins
 /// where both set a field.
 #[derive(Clone, Default)]

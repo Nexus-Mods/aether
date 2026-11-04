@@ -818,7 +818,7 @@ fn read_bulk_1_mib() {
     check("read_bulk_1_mib", m);
 }
 
-/// S7: one `NtReadFile` of 5 MiB, the stream pipeline's size.
+/// One `NtReadFile` of 5 MiB, the stream pipeline's size.
 #[test]
 fn read_stream_5_mib() {
     cost_case!();
@@ -848,7 +848,7 @@ fn write_4_kib() {
     check("write_4_kib", m);
 }
 
-/// S4: a write the shim splits into three full chunks and one byte.
+/// A write the shim splits into three full chunks and one byte.
 #[test]
 fn write_three_chunks_and_a_byte() {
     cost_case!();
@@ -923,7 +923,7 @@ fn delete_a_file() {
     check("delete", m);
 }
 
-/// Task 3A's B3: GETATTR, then MKDIR.
+/// GETATTR, then MKDIR (`docs/wire.md` 3.4.9).
 #[test]
 fn create_directory() {
     cost_case!();
@@ -1062,7 +1062,7 @@ fn view(section: HANDLE) -> *const u8 {
     v.Value as *const u8
 }
 
-/// S6: a 1 MiB section, filled whole at creation.
+/// A 1 MiB section, filled whole at creation.
 #[test]
 fn section_eager_1_mib() {
     cost_case!();
@@ -1077,7 +1077,7 @@ fn section_eager_1_mib() {
     check("section_eager_1_mib", m);
 }
 
-/// S6: one 256 KiB page fill of a demand-paged section (sections over
+/// One 256 KiB page fill of a demand-paged section (sections over
 /// 4 MiB, here, through `set_eager_section_max`), outside the 2 MiB warmed
 /// at creation.
 #[test]
@@ -1104,7 +1104,7 @@ fn section_lazy_page_fill() {
 
 // ---- a child under a root --------------------------------------------------
 
-/// S1: `CreateProcessW` of an image under a root, one STAGE_EXEC. The child
+/// `CreateProcessW` of an image under a root, one STAGE_EXEC. The child
 /// the hook starts never reports ready (the injected shim is this test), so
 /// the call ends refused after `READY_TIMEOUT_SECS`.
 #[test]

@@ -1,5 +1,5 @@
 //! A child started under a root, through STAGE_EXEC (`docs/wire.md`
-//! 3.4.14, gap hunt S1): `hook/child_start.rs`'s `plan` and the process
+//! 3.4.14): `hook/child_start.rs`'s `plan` and the process
 //! hook (`hook/process.rs`).
 //!
 //! The test process calls `CreateProcessW` with an image path under root 0,
@@ -18,8 +18,8 @@
 //! image the child was created from is. Every child is waited for until it
 //! has gone.
 //!
-//! Cross-reference: conformance C13 (another branch) checks that a
-//! director's STAGE_EXEC answer is usable.
+//! `aether-conform` checks the other side: that a director's STAGE_EXEC
+//! answer is usable.
 #![allow(unsafe_code)] // Win32 calls
 
 use crate::fakedirector::{self, Fake, Fault, Match, Options, ReadStyle};

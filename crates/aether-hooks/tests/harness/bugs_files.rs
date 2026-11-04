@@ -1,17 +1,16 @@
-//! The gap hunt's suspected bugs in the file calls (B3, B4, B5, B6, B8) and
-//! the shim tests that go with them (S2, S4, S5, S9, S12), each against a
-//! director answer `docs/wire.md` allows:
+//! The file calls against director answers `docs/wire.md` allows that are
+//! easy to get wrong:
 //!
 //! - MKDIR answered `ST_OK` on an existing directory (3.4.9): a create still
-//!   reports the collision, an open-if reports the open (B3, S5).
+//!   reports the collision, an open-if reports the open.
 //! - READDIR failing, overflowing or answered "not found" (3.4.2), and a
-//!   large listing resumed over many small buffers (B4, S2).
+//!   large listing resumed over many small buffers.
 //! - A director that issues `fh` 0 (3.4.3): a new directory's handle closes
-//!   nothing at the director (B5, S9).
-//! - Reading and truncating through a handle opened with `OPEN_WRITE` (3.4.3,
-//!   B6, S12).
+//!   nothing at the director.
+//! - Reading and truncating through a handle opened with `OPEN_WRITE`
+//!   (3.4.3).
 //! - A write of several chunks, one of which fails, and `ST_NO_SPACE`
-//!   (3.4.5, B8, S4).
+//!   (3.4.5).
 #![allow(unsafe_code)] // Win32 and ntdll calls
 
 use crate::fakedirector::{self, Fake, Fault, Match, Options, ReadStyle};
@@ -310,7 +309,7 @@ fn listed(r: &aether_refdirector::harness::Recorded) -> Vec<String> {
     }
 }
 
-// ---- B3, S5: MKDIR answered OK on an existing directory -------------------
+// ---- wire.md 3.4.9: MKDIR answered OK on an existing directory -----------
 
 /// A writable `save/` holding the directory `save/sub`, whose MKDIR the
 /// director answers `ST_OK` (a writable provider may, wire.md 3.4.9).
@@ -429,7 +428,7 @@ fn the_getattr_before_mkdir_sends_the_folded_path() {
     }
 }
 
-// ---- B4, S2: READDIR failing, overflowing, vanished; large listings -------
+// ---- wire.md 3.4.2: READDIR failing, overflowing, vanished; large listings
 
 /// `save/` with three files, and an empty `empty/`.
 fn three_files() -> Fake {
@@ -635,7 +634,7 @@ fn a_listing_of_3000_entries_is_resumed_over_many_buffers_complete_and_in_order(
     assert_eq!(names, sent, "every name once, in the director's order");
 }
 
-// ---- B5, S9: a director that issues fh 0 ---------------------------------
+// ---- wire.md 3.4.3: a director that issues fh 0 --------------------------
 
 #[test]
 fn closing_a_new_directory_sends_no_close() {
@@ -672,7 +671,7 @@ fn closing_a_new_directory_sends_no_close() {
     assert_eq!(served.fake.tally.closes("save/a.txt"), 1);
 }
 
-// ---- B6, S12: reading through a write handle ------------------------------
+// ---- wire.md 3.4.3, 3.4.4: reading through a write handle ----------------
 
 #[test]
 fn a_read_write_handle_reads_back_what_it_wrote() {
@@ -721,7 +720,7 @@ fn a_read_write_handle_reads_back_what_it_wrote() {
     );
 }
 
-// ---- B8, S4: writes of several chunks -------------------------------------
+// ---- wire.md 3.4.5: writes of several chunks -----------------------------
 
 /// A writable `save/` and an open `save/out.bin`, made empty
 /// (`CREATE_ALWAYS`, read and write).

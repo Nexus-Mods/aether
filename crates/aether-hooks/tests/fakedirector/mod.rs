@@ -42,7 +42,7 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::{CreateEventW, Sleep, WaitForSingleObject};
 
-// The tests know the reference director by its old name here.
+// The tests call the reference director `Fake`.
 pub(crate) use aether_refdirector::harness::{Fault, Faults, Match, Override, Recorder};
 pub(crate) use aether_refdirector::{key, pattern, ReadStyle, Reference as Fake, BULK_THRESHOLD};
 

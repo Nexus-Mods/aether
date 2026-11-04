@@ -577,8 +577,8 @@ pub(super) struct OpenCall {
 /// an under-root miss behind `allow_disk_fallthrough`). `real` makes the original call with the
 /// `OBJECT_ATTRIBUTES` it is given.
 ///
-/// A name the call carries that cannot be decoded is refused (`path_of_tracked`'s status, the
-/// C2 fail-closed rule), before anything else happens.
+/// A name the call carries that cannot be decoded is refused (`path_of_tracked`'s status: an
+/// undecodable name fails closed), before anything else happens.
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.

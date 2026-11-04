@@ -14,7 +14,8 @@
 //! them, and [`serve_threads_of`] serves any director the way
 //! [`serve_threads`] serves the reference.
 //!
-//! A lock here is never held while a fault waits or a rewrite runs, and one
+//! No lock here is held while a fault waits or a [`Fault::Rewrite`] runs
+//! (an [`Override`] holds its own while it edits an OPEN reply), and one
 //! poisoned by a panic elsewhere is taken anyway: a tap that panics fails its
 //! request (the ring answers `Status::IoError`) and leaves the layers
 //! working.

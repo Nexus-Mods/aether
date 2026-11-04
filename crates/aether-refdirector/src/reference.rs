@@ -19,8 +19,10 @@
 //! methods from [`Reference::with_fh_base`] to [`Reference::with_lower_dir`]
 //! give answers other directors give and `docs/wire.md` allows (each names
 //! its section). Each is off until a test sets it; with none set, every
-//! answer below is as described, and conformance never sets one. A name keeps the spelling it was created with (a fixture's
-//! vpath, a creating OPEN, MKDIR, a RENAME or RENAME_X target), and READDIR
+//! answer below is as described, and conformance never sets one.
+//!
+//! A name keeps the spelling it was created with (a fixture's vpath, a
+//! creating OPEN, MKDIR, a RENAME or RENAME_X target), and READDIR
 //! and STORED_NAMES answer with it (wire.md 3.2). Where the fake it was
 //! moved from differed from `docs/wire.md`, it answers as wire.md says: an
 //! opcode outside the table or
@@ -106,7 +108,8 @@ pub const MAX_FILE_LEN: usize = 64 * 1024 * 1024;
 /// The longest file a mounted tree may hold ([`crate::tree::Tree`]): larger
 /// than [`MAX_FILE_LEN`], so a benchmark can read an archive of a game's
 /// size. Such a file is read like any other; a WRITE ending past
-/// [`MAX_FILE_LEN`] is still `Status::NoSpace`.
+/// [`MAX_FILE_LEN`] is still `Status::NoSpace`, and so is a SETATTR to any
+/// size above it, a shrink of such a file included.
 pub const MAX_MOUNTED_LEN: usize = 512 * 1024 * 1024;
 
 /// How the reference answers READ for one file.

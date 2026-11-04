@@ -1,0 +1,24 @@
+{
+  "name": "registry-case",
+  "description": "Keys compare case-insensitively by the fold, the `Registry`, `Machine` and `User` components included (wire.md 4.2: \"both directors accept `\\REGISTRY\\MACHINE\\...` as readily as `\\Registry\\Machine\\...`\"); value names fold too (3.2) and keep the spelling they were created with.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Cairn", "values": [{"name": "Value", "ty": 1, "data": {"hex": "6100"}}]}
+    ]}
+  },
+  "steps": [
+    {"request": {"op": "reg-lookup", "path": "\\REGISTRY\\MACHINE\\SOFTWARE\\CAIRN"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\registry\\machine\\software\\cairn"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\REGISTRY\\machine\\SOFTWARE\\CAIRN"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\registry\\machine\\software\\cairn"}, "expect": {"reply": {"version": 2, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Value", "ty": 1, "data": {"hex": "6100"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\REGISTRY\\MACHINE\\SOFTWARE\\CAIRN", "name": "VALUE", "ty": 4, "data": {"hex": "09000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}, "note": "same value under another case: replaced, spelling kept"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 3, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Value", "ty": 4, "data": {"hex": "09000000"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\registry\\machine\\software\\cairn", "name": "other", "ty": 1, "data": {"hex": "6200"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "Value", "ty": 4, "data": {"hex": "09000000"}}, {"name": "other", "ty": 1, "data": {"hex": "6200"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"path": "\\REGISTRY\\MACHINE\\SOFTWARE\\CAIRN", "volatile": false, "op": "reg-create-key"}, "expect": {"status": "exists"}, "note": "created again under another case"}
+  ]
+}

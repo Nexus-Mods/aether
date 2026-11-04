@@ -214,6 +214,35 @@ fn a_non_canonical_path_is_a_load_error() {
     }
 }
 
+/// wire.md 3.2 says what a path that leaves its root gets, so a scenario may
+/// send one that starts with `..`; the rest of the non-canonical syntax stays
+/// refused.
+#[test]
+fn a_path_that_leaves_its_root_loads() {
+    let dir = aether_testkit::tempdir().unwrap();
+    for path in ["..", "../x", "../../x/y"] {
+        let p = write(
+            dir.path(),
+            "esc.json",
+            &scenario(json!([{
+                "request": {"op": "getattr", "root": 0, "path": path},
+                "expect": {"status": "bad-request"}
+            }])),
+        );
+        let s = load(&p).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        let OwnedRequest::GetAttr { path: got, .. } = &s.steps[0].request else {
+            panic!("not a getattr");
+        };
+        assert_eq!(got, path);
+    }
+    for path in ["../", "..//x", ".././x", r"..\x", "a/../../x"] {
+        let e = load_error(
+            json!([{"request": {"op": "getattr", "root": 0, "path": path}, "expect": {"status": "bad-request"}}]),
+        );
+        assert!(e.contains("step 0") && e.contains("path"), "{path:?}: {e}");
+    }
+}
+
 #[test]
 fn one_of_needs_the_wire_section_that_allows_it() {
     let e = load_error(json!([{

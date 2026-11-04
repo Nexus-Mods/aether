@@ -1,0 +1,25 @@
+{
+  "name": "delete-file",
+  "description": "DELETE removes a file under a writable provider (wire.md 3.4.8: \"a file ... is deleted\"); it is no longer found, no longer listed, and its name can be created again.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/a.txt", "contents": "AAA"},
+        {"path": "saves/Keep.txt", "contents": "k"}
+      ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "delete", "root": 0, "path": "saves/a.txt"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "Keep.txt", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/a.txt"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "delete", "root": 0, "path": "SAVES/KEEP.TXT"}, "expect": {"status": "ok"}, "note": "found under the fold"},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "a.txt", "is_dir": false, "size": 0, "mtime": 0}]}}}
+  ]
+}

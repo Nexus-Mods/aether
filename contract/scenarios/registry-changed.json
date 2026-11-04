@@ -1,0 +1,35 @@
+{
+  "name": "registry-changed",
+  "description": "REG_CHANGED says whether a key changed after a version: its own values, existence or child list and, with `subtree`, anything below it; a deleted key counts as changed by its deletion or an ancestor's (wire.md 4.3, overlay.rs `changed_since`). `since` is sent in the numbering of the director it goes to.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Cairn"},
+      {"path": "\\Registry\\Machine\\Software\\Cairn\\Quiet\\Sub"}
+    ]}
+  },
+  "steps": [
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": true, "since": 2}, "expect": {"reply": {"version": 2, "changed": false}}, "note": "nothing since the mount"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "subtree": true, "since": 2}, "expect": {"reply": {"version": 2, "changed": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Quiet\\Sub", "name": "v", "ty": 4, "data": {"hex": "01000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet\\Sub", "subtree": false, "since": 2}, "expect": {"reply": {"version": 3, "changed": true}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "subtree": false, "since": 2}, "expect": {"reply": {"version": 3, "changed": false}}, "note": "its own values and child list did not change"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "subtree": true, "since": 2}, "expect": {"reply": {"version": 3, "changed": true}}, "note": "but below it something did"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": true, "since": 2}, "expect": {"reply": {"version": 3, "changed": true}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet\\Sub", "subtree": true, "since": 3}, "expect": {"reply": {"version": 3, "changed": false}}, "note": "since the very change"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": true, "since": 3}, "expect": {"reply": {"version": 3, "changed": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "name": "own", "ty": 4, "data": {"hex": "02000000"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": false, "since": 3}, "expect": {"reply": {"version": 4, "changed": true}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": false, "since": 4}, "expect": {"reply": {"version": 4, "changed": false}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "subtree": true, "since": 3}, "expect": {"reply": {"version": 4, "changed": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "op": "reg-delete-key"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "subtree": false, "since": 4}, "expect": {"reply": {"version": 5, "changed": true}}, "note": "a deleted key counts as changed"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet\\Sub", "subtree": false, "since": 4}, "expect": {"reply": {"version": 5, "changed": true}}, "note": "and so does one below it"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Quiet", "subtree": false, "since": 5}, "expect": {"reply": {"version": 5, "changed": false}}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": false, "since": 4}, "expect": {"reply": {"version": 5, "changed": true}}, "note": "its child list changed"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn\\Never", "subtree": true, "since": 5}, "expect": {"reply": {"version": 5, "changed": false}}, "note": "a key never held, nothing deleted since"}
+  ]
+}

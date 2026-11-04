@@ -1,0 +1,22 @@
+{
+  "name": "write-setattr",
+  "description": "SETATTR sets the length of the file on an open handle, truncating or extending (wire.md 3.4.6: \"Sets the file's length (truncate or extend) on an open handle\"); the bytes kept are the first ones.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/a.txt", "contents": "0123456789"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 1, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "setattr", "fh": 1, "size": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 32}, "expect": {"reply": {"data": "0123"}}, "note": "shrunk"},
+    {"request": {"op": "setattr", "fh": 1, "size": 8}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 4}, "expect": {"reply": {"data": "0123"}}, "note": "grown: the first bytes are kept"},
+    {"request": {"op": "setattr", "fh": 1, "size": 0}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 8}, "expect": {"reply": {"data": ""}}, "note": "emptied"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 0, "mtime": 0}}}
+  ]
+}

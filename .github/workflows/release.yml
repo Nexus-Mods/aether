@@ -4,7 +4,8 @@
 #   natives.zip     the four natives (contract/artifacts.json's names)
 #   fixtures.zip    the test fixtures, with the host-target injector and shim
 #                   beside them (unsigned: test-only)
-#   contract.zip    contract/*.json and the protocol's golden vectors
+#   contract.zip    contract/*.json, the protocol's golden vectors and
+#                   contract/scenarios/ (what a director must do, as data)
 #   natives-key.txt what the natives are built from (bin/natives-key.ps1)
 #   SHA256SUMS      the SHA-256 of each of the others
 #
@@ -118,7 +119,29 @@ jobs:
           Compress-Archive -LiteralPath $natives -DestinationPath "$out\natives.zip" -Force
           $fixtures = @($contract.fixtures) | ForEach-Object { Join-Path 'target\release' $_ }
           Compress-Archive -LiteralPath $fixtures -DestinationPath "$out\fixtures.zip" -Force
-          Compress-Archive -LiteralPath contract\artifacts.json, contract\env.json, contract\protocol.json, crates\aether-protocol\tests\golden\vectors.txt -DestinationPath "$out\contract.zip" -Force
+          # contract.zip: the JSON and the vectors at the top, the scenarios in
+          # scenarios/. Built with System.IO.Compression so the entry names have
+          # forward slashes (Windows PowerShell 5.1's Compress-Archive writes
+          # backslashes for a folder).
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $entries = @(
+            @('contract\artifacts.json', 'artifacts.json'),
+            @('contract\env.json', 'env.json'),
+            @('contract\protocol.json', 'protocol.json'),
+            @('crates\aether-protocol\tests\golden\vectors.txt', 'vectors.txt')
+          )
+          foreach ($f in @(Get-ChildItem -LiteralPath contract\scenarios -File | Sort-Object Name)) {
+            $entries += ,@($f.FullName, "scenarios/$($f.Name)")
+          }
+          $zipPath = Join-Path $PWD "$out\contract.zip"
+          if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+          $zip = [IO.Compression.ZipFile]::Open($zipPath, 'Create')
+          try {
+            foreach ($e in $entries) {
+              [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path -LiteralPath $e[0]).Path, $e[1], 'Optimal')
+            }
+          } finally { $zip.Dispose() }
           $sums = Get-ChildItem -LiteralPath $out -File | Sort-Object Name | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower())  $($_.Name)"
           }

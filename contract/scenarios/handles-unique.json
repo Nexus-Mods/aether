@@ -1,0 +1,37 @@
+{
+  "name": "handles-unique",
+  "description": "`fh` is unique among open handles (wire.md 3.4.3): many opens of one file and of different files, all open at once, each reads its own file. The run pairs each handle with the scenario's number one to one while it is open, so a duplicate fails.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "a.txt", "contents": "AAAA"},
+        {"path": "b.txt", "contents": "BBBB"},
+        {"path": "c.txt", "contents": "CCCC"}
+      ]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 1, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "b.txt"}, "expect": {"reply": {"fh": 2, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "c.txt"}, "expect": {"reply": {"fh": 3, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 4, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "b.txt"}, "expect": {"reply": {"fh": 5, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "c.txt"}, "expect": {"reply": {"fh": 6, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 7, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 4}, "expect": {"reply": {"data": "AAAA"}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 4}, "expect": {"reply": {"data": "BBBB"}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 4}, "expect": {"reply": {"data": "CCCC"}}},
+    {"request": {"op": "read", "fh": 4, "offset": 0, "len": 4}, "expect": {"reply": {"data": "AAAA"}}},
+    {"request": {"op": "read", "fh": 5, "offset": 0, "len": 4}, "expect": {"reply": {"data": "BBBB"}}},
+    {"request": {"op": "read", "fh": 6, "offset": 0, "len": 4}, "expect": {"reply": {"data": "CCCC"}}},
+    {"request": {"op": "read", "fh": 7, "offset": 0, "len": 4}, "expect": {"reply": {"data": "AAAA"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 5}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 6}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 7}, "expect": {"status": "ok"}}
+  ]
+}

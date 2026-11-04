@@ -1,0 +1,14 @@
+{
+  "name": "heartbeat",
+  "description": "HEARTBEAT answers ST_OK with an empty reply (wire.md 3.4.11: \"Reply: `ST_OK`, empty\"); sent twice, since the run already sent one on attach.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "x"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "heartbeat"}, "expect": {"status": "ok"}},
+    {"request": {"op": "heartbeat"}, "expect": {"status": "ok"}}
+  ]
+}

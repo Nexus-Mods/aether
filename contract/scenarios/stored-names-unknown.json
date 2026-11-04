@@ -1,0 +1,16 @@
+{
+  "name": "stored-names-unknown",
+  "description": "A component the director has no entry for SHOULD come back as it was sent; a director MAY instead answer ST_NOT_FOUND for a path it does not have (wire.md 3.4.12). An unknown root is ST_NOT_FOUND (3.5.1).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "Data/Real.txt", "contents": "r"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/missing.txt"}, "expect": {"one_of": [{"reply": {"names": "Data/missing.txt"}}, {"status": "not-found"}], "wire": "3.4.12"}, "note": "a held directory and a missing file"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "nowhere/else"}, "expect": {"one_of": [{"reply": {"names": "nowhere/else"}}, {"status": "not-found"}], "wire": "3.4.12"}, "note": "nothing held"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "nowhere/else"}, "expect": {"one_of": [{"reply": {"names": "else"}}, {"status": "not-found"}], "wire": "3.4.12"}, "note": "with skip"},
+    {"request": {"op": "stored-names", "root": 6, "skip": 0, "path": "data"}, "expect": {"status": "not-found"}, "note": "root 6 is not served"}
+  ]
+}

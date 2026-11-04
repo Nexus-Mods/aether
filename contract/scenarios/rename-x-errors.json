@@ -1,0 +1,28 @@
+{
+  "name": "rename-x-errors",
+  "description": "RENAME_X: a missing `from` is ST_NOT_FOUND (3.5: \"No such path\"; 3.4.13 says only that equal roots behave as RENAME, 3.4.7); an unknown root at either end is ST_NOT_FOUND (Cairn) or ST_BAD_REQUEST (old Rust director), 3.5.1's table (\"RENAME_X: as RENAME\").",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/a.txt", "contents": "AAA"},
+        {"path": "saves/dir/x.txt", "contents": "x"}
+      ],
+       "dirs": ["saves/empty"],
+       "writable": ["."]},
+      {"id": 1,
+       "files": [
+        {"path": "keep/old.txt", "contents": "old!"},
+        {"path": "here/there/z.txt", "contents": "z"}
+      ],
+       "dirs": ["moved", "Cased", "Other"],
+       "writable": ["."]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename-x", "from_root": 0, "to_root": 1, "from": "saves/missing.txt", "to": "m.txt"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "rename-x", "from_root": 0, "to_root": 8, "from": "saves/a.txt", "to": "m.txt"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.5.1"}, "note": "to_root 8 is not served"},
+    {"request": {"op": "rename-x", "from_root": 8, "to_root": 0, "from": "saves/a.txt", "to": "m.txt"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.5.1"}, "note": "from_root 8 is not served"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}}
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "readdir-roots-and-changes",
+  "description": "READDIR reflects the tree's changes: a created file and a created directory appear, a deleted one and a renamed-away one disappear, in stored spelling (wire.md 3.4.2, 3.2). Roots list separately.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/a.txt", "contents": "A"}],
+       "writable": ["saves"]},
+      {"id": 1,
+       "files": [{"path": "only1.txt", "contents": "1"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "readdir", "root": 0, "path": "."}, "expect": {"reply": {"entries": [{"name": "saves", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/New.Txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/SubDir"}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "a.txt", "is_dir": false, "size": 1, "mtime": 0}, {"name": "New.Txt", "is_dir": false, "size": 0, "mtime": 0}, {"name": "SubDir", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/a.txt"}, "expect": {"status": "ok"}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/new.txt", "to": "saves/subdir/Moved.TXT"}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "SubDir", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves/subdir"}, "expect": {"reply": {"entries": [{"name": "Moved.TXT", "is_dir": false, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 1, "path": "."}, "expect": {"reply": {"entries": [{"name": "only1.txt", "is_dir": false, "size": 1, "mtime": 0}]}}}
+  ]
+}

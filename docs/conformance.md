@@ -37,9 +37,11 @@ Conformance checks only what the contract guarantees.
 
 **Input the contract leaves to the director.** A scenario sends only
 canonical paths: `/` between components, none empty, `.` or `..`, no `\`,
-and `"."` for the root. wire.md 3.2 says of any other syntax that "Directors
-have differed on anything else, so a client must not rely on it", so the
-suite never sends it and a director may answer it however it likes.
+and `"."` for the root, and paths that leave the root (first component `..`),
+which wire.md 3.2 and 3.5.1 say how to answer. wire.md 3.2 says of any other
+syntax that "Directors have differed on anything else, so a client must not
+rely on it", so the suite never sends it and a director may answer it however
+it likes.
 
 **Fields the contract leaves to the director.** The rule is equality; these
 are the only exceptions, and each is allowed by the wire.md text quoted
@@ -67,6 +69,52 @@ the rule that two immutable opens with equal size and `mount_gen` have
 identical content (3.4.3). The handshake variables a run does not use
 (`VFS_VIRTUAL_ROOTS`, `VFS_REGISTRY` and the rest) are not checked against
 the tree.
+
+## The scenarios
+
+`contract/scenarios/` holds the suite: what every director must do, as data,
+one scenario per file, named by its file. Each `description` names the
+wire.md section it checks. Where the contract lets directors answer
+differently, the step lists the answers it allows (`one_of`) and cites the
+section. The reference passes all of it over a file ring and, on Windows,
+over a section (`cargo test -p aether-conform` and CI run both).
+
+| Files | Covers |
+|---|---|
+| `heartbeat` | HEARTBEAT (3.4.11) |
+| `getattr-*` | GETATTR: found and size, a missing path or root is found=0 (3.4.1, 3.5.1) |
+| `escape-paths` | a path above the root, for every path opcode (3.2, 3.5, 3.5.1) |
+| `open-read`, `open-flags-zero`, `open-errors`, `open-write-existing-readonly-path` | OPEN: handles, `oflags == 0`, the statuses of 3.4.3 and 3.5 |
+| `read-inline`, `read-eof`, `read-bulk`, `read-bulk-threshold` | READ: offsets, short reads, end of file, inline and bulk (3.4.4, 3.6) |
+| `handles-*` | handles unique while open, unknown and closed handles (3.4.3, 3.4.10, 3.5) |
+| `write-*` | write opens (create, excl, trunc, append), WRITE, SETATTR, spelling kept (3.4.3 to 3.4.6, 3.2) |
+| `rename-*` | RENAME: replace, respell, directories, refusals, unknown root (3.4.7, 3.5.1) |
+| `rename-x-*` | RENAME_X: files across roots, directories `ST_CROSS_ROOT`, equal roots, errors (3.4.13) |
+| `mkdir-*`, `delete-*` | MKDIR and DELETE: spelling, existing names, non-empty directories, read-only, errors (3.4.8, 3.4.9) |
+| `readdir-*` | READDIR: listing, case, changes, unknown root (3.4.2) |
+| `stored-names-*` | STORED_NAMES: stored spelling, `skip`, unknown names, after changes (3.4.12) |
+| `case-fold-*` | the fold: ASCII, Unicode (`Σ`, `İ`, composed and decomposed), fold-equal names are one entry (3.2) |
+| `roots-*` | several roots kept apart, unserved roots (3.2, 3.5.1) |
+| `stage-exec` | STAGE_EXEC: `ST_NOT_SUPPORTED` or a path (3.4.14) |
+| `registry-none` | no registry layer: all eight opcodes `ST_NOT_SUPPORTED` (4) |
+| `registry-lookup`, `-case`, `-bad-path` | REG_LOOKUP states, case-insensitive keys, non-canonical paths (4.2, 4.3) |
+| `registry-values`, `-delete-value` | REG_SET_VALUE, REG_KEY values, value tombstones (4.3) |
+| `registry-create-key`, `-delete-key`, `-rename-key` | key create, delete, rename, children (4.3) |
+| `registry-changed` | REG_CHANGED, with `since` in the director's numbering (4.3) |
+| `registry-limits`, `-key-too-large` | name, depth and reply limits; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
+
+**Left out because wire.md does not fix the answer**, so no scenario
+asserts it: the `size` GETATTR and OPEN report for a directory (so no
+scenario opens a directory, and `ST_IS_DIR` on a read of a directory handle
+is not covered); READDIR of a path that is not a directory; a path
+below a file (accepted as found=0, `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`);
+a write open, DELETE or RENAME of a missing path outside every writable
+provider; a create whose parent directory is missing; what a
+write past the end puts in the gap; WRITE or SETATTR on a handle opened
+read-only; a WRITE larger than the ring's payload (`payload_cap` is the
+director's); `ST_NO_SPACE`; opcodes outside the table and trailing bytes in
+a registry request (a scenario names opcodes and fields, so cannot send
+them); a registry value over `MAX_DATA` (the request would not fit the ring).
 
 ## The adapter protocol
 

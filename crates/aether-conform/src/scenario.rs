@@ -557,15 +557,17 @@ impl<'v> Obj<'v> {
         self.u32(name).map(RootId)
     }
 
-    /// A file path: canonical (`docs/wire.md` 3.2).
+    /// A file path: canonical (`docs/wire.md` 3.2), or one that leaves its
+    /// root ([`is_escape`]), the one other path wire.md 3.2 says what to do
+    /// with.
     fn vpath(&mut self, name: &str) -> R<String> {
         let p = self.str(name)?;
-        if !is_canonical(&p) {
+        if !is_canonical(&p) && !is_escape(&p) {
             return Err(self.bad(
                 name,
                 format!(
                     "{p:?} is not a canonical path (docs/wire.md 3.2: `/`-joined, \
-                     no empty, `.` or `..` component, `.` for the root)"
+                     no empty, `.` or `..` component, `.` for the root), nor a \n                     path that leaves its root (it starts with `..`)"
                 ),
             ));
         }
@@ -609,6 +611,16 @@ impl<'v> Obj<'v> {
             Some(k) => Err(self.bad(k, format!("unknown field {k:?}"))),
         }
     }
+}
+
+/// Whether `path` leaves its root whatever way a director normalises paths:
+/// its first component is `..` and the others are plain (not empty, not `.`,
+/// no backslash). wire.md 3.2: "a director must treat a path that would leave
+/// its root (`..` above the root) as an error". A path that goes up only after
+/// other components is not sent, since directors differ on where it ends up.
+fn is_escape(path: &str) -> bool {
+    let mut parts = path.split('/');
+    parts.next() == Some("..") && !path.contains('\\') && parts.all(|c| !c.is_empty() && c != ".")
 }
 
 /// The names and masks of `OpenFlags`, as `contract/protocol.json`'s

@@ -354,3 +354,14 @@ fn a_hung_adapter_is_killed_with_the_processes_it_started() {
     }
     assert!(!alive(pid), "the grandchild {pid} outlived the run: {all}");
 }
+
+/// The committed suite (`contract/scenarios`) passes against the reference:
+/// the check CI runs with the built binary, also made by `cargo test`.
+#[test]
+fn the_committed_scenarios_pass_against_the_reference_adapter() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let o = run_reference(&dir, "", &[]);
+    let out = stdout(&o);
+    assert!(o.status.success(), "{out}\n{}", stderr(&o));
+    assert!(!out.contains("not ok"), "{out}");
+}

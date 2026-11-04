@@ -1,0 +1,18 @@
+{
+  "name": "handles-bad",
+  "description": "An unknown handle is ST_BAD_FH for READ, WRITE, SETATTR and CLOSE (wire.md 3.4.4, 3.4.6, 3.4.10; for WRITE 3.5: \"Unknown handle\"). Handles the scenario never opened get a number no open handle has.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "w/a.txt", "contents": "abc"}],
+       "writable": ["w"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "read", "fh": 4242, "offset": 0, "len": 4}, "expect": {"status": "bad-fh"}},
+    {"request": {"op": "write", "fh": 4242, "offset": 0, "data": "x"}, "expect": {"status": "bad-fh"}},
+    {"request": {"op": "setattr", "fh": 4242, "size": 0}, "expect": {"status": "bad-fh"}},
+    {"request": {"op": "close", "fh": 4242}, "expect": {"status": "bad-fh"}},
+    {"request": {"op": "close", "fh": 0}, "expect": {"status": "bad-fh"}, "note": "handle 0"}
+  ]
+}

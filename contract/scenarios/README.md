@@ -67,7 +67,12 @@ tree must make every root writable as a whole. Paths are canonical.
 File paths (`path`, `from`, `to` of file opcodes) must be canonical: `/`
 between components, none empty, `.` or `..`, no `\`, and `"."` for the root.
 wire.md 3.2 says other syntax is director-defined ("a client must not rely
-on it"), so a scenario never sends it. Registry paths are sent as written.
+on it"), so a scenario never sends it. The one other path it sends is one
+that leaves its root: wire.md 3.2 says a director "must treat a path that
+would leave its root (`..` above the root) as an error", so a path whose
+first component is `..` (`../x`, `..`, `../../a/b`, the other components
+plain) is allowed, and escapes under any way of normalising. A `..` after
+other components is not sent. Registry paths are sent as written.
 
 **Expectations.** One of:
 

@@ -1,0 +1,26 @@
+{
+  "name": "registry-delete-key",
+  "description": "REG_DELETE_KEY tombstones the key and drops its subtree: the key and everything under it read as tombstoned, REG_KEY has no node, the parent lists the name as a tombstone child; deleting it again is ST_NOT_FOUND; the root `\\Registry` is ST_BAD_REQUEST (wire.md 4.3, overlay.rs `delete_key`).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Cairn\\Gone\\Child", "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}]},
+      {"path": "\\Registry\\Machine\\Software\\Cairn\\Stays"}
+    ]}
+  },
+  "steps": [
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Gone", "op": "reg-delete-key"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Gone"}, "expect": {"reply": {"version": 4, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Gone\\Child"}, "expect": {"reply": {"version": 4, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\Gone"}, "expect": {"reply": {"version": 4, "node": null}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\Gone\\Child"}, "expect": {"reply": {"version": 4, "node": null}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 4, "node": {"created": false, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": [{"folded": "gone", "spelling": "Gone", "state": "tombstone"}, {"folded": "stays", "spelling": "Stays", "state": "present"}]}}}, "note": "the parent of a created key is not created itself"},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\GONE", "op": "reg-delete-key"}, "expect": {"status": "not-found"}},
+    {"request": {"path": "\\Registry", "op": "reg-delete-key"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Stays"}, "expect": {"reply": {"version": 4, "state": "created", "below": false}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\Unknown"}, "expect": {"reply": {"version": 4, "node": null}}, "note": "a key the overlay never held"}
+  ]
+}

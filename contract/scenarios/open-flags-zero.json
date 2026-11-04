@@ -1,0 +1,15 @@
+{
+  "name": "open-flags-zero",
+  "description": "oflags == 0 is read as OPEN_READ (wire.md 3.4.3: \"`oflags == 0` is read as `OPEN_READ` by both directors\"), so the file opens and reads.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "hello"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": [], "path": "a.txt"}, "expect": {"reply": {"fh": 1, "size": 5, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 5}, "expect": {"reply": {"data": "hello"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+  ]
+}

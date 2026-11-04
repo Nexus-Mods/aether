@@ -1,0 +1,19 @@
+{
+  "name": "registry-key-too-large",
+  "description": "A REG_KEY reply longer than `payload_cap - 8` is ST_REPLY_TOO_LARGE (wire.md 4.3: \"must be answered `ST_REPLY_TOO_LARGE` instead\"). A key holding one value of MAX_DATA (1 MiB) has a reply over 1 MiB: a director whose payload cap is not larger answers ST_REPLY_TOO_LARGE; one with a larger cap may answer the key. The other registry opcodes on it are unaffected, and a smaller key still answers.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Cairn", "values": [{"name": "huge", "ty": 3, "data": {"size": 1048576, "seed": 9}}]},
+      {"path": "\\Registry\\Machine\\Software\\Cairn\\Small", "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}]}
+    ]}
+  },
+  "steps": [
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"one_of": [{"status": "reply-too-large"}, {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "huge", "ty": 3, "data": {"size": 1048576, "seed": 9}}], "value_tombstones": [], "children": [{"folded": "small", "spelling": "Small", "state": "present"}]}}}], "wire": "4.3"}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 4, "state": "created", "below": true}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\Small"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": [], "children": []}}}}
+  ]
+}

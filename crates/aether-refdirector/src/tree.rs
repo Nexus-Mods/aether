@@ -235,10 +235,13 @@ impl Tree {
 }
 
 impl Root {
-    /// Every directory under this root, folded: the listed ones, the
-    /// writable ones and every file's ancestors.
-    fn dirs_folded(&self) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
+    /// Every directory under this root, each once (by fold) with the
+    /// spelling the tree gives it: the listed ones, then the writable ones,
+    /// then every file's ancestors as the file's path spells them. The first
+    /// spelling of a name wins.
+    fn dirs_spelled(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
         let ancestors = self.files.iter().flat_map(|f| {
             let comps: Vec<&str> = f.path.split('/').collect();
             (1..comps.len()).map(move |n| comps[..n].join("/"))
@@ -251,9 +254,19 @@ impl Root {
             .chain(ancestors)
             .filter(|d| d != ".")
         {
-            out.insert(aether_casefold::fold(&d));
+            if seen.insert(aether_casefold::fold(&d)) {
+                out.push(d);
+            }
         }
         out
+    }
+
+    /// The same directories, folded.
+    fn dirs_folded(&self) -> BTreeSet<String> {
+        self.dirs_spelled()
+            .iter()
+            .map(|d| aether_casefold::fold(d))
+            .collect()
     }
 }
 
@@ -287,7 +300,7 @@ impl Reference {
         let mut d = Reference::new();
         for r in &tree.roots {
             d = d.with_root(r.id);
-            for dir in r.dirs_folded() {
+            for dir in r.dirs_spelled() {
                 d = d.with_dir(&under(r.id, &dir));
             }
             for f in &r.files {

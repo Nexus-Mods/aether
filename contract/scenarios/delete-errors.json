@@ -1,0 +1,28 @@
+{
+  "name": "delete-errors",
+  "description": "DELETE: the root itself is ST_BAD_REQUEST; a missing path under a writable provider is ST_NOT_FOUND; an existing path outside every writable provider is ST_READ_ONLY; an unknown root is ST_NOT_FOUND (wire.md 3.4.8, 3.5).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "data/a.esp", "contents": "abc"},
+        {"path": "saves/s.sav", "contents": "s"}
+      ],
+       "dirs": ["data/sub"],
+       "writable": ["saves"]},
+      {"id": 1,
+       "files": [{"path": "r1.txt", "contents": "r"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "delete", "root": 0, "path": "."}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/missing.txt"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "delete", "root": 0, "path": "data/a.esp"}, "expect": {"status": "read-only"}, "note": "a file outside every writable provider"},
+    {"request": {"op": "delete", "root": 0, "path": "data/sub"}, "expect": {"status": "read-only"}, "note": "a directory outside every writable provider"},
+    {"request": {"op": "delete", "root": 1, "path": "r1.txt"}, "expect": {"status": "read-only"}, "note": "a root with no writable provider"},
+    {"request": {"op": "delete", "root": 6, "path": "saves/s.sav"}, "expect": {"status": "not-found"}, "note": "root 6 is not served"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 1, "path": "r1.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/s.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}}
+  ]
+}

@@ -90,6 +90,38 @@ fn a_files_ancestors_and_the_named_directories_are_directories() {
     );
 }
 
+/// A directory keeps the spelling the tree gives it, as a name created
+/// through the ring does (wire.md 3.2: READDIR and STORED_NAMES answer with
+/// stored spellings): a file's ancestors as the file's path spells them, and a
+/// listed or writable directory as listed.
+#[test]
+fn directories_of_a_tree_keep_their_spelling() {
+    let t = Tree {
+        roots: vec![Root {
+            id: 0,
+            files: vec![file("Data/Textures/Sky.DDS", Contents::Text("s".into()))],
+            dirs: vec!["Data/Empty Dir".into()],
+            writable: vec!["Saves".into()],
+        }],
+        registry: None,
+    };
+    let mut d = Reference::from_tree(&t).unwrap();
+    let list = |d: &mut Reference, path: &str| {
+        let mut out = Listing::default();
+        d.read_dir(RootId(0), path, &mut out).unwrap();
+        let mut names: Vec<_> = out.iter().map(|e| e.name.to_string()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(list(&mut d, "."), ["Data", "Saves"]);
+    assert_eq!(list(&mut d, "data"), ["Empty Dir", "Textures"]);
+    assert_eq!(
+        d.stored_names(RootId(0), 0, "data/textures/sky.dds")
+            .unwrap(),
+        "Data/Textures/Sky.DDS"
+    );
+}
+
 #[test]
 fn writes_stick_only_under_a_writable_prefix() {
     let mut d = Reference::from_tree(&tree()).unwrap();

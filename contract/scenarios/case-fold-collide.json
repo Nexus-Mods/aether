@@ -1,0 +1,26 @@
+{
+  "name": "case-fold-collide",
+  "description": "Two spellings that fold equal are one entry (wire.md 3.2): created under one spelling, a file is that file under the other; a rename and a delete through the other spelling act on it; the stored spelling is the first.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [],
+       "dirs": ["saves"],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/File.TXT"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "one"}, "expect": {"reply": {"written": 3}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/FILE.txt"}, "expect": {"reply": {"fh": 2, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "the same entry, so its contents are there"},
+    {"request": {"op": "write", "fh": 2, "offset": 3, "data": "two"}, "expect": {"reply": {"written": 3}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "File.TXT", "is_dir": false, "size": 6, "mtime": 0}]}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/file.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 6, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/file.txt", "to": "saves/Other.dat"}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "Other.dat", "is_dir": false, "size": 6, "mtime": 0}]}}},
+    {"request": {"op": "delete", "root": 0, "path": "SAVES/OTHER.DAT"}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": []}}}
+  ]
+}

@@ -326,12 +326,16 @@ in a request says which process sent it, so:
 Each request takes effect atomically with respect to every other on the
 ring, from any client:
 
-- of concurrent `OPEN_EXCL` creates of one name, or REG_CREATE_KEYs of one
-  key, exactly one succeeds;
+- of concurrent `OPEN_EXCL` creates of one missing name, or REG_CREATE_KEYs
+  of one missing key, exactly one succeeds;
 - concurrent WRITEs to disjoint ranges all land;
 - each append WRITE lands whole at an end;
 - a request concurrent with a RENAME or DELETE sees the state before it or
-  the state after it, never a mixture.
+  the state after it, never a mixture;
+- of a create (`OPEN_CREATE`) and a MKDIR of one missing name, at most one
+  succeeds, and the name is then one entry of one kind; a create under a
+  directory concurrent with a RENAME of that directory lands under one of
+  its two names, or is refused as a create under a missing parent.
 
 The reference serves each file request under one lock over its tree, and
 each registry request under one lock over its overlay.
@@ -542,8 +546,7 @@ truncation, bad UTF-8 and out-of-range values.
 means "no time" and the shim substitutes 2024-01-01T00:00:00Z. Which time a
 director reports for a path, if any, is the director's to choose: the shim
 checks no time it is sent. A director should report one `mtime` for a path
-in GETATTR and in READDIR until the path changes; conformance does not fail
-a director that does not. The reference reports 0 everywhere.
+in GETATTR and in READDIR until the path changes. The reference reports 0 everywhere.
 
 ### 3.3 Opcode table
 
@@ -876,16 +879,16 @@ directory moves with everything under it. A file or an empty directory at
 inside `from`, is `ST_BAD_REQUEST` (as the reference director answers) or
 `ST_IO_ERROR` (as an overlay answers that never moves a directory only its
 lower layer holds, the root included), and nothing moves. A missing `from` is
-`ST_NOT_FOUND` whatever `to` is; either end outside every writable provider
-`ST_READ_ONLY`.
+`ST_NOT_FOUND` whatever `to` is, the root at either end aside; either end
+outside every writable provider `ST_READ_ONLY`.
 
 - **Kinds.** A directory onto an existing file is `ST_IO_ERROR`, and nothing
   moves. A file onto an empty directory may replace it (`ST_OK`) or be
   refused with `ST_IO_ERROR`; the reference replaces it.
 - **The same name.** A `to` equal to `from`, in the same spelling, is
   `ST_OK` and nothing changes.
-- **An ancestor.** A `to` that is an ancestor of `from` is a directory with
-  something under it: `ST_IO_ERROR`.
+- **An ancestor.** A `to` that is an ancestor of `from`, other than the
+  root, is a directory with something under it: `ST_IO_ERROR`.
 - **A missing parent.** A `to` whose parent is missing is `ST_NOT_FOUND`;
   one whose parent is a file is `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`.
   Nothing moves. The reference answers `ST_NOT_FOUND` for both.
@@ -919,12 +922,15 @@ any other: a director that keeps files on disk should open them with
 `FILE_SHARE_DELETE`, so the delete or rename of an open file succeeds.
 
 After its file is deleted, or replaced by a RENAME or RENAME_X onto its
-name, a handle may go on reading the file's last bytes (and its WRITEs and
-SETATTRs then change nothing anyone else can see), or its READ, WRITE and
-SETATTR may fail with `ST_IO_ERROR` or `ST_NOT_FOUND`. It never reads or
-changes a file created at, or moved to, that name later, and its CLOSE is
-`ST_OK`. The reference fails them: READ `ST_IO_ERROR`, WRITE and SETATTR
-`ST_NOT_FOUND`.
+name, a handle's READ, WRITE and SETATTR may fail with `ST_IO_ERROR` or
+`ST_NOT_FOUND`, or the director may keep the file for its open handles, as
+NTFS keeps a file deleted with `FILE_SHARE_DELETE`. A kept file is still
+one file to all of them: it starts with its last bytes, and a WRITE or
+SETATTR through one of its handles is seen by a READ through any other
+(3.4.4), but by nothing that reaches it through a name, since it has none.
+A handle never reads or changes a file created at, or moved to, that name
+later, and its CLOSE is `ST_OK`. The reference fails them: READ
+`ST_IO_ERROR`, WRITE and SETATTR `ST_NOT_FOUND`.
 
 #### 3.4.9 MKDIR (10)
 
@@ -969,8 +975,8 @@ The reference director has no layers, so it never gives these answers.
 #### 3.4.10 CLOSE (11)
 
 Request, 8 bytes: `fh:u64`. Reply: status only. Unknown `fh` `ST_BAD_FH`;
-`CLOSE(0)`, from a director that never issued 0 (3.4.3), is `ST_BAD_FH`,
-which the shim ignores.
+`CLOSE(0)` is `ST_BAD_FH` (3.4.3: 0 is never a handle), which the shim
+ignores.
 
 #### 3.4.11 HEARTBEAT (13)
 
@@ -1004,8 +1010,8 @@ its stored spelling, even when later components are unknown: an echo of a
 known component as sent defeats `GetFinalPathNameByHandle`. A `skip` equal
 to or greater than the number of components, which the shim never sends,
 may be answered with an empty reply or `ST_BAD_REQUEST`; the reference
-answers an empty reply. STORED_NAMES of `"."` names the root itself, and the
-reference answers `.`.
+answers an empty reply. STORED_NAMES of `"."` names the root itself: the
+reply is `.`, one name.
 
 #### 3.4.13 RENAME_X (23)
 

@@ -147,6 +147,25 @@ pub fn connect_from_env() -> Result<FuseClient, FuseInitError> {
     client_from_env()
 }
 
+/// How far a test has moved the spelling cache's clock past real time
+/// ([`advance_name_clock`]). Not in the shipped shim.
+#[cfg(feature = "test-support")]
+static NAME_CLOCK_AHEAD_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a remembered spelling is used without asking again, for a test
+/// that moves the clock past it. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub const NAME_TTL_MS_FOR_TESTS: u64 = NAME_TTL_MS;
+
+/// Move the clock every client's spelling cache reads `ms` ahead, so that a
+/// test sees an entry expire without sleeping. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn advance_name_clock(ms: u64) {
+    NAME_CLOCK_AHEAD_MS.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Test-only escape hatch (see the constant's doc comment in `aether-env`): lets
 /// the launch-abort path be exercised without standing up a director that is
 /// actually broken.
@@ -896,7 +915,7 @@ impl FuseClient {
     /// names than components (none, even) if the director could not say.
     fn stored_names(&self, root: RootId, under: &[String]) -> Vec<String> {
         crate::hookstats::note_name_query();
-        let now = self.started.elapsed().as_millis() as u64;
+        let now = self.name_clock_ms();
         let mut known = match self.names.lock() {
             Ok(names) => names.leading(root.0, under, now),
             Err(_) => Vec::new(),
@@ -932,6 +951,16 @@ impl FuseClient {
         }
         known.extend(rest);
         known
+    }
+
+    /// The spelling cache's clock: milliseconds since this client was made
+    /// (plus what a test moved it ahead, in a test build).
+    fn name_clock_ms(&self) -> u64 {
+        #[cfg(feature = "test-support")]
+        let ahead = NAME_CLOCK_AHEAD_MS.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(feature = "test-support"))]
+        let ahead = 0;
+        self.started.elapsed().as_millis() as u64 + ahead
     }
 
     /// Something this process did may have changed how `vpath` (folded,

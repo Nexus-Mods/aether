@@ -38,7 +38,8 @@ windows-sys = { workspace = true, features = [
 
 [features]
 # Entry points for this crate's own tests (`director::install_global`,
-# `director::connect_from_env`, `set_eager_section_max`). Off in the shipped shim: only the
+# `director::connect_from_env`, `director::advance_name_clock` (the spelling cache's clock),
+# `set_eager_section_max`). Off in the shipped shim: only the
 # dev-dependency below turns it on.
 test-support = []
 

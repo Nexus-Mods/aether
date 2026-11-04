@@ -665,3 +665,42 @@ fn a_create_under_a_missing_parent_or_a_file_is_not_found() {
     assert!(implied.open(R0, RW | OpenFlags::CREATE, "w/new").is_ok());
     assert_eq!(implied.mkdir(R0, 0o755, "data/deep/sub"), Ok(()));
 }
+
+/// 3.4.3: OPEN_EXCL on an existing directory the writable provider holds is
+/// Status::Exists, before the kind of entry is looked at; any other write
+/// open of it is Status::IsDir (with OPEN_CREATE) or Status::IoError, and one
+/// no writable provider serves Status::ReadOnly.
+#[test]
+fn open_excl_on_a_directory_is_exists() {
+    let mut d = Reference::new()
+        .writable_under("saves/")
+        .with_dir("saves")
+        .with_dir("saves/dir")
+        .with_dir("data");
+    for flags in [
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCL,
+        OpenFlags::WRITE | OpenFlags::EXCL,
+        RW | OpenFlags::CREATE | OpenFlags::EXCL | OpenFlags::TRUNC,
+    ] {
+        assert_eq!(
+            d.open(R0, flags, "saves/DIR").map(|_| ()),
+            Err(Status::Exists),
+            "{flags:?}"
+        );
+        assert_eq!(
+            d.open(R0, flags, "data").map(|_| ()),
+            Err(Status::ReadOnly),
+            "{flags:?}"
+        );
+    }
+    assert_eq!(
+        d.open(R0, OpenFlags::WRITE | OpenFlags::CREATE, "saves/dir")
+            .map(|_| ()),
+        Err(Status::IsDir)
+    );
+    assert_eq!(
+        d.open(R0, OpenFlags::WRITE, "saves/dir").map(|_| ()),
+        Err(Status::IoError)
+    );
+    assert!(d.get_attr(R0, "saves/dir").unwrap().is_dir);
+}

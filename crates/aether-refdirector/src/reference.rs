@@ -626,8 +626,9 @@ impl Reference {
     ///
     /// It answers a write open the way a real provider graph does: a
     /// writable mount answers `Status::IoError` (opening a directory for
-    /// writing fails), a read-only one `Status::ReadOnly`, and a creating open
-    /// on a writable mount `Status::IsDir`. On a directory handle the access
+    /// writing fails), a read-only one `Status::ReadOnly`, an exclusive open
+    /// on a writable mount `Status::Exists`, and a creating open there
+    /// `Status::IsDir`. On a directory handle the access
     /// bits the shim reads as write access are `FILE_ADD_FILE` and
     /// `FILE_ADD_SUBDIRECTORY`, which every backup-semantics directory open
     /// carries, so these answers matter.
@@ -920,13 +921,16 @@ impl Director for Reference {
         }
         if g.is_dir(&vpath) {
             if write {
-                // The three answers a real graph gives, each its own code
-                // path (see `with_dir`): a read-only mount refuses on
-                // access; an overlay whose base holds the directory refuses
-                // a creating open; a writable disk provider tries to open
-                // the directory for writing and fails.
+                // The answers a real graph gives, each its own code path
+                // (see `with_dir`): a read-only mount refuses on access; an
+                // exclusive create finds the name taken, whatever is there
+                // (wire.md 3.4.3); an overlay whose base holds the directory
+                // refuses a creating open; a writable disk provider tries to
+                // open the directory for writing and fails.
                 return Err(if !g.is_writable(&vpath) {
                     Status::ReadOnly
+                } else if flags.contains(OpenFlags::EXCL) {
+                    Status::Exists
                 } else if flags.contains(OpenFlags::CREATE) {
                     Status::IsDir
                 } else {

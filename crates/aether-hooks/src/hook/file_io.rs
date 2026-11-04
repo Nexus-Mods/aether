@@ -210,9 +210,9 @@ pub(super) unsafe fn write_hook_body(
                 }
             }
             // What landed, and the failure that stopped the rest: a write that
-            // fails part way still moved the position and size by what its
-            // earlier chunks wrote, and says so in `Information`
-            // (docs/wire.md 3.4.5).
+            // fails part way grew the file by what its earlier chunks wrote,
+            // and says so in `Information`, but leaves the file pointer where
+            // it was, as NTFS does (docs/wire.md 3.4.5).
             let (n, failed) = if want == 0 || buffer.is_null() {
                 (0usize, None)
             } else {
@@ -239,10 +239,12 @@ pub(super) unsafe fn write_hook_body(
                 unsafe { crate::ntbuf::iosb_set(iosb, st, 0) };
                 return st;
             }
-            // Append-only always tracks position (every write moved EOF
-            // forward regardless of what the caller passed); otherwise only
-            // an implicit-offset write consumes the file pointer.
-            if append_only || explicit.is_none() {
+            // Append-only always tracks position (it is the end of file every
+            // append lands at, and the landed bytes moved it, failed or not);
+            // otherwise only an implicit-offset write that succeeded moves the
+            // file pointer. A failed one leaves it, so a retry of the same
+            // buffer lands where this one started.
+            if append_only || (explicit.is_none() && failed.is_none()) {
                 crate::synth_file::set_position(handle as isize, off + n as u64);
             }
             // The synthetic size was set once at open and never touched

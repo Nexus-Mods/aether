@@ -836,10 +836,13 @@ write layer and disk provider loop to the end, `provider/layer.clj` and
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
 
-A WRITE that fails ends the program's write: the shim reports what the
-chunks before it wrote (`IoStatus.Information`, and the position and size
-move by it) with `STATUS_DISK_FULL` for `ST_NO_SPACE` and
-`STATUS_UNSUCCESSFUL` for any other failure, and sends no further chunk. A
+A WRITE that fails ends the program's write, and the shim sends no further
+chunk. It reports what the chunks before it wrote in `IoStatus.Information`,
+and the file's size grows by that, but the file pointer stays where the call
+found it, as NTFS leaves it after a failed write, so a retry of the same
+buffer lands where this write started (an append-only handle's end of file
+still moves). The status is `STATUS_DISK_FULL` for `ST_NO_SPACE` and
+`STATUS_UNSUCCESSFUL` for any other failure. A
 `written` larger than the chunk's `len` is a reply the shim cannot use: that
 chunk counts as not written and the write fails `STATUS_UNSUCCESSFUL`.
 

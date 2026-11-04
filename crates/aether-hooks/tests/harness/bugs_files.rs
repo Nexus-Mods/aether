@@ -765,11 +765,13 @@ fn a_later_chunk_failing_reports_what_landed() {
     );
     assert_eq!(st, STATUS_UNSUCCESSFUL);
     assert_eq!(information, CHUNK, "IoStatus.Information: what landed");
-    assert_eq!(seek(h, 0, FILE_CURRENT), CHUNK as i64);
+    // The bytes that landed are the file's, but the pointer stays where the
+    // call found it, as NTFS leaves it after a failed write.
+    assert_eq!(seek(h, 0, FILE_CURRENT), 0, "the pointer moved");
     assert_eq!(size_of(h), CHUNK as i64);
 
     // WriteFile, again failing at its second chunk: the error, and the
-    // pointer past what landed.
+    // pointer still where it was.
     let third = served.faults.arm(
         Match {
             nth: Some(2),
@@ -784,13 +786,24 @@ fn a_later_chunk_failing_reports_what_landed() {
     assert_eq!(served.faults.applied(third), 1);
     assert!(!ok);
     assert_eq!(err, ERROR_GEN_FAILURE);
-    assert_eq!(seek(h, 0, FILE_CURRENT), 2 * CHUNK as i64);
-    assert_eq!(size_of(h), 2 * CHUNK as i64);
-    close(h);
+    assert_eq!(seek(h, 0, FILE_CURRENT), 0, "the pointer moved");
+    assert_eq!(size_of(h), CHUNK as i64);
+
+    // A retry of the same buffer at the current position, as a program
+    // retries, lands where the first try started.
+    let retry = served.recorder.mark();
+    let (ok, put, _) = write(h, &data);
+    assert!(ok, "the retry");
+    assert_eq!(put as usize, data.len());
     assert_eq!(
-        served.fake.contents("save/out.bin"),
-        Some([&data[..CHUNK], &data[..CHUNK]].concat())
+        write_offsets(served, retry)[0],
+        0,
+        "the retry's first chunk"
     );
+    assert_eq!(seek(h, 0, FILE_CURRENT), data.len() as i64);
+    assert_eq!(size_of(h), data.len() as i64);
+    close(h);
+    assert_eq!(served.fake.contents("save/out.bin"), Some(data));
 }
 
 #[test]

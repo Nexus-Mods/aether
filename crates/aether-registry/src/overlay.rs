@@ -284,12 +284,14 @@ impl Overlay {
     }
 
     /// Delete a value; the tombstone also hides a real value of that name. `NotFound` if the
-    /// key itself is tombstoned.
+    /// key is tombstoned (itself or below a tombstoned ancestor). Checks the key-name lengths
+    /// and the depth, as every write that may create a key does.
     pub fn delete_value(&mut self, path: &str, name: &str, now: u64) -> Result<u64, RegError> {
         if !valid_path(path) {
             return Err(RegError::InvalidPath);
         }
         check_key_name(path)?;
+        check_depth(path, MAX_WRITE_DEPTH)?;
         if utf16_len(name) > MAX_VALUE_NAME {
             return Err(RegError::NameTooLong);
         }
@@ -338,13 +340,16 @@ impl Overlay {
         Ok(v)
     }
 
-    /// Tombstone the key and drop its subtree. `NotFound` if already tombstoned;
-    /// `InvalidPath` for the root.
+    /// Tombstone the key and drop its subtree. `NotFound` if already tombstoned (itself or
+    /// below a tombstoned ancestor); `InvalidPath` for the root. Checks the key-name lengths
+    /// and the depth: the parent chain it makes exist is created by this write.
     pub fn delete_key(&mut self, path: &str, now: u64) -> Result<u64, RegError> {
         if !valid_path(path) {
             return Err(RegError::InvalidPath);
         }
         let parent = path::parent(path).ok_or(RegError::InvalidPath)?;
+        check_key_name(path)?;
+        check_depth(path, MAX_WRITE_DEPTH)?;
         if self.lookup(path).0 == Lookup::Tombstoned {
             return Err(RegError::NotFound);
         }
@@ -377,6 +382,7 @@ impl Overlay {
         if utf16_len(new_leaf) > MAX_KEY_NAME {
             return Err(RegError::NameTooLong);
         }
+        check_key_name(path)?;
         let parent = path::parent(path).ok_or(RegError::InvalidPath)?;
         let old_f = fold(path);
         let Some(root) = self.entries.get(&old_f) else {
@@ -390,8 +396,12 @@ impl Overlay {
         if !case_only && self.entries.contains_key(&new_f) {
             return Err(RegError::AlreadyExists);
         }
-        let v = self.bump();
+        // The moved keys are created at their own depth under the new name.
         let moved_keys: Vec<String> = self.subtree_keys(&old_f);
+        for k in &moved_keys {
+            check_depth(&self.entries[k].path, MAX_WRITE_DEPTH)?;
+        }
+        let v = self.bump();
         let moved_tombs: Vec<(String, u64)> = self
             .tombs
             .range(child_prefix(&old_f)..)
@@ -796,6 +806,41 @@ mod tests {
             o.set_value(r"\Device\x", "v", REG_SZ, b"", 1),
             Err(RegError::InvalidPath)
         );
+    }
+
+    /// Every write checks the limits of wire.md 4.1 on the keys it touches:
+    /// each key-name component at most 255 UTF-16 units, and no key it would
+    /// create (or move) deeper than 512 components below `\Registry`.
+    /// Refused writes change nothing.
+    #[test]
+    fn every_write_checks_key_name_length_and_depth() {
+        let chain = |n: usize| {
+            let mut p = String::from(r"\Registry");
+            for i in 0..n {
+                p.push_str(&format!(r"\k{i}"));
+            }
+            p
+        };
+        let deep = chain(MAX_WRITE_DEPTH + 1);
+        let long = format!(r"{K}\{}", "k".repeat(256));
+        let mut o = Overlay::new();
+        assert_eq!(o.delete_value(&deep, "v", 1), Err(RegError::TooDeep));
+        assert_eq!(o.delete_key(&deep, 1), Err(RegError::TooDeep));
+        assert_eq!(o.delete_value(&long, "v", 1), Err(RegError::NameTooLong));
+        assert_eq!(o.delete_key(&long, 1), Err(RegError::NameTooLong));
+        assert_eq!(o.rename_key(&long, "x", 1), Err(RegError::NameTooLong));
+        assert_eq!(o.version(), 0);
+        assert!(o.node(&chain(MAX_WRITE_DEPTH)).is_none());
+        // At the limit the same writes go through.
+        o.delete_value(&chain(MAX_WRITE_DEPTH), "v", 1).unwrap();
+        o.delete_key(&chain(MAX_WRITE_DEPTH), 2).unwrap();
+        // A rename would create the moved keys at their own depth: a key a
+        // persisted layer holds deeper than a write may create is not moved.
+        o.insert_node(&deep, Node::default(), 0).unwrap();
+        let v = o.version();
+        assert_eq!(o.rename_key(&chain(4), "moved", 3), Err(RegError::TooDeep));
+        assert_eq!(o.version(), v);
+        assert!(o.node(&deep).is_some());
     }
 
     #[test]

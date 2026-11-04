@@ -104,6 +104,11 @@ pub fn fold(s: &str) -> String {
     aether_casefold::fold(s)
 }
 
+/// [`fold`] into a buffer the caller keeps (`aether_casefold::fold_into`).
+pub fn fold_into(s: &str, out: &mut String) {
+    aether_casefold::fold_into(s, out)
+}
+
 pub fn parent(canonical: &str) -> Option<&str> {
     match canonical.rfind('\\') {
         Some(0) | None => None,

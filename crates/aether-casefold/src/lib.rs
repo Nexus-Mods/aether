@@ -45,6 +45,18 @@ pub fn fold(s: &str) -> String {
     fold_unicode(s)
 }
 
+/// [`fold`] into `out`, which is cleared first: the same string, in a buffer
+/// the caller keeps, so a fold into a buffer that has grown allocates nothing.
+pub fn fold_into(s: &str, out: &mut String) {
+    out.clear();
+    if s.is_ascii() {
+        out.push_str(s);
+        out.make_ascii_lowercase();
+    } else {
+        out.extend(s.chars().flat_map(char::to_lowercase));
+    }
+}
+
 /// [`fold`]'s definition: `char::to_lowercase` of every character.
 fn fold_unicode(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
@@ -126,6 +138,25 @@ mod tests {
             let b = respell(&a, &flips);
             proptest::prop_assert_eq!(eq_folded(&a, &b), fold(&a) == fold(&b));
             proptest::prop_assert_eq!(eq_folded(&b, &a), fold(&b) == fold(&a));
+        }
+    }
+
+    #[test]
+    fn fold_into_gives_the_fold() {
+        let mut out = String::from("left over");
+        for s in ["", "FooBAR.ESP", "ÄÖÜ", "İstanbul", r"data\SKSE\Plugins"] {
+            fold_into(s, &mut out);
+            assert_eq!(out, fold(s), "{s:?}");
+        }
+    }
+
+    /// So a name already folded compares as itself: `eq_folded(a, fold(b))` is
+    /// `fold(a) == fold(b)`.
+    #[test]
+    fn fold_is_idempotent_over_every_char() {
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            let once = fold(&c.to_string());
+            assert_eq!(fold(&once), once, "{c:?} (U+{:04X})", c as u32);
         }
     }
 

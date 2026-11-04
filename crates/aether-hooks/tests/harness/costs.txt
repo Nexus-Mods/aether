@@ -27,8 +27,8 @@ read_small_cached round_trips=0 ring_bytes=0 allocs<=0
 read_small_cached_cold round_trips=1 ring_bytes=65576 allocs<=16
 read_small_mutable round_trips=1 ring_bytes=1056 allocs<=9
 read_stream_5_mib round_trips=20 ring_bytes=5243680 allocs<=130
-reg_query_overlay_cold round_trips=1 ring_bytes=118 allocs<=13
-reg_query_overlay_warm round_trips=0 ring_bytes=0 allocs<=8
+reg_query_overlay_cold round_trips=1 ring_bytes=118 allocs<=10
+reg_query_overlay_warm round_trips=0 ring_bytes=0 allocs<=4
 section_eager_1_mib round_trips=4 ring_bytes=1048736 allocs<=29
 section_lazy_page_fill round_trips=1 ring_bytes=262184 allocs<=2
 write_4_kib round_trips=2 ring_bytes=4160 allocs<=6

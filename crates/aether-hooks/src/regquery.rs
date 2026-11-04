@@ -885,14 +885,24 @@ enum Hit {
     Real,
 }
 
-fn hit(n: Option<&Node>, folded: &str) -> Hit {
+/// What `n` says about the value `name`, folded or not: names compare by
+/// their folds (`eq_folded`, which builds neither), and a fold is its own fold.
+fn hit(n: Option<&Node>, name: &str) -> Hit {
     let Some(n) = n else {
         return Hit::Real;
     };
-    if let Some(v) = n.values.iter().find(|v| fold(&v.name) == folded) {
+    if let Some(v) = n
+        .values
+        .iter()
+        .find(|v| aether_casefold::eq_folded(&v.name, name))
+    {
         return Hit::Overlay(v.clone());
     }
-    if n.created || n.value_tombstones.iter().any(|t| t == folded) {
+    if n.created
+        || n.value_tombstones
+            .iter()
+            .any(|t| aether_casefold::eq_folded(t, name))
+    {
         return Hit::Hidden;
     }
     Hit::Real
@@ -931,9 +941,8 @@ pub(crate) unsafe fn query_value_key(
         Ok(v) => v,
         Err(st) => return st,
     };
-    let f = fold(&vname);
     // The director lost since the lookup: the real key alone (counted by `regclient`).
-    let found = regclient::with_key(&ctx.path, |n| hit(n, &f)).unwrap_or(Hit::Real);
+    let found = regclient::with_key(&ctx.path, |n| hit(n, &vname)).unwrap_or(Hit::Real);
     match found {
         Hit::Overlay(v) => emit(info, len, ret, |b| layout::write_value_info(vc, &v, b)),
         Hit::Hidden => STATUS_OBJECT_NAME_NOT_FOUND,

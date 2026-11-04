@@ -199,6 +199,25 @@ fn read_failed<T>(status: Status) -> Result<T, Status> {
 
 thread_local! {
     static IN_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The folded path a cache lookup asks with, in a buffer each thread keeps.
+    static FOLDED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// `f` of `fold(path)`, folded into this thread's kept buffer, so a lookup
+/// that hits allocates nothing once the buffer has grown. A fresh string when
+/// the buffer is in use (or the thread is ending).
+fn with_folded<R>(path: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut f = Some(f);
+    let kept = FOLDED.try_with(|cell| {
+        let mut buf = cell.try_borrow_mut().ok()?;
+        aether_registry::path::fold_into(path, &mut buf);
+        f.take().map(|f| f(&buf))
+    });
+    match (kept, f) {
+        (Ok(Some(r)), _) => r,
+        (_, Some(f)) => f(&fold(path)),
+        (_, None) => unreachable!("`f` ran and returned"),
+    }
 }
 
 /// While held, this thread is answering a registry write: a director request that fails is
@@ -288,16 +307,22 @@ impl<'a> RegClient<'a> {
     /// [`RegClient::key`] with `f` run on the cached node in place (under the cache lock).
     pub fn with_key<R>(&self, path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, Status> {
         let generation = self.fc.reg_generation();
-        let k = fold(path);
+        let mut f = Some(f);
         if generation != 0 {
-            if let Ok(mut c) = self.cache.lock() {
-                if c.at(generation) {
-                    if let Some(v) = c.keys.get(&k) {
-                        return Ok(f(v.as_ref()));
-                    }
+            let hit = with_folded(path, |k| {
+                let mut c = self.cache.lock().ok()?;
+                if !c.at(generation) {
+                    return None;
                 }
+                let v = c.keys.get(k)?;
+                f.take().map(|f| f(v.as_ref()))
+            });
+            if let Some(r) = hit {
+                return Ok(r);
             }
         }
+        let f = f.expect("run only on a hit, which returned");
+        let k = fold(path);
         let v = match self.fetch_key(path) {
             Ok(v) => v,
             Err(st) => return read_failed(st),
@@ -419,17 +444,19 @@ impl<'a> RegClient<'a> {
         fetch: impl FnOnce() -> Result<T, Status>,
     ) -> Result<T, Status> {
         let generation = self.fc.reg_generation();
-        let k = fold(path);
         if generation != 0 {
-            if let Ok(mut c) = self.cache.lock() {
-                if c.at(generation) {
-                    if let Some(v) = map(&mut c).get(&k) {
-                        return Ok(v.clone());
-                    }
+            let hit = with_folded(path, |k| {
+                let mut c = self.cache.lock().ok()?;
+                if !c.at(generation) {
+                    return None;
                 }
+                map(&mut c).get(k).cloned()
+            });
+            if let Some(v) = hit {
+                return Ok(v);
             }
         }
-        self.fetched(generation, k, map, fetch)
+        self.fetched(generation, fold(path), map, fetch)
     }
 
     /// `fetch`'s answer, kept in `map` under `generation` (read before asking; 0 keeps

@@ -138,13 +138,14 @@ fn an_inline_read_reaches_the_client_as_the_fake_sent_it() {
 }
 
 #[test]
-fn opcodes_outside_the_table_are_not_supported() {
+/// wire.md 3.3: any other opcode is ST_BAD_REQUEST with an empty payload.
+fn opcodes_outside_the_table_are_bad_requests() {
     with_ring(Reference::new(), |c, _| {
         for op in [0, 4, 12, 25, 1000] {
             let r = c.submit(op, 0, b"anything").unwrap();
             assert_eq!(
                 (r.status, r.payload),
-                (Status::NotSupported.code(), vec![]),
+                (Status::BadRequest.code(), vec![]),
                 "opcode {op}"
             );
         }
@@ -152,7 +153,10 @@ fn opcodes_outside_the_table_are_not_supported() {
 }
 
 #[test]
-fn undecodable_requests_get_the_fakes_statuses() {
+/// wire.md 3.5: a payload that does not decode is ST_BAD_REQUEST, whatever
+/// the opcode; 3.2: file-op decoders ignore trailing bytes, so a HEARTBEAT
+/// carrying some is still OK.
+fn undecodable_requests_are_bad_requests() {
     let d = Reference::new().with_registry();
     with_ring(d, |c, _| {
         let raw = |op: Opcode, body: &[u8]| {
@@ -160,8 +164,9 @@ fn undecodable_requests_get_the_fakes_statuses() {
             assert!(r.payload.is_empty());
             r.status
         };
-        assert_eq!(raw(Opcode::Close, &[1, 2]), Status::Ok.code());
-        assert_eq!(raw(Opcode::Mkdir, &[1]), Status::NotSupported.code());
+        assert_eq!(raw(Opcode::Close, &[1, 2]), Status::BadRequest.code());
+        assert_eq!(raw(Opcode::Mkdir, &[1]), Status::BadRequest.code());
+        assert_eq!(raw(Opcode::StageExec, &[1]), Status::BadRequest.code());
         assert_eq!(raw(Opcode::GetAttr, &[1]), Status::BadRequest.code());
         assert_eq!(raw(Opcode::RegLookup, &[1]), Status::BadRequest.code());
         assert_eq!(raw(Opcode::Heartbeat, &[1, 2, 3]), Status::Ok.code());

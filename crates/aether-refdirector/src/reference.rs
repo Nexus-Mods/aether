@@ -11,9 +11,18 @@
 //! **What it answers.** HEARTBEAT, GETATTR, READDIR, OPEN, READ, WRITE,
 //! SETATTR (truncate), DELETE, RENAME and CLOSE, and the registry opcodes when
 //! it has a registry layer ([`Reference::with_registry`]). MKDIR,
-//! STORED_NAMES, RENAME_X, STAGE_EXEC and every number outside the table are
-//! `Status::NotSupported`, so an unexpected opcode never looks like a healthy
-//! exchange. A test controls how a READ is answered ([`ReadStyle`]), because
+//! STORED_NAMES, RENAME_X and STAGE_EXEC are `Status::NotSupported` once
+//! their paths are checked, so an unexpected request never looks like a
+//! healthy exchange. Where the fake it was moved from differed from
+//! `docs/wire.md`, it answers as wire.md says: an opcode outside the table or
+//! a payload that does not decode is `Status::BadRequest` (3.3, 3.5); a path
+//! that leaves its root is `Status::BadRequest` (3.2, 3.5.1); a root it does
+//! not serve is `Status::NotFound`, or OK with nothing found for GETATTR
+//! (3.4.1, 3.5.1); an unknown handle is `Status::BadFh` and a directory
+//! handle `Status::IsDir` (3.4.4, 3.4.10, 3.5); names match by
+//! `aether_casefold::fold` (3.2).
+//!
+//! A test controls how a READ is answered ([`ReadStyle`]), because
 //! a read loop's correctness is mostly about awkward answers: a short read
 //! that is not EOF, a read that fails part-way, a file shorter than OPEN
 //! said.
@@ -27,7 +36,13 @@
 //!
 //! **Roots.** Root 0's files are keyed by their bare vpath; any other root's
 //! by `@<id>/<vpath>` ([`key`]). A request that lost its root then finds the
-//! wrong file.
+//! wrong file. Root 0 is always served; another root is served once the
+//! reference is built with a file, directory or prefix under it, or named
+//! with [`Reference::with_root`].
+//!
+//! **Size.** No file grows past [`MAX_FILE_LEN`]: a WRITE or SETATTR past it
+//! is `Status::NoSpace` (storage full, wire.md 3.5), so hostile offsets and
+//! lengths cannot make the reference allocate without bound.
 //!
 //! **The registry half** keeps one session's overlay as `aether_registry`'s
 //! own `Overlay`, so what is stored, merged and versioned is that crate's
@@ -55,6 +70,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_casefold::fold;
 use aether_protocol::{
     AttrResp, ChangedReply, DirEntry, KeyReply, LookupReply, Opcode, OpenFlags, OpenResp,
     ReadReply, RequestFlags, RootId, Status,
@@ -66,6 +82,10 @@ use aether_rpc::{Director, Listing, ReadSlot};
 /// the shim's `read_fragmented`'s own constant. Below it a READ stays inline
 /// whatever the arena is, which is how one ring covers both transports.
 pub const BULK_THRESHOLD: u32 = 64 * 1024;
+
+/// The longest file the reference holds. A WRITE ending past it, or a
+/// SETATTR to a larger size, is `Status::NoSpace`.
+pub const MAX_FILE_LEN: usize = 64 * 1024 * 1024;
 
 /// How the reference answers READ for one file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -116,11 +136,7 @@ impl Tally {
 
     /// A file tally, keyed by the folded vpath as the table is ([`key`]).
     fn get_file(m: &Mutex<HashMap<String, u64>>, vpath: &str) -> u64 {
-        m.lock()
-            .unwrap()
-            .get(&vpath.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(0)
+        m.lock().unwrap().get(&fold(vpath)).copied().unwrap_or(0)
     }
 
     /// OPENs that issued a handle (a refused OPEN issues none).
@@ -197,12 +213,13 @@ impl Tally {
 /// `@<root>/<vpath>` for any other. A fixture names a second root's files
 /// with this (`key(1, "data/a.esp")`).
 ///
-/// Folded (ASCII lowercase), because a real provider graph looks names up
-/// case-insensitively and the shim does not always send the folded spelling:
-/// a write open carries the caller's. So the reference stores and finds every
-/// name folded, and does not model the stored case.
+/// Folded (`aether_casefold::fold`, the wire's fold, `docs/wire.md` 3.2),
+/// because a director looks names up case-insensitively and the shim does not
+/// always send the folded spelling: a write open carries the caller's. So the
+/// reference stores and finds every name folded, and does not model the
+/// stored case.
 pub fn key(root: u32, vpath: &str) -> String {
-    let vpath = vpath.to_ascii_lowercase();
+    let vpath = fold(vpath);
     if root == 0 {
         vpath
     } else {
@@ -232,7 +249,7 @@ struct Graph {
     /// creates one, since the shim takes directory creates before they reach
     /// a create open.
     dirs: Vec<String>,
-    handles: Mutex<HashMap<u64, String>>,
+    handles: Mutex<HashMap<u64, Handle>>,
     next_fh: AtomicU64,
     writable: Vec<String>,
     /// Prefixes under which a write open fails with `Status::IoError`: a
@@ -240,6 +257,8 @@ struct Graph {
     failing: Vec<String>,
     /// Answers the registry opcodes when set ([`Reference::with_registry`]).
     registry: Option<Registry>,
+    /// The roots besides 0 that are served. Fixed once built.
+    roots: Vec<u32>,
 }
 
 impl Graph {
@@ -256,16 +275,68 @@ impl Graph {
         self.failing.iter().any(|p| vpath.starts_with(p.as_str()))
     }
 
-    fn handle(&self, fh: u64) -> Option<String> {
+    fn handle(&self, fh: u64) -> Option<Handle> {
         self.handles.lock().unwrap().get(&fh).cloned()
     }
 
-    fn issue(&self, vpath: String, tally: &Tally) -> u64 {
+    /// The root a table key or prefix is under ([`key`]'s `@<id>/`).
+    fn root_of(k: &str) -> Option<u32> {
+        match k.strip_prefix('@') {
+            None => Some(0),
+            Some(rest) => rest.split_once('/')?.0.parse().ok(),
+        }
+    }
+
+    fn serves(&self, root: u32) -> bool {
+        root == 0 || self.roots.contains(&root)
+    }
+
+    /// The table key for a request's path: `BadRequest` for a path that
+    /// leaves its root, `NotFound` for a root not served.
+    fn resolve(&self, root: RootId, path: &str) -> Result<String, Status> {
+        if escapes(path) {
+            return Err(Status::BadRequest);
+        }
+        if !self.serves(root.0) {
+            return Err(Status::NotFound);
+        }
+        Ok(key(root.0, path))
+    }
+
+    fn issue(&self, vpath: String, append: bool, tally: &Tally) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         Tally::bump(&tally.opened, &vpath);
-        self.handles.lock().unwrap().insert(fh, vpath);
+        self.handles
+            .lock()
+            .unwrap()
+            .insert(fh, Handle { vpath, append });
         fh
     }
+}
+
+/// Whether `path` walks above its root: a `..` with no component before it
+/// to undo (`docs/wire.md` 3.2).
+fn escapes(path: &str) -> bool {
+    let mut depth = 0usize;
+    for c in path.split('/') {
+        match c {
+            ".." => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return true,
+            },
+            "" | "." => {}
+            _ => depth += 1,
+        }
+    }
+    false
+}
+
+/// An open handle: the file it names and whether it was opened
+/// `OpenFlags::APPEND`.
+#[derive(Clone)]
+struct Handle {
+    vpath: String,
+    append: bool,
 }
 
 /// The reference director. Built with the methods below, then served
@@ -297,6 +368,7 @@ impl Reference {
                 writable: Vec::new(),
                 failing: Vec::new(),
                 registry: None,
+                roots: Vec::new(),
             }),
             tally: Arc::new(Tally::default()),
             read_buf: Vec::new(),
@@ -306,6 +378,23 @@ impl Reference {
     /// The graph, for a builder method: only before it is shared.
     fn building(&mut self) -> &mut Graph {
         Arc::get_mut(&mut self.graph).expect("a Reference is built before it is shared")
+    }
+
+    /// Serve the root of table key or prefix `k`.
+    fn note_root(&mut self, k: &str) {
+        if let Some(r) = Graph::root_of(k).filter(|&r| r != 0) {
+            let g = self.building();
+            if !g.roots.contains(&r) {
+                g.roots.push(r);
+            }
+        }
+    }
+
+    /// Serve root `id` even with nothing under it. Root 0 is always served,
+    /// and so is any root a file, directory or prefix was added under.
+    pub fn with_root(mut self, id: u32) -> Reference {
+        self.note_root(&key(id, ""));
+        self
     }
 
     /// Another handle on the same graph, registry and tally, with its own
@@ -367,7 +456,8 @@ impl Reference {
     /// `FILE_ADD_SUBDIRECTORY`, which every backup-semantics directory open
     /// carries, so these answers matter.
     pub fn with_dir(mut self, vpath: &str) -> Reference {
-        self.building().dirs.push(vpath.to_ascii_lowercase());
+        self.note_root(vpath);
+        self.building().dirs.push(fold(vpath));
         self
     }
 
@@ -376,9 +466,10 @@ impl Reference {
     /// Outside every declared prefix the graph is read-only: a served file
     /// answers `Status::ReadOnly` to a write open and an unserved one
     /// `Status::NotFound` to a create. With no prefix declared (the default)
-    /// the whole graph is read-only.
+    /// the whole graph is read-only. An empty prefix covers every root.
     pub fn writable_under(mut self, prefix: &str) -> Reference {
-        self.building().writable.push(prefix.to_ascii_lowercase());
+        self.note_root(prefix);
+        self.building().writable.push(fold(prefix));
         self
     }
 
@@ -386,19 +477,21 @@ impl Reference {
     /// the answer a provider gives when its own I/O breaks. Checked before
     /// anything else a write open looks at.
     pub fn failing_writes_under(mut self, prefix: &str) -> Reference {
-        self.building().failing.push(prefix.to_ascii_lowercase());
+        self.note_root(prefix);
+        self.building().failing.push(fold(prefix));
         self
     }
 
     /// Add a file to the provider graph. `vpath` is the folded, `/`-joined
     /// remainder the shim builds from the path (`Data\A.esp` is
     /// `data/a.esp`).
-    pub fn with(self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Reference {
+    pub fn with(mut self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Reference {
+        self.note_root(vpath);
         self.graph
             .files
             .lock()
             .unwrap()
-            .insert(vpath.to_ascii_lowercase(), Entry { bytes, style });
+            .insert(fold(vpath), Entry { bytes, style });
         self
     }
 
@@ -409,7 +502,7 @@ impl Reference {
             .files
             .lock()
             .unwrap()
-            .get(&vpath.to_ascii_lowercase())
+            .get(&fold(vpath))
             .map(|e| e.bytes.clone())
     }
 
@@ -426,8 +519,20 @@ impl Director for Reference {
         Ok(())
     }
 
+    /// A missing path, and any path on a root not served, is OK with
+    /// nothing found (`docs/wire.md` 3.4.1).
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
-        let vpath = key(root.0, path);
+        let vpath = match self.graph.resolve(root, path) {
+            Err(Status::NotFound) => {
+                return Ok(AttrResp {
+                    found: false,
+                    is_dir: false,
+                    size: 0,
+                    mtime: 0,
+                })
+            }
+            r => r?,
+        };
         if self.graph.is_dir(&vpath) {
             return Ok(AttrResp {
                 found: true,
@@ -457,8 +562,8 @@ impl Director for Reference {
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
         // The shim sends "." for the root itself.
         let dir = match path {
-            "." | "" => key(root.0, ""),
-            v => key(root.0, v),
+            "." | "" => self.graph.resolve(root, "")?,
+            v => self.graph.resolve(root, v)?,
         };
         let prefix = if dir.is_empty() || dir.ends_with('/') {
             dir
@@ -505,8 +610,9 @@ impl Director for Reference {
             .lock()
             .unwrap()
             .push((flags.bits(), path.to_string()));
-        let vpath = key(root.0, path);
+        let vpath = g.resolve(root, path)?;
         let write = flags.contains(OpenFlags::WRITE);
+        let append = flags.contains(OpenFlags::APPEND);
         if write && g.write_fails(&vpath) {
             return Err(Status::IoError);
         }
@@ -525,7 +631,7 @@ impl Director for Reference {
                     Status::IoError
                 });
             }
-            let fh = g.issue(vpath, &self.tally);
+            let fh = g.issue(vpath, append, &self.tally);
             return Ok(OpenResp {
                 fh,
                 size: 0,
@@ -538,6 +644,12 @@ impl Director for Reference {
         if write {
             // The access check first (a read-only mount refuses the write
             // whether or not the file is there), then the disposition bits.
+            // A missing path outside every writable prefix is NotFound even
+            // on a root with no writable provider, where wire.md 3.4.3 says
+            // ReadOnly: the shim's tests rely on NotFound there
+            // (`seal/write_seal_no_overlay.rs`,
+            // `director_overlay/overlay_failure_reporting.rs`), so it waits
+            // for a ruling.
             if !g.is_writable(&vpath) {
                 return Err(if exists {
                     Status::ReadOnly
@@ -568,7 +680,7 @@ impl Director for Reference {
         };
         let size = e.bytes.len() as u64;
         drop(files);
-        let fh = g.issue(vpath, &self.tally);
+        let fh = g.issue(vpath, append, &self.tally);
         Ok(OpenResp {
             fh,
             size,
@@ -585,10 +697,13 @@ impl Director for Reference {
         offset: u64,
         len: u32,
     ) -> Result<ReadReply<'_>, Status> {
-        let Some(vpath) = self.graph.handle(fh) else {
-            return Err(Status::BadRequest);
+        let Some(Handle { vpath, .. }) = self.graph.handle(fh) else {
+            return Err(Status::BadFh);
         };
         Tally::bump(&self.tally.reads, &vpath);
+        if self.graph.is_dir(&vpath) {
+            return Err(Status::IsDir);
+        }
         let files = self.graph.files.lock().unwrap();
         // A file deleted or renamed under an open handle.
         let Some(e) = files.get(&vpath) else {
@@ -629,28 +744,43 @@ impl Director for Reference {
         Ok(ReadReply::Inline(&self.read_buf))
     }
 
+    /// On an append handle the offset is ignored (`docs/wire.md` 3.4.3).
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
-        let Some(vpath) = self.graph.handle(fh) else {
+        let Some(Handle { vpath, append }) = self.graph.handle(fh) else {
             return Err(Status::BadFh);
         };
         Tally::bump(&self.tally.writes, &vpath);
+        if self.graph.is_dir(&vpath) {
+            return Err(Status::IsDir);
+        }
         let mut files = self.graph.files.lock().unwrap();
         let Some(e) = files.get_mut(&vpath) else {
             return Err(Status::NotFound);
         };
-        let at = offset as usize;
-        if e.bytes.len() < at + data.len() {
-            e.bytes.resize(at + data.len(), 0);
+        let at = if append { e.bytes.len() as u64 } else { offset };
+        let end = at
+            .checked_add(data.len() as u64)
+            .filter(|&end| end <= MAX_FILE_LEN as u64)
+            .ok_or(Status::NoSpace)? as usize;
+        let at = at as usize;
+        if e.bytes.len() < end {
+            e.bytes.resize(end, 0);
         }
-        e.bytes[at..at + data.len()].copy_from_slice(data);
+        e.bytes[at..end].copy_from_slice(data);
         Ok(data.len() as u32)
     }
 
     /// Truncate or extend: how the shim's `truncate` reaches the director.
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
-        let Some(vpath) = self.graph.handle(fh) else {
+        let Some(Handle { vpath, .. }) = self.graph.handle(fh) else {
             return Err(Status::BadFh);
         };
+        if self.graph.is_dir(&vpath) {
+            return Err(Status::IsDir);
+        }
+        if size > MAX_FILE_LEN as u64 {
+            return Err(Status::NoSpace);
+        }
         let mut files = self.graph.files.lock().unwrap();
         let Some(e) = files.get_mut(&vpath) else {
             return Err(Status::NotFound);
@@ -663,8 +793,14 @@ impl Director for Reference {
     /// nothing serves is `Status::NotFound`, and one outside every writable
     /// mount `Status::ReadOnly`.
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
-        let (from, to) = (key(root.0, from), key(root.0, to));
-        Tally::bump(&self.tally.renames, &from);
+        Tally::bump(&self.tally.renames, &key(root.0, from));
+        if escapes(to) {
+            return Err(Status::BadRequest);
+        }
+        let (from, to) = (
+            self.graph.resolve(root, from)?,
+            self.graph.resolve(root, to)?,
+        );
         let mut files = self.graph.files.lock().unwrap();
         if !files.contains_key(&from) {
             return Err(Status::NotFound);
@@ -678,8 +814,8 @@ impl Director for Reference {
     }
 
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
-        let vpath = key(root.0, path);
-        Tally::bump(&self.tally.deletes, &vpath);
+        Tally::bump(&self.tally.deletes, &key(root.0, path));
+        let vpath = self.graph.resolve(root, path)?;
         let mut files = self.graph.files.lock().unwrap();
         if !files.contains_key(&vpath) {
             return Err(Status::NotFound);
@@ -691,26 +827,43 @@ impl Director for Reference {
         Ok(())
     }
 
-    fn mkdir(&mut self, _: RootId, _: u32, _: &str) -> Result<(), Status> {
+    fn mkdir(&mut self, root: RootId, _: u32, path: &str) -> Result<(), Status> {
+        self.graph.resolve(root, path)?;
         Err(Status::NotSupported)
     }
 
-    /// OK for any handle; a handle this graph issued is released and counted.
+    /// Releases and counts the handle; an unknown one is `Status::BadFh`
+    /// (`docs/wire.md` 3.4.10).
     fn close(&mut self, fh: u64) -> Result<(), Status> {
-        if let Some(vpath) = self.graph.handles.lock().unwrap().remove(&fh) {
-            Tally::bump(&self.tally.closed, &vpath);
-        }
+        let Some(h) = self.graph.handles.lock().unwrap().remove(&fh) else {
+            return Err(Status::BadFh);
+        };
+        Tally::bump(&self.tally.closed, &h.vpath);
         Ok(())
     }
 
-    fn stored_names(&mut self, _: RootId, _: u32, _: &str) -> Result<&str, Status> {
+    fn stored_names(&mut self, root: RootId, _: u32, path: &str) -> Result<&str, Status> {
+        self.graph.resolve(root, path)?;
         Err(Status::NotSupported)
     }
 
-    fn rename_x(&mut self, _: RootId, _: RootId, _: &str, _: &str) -> Result<(), Status> {
+    fn rename_x(
+        &mut self,
+        from_root: RootId,
+        to_root: RootId,
+        from: &str,
+        to: &str,
+    ) -> Result<(), Status> {
+        if escapes(from) || escapes(to) {
+            return Err(Status::BadRequest);
+        }
+        self.graph.resolve(from_root, from)?;
+        self.graph.resolve(to_root, to)?;
         Err(Status::NotSupported)
     }
 
+    /// The reference stages nothing, which wire.md 3.4.14 says is answered
+    /// first.
     fn stage_exec(&mut self, _: RootId, _: &str) -> Result<&str, Status> {
         Err(Status::NotSupported)
     }
@@ -785,52 +938,28 @@ impl Director for Reference {
         r.write(path, |o, now| o.rename_key(path, new_leaf, now))
     }
 
-    /// Opcodes outside the table are `Status::NotSupported`, not the
-    /// framing default.
-    fn unknown(&mut self, _: u32) -> Status {
-        Status::NotSupported
-    }
-
-    /// What the fake answered a payload it could not decode: CLOSE is OK
-    /// whatever it says; the opcodes it does not serve, and the registry
-    /// ones with no attached layer, are `Status::NotSupported`; the rest
-    /// `Status::BadRequest`. A registry request whose leading path decodes is
-    /// counted, as it was.
+    /// A payload that does not decode is `Status::BadRequest` whatever the
+    /// opcode (`docs/wire.md` 3.5); this override only keeps the registry
+    /// tally: a registry request whose leading path decodes is counted when
+    /// the reference has a registry layer.
     fn undecodable(&mut self, op: Opcode, _: u32, payload: &[u8]) -> Status {
-        match op {
-            Opcode::Close | Opcode::Heartbeat => Status::Ok,
-            Opcode::Mkdir | Opcode::StoredNames | Opcode::RenameX | Opcode::StageExec => {
-                Status::NotSupported
-            }
+        let registry = matches!(
+            op,
             Opcode::RegLookup
-            | Opcode::RegKey
-            | Opcode::RegSetValue
-            | Opcode::RegDeleteValue
-            | Opcode::RegCreateKey
-            | Opcode::RegDeleteKey
-            | Opcode::RegRenameKey
-            | Opcode::RegChanged => {
-                let Some(r) = &self.graph.registry else {
-                    return Status::NotSupported;
-                };
-                if let Some(path) = leading_path(payload) {
-                    self.tally.bump_reg(op, path);
-                }
-                if r.state.lock().unwrap().attached {
-                    Status::BadRequest
-                } else {
-                    Status::NotSupported
-                }
+                | Opcode::RegKey
+                | Opcode::RegSetValue
+                | Opcode::RegDeleteValue
+                | Opcode::RegCreateKey
+                | Opcode::RegDeleteKey
+                | Opcode::RegRenameKey
+                | Opcode::RegChanged
+        );
+        if registry && self.graph.registry.is_some() {
+            if let Some(path) = leading_path(payload) {
+                self.tally.bump_reg(op, path);
             }
-            Opcode::GetAttr
-            | Opcode::ReadDir
-            | Opcode::Open
-            | Opcode::Read
-            | Opcode::Write
-            | Opcode::SetAttr
-            | Opcode::Rename
-            | Opcode::Delete => Status::BadRequest,
         }
+        Status::BadRequest
     }
 }
 

@@ -117,6 +117,7 @@ dependencies = [
 name = "aether-refdirector"
 version = "0.1.0"
 dependencies = [
+ "aether-casefold",
  "aether-ipc",
  "aether-protocol",
  "aether-registry",

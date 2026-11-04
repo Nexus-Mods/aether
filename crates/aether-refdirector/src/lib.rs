@@ -18,4 +18,4 @@ mod null;
 mod reference;
 
 pub use null::Null;
-pub use reference::{key, pattern, ReadStyle, Reference, Tally, BULK_THRESHOLD};
+pub use reference::{key, pattern, ReadStyle, Reference, Tally, BULK_THRESHOLD, MAX_FILE_LEN};

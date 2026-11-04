@@ -1,6 +1,7 @@
 //! `Reference` answered directly through its `Director` methods: for each
 //! opcode, the reply the shim tests' fake director gave before it became
-//! this crate (`crates/aether-hooks/tests/fakedirector/mod.rs`).
+//! this crate, except where `docs/wire.md` says otherwise (each such case
+//! names its section).
 
 use aether_ipc::{DataArena, OwnedSeg};
 use aether_protocol::{
@@ -249,8 +250,8 @@ fn read_answers_by_the_files_read_style() {
         Ok(bytes[50..100].to_vec())
     );
     assert_eq!(read(&mut d, trunc.fh, 500, 4000), Ok(Vec::new()));
-    // An unknown handle is a bad request (not BadFh) for READ.
-    assert_eq!(read(&mut d, 999, 0, 1), Err(Status::BadRequest));
+    // wire.md 3.4.4: an unknown handle is BadFh.
+    assert_eq!(read(&mut d, 999, 0, 1), Err(Status::BadFh));
     assert_eq!(d.tally.reads("whole"), 3);
     assert_eq!(d.tally.reads("error"), 1);
     assert_eq!(d.tally.bulk_reads("whole"), 0);
@@ -402,14 +403,15 @@ fn rename_moves_within_writable_prefixes_only() {
 }
 
 #[test]
-fn close_releases_the_handle_and_is_ok_for_any_handle() {
+fn close_releases_the_handle_and_refuses_an_unknown_one() {
     let mut d = Reference::new().with("a", vec![1], ReadStyle::Whole);
     let fh = open_read(&mut d, "a").fh;
     assert_eq!(d.close(fh), Ok(()));
-    assert_eq!(d.close(fh), Ok(()));
-    assert_eq!(d.close(999), Ok(()));
+    // wire.md 3.4.10: unknown fh is BadFh.
+    assert_eq!(d.close(fh), Err(Status::BadFh));
+    assert_eq!(d.close(999), Err(Status::BadFh));
     assert_eq!(d.tally.closes("a"), 1);
-    assert_eq!(read(&mut d, fh, 0, 1), Err(Status::BadRequest));
+    assert_eq!(read(&mut d, fh, 0, 1), Err(Status::BadFh));
 }
 
 #[test]
@@ -417,43 +419,36 @@ fn the_ops_it_does_not_serve_are_not_supported() {
     let mut d = Reference::new();
     assert_eq!(d.mkdir(R0, 0o755, "dir"), Err(Status::NotSupported));
     assert_eq!(d.stored_names(R0, 0, "a"), Err(Status::NotSupported));
+    assert_eq!(d.rename_x(R0, R0, "a", "b"), Err(Status::NotSupported));
+    assert_eq!(d.stage_exec(R0, "a.exe"), Err(Status::NotSupported));
+    // wire.md 3.4.14: a director that stages nothing says so first.
     assert_eq!(
-        d.rename_x(R0, RootId(1), "a", "b"),
+        d.stage_exec(RootId(9), "../x.exe"),
         Err(Status::NotSupported)
     );
-    assert_eq!(d.stage_exec(R0, "a.exe"), Err(Status::NotSupported));
+}
+
+#[test]
+fn opcodes_outside_the_table_are_bad_requests() {
+    // wire.md 3.3: any other opcode is ST_BAD_REQUEST.
+    let mut d = Reference::new();
     for op in [0, 4, 12, 25, 1000, u32::MAX] {
-        assert_eq!(d.unknown(op), Status::NotSupported, "opcode {op}");
+        assert_eq!(d.unknown(op), Status::BadRequest, "opcode {op}");
     }
 }
 
 #[test]
-fn an_undecodable_request_is_answered_as_the_fake_did() {
-    let mut d = Reference::new();
-    // CLOSE was answered OK whatever its payload said.
-    assert_eq!(d.undecodable(Opcode::Close, 0, &[1]), Status::Ok);
-    for op in [
-        Opcode::Mkdir,
-        Opcode::StoredNames,
-        Opcode::RenameX,
-        Opcode::StageExec,
-    ] {
-        assert_eq!(d.undecodable(op, 0, &[]), Status::NotSupported, "{op:?}");
+fn an_undecodable_request_is_a_bad_request() {
+    // wire.md 3.5 and 3.5.1: a payload that does not decode is ST_BAD_REQUEST.
+    for registry in [false, true] {
+        let mut d = Reference::new();
+        if registry {
+            d = d.with_registry();
+        }
+        for &op in Opcode::ALL {
+            assert_eq!(d.undecodable(op, 0, &[]), Status::BadRequest, "{op:?}");
+        }
     }
-    for op in [
-        Opcode::GetAttr,
-        Opcode::ReadDir,
-        Opcode::Open,
-        Opcode::Read,
-        Opcode::Write,
-        Opcode::SetAttr,
-        Opcode::Rename,
-        Opcode::Delete,
-    ] {
-        assert_eq!(d.undecodable(op, 0, &[]), Status::BadRequest, "{op:?}");
-    }
-    // Registry ops: not supported with no layer, else a bad request.
-    assert_eq!(d.undecodable(Opcode::RegKey, 0, &[]), Status::NotSupported);
     let mut d = Reference::new().with_registry();
     let path = b"\\Registry\\A";
     let mut body = (path.len() as u32).to_le_bytes().to_vec();
@@ -463,10 +458,8 @@ fn an_undecodable_request_is_answered_as_the_fake_did() {
     // The leading path still counts the request, as it did.
     assert_eq!(d.tally.reg(Opcode::RegKey, "\\Registry\\A"), 1);
     d.detach_registry();
-    assert_eq!(
-        d.undecodable(Opcode::RegKey, 0, &body),
-        Status::NotSupported
-    );
+    assert_eq!(d.undecodable(Opcode::RegKey, 0, &body), Status::BadRequest);
+    assert_eq!(d.tally.reg(Opcode::RegKey, "\\Registry\\A"), 2);
 }
 
 #[test]

@@ -17,6 +17,8 @@ members = [
   # aether-casefold. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
   "crates/aether-registry",
   "crates/aether-ipc",
+  # A ring in a memory-mapped file (aether_ipc::RingBacking), for native tools on any OS.
+  "crates/aether-filering",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.
@@ -65,6 +67,7 @@ unimplemented = "warn"
 # Internal crates.
 aether-casefold = { path = "crates/aether-casefold" }
 aether-env = { path = "crates/aether-env" }
+aether-filering = { path = "crates/aether-filering" }
 aether-hooks = { path = "crates/aether-hooks" }
 aether-inject = { path = "crates/aether-inject" }
 aether-ipc = { path = "crates/aether-ipc" }
@@ -79,6 +82,7 @@ aether-win = { path = "crates/aether-win" }
 # Shared external crates: one version spec each. Members add their own
 # `features` / `optional` on top.
 tempfile = "3.27"
+memmap2 = "0.9"
 serde_json = "1"
 windows-sys = "0.61"
 

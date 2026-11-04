@@ -312,3 +312,117 @@ fn the_break_switch_is_not_reachable_without_the_flag() {
         );
     }
 }
+
+/// A generated run of `cases` cases of `seed` against the reference adapter
+/// breaking `rule`, beside one HEARTBEAT scenario, so that only the
+/// generator can fail it: it fails, its case shrinks to at most `steps`
+/// steps whose first failure is at an `op` request, and the shrunk case,
+/// replayed against the reference, passes (its expectations are wire.md's).
+fn generator_catches(rule: &str, cases: u32, seed: u64, steps: usize, op: &str) {
+    let tmp = aether_testkit::tempdir().unwrap();
+    let scenarios = heartbeat_only(tmp.path());
+    let failures = tmp.path().join("failures");
+    let report = tmp.path().join("report.json");
+    let o = conform(&[
+        "run",
+        "--director",
+        &director(&format!(" --break {rule}")),
+        "--scenarios",
+        scenarios.to_str().unwrap(),
+        "--generate",
+        "--cases",
+        &cases.to_string(),
+        "--seed",
+        &seed.to_string(),
+        "--failures",
+        failures.to_str().unwrap(),
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    let v = json_report(&o, &report);
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{rule}: {v:#}
+{}",
+        stderr(&o)
+    );
+    let g = scenario(&v, "generated");
+    let failed = first_failure(g);
+    assert_eq!(failed["request"]["op"], op, "{rule}: {failed:#}");
+    let file = g["file"].as_str().unwrap();
+    let s: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let n = s["steps"].as_array().unwrap().len();
+    assert!(
+        n <= steps,
+        "{rule}: shrunk to {n} steps, not at most {steps}: {s:#}"
+    );
+    let o = conform(&[
+        "run",
+        "--director",
+        &director(""),
+        "--scenarios",
+        failures.to_str().unwrap(),
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{rule}: {}", stdout(&o));
+}
+
+/// One test per rule the generator now sends requests for, each a defect
+/// it finds (`reference-adapter --break`) that no generated case reached
+/// before: (test, rule, cases, seed, the op the shrunk case fails at).
+macro_rules! caught_by_the_generator {
+    ($($name:ident: $rule:literal, $cases:literal, $seed:literal, $op:literal;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                generator_catches($rule, $cases, $seed, 8, $op);
+            }
+        )*
+    };
+}
+
+caught_by_the_generator! {
+    // wire.md 3.4.7, 3.4.8: a handle follows its file through a RENAME, and
+    // never reaches a file later at its old name.
+    handles_hold_their_file: "handles-by-path", 256, 7, "write";
+    // 3.4.3, 3.4.4: an append lands at the end other handles' changes left.
+    appends_land_at_the_shared_end: "append-own-end", 256, 7, "getattr";
+    // 3.4.5, 3.4.6: a WRITE past the end leaves zeros, cut bytes included.
+    a_gap_past_the_end_reads_as_zeros: "truncate-keeps-bytes", 256, 7, "read";
+    // 3.4.4: a handle opened without OPEN_READ is read.
+    a_write_only_handle_is_read: "write-only-unreadable", 256, 7, "read";
+    // 3.4.7: chains on one name (a directory renamed away and made again).
+    a_directory_made_again_is_empty: "rename-dir-ghosts", 1024, 2, "readdir";
+    // 2.8.1: steps from several clients present each other's handles.
+    handles_are_ring_global: "per-slot-fh", 256, 7, "open";
+    // 3.4.3, 3.4.9: a create in a missing directory makes nothing.
+    a_create_in_a_missing_directory_is_not_found: "create-makes-parents", 256, 7, "open";
+    // 3.4.9, 3.5: a create below a file.
+    a_create_below_a_file_is_not_found: "file-parent-io-error", 256, 7, "mkdir";
+    // 3.4.3: a write OPEN of a directory.
+    a_write_open_of_a_directory_is_refused: "dir-write-open", 256, 7, "open";
+    // 3.4.2: READDIR of a file.
+    a_file_is_not_listed: "readdir-file-lists-itself", 256, 7, "readdir";
+    // 3.4.7: a file onto an empty directory, replaced or refused.
+    a_file_onto_an_empty_directory_moves_or_not: "file-onto-dir-kept", 1024, 3, "rename";
+    // 3.4.7: a RENAME onto an ancestor of `from`.
+    a_rename_onto_an_ancestor_is_an_io_error: "ancestor-bad-request", 1024, 1, "rename";
+    // 3.4.7: a RENAME to the same name in its stored spelling.
+    a_rename_to_itself_is_ok: "same-name-exists", 1024, 2, "rename";
+    // 3.4.13: RENAME_X onto a directory of another root.
+    a_rename_x_onto_a_directory_is_refused: "rename-x-onto-dir-ok", 1024, 2, "rename-x";
+    // 3.4.4: READ offsets far past the end.
+    a_read_far_past_the_end_is_empty: "read-offset-wraps", 256, 7, "read";
+    // 3.4.5, 3.4.6: sizes no director holds.
+    a_size_past_any_file_is_refused: "huge-write-ok", 256, 7, "write";
+    // 3.4.12: STORED_NAMES with a `skip` of every component.
+    a_skip_of_every_component_names_none: "skip-past-end-echo", 256, 7, "stored-names";
+    // 3.2: a create's parents keep their stored spelling.
+    a_create_keeps_its_parents_spelling: "parent-respelled", 256, 7, "readdir";
+    // 3.2: a named stream is not its base file.
+    a_named_stream_is_not_its_file: "stream-base", 256, 7, "getattr";
+    // 4.3: REG_DELETE_KEY of a key no layer holds, in every registry case.
+    an_unknown_key_is_tombstoned: "delete-unrecorded-not-found", 8, 2, "reg-delete-key";
+}

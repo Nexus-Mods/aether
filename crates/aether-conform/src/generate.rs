@@ -13,8 +13,10 @@
 //! 32-byte seed spread from the `u64` one), so `--seed` replays a run. The
 //! first case that fails is shrunk the way proptest shrinks (simplify while
 //! it still fails, complicate when it passes), each candidate played
-//! against the director; the smallest failing one is written to the
-//! failures folder as a scenario file, which `run --scenarios` replays.
+//! against the director, then op by op (each template taken apart, and ops
+//! dropped one at a time while it still fails); the smallest failing one is
+//! written to the failures folder as a scenario file, which `run
+//! --scenarios` replays.
 //!
 //! `proptest-state-machine` is not used: its reference state machine wants
 //! a model of the answers, which here is the reference director itself, and
@@ -226,12 +228,14 @@ fn cases_against(
         // when it passes or fails otherwise.
         let class = failure_class(&r);
         let mut best = (s, r);
+        let mut best_input = tree.current();
         let mut iters = 0;
         let mut stopped = None;
         if tree.simplify() {
             while iters < MAX_SHRINK_ITERS {
                 iters += 1;
-                let tried = build(case, &tree.current()).and_then(|s| play(&s).map(|r| (s, r)));
+                let input = tree.current();
+                let tried = build(case, &input).and_then(|s| play(&s).map(|r| (s, r)));
                 let (s, r) = match tried {
                     Ok(t) => t,
                     Err(e) => {
@@ -241,11 +245,45 @@ fn cases_against(
                 };
                 if !r.passed && failure_class(&r) == class {
                     best = (s, r);
+                    best_input = input;
                     if !tree.simplify() {
                         break;
                     }
                 } else if !tree.complicate() {
                     break;
+                }
+            }
+        }
+        // Then op by op: each template taken apart into its ops, and each op
+        // and the other clients dropped while the case still fails the same
+        // way, which proptest's shrinking of a template as one op cannot.
+        if stopped.is_none() {
+            let mut tries = vec![model::flatten(&best_input)];
+            while let Some(input) = tries.pop() {
+                if iters >= 2 * MAX_SHRINK_ITERS {
+                    break;
+                }
+                iters += 1;
+                let tried = build(case, &input).and_then(|s| play(&s).map(|r| (s, r)));
+                let (s, r) = match tried {
+                    Ok(t) => t,
+                    Err(e) => {
+                        stopped = Some(e);
+                        break;
+                    }
+                };
+                if r.passed || failure_class(&r) != class {
+                    continue;
+                }
+                best = (s, r);
+                tries.clear();
+                for i in 0..input.ops.len() {
+                    let mut fewer = input.clone();
+                    fewer.ops.remove(i);
+                    tries.push(fewer);
+                }
+                if input.others > 0 {
+                    tries.push(CaseInput { others: 0, ..input });
                 }
             }
         }

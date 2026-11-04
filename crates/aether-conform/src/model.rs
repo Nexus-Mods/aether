@@ -2,17 +2,27 @@
 //! behind `aether-conform run --generate` ([`crate::generate`]).
 //!
 //! A case is a [`CaseInput`]: a [`TreeSpec`] (the roots, files, directories,
-//! writable entries and registry keys to mount) and a list of [`RawOp`]s,
-//! each an operation kind and four numbers. Both are plain proptest values,
-//! so proptest generates and shrinks them. [`build`] turns one into a
-//! [`Scenario`]: it builds the tree, mounts it in an in-process [`Oracle`]
-//! (the reference director, `aether_refdirector::Reference`, behind a ring
-//! in memory), and reads the ops one at a time against the oracle's state.
-//! Each op's numbers pick its targets among what exists at that point (an
-//! open handle, an existing file, a missing name under an existing
-//! directory), so every shrunk case is still a valid one; an op with nothing
-//! to act on is dropped. The oracle's answer to each request becomes that
+//! writable entries and registry keys to mount), a list of [`RawOp`]s, each
+//! an operation kind and five numbers, and how many clients besides client
+//! 0 send steps. All are plain proptest values, so proptest generates and
+//! shrinks them. [`build`] turns one into a [`Scenario`]: it builds the
+//! tree, mounts it in an in-process [`Oracle`] (the reference director,
+//! `aether_refdirector::Reference`, behind a ring in memory), and reads the
+//! ops one at a time against the oracle's state. Each op's numbers pick its
+//! targets among what exists at that point (an open handle, an existing
+//! file, a missing name under an existing directory), now and then among
+//! what the last steps touched, so chains on one name are common; every
+//! shrunk case is still a valid one, and an op with nothing to act on is
+//! dropped. A [`Kind::Template`] op stands for a sequence of ops on the same
+//! names ([`TEMPLATES`]). The oracle's answer to each request becomes that
 //! step's expectation.
+//!
+//! A handle holds its file, not its name ([`Handle`]): the generator keeps
+//! each open file's identity where the file is now, so a handle follows its
+//! file through RENAMEs and its READs, WRITEs and SETATTRs are the oracle's,
+//! which serves every handle the file as it is now (wire.md 3.4.4, 3.4.7).
+//! A handle whose file was deleted or replaced keeps the bytes the file had
+//! then ([`Gone`]), and its answers are the `one_of`s 3.4.8 allows.
 //!
 //! The generator only sends what `docs/wire.md` fixes the answer to, as
 //! `contract/scenarios/README.md` reads a tree ("Who holds what"), and where
@@ -25,15 +35,10 @@
 //! What it leaves out, and why, is listed in `docs/conformance.md`
 //! ("Generated cases"). In short: names whose answer depends on the
 //! director's layering (a writable entry's own directory, its ancestors);
-//! creates under a missing parent; writes past the end and reads of the gap
-//! SETATTR leaves; WRITE and SETATTR on a handle opened read-only, and READ
-//! on one opened write-only; anything but CLOSE on a handle whose file was
-//! changed through another handle or a path (rename, delete, truncate);
-//! READDIR of a missing path or a file; a path below a file; paths that
-//! leave their root (`escape-paths` covers them); a RENAME_X onto a
-//! directory or with a read-only end; a file renamed onto an empty
-//! directory (a director may replace it or refuse); registry requests near
-//! a limit.
+//! WRITE and SETATTR on a handle opened without write access; requests that
+//! create a named stream; READs through a handle whose file is gone after a
+//! WRITE or SETATTR through it; paths that leave their root (`escape-paths`
+//! covers them); registry requests near a limit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -132,11 +137,13 @@ impl Oracle {
 // ---------------------------------------------------------------------------
 // What proptest generates.
 
-/// One generated case: a tree and the operations to read against it.
+/// One generated case: a tree, the operations to read against it, and how
+/// many clients besides client 0 send some of them (wire.md 2.8.1).
 #[derive(Debug, Clone)]
 pub struct CaseInput {
     pub tree: TreeSpec,
     pub ops: Vec<RawOp>,
+    pub others: u8,
 }
 
 /// The tree to mount, as numbers proptest can shrink; [`build`] makes a
@@ -158,6 +165,9 @@ pub struct TreeSpec {
 #[derive(Debug, Clone)]
 pub struct RootSpec {
     pub writable: Option<u32>,
+    /// At least two writable entries, so a RENAME can go from one to
+    /// another.
+    pub two: bool,
     pub entries: Vec<EntrySpec>,
 }
 
@@ -200,7 +210,9 @@ pub struct ValueSpec {
 }
 
 /// One operation: its kind and four numbers that pick its targets and
-/// arguments against the state it meets.
+/// arguments against the state it meets, and a fifth, `e`, that picks
+/// whether it acts on something a recent step touched (and which), and
+/// which client sends it.
 #[derive(Debug, Clone, Copy)]
 pub struct RawOp {
     pub kind: Kind,
@@ -208,6 +220,7 @@ pub struct RawOp {
     pub b: u32,
     pub c: u32,
     pub d: u32,
+    pub e: u32,
 }
 
 /// The kinds of operation. Earlier ones are what proptest shrinks towards.
@@ -239,6 +252,9 @@ pub enum Kind {
     RegRenameKey,
     RegChanged,
     RegBadPath,
+    /// A sequence of the kinds above on the same names and handles
+    /// ([`TEMPLATES`]).
+    Template,
 }
 
 /// The ids of root 0 and the two others a tree may have; [`UNKNOWN_ROOTS`]
@@ -327,9 +343,14 @@ fn entry_spec() -> impl Strategy<Value = EntrySpec> {
 fn root_spec() -> impl Strategy<Value = RootSpec> {
     (
         proptest::option::weighted(0.7, any::<u32>()),
+        proptest::bool::weighted(0.3),
         proptest::collection::vec(entry_spec(), 0..12),
     )
-        .prop_map(|(writable, entries)| RootSpec { writable, entries })
+        .prop_map(|(writable, two, entries)| RootSpec {
+            writable,
+            two,
+            entries,
+        })
 }
 
 fn key_spec() -> impl Strategy<Value = KeySpec> {
@@ -398,6 +419,7 @@ fn kind() -> impl Strategy<Value = Kind> {
         1 => Just(K::RegRenameKey),
         2 => Just(K::RegChanged),
         1 => Just(K::RegBadPath),
+        3 => Just(K::Template),
     ]
 }
 
@@ -408,8 +430,16 @@ fn raw_op() -> impl Strategy<Value = RawOp> {
         any::<u32>(),
         any::<u32>(),
         any::<u32>(),
+        any::<u32>(),
     )
-        .prop_map(|(kind, a, b, c, d)| RawOp { kind, a, b, c, d })
+        .prop_map(|(kind, a, b, c, d, e)| RawOp {
+            kind,
+            a,
+            b,
+            c,
+            d,
+            e,
+        })
 }
 
 /// Cases of at most `max_ops` operations.
@@ -417,8 +447,9 @@ pub fn case_strategy(max_ops: usize) -> impl Strategy<Value = CaseInput> {
     (
         tree_spec(),
         proptest::collection::vec(raw_op(), 1..=max_ops.max(1)),
+        prop_oneof![9 => Just(0u8), 1 => 1u8..=2],
     )
-        .prop_map(|(tree, ops)| CaseInput { tree, ops })
+        .prop_map(|(tree, ops, others)| CaseInput { tree, ops, others })
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +578,8 @@ fn build_tree(spec: &TreeSpec) -> (Tree, Vec<RootInfo>) {
                 .filter(|(i, _)| mask >> (i % 32) & 1 == 1)
                 .map(|(_, d)| d.clone())
                 .collect();
-            if writable.is_empty() {
+            let want = if r.two { 2 } else { 1 };
+            while writable.len() < want {
                 let w = ["saves", "w0", "w1", "w2"]
                     .into_iter()
                     .find(|w| !taken.contains(&fold(w)))
@@ -623,7 +655,7 @@ fn build_tree(spec: &TreeSpec) -> (Tree, Vec<RootInfo>) {
 
 /// What wire.md says a generated request is answered, checked against the
 /// oracle before its answer becomes the expectation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Want {
     /// `ST_OK`, with the oracle's reply.
     Ok,
@@ -650,6 +682,45 @@ enum Want {
     /// `ST_BAD_REQUEST` from a writable layer, `ST_IO_ERROR` from a
     /// disk-backed upper (3.4.7, 3.4.8).
     BadRequestOrIoError,
+    /// Any of these statuses, the oracle's among them.
+    Statuses(&'static [Status]),
+    /// Any of these answers, the oracle's among them.
+    Alts(Vec<Expect>),
+}
+
+/// A path below a file, to any opcode but GETATTR: `ST_NOT_FOUND` or
+/// `ST_NOT_A_DIRECTORY` (3.5).
+const BELOW_A_FILE: &[Status] = &[Status::NotFound, Status::NotADirectory];
+/// A WRITE or SETATTR to a size no director can hold (3.4.5, 3.4.6).
+const TOO_LARGE: &[Status] = &[Status::NoSpace, Status::BadRequest];
+/// A request naming a named stream the director does not hold (3.2).
+const A_STREAM: &[Status] = &[Status::NotFound, Status::BadRequest];
+/// A write OPEN of a directory a writable provider serves (3.4.3).
+const DIR_WRITE_OPEN: &[Status] = &[Status::IsDir, Status::IoError];
+/// RENAME_X onto a directory (3.4.13).
+const RENAME_X_ONTO_DIR: &[Status] = &[Status::IsDir, Status::IoError];
+
+/// What the generator does right after a step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Then {
+    Nothing,
+    /// A GETATTR of this path, expecting the oracle's answer: what the step
+    /// left (or did not change) is checked at once.
+    GetAttr {
+        root: u32,
+        path: String,
+    },
+    /// The same request again, `ST_NOT_FOUND` (the first moved `from`) or
+    /// `ST_IO_ERROR` (it refused again); then a READDIR of directory `dir`,
+    /// as listed after the step or as listed before it; and the case ends.
+    /// For a RENAME whose `one_of` answers leave different trees: the
+    /// second answer shows whether the first moved anything, the listing
+    /// that nothing else changed, and after it the oracle's tree may not be
+    /// the director's.
+    Listing {
+        root: u32,
+        dir: String,
+    },
 }
 
 /// What a step changes in the generator's state when it succeeds.
@@ -660,21 +731,16 @@ enum Effect {
         root: u32,
         path: String,
         dir: bool,
-        read: bool,
         write: bool,
         append: bool,
         /// The open created the file or truncated it.
         emptied: bool,
     },
-    Wrote {
-        fh: u64,
-        offset: u64,
-        n: u64,
-    },
-    Resized {
-        fh: u64,
-        size: u64,
-    },
+    /// A WRITE or SETATTR through this handle changed its file.
+    Wrote(u64),
+    /// A WRITE or SETATTR through this handle, whose file is gone, may or
+    /// may not have changed what it reads.
+    Spent(u64),
     Closed(u64),
     Moved {
         from_root: u32,
@@ -696,6 +762,7 @@ struct Plan {
     wire: &'static str,
     note: String,
     effect: Effect,
+    then: Then,
 }
 
 /// An entry the oracle has: its stored spelling and folded path.
@@ -711,16 +778,46 @@ struct Node {
 #[derive(Debug, Clone)]
 struct Handle {
     root: u32,
-    /// Folded path of what it opened.
+    /// Folded path of what it opened: for a file handle whose file is still
+    /// there, where the file is now ([`Gen::locate`]).
     folded: String,
     dir: bool,
-    read: bool,
     write: bool,
     append: bool,
-    /// Nothing but this handle has changed its file since it was opened, so
-    /// what it reads is fixed by wire.md. A handle that is not clean is only
-    /// closed.
+    /// The file it holds, while the file is there (wire.md 3.4.7: a handle
+    /// follows its file through RENAMEs); `None` for a directory handle and
+    /// once the file is gone.
+    file: Option<u64>,
+    /// What a handle whose file is gone answers.
+    gone: Option<Gone>,
+    /// For a directory handle: nothing renamed or deleted the directory or
+    /// a directory above it since it was opened (wire.md says nothing of
+    /// such a handle's answers, so it is then only closed).
     clean: bool,
+}
+
+/// A file handle whose file was deleted, or replaced by a RENAME or
+/// RENAME_X onto its name (wire.md 3.4.8), or moved to another root by a
+/// RENAME_X (3.4.7: it may follow the file or answer as for a deleted
+/// file).
+#[derive(Debug, Clone)]
+struct Gone {
+    /// The file's bytes when it went: what a director that goes on reading
+    /// it serves.
+    snap: Vec<u8>,
+    /// Deleted or replaced: a WRITE or SETATTR through it is `ST_OK`
+    /// (changing nothing anyone else sees), `ST_IO_ERROR` or
+    /// `ST_NOT_FOUND`. A handle a RENAME_X moved is never written through,
+    /// since a director that follows the file writes the file at `to`.
+    writes: bool,
+    /// The file a RENAME_X moved, which a director may follow: once
+    /// anything changes it, the handle's READs depend on whether the
+    /// director followed, and the handle is spent.
+    follows: Option<u64>,
+    /// A WRITE or SETATTR went through it, or the file it may follow
+    /// changed: what it reads now depends on the director's choice, so it
+    /// is only written to and closed.
+    spent: bool,
 }
 
 /// A path a request names, and what the oracle has there.
@@ -777,18 +874,43 @@ struct Gen {
     /// Every entry of every root, from the oracle's listings, with the root
     /// itself first.
     nodes: BTreeMap<u32, Vec<Node>>,
-    /// How many leading bytes of each file wire.md fixes: all of them,
-    /// except after a SETATTR that extended it (what the extension holds is
-    /// the director's).
-    known: BTreeMap<(u32, String), u64>,
+    /// The identity of each file an open handle holds, by where the file is
+    /// now: a RENAME moves it, a DELETE or a RENAME onto its name ends it.
+    ids: BTreeMap<(u32, String), u64>,
+    next_id: u64,
     handles: BTreeMap<u64, Handle>,
     closed: Vec<u64>,
     /// Registry versions seen so far, in the oracle's numbering.
     versions: Vec<u64>,
     /// Key paths to pick from: the tree's and every one sent since.
     keys: Vec<String>,
+    /// Keys a REG_DELETE_KEY tombstoned.
+    tombstoned: Vec<String>,
+    /// The (root, folded path)s the last steps named, the latest last.
+    recent: Vec<(u32, String)>,
+    /// The handles the last steps used, the latest last.
+    recent_fh: Vec<u64>,
+    /// The op being planned's `e`: whether it picks among what the last
+    /// steps touched.
+    focus: u32,
+    /// Clients besides client 0 that send steps.
+    others: u8,
+    /// A step whose allowed answers leave different trees ended the case.
+    done: bool,
     steps: Vec<Step>,
 }
+
+/// How many recent paths and handles [`Gen`] keeps for its locality bias.
+const RECENT: usize = 8;
+/// The bits of an op's `e` that make it pick, among what the last steps
+/// touched: an existing name ([`Gen::existing`]), a missing one
+/// ([`Gen::missing`]), a RENAME's existing `to` ([`Gen::existing_to`]), a
+/// handle ([`Gen::handle_for`]). Bits 8 and up pick which, the latest
+/// first, and bits 16 and up the client.
+const NEAR_EXISTING: u32 = 1;
+const NEAR_MISSING: u32 = 2;
+const NEAR_TO: u32 = 4;
+const NEAR_HANDLE: u32 = 8;
 
 fn pick<T>(v: &[T], n: u32) -> Option<&T> {
     if v.is_empty() {
@@ -816,12 +938,18 @@ pub fn build_with(
     let (tree, roots) = build_tree(&input.tree);
     tree.validate()
         .map_err(|e| format!("generator: an invalid tree: {e}"))?;
-    let mut g = Gen::new(&tree, roots, limits)?;
+    let mut g = Gen::new(&tree, roots.clone(), limits)?;
+    g.others = input.others;
     for op in &input.ops {
-        if let Some(plan) = g.plan(op) {
-            g.step(plan)?;
+        if op.kind == Kind::Template {
+            for sub in expand(op, &roots) {
+                g.op(&sub)?;
+            }
+        } else {
+            g.op(op)?;
         }
     }
+    g.finish()?;
     Ok(Scenario {
         name: name.to_string(),
         description: description.to_string(),
@@ -844,11 +972,18 @@ impl Gen {
             roots,
             registry: tree.registry.is_some(),
             nodes: BTreeMap::new(),
-            known: BTreeMap::new(),
+            ids: BTreeMap::new(),
+            next_id: 1,
             handles: BTreeMap::new(),
             closed: Vec::new(),
             versions: Vec::new(),
             keys,
+            tombstoned: Vec::new(),
+            recent: Vec::new(),
+            recent_fh: Vec::new(),
+            focus: 0,
+            others: 0,
+            done: false,
             steps: Vec::new(),
         };
         g.refresh();
@@ -866,8 +1001,9 @@ impl Gen {
     }
 
     /// Whether the writable provider holds folded `path`: anything under a
-    /// writable entry, or anything but the root itself in a root writable
-    /// as a whole.
+    /// writable entry but an entry itself or its ancestors (an entry inside
+    /// another), or anything but the root itself in a root writable as a
+    /// whole.
     fn held(&self, root: u32, path: &str) -> bool {
         let Some(r) = self.info(root) else {
             return false;
@@ -876,6 +1012,7 @@ impl Gen {
             return path != ".";
         }
         r.entries.iter().any(|w| path.starts_with(&format!("{w}/")))
+            && !r.entries.iter().any(|w| under(w, path))
     }
 
     /// Whether a read-only provider alone holds folded `path`: not the
@@ -929,32 +1066,122 @@ impl Gen {
     /// picks (a lookup finds any spelling with the same fold, wire.md 3.2).
     fn existing(&self, root: u32, n: u32, bits: u32, ok: impl Fn(&Node) -> bool) -> Option<Target> {
         let all: Vec<Node> = self.all(root).into_iter().filter(|x| ok(x)).collect();
-        let node = pick(&all, n)?;
+        let node = self
+            .near(root, &all, NEAR_EXISTING)
+            .or_else(|| pick(&all, n).cloned())?;
         Some(self.target(root, respell_path(&node.path, bits)))
     }
 
+    /// With the op's `e` asking for it (`bit`), one of `candidates` that the
+    /// last steps named, the latest first, as `e` picks: so chains of
+    /// requests on the same names are common.
+    fn near(&self, root: u32, candidates: &[Node], bit: u32) -> Option<Node> {
+        if self.focus & bit == 0 {
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        let near: Vec<&Node> = self
+            .recent
+            .iter()
+            .rev()
+            .filter(|(r, p)| *r == root && seen.insert(p.clone()))
+            .filter_map(|(_, p)| candidates.iter().find(|c| &c.folded == p))
+            .collect();
+        pick(&near, self.focus >> 8).map(|n| (*n).clone())
+    }
+
     /// A name `root` does not have, under an existing directory that `ok`
-    /// accepts. The parent is spelled as stored, since a request that
-    /// creates a name keeps the spelling it is sent with; the leaf is from
-    /// [`NAMES`], spelled as `bits` picks.
+    /// accepts: now and then (`e`) one the last steps named, which a DELETE
+    /// or RENAME took away. The parent is respelled as `bits` picks (a
+    /// creating request's parents keep their stored spelling, wire.md 3.2);
+    /// the leaf is from [`NAMES`], spelled as `bits` picks.
     fn missing(&self, root: u32, n: u32, bits: u32, ok: impl Fn(&Node) -> bool) -> Option<Target> {
         let dirs: Vec<Node> = self
             .all(root)
             .into_iter()
-            .filter(|x| x.dir && ok(x))
+            .filter(|x| x.dir && ok(x) && x.path.split('/').count() < 4)
             .collect();
-        let dir = pick(&dirs, n)?;
-        if dir.path.split('/').count() >= 4 {
-            return None;
+        if self.focus & NEAR_MISSING != 0 {
+            let gone: Vec<&(u32, String)> = self
+                .recent
+                .iter()
+                .rev()
+                .filter(|(r, p)| {
+                    *r == root
+                        && p != "."
+                        && self.node(root, p).is_none()
+                        && dirs.iter().any(|d| d.folded == parent(p))
+                })
+                .collect();
+            if let Some((_, p)) = pick(&gone, self.focus >> 8) {
+                let dir = dirs.iter().find(|d| d.folded == parent(p))?;
+                let path = join(
+                    &respell_path(&dir.path, bits.rotate_left(11)),
+                    &respell(leaf(p), bits),
+                );
+                return Some(self.target(root, path));
+            }
         }
+        let dir = pick(&dirs, n)?;
         (0..NAMES.len() as u32).find_map(|i| {
             let leaf = respell(
                 NAMES[((bits >> 4).wrapping_add(i)) as usize % NAMES.len()],
                 bits,
             );
-            let t = self.target(root, join(&dir.path, &leaf));
+            let t = self.target(
+                root,
+                join(&respell_path(&dir.path, bits.rotate_left(11)), &leaf),
+            );
             t.node.is_none().then_some(t)
         })
+    }
+
+    /// A path below an existing file of `root`: a missing path (3.5).
+    fn below_file(&self, root: u32, n: u32, bits: u32) -> Option<Target> {
+        let f = self.existing(root, n, bits, |x| !x.dir)?;
+        let leaf = NAMES[(bits >> 9) as usize % NAMES.len()];
+        Some(self.target(root, join(&f.path, leaf)))
+    }
+
+    /// A named stream of an existing file of `root` that no request made:
+    /// a name the director does not have (3.2).
+    fn stream_of(&self, root: u32, n: u32, bits: u32) -> Option<Target> {
+        let f = self.existing(root, n, bits, |x| !x.dir)?;
+        let stream = ["zone.identifier", "s", "x"][(bits >> 9) as usize % 3];
+        let mut t = self.target(root, format!("{}:{stream}", f.path));
+        // The base file, for the GETATTR after.
+        t.folded = f.folded;
+        Some(t)
+    }
+
+    /// `req`, naming stream target `t`: `ST_NOT_FOUND` or `ST_BAD_REQUEST`
+    /// from a director that holds no named streams, and the base file is
+    /// unchanged after it (3.2).
+    fn stream_plan(&self, root: u32, req: OwnedRequest, t: &Target) -> Plan {
+        Plan {
+            req,
+            want: Want::Statuses(A_STREAM),
+            wire: "3.2",
+            note: "a named stream the director does not hold; the base file is unchanged".into(),
+            effect: Effect::None,
+            then: Then::GetAttr {
+                root,
+                path: t.folded.clone(),
+            },
+        }
+    }
+
+    /// A name under a missing directory the writable provider would hold,
+    /// or (`below_file`) under a file it holds: a create there finds no
+    /// parent (wire.md 3.4.3, 3.4.7, 3.4.9).
+    fn orphan_name(&self, root: u32, n: u32, bits: u32, below_file: bool) -> Option<Target> {
+        let parent = if below_file {
+            self.existing(root, n, bits, |x| !x.dir && self.held(root, &x.folded))?
+        } else {
+            self.missing_held(root, n, bits)?
+        };
+        let leaf = respell(NAMES[(bits >> 9) as usize % NAMES.len()], bits >> 3);
+        Some(self.target(root, join(&parent.path, &leaf)))
     }
 
     /// A missing name the writable provider would hold.
@@ -1019,20 +1246,6 @@ impl Gen {
             nodes.insert(id, out);
         }
         self.nodes = nodes;
-        let files: BTreeMap<(u32, String), u64> = self
-            .nodes
-            .iter()
-            .flat_map(|(r, ns)| {
-                ns.iter()
-                    .filter(|n| !n.dir)
-                    .map(move |n| ((*r, n.folded.clone()), n.size))
-            })
-            .collect();
-        self.known.retain(|k, _| files.contains_key(k));
-        for (k, size) in files {
-            let known = self.known.entry(k).or_insert(size);
-            *known = (*known).min(size);
-        }
     }
 
     // --- Handles.
@@ -1048,13 +1261,24 @@ impl Gen {
     /// A clean handle to act on: a file handle `ok` accepts, or now and then
     /// (or when there is none) a directory handle.
     fn handle_for(&self, a: u32, d: u32, ok: impl Fn(&Handle) -> bool) -> Option<(u64, Handle)> {
-        let files = self.open_handles(|h| h.clean && !h.dir && ok(h));
+        let files = self.open_handles(|h| !h.dir && ok(h));
         let dirs = self.open_handles(|h| h.clean && h.dir);
         let list = if files.is_empty() || (!dirs.is_empty() && (d >> 4).is_multiple_of(8)) {
             dirs
         } else {
             files
         };
+        if self.focus & NEAR_HANDLE != 0 {
+            let near: Vec<&(u64, Handle)> = self
+                .recent_fh
+                .iter()
+                .rev()
+                .filter_map(|fh| list.iter().find(|(f, _)| f == fh))
+                .collect();
+            if let Some(h) = pick(&near, self.focus >> 8) {
+                return Some((*h).clone());
+            }
+        }
         pick(&list, a).cloned()
     }
 
@@ -1070,11 +1294,11 @@ impl Gen {
         }
     }
 
-    /// Marks every handle on `root`'s `path` or below it, but `except`, as
-    /// changed under it.
-    fn taint(&mut self, root: u32, path: &str, except: Option<u64>) {
-        for (fh, h) in self.handles.iter_mut() {
-            if Some(*fh) != except && h.root == root && under(&h.folded, path) {
+    /// Marks every directory handle on `root`'s `path` or below it as
+    /// renamed or deleted under it.
+    fn taint_dirs(&mut self, root: u32, path: &str) {
+        for h in self.handles.values_mut() {
+            if h.dir && h.root == root && under(&h.folded, path) {
                 h.clean = false;
             }
         }
@@ -1084,17 +1308,100 @@ impl Gen {
         self.node(root, folded).map(|n| n.size).unwrap_or(0)
     }
 
-    fn known_of(&self, root: u32, folded: &str) -> u64 {
-        self.known
-            .get(&(root, folded.to_string()))
-            .copied()
-            .unwrap_or(0)
+    /// The size of the file behind file handle `h`: the file where it is
+    /// now, or the bytes it had when it went.
+    fn handle_size(&self, h: &Handle) -> u64 {
+        match &h.gone {
+            Some(g) => g.snap.len() as u64,
+            None => self.size_of(h.root, &h.folded),
+        }
+    }
+
+    /// The identity of the file at `root`'s folded `path`, given one if it
+    /// has none yet.
+    fn id_at(&mut self, root: u32, path: &str) -> u64 {
+        if let Some(id) = self.ids.get(&(root, path.to_string())) {
+            return *id;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.ids.insert((root, path.to_string()), id);
+        id
+    }
+
+    /// The bytes the oracle holds for the file at `root`'s folded `path`.
+    fn bytes_at(&self, root: u32, path: &str) -> Vec<u8> {
+        self.oracle
+            .d
+            .contents(&aether_refdirector::key(root, path))
+            .unwrap_or_default()
+    }
+
+    /// Every open file handle's file's bytes, by identity: taken before a
+    /// step that may end or move files, for the handles it leaves behind.
+    fn snapshots(&self) -> BTreeMap<u64, Vec<u8>> {
+        self.ids
+            .iter()
+            .filter(|(_, id)| self.handles.values().any(|h| h.file == Some(**id)))
+            .map(|((r, p), id)| (*id, self.bytes_at(*r, p)))
+            .collect()
+    }
+
+    /// The file `id` changed: a handle that may follow it there (RENAME_X)
+    /// is spent.
+    fn changed_file(&mut self, id: u64) {
+        for h in self.handles.values_mut() {
+            if let Some(g) = &mut h.gone {
+                if g.follows == Some(id) {
+                    g.spent = true;
+                }
+            }
+        }
+    }
+
+    /// The files at and below `root`'s `path` end (deleted, or replaced by
+    /// a rename): their handles keep what `snaps` says they held.
+    fn end_files(&mut self, root: u32, path: &str, snaps: &BTreeMap<u64, Vec<u8>>) {
+        let ended: Vec<((u32, String), u64)> = self
+            .ids
+            .iter()
+            .filter(|((r, p), _)| *r == root && under(p, path))
+            .map(|(k, id)| (k.clone(), *id))
+            .collect();
+        for (k, id) in ended {
+            self.ids.remove(&k);
+            for h in self.handles.values_mut() {
+                if h.file == Some(id) {
+                    h.file = None;
+                    h.gone = Some(Gone {
+                        snap: snaps.get(&id).cloned().unwrap_or_default(),
+                        writes: true,
+                        follows: None,
+                        spent: false,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Moves every live handle's place to where its file is now.
+    fn follow(&mut self) {
+        let at: BTreeMap<u64, (u32, String)> =
+            self.ids.iter().map(|(k, id)| (*id, k.clone())).collect();
+        for h in self.handles.values_mut() {
+            if let Some((r, p)) = h.file.and_then(|id| at.get(&id)) {
+                h.root = *r;
+                h.folded = p.clone();
+            }
+        }
     }
 
     // --- Choosing a request.
 
     fn plan(&self, op: &RawOp) -> Option<Plan> {
-        let RawOp { kind, a, b, c, d } = *op;
+        let RawOp {
+            kind, a, b, c, d, ..
+        } = *op;
         let plan = |req, want, wire, note: &str, effect| {
             Some(Plan {
                 req,
@@ -1102,6 +1409,7 @@ impl Gen {
                 wire,
                 note: note.to_string(),
                 effect,
+                then: Then::Nothing,
             })
         };
         match kind {
@@ -1127,6 +1435,30 @@ impl Gen {
                     );
                 }
                 let root = self.root(a);
+                if b % 4 == 0 && (d >> 8) % 4 != 0 {
+                    // A path below a file, or a named stream the director
+                    // does not hold: missing (3.5, 3.2).
+                    let stream = (d >> 8) % 4 == 2;
+                    let (t, note) = if stream {
+                        (
+                            self.stream_of(root, a >> 8, c)?,
+                            "a named stream: found = 0",
+                        )
+                    } else {
+                        (self.below_file(root, a >> 8, c)?, "below a file: found = 0")
+                    };
+                    return Some(Plan {
+                        req: OwnedRequest::GetAttr {
+                            root: RootId(root),
+                            path: t.path,
+                        },
+                        want: Want::Ok,
+                        wire: if stream { "3.4.1, 3.2" } else { "3.4.1, 3.5" },
+                        note: note.into(),
+                        effect: Effect::None,
+                        then: Then::Nothing,
+                    });
+                }
                 let t = if b % 4 == 0 {
                     self.missing(root, a >> 8, c, |_| true)?
                 } else {
@@ -1162,6 +1494,40 @@ impl Gen {
                     );
                 }
                 let root = self.root(a);
+                let odd = match (d >> 8) % 6 {
+                    1 => Some((self.missing(root, b, c, |_| true)?, false)),
+                    2 => Some((self.existing(root, b, c, |n| !n.dir)?, true)),
+                    3 => Some((self.below_file(root, b, c)?, true)),
+                    _ => None,
+                };
+                if let Some((t, file)) = odd {
+                    // A missing directory: an empty listing or
+                    // ST_NOT_FOUND; a file, or a path below one, also
+                    // ST_NOT_A_DIRECTORY (3.4.2, 3.5).
+                    let mut alts = vec![
+                        Expect::Reply(OwnedReply::ReadDir(Vec::new())),
+                        Expect::Status(Status::NotFound),
+                    ];
+                    if file {
+                        alts.push(Expect::Status(Status::NotADirectory));
+                    }
+                    let note = match (t.node.is_some(), file) {
+                        (true, _) => "a file",
+                        (false, true) => "below a file",
+                        (false, false) => "a missing directory",
+                    };
+                    return Some(Plan {
+                        req: OwnedRequest::ReadDir {
+                            root: RootId(root),
+                            path: t.path,
+                        },
+                        want: Want::Alts(alts),
+                        wire: "3.4.2",
+                        note: note.into(),
+                        effect: Effect::None,
+                        then: Then::Nothing,
+                    });
+                }
                 let t = self.existing(root, b, c, |n| n.dir)?;
                 plan(
                     OwnedRequest::ReadDir {
@@ -1181,11 +1547,22 @@ impl Gen {
             Kind::SetAttr => self.plan_setattr(a, b, c),
             Kind::Close => {
                 let hs = self.open_handles(|_| true);
-                let (fh, h) = pick(&hs, a)?;
-                let note = if h.clean {
-                    ""
+                let near: Vec<&(u64, Handle)> = self
+                    .recent_fh
+                    .iter()
+                    .rev()
+                    .filter_map(|fh| hs.iter().find(|(f, _)| f == fh))
+                    .collect();
+                let (fh, h) = match pick(&near, self.focus >> 8) {
+                    Some(h) if self.focus & NEAR_HANDLE != 0 => *h,
+                    _ => pick(&hs, a)?,
+                };
+                let note = if h.gone.is_some() {
+                    "a handle whose file is gone"
+                } else if !h.clean {
+                    "a directory handle whose directory moved or went"
                 } else {
-                    "a handle whose file changed under it"
+                    ""
                 };
                 plan(
                     OwnedRequest::Close { fh: *fh },
@@ -1270,9 +1647,37 @@ impl Gen {
                 wire: "3.4.3",
                 note: "unknown root".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
         let root = self.root(a);
+        if b.is_multiple_of(4) && (d >> 8) % 4 == 1 {
+            let t = self.below_file(root, a >> 8, c)?;
+            return Some(Plan {
+                req: OwnedRequest::Open {
+                    root: RootId(root),
+                    flags,
+                    path: t.path,
+                },
+                want: Want::Statuses(BELOW_A_FILE),
+                wire: "3.5",
+                note: "below a file: a missing path".into(),
+                effect: Effect::None,
+                then: Then::Nothing,
+            });
+        }
+        if b.is_multiple_of(4) && (d >> 8) % 4 == 2 {
+            let t = self.stream_of(root, a >> 8, c)?;
+            return Some(self.stream_plan(
+                root,
+                OwnedRequest::Open {
+                    root: RootId(root),
+                    flags,
+                    path: t.path.clone(),
+                },
+                &t,
+            ));
+        }
         let t = match b % 4 {
             0 => self.missing(root, a >> 8, c, |_| true)?,
             1 => self.existing(root, b >> 2, c, |_| true)?,
@@ -1293,7 +1698,6 @@ impl Gen {
                     root,
                     path: t.folded.clone(),
                     dir: n.dir,
-                    read: true,
                     write: false,
                     append: false,
                     emptied: false,
@@ -1310,6 +1714,7 @@ impl Gen {
             wire: "3.4.3",
             note: note.into(),
             effect,
+            then: Then::Nothing,
         })
     }
 
@@ -1329,16 +1734,65 @@ impl Gen {
             flags |= OpenFlags::APPEND;
         }
         let root = self.root(a);
-        let t = match b % 5 {
-            0 | 1 => self.existing(root, b >> 3, c, |n| !n.dir && self.held(root, &n.folded)),
-            2 => self.missing_held(root, b >> 3, c),
-            3 => self.existing(root, b >> 3, c, |n| {
+        let mut no_parent = None;
+        let t = match (b % 5, (d >> 8) % 4) {
+            (0 | 1, _) => self.existing(root, b >> 3, c, |n| !n.dir && self.held(root, &n.folded)),
+            (2, _) => self.missing_held(root, b >> 3, c),
+            (3, _) => self.existing(root, b >> 3, c, |n| {
                 !n.dir && self.read_only(root, &n.folded)
             }),
+            (_, 0) => self.existing(root, b >> 3, c, |n| {
+                n.dir && (self.held(root, &n.folded) || self.read_only(root, &n.folded))
+            }),
+            (_, k @ (1 | 2)) => {
+                no_parent = Some(k == 2);
+                self.orphan_name(root, b >> 3, c, k == 2)
+            }
             _ if !self.has_writable(root) => self.missing(root, b >> 3, c, |_| true),
             _ => self.missing_held(root, b >> 3, c),
         }?;
+        if let Some(below_file) = no_parent {
+            // No parent to create it in (3.4.3); a path below a file is a
+            // missing path (3.5).
+            let (want, note) = if below_file {
+                (Want::Statuses(BELOW_A_FILE), "a name below a file")
+            } else {
+                (
+                    Want::Status(Status::NotFound),
+                    "a name in a missing directory",
+                )
+            };
+            return Some(Plan {
+                req: OwnedRequest::Open {
+                    root: RootId(root),
+                    flags,
+                    path: t.path,
+                },
+                want,
+                wire: "3.4.3, 3.5",
+                note: note.into(),
+                effect: Effect::None,
+                then: Then::Nothing,
+            });
+        }
         let (want, note) = match &t.node {
+            Some(n) if n.dir && self.read_only(root, &t.folded) => (
+                Want::Status(Status::ReadOnly),
+                "a directory no writable provider holds",
+            ),
+            Some(n) if n.dir && self.held(root, &t.folded) => {
+                if flags.contains(OpenFlags::EXCL) {
+                    (
+                        Want::Status(Status::Exists),
+                        "OPEN_EXCL on an existing directory",
+                    )
+                } else {
+                    (
+                        Want::Statuses(DIR_WRITE_OPEN),
+                        "a write open of a directory",
+                    )
+                }
+            }
             Some(n) if n.dir => return None,
             Some(_) if self.held(root, &t.folded) => {
                 if flags.contains(OpenFlags::EXCL) {
@@ -1376,7 +1830,6 @@ impl Gen {
                 root,
                 path: t.folded.clone(),
                 dir: false,
-                read: flags.contains(OpenFlags::READ),
                 write: true,
                 append: flags.contains(OpenFlags::APPEND),
                 emptied: t.node.is_none() || flags.contains(OpenFlags::TRUNC),
@@ -1394,11 +1847,13 @@ impl Gen {
             wire: "3.4.3",
             note: note.into(),
             effect,
+            then: Then::Nothing,
         })
     }
 
     fn plan_read(&self, a: u32, b: u32, c: u32, d: u32) -> Option<Plan> {
-        let (fh, h) = &self.handle_for(a, d, |h| h.read)?;
+        // Any file handle, whatever access it was opened with (3.4.4).
+        let (fh, h) = &self.handle_for(a, d, |h| h.gone.as_ref().is_none_or(|g| !g.spent))?;
         let slot_flags = if d & 1 == 1 {
             RequestFlags::READ_BULK
         } else {
@@ -1417,17 +1872,24 @@ impl Gen {
                 wire: "3.4.4",
                 note: "a directory handle".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
-        let size = self.size_of(h.root, &h.folded);
-        let known = self.known_of(h.root, &h.folded);
-        let mut offset = match b % 6 {
+        let size = self.handle_size(h);
+        let r = u64::from(b >> 4);
+        let offset = match b % 9 {
             0 => 0,
             1 => size,
-            2 => size + u64::from(b >> 3) % 50,
-            3 => u64::from(b >> 3) % (size + 1),
-            4 => (u64::from(b >> 3) % 7) | 1,
-            _ => size.saturating_sub(1),
+            2 => size + r % 50,
+            3 => r % (size + 1),
+            4 => (r % 7) | 1,
+            5 => size.saturating_sub(1),
+            // The later half, where a WRITE past the end or a SETATTR left
+            // zeros.
+            6 => size - r % (size / 2 + 1),
+            // Far past any end: no wrap, 0 bytes (3.4.4).
+            7 => [u64::MAX - r % 16, 1 << 63, 1 << 32, u64::MAX][(r >> 4) as usize % 4],
+            _ => r % (size + 1),
         };
         let mut len: u64 = match c % 8 {
             0 => 0,
@@ -1447,27 +1909,82 @@ impl Gen {
         if inline {
             len = len.min(u64::from(self.limits.inline_read));
         }
-        if known < size {
-            // Only the bytes wire.md fixes.
-            offset = offset.min(known);
-            len = len.min(known - offset);
+        // `len` u32::MAX, answered in bulk, where what is left fits any
+        // bank: the whole rest (3.4.4).
+        let rest = size.saturating_sub(offset);
+        if self.limits.arena && (c >> 24) % 6 == 5 && rest <= 256 {
+            len = u64::from(u32::MAX);
+        }
+        let req = OwnedRequest::Read {
+            slot_flags,
+            fh: *fh,
+            offset,
+            len: len as u32,
+        };
+        if let Some(g) = &h.gone {
+            let from = offset.min(g.snap.len() as u64) as usize;
+            let to = (from as u64).saturating_add(len).min(g.snap.len() as u64) as usize;
+            return Some(Plan {
+                req,
+                want: Want::Alts(vec![
+                    Expect::Reply(OwnedReply::Read(g.snap[from..to].to_vec())),
+                    Expect::Status(Status::IoError),
+                    Expect::Status(Status::NotFound),
+                ]),
+                wire: "3.4.8",
+                note: "a handle whose file is gone: its last bytes, or a failure".into(),
+                effect: Effect::None,
+                then: Then::Nothing,
+            });
         }
         Some(Plan {
-            req: OwnedRequest::Read {
-                slot_flags,
-                fh: *fh,
-                offset,
-                len: len as u32,
-            },
+            req,
             want: Want::Ok,
             wire: "3.4.4",
             note: String::new(),
             effect: Effect::None,
+            then: Then::Nothing,
+        })
+    }
+
+    /// What a WRITE or SETATTR through a handle whose file was deleted or
+    /// replaced answers (3.4.8): `ST_OK`, changing nothing anyone else
+    /// sees, or a failure. The handle is spent after it.
+    fn orphan_change(&self, req: OwnedRequest, ok: OwnedReply, fh: u64) -> Option<Plan> {
+        Some(Plan {
+            req,
+            want: Want::Alts(vec![
+                Expect::Reply(ok),
+                Expect::Status(Status::IoError),
+                Expect::Status(Status::NotFound),
+            ]),
+            wire: "3.4.8",
+            note: "a handle whose file is gone: changes nothing anyone else sees, or fails".into(),
+            effect: Effect::Spent(fh),
+            then: Then::Nothing,
+        })
+    }
+
+    /// A WRITE or SETATTR to a size no director can hold, and a GETATTR of
+    /// the file after it, which it did not change (3.4.5, 3.4.6).
+    fn too_large(&self, req: OwnedRequest, h: &Handle, wire: &'static str) -> Option<Plan> {
+        Some(Plan {
+            req,
+            want: Want::Statuses(TOO_LARGE),
+            wire,
+            note: "past the largest file a director can hold; the file is unchanged".into(),
+            effect: Effect::None,
+            then: Then::GetAttr {
+                root: h.root,
+                path: h.folded.clone(),
+            },
         })
     }
 
     fn plan_write(&self, a: u32, b: u32, c: u32, d: u32) -> Option<Plan> {
-        let (fh, h) = &self.handle_for(a, d, |h| h.write)?;
+        let (fh, h) = &self.handle_for(a, d, |h| {
+            h.write && h.gone.as_ref().is_none_or(|g| g.writes)
+        })?;
         if h.dir {
             return Some(Plan {
                 req: OwnedRequest::Write {
@@ -1479,20 +1996,9 @@ impl Gen {
                 wire: "3.4.5",
                 note: "a directory handle".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
-        let known = self.known_of(h.root, &h.folded);
-        let offset = if h.append {
-            // Ignored on an append handle (3.4.3, 3.4.5).
-            u64::from(b % 1000)
-        } else {
-            match b % 4 {
-                0 => 0,
-                1 => known,
-                2 => u64::from(b >> 2) % (known + 1),
-                _ => known.saturating_sub(1),
-            }
-        };
         let n = match (c >> 4) % 8 {
             0 => 0,
             1..=4 => 1 + c % 16,
@@ -1502,6 +2008,44 @@ impl Gen {
         }
         .min(self.limits.write as u32) as usize;
         let data = fill(n, u64::from(d));
+        let size = self.handle_size(h);
+        let r = u64::from(b >> 4);
+        if h.gone.is_some() {
+            let req = OwnedRequest::Write {
+                fh: *fh,
+                offset: r % (size + 1),
+                data,
+            };
+            return self.orphan_change(req, OwnedReply::Write(n as u32), *fh);
+        }
+        if b % 16 == 15 && n > 0 && !h.append {
+            // Its end past u64::MAX, or past 2^63.
+            let offset = if r & 1 == 0 {
+                u64::MAX - (r >> 1) % n as u64
+            } else {
+                1 << 63
+            };
+            let req = OwnedRequest::Write {
+                fh: *fh,
+                offset,
+                data,
+            };
+            return self.too_large(req, h, "3.4.5");
+        }
+        let offset = if h.append {
+            // Ignored on an append handle (3.4.3, 3.4.5).
+            r % 1000
+        } else {
+            match b % 6 {
+                0 => 0,
+                1 => size,
+                2 => r % (size + 1),
+                3 => size.saturating_sub(1),
+                // Past the end: the gap reads as zeros (3.4.5).
+                4 => size + 1 + r % 70_000,
+                _ => size + r % 16,
+            }
+        };
         Some(Plan {
             req: OwnedRequest::Write {
                 fh: *fh,
@@ -1512,19 +2056,20 @@ impl Gen {
             wire: "3.4.5",
             note: if h.append {
                 "an OPEN_APPEND handle: the offset is ignored".into()
+            } else if offset > size && n > 0 {
+                "past the end: the gap reads as zeros".into()
             } else {
                 String::new()
             },
-            effect: Effect::Wrote {
-                fh: *fh,
-                offset,
-                n: n as u64,
-            },
+            effect: Effect::Wrote(*fh),
+            then: Then::Nothing,
         })
     }
 
     fn plan_setattr(&self, a: u32, b: u32, c: u32) -> Option<Plan> {
-        let (fh, h) = &self.handle_for(a, c, |h| h.write)?;
+        let (fh, h) = &self.handle_for(a, c, |h| {
+            h.write && h.gone.as_ref().is_none_or(|g| g.writes)
+        })?;
         if h.dir {
             return Some(Plan {
                 req: OwnedRequest::SetAttr { fh: *fh, size: 0 },
@@ -1532,22 +2077,40 @@ impl Gen {
                 wire: "3.4.5",
                 note: "a directory handle".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
-        let size = self.size_of(h.root, &h.folded);
-        let to = match b % 5 {
+        let size = self.handle_size(h);
+        let to = match b % 8 {
             0 => 0,
             1 => size,
             2 => size / 2,
             3 => size + u64::from(c % 100),
+            4 => size + u64::from(c >> 8) % 70_000,
+            7 if h.gone.is_none() => {
+                let req = OwnedRequest::SetAttr {
+                    fh: *fh,
+                    size: [u64::MAX, 1 << 63][(c & 1) as usize],
+                };
+                return self.too_large(req, h, "3.4.6");
+            }
             _ => u64::from(c) % (size + 1),
         };
+        let req = OwnedRequest::SetAttr { fh: *fh, size: to };
+        if h.gone.is_some() {
+            return self.orphan_change(req, OwnedReply::Empty, *fh);
+        }
         Some(Plan {
-            req: OwnedRequest::SetAttr { fh: *fh, size: to },
+            req,
             want: Want::Ok,
             wire: "3.4.6",
-            note: String::new(),
-            effect: Effect::Resized { fh: *fh, size: to },
+            note: if to > size {
+                "an extension: it reads as zeros".into()
+            } else {
+                String::new()
+            },
+            effect: Effect::Wrote(*fh),
+            then: Then::Nothing,
         })
     }
 
@@ -1579,15 +2142,76 @@ impl Gen {
                 wire: "3.5.1",
                 note: "unknown root".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
         let root = self.writable_root(a)?;
         let held_node = |n: &Node| self.held(root, &n.folded);
+        let sub = (a >> 24) % 8;
         let (from, to) = match b % 12 {
+            // `to` in a missing directory, or below a file (3.4.7).
+            0 | 7 if sub == 3 || sub == 4 => {
+                let from = self.existing(root, a >> 8, c, |n| !n.dir && held_node(n))?;
+                let to = self.orphan_name(root, b >> 4, d, sub == 4)?;
+                if under(&to.folded, &from.folded) {
+                    return None;
+                }
+                let (want, note) = if sub == 4 {
+                    (Want::Statuses(BELOW_A_FILE), "`to` below a file")
+                } else {
+                    (
+                        Want::Status(Status::NotFound),
+                        "`to` in a missing directory",
+                    )
+                };
+                return Some(Plan {
+                    req: mk(root, from.path, to.path),
+                    want,
+                    wire,
+                    note: note.into(),
+                    effect: Effect::None,
+                    then: Then::GetAttr {
+                        root,
+                        path: from.folded,
+                    },
+                });
+            }
             0 => (
                 self.existing(root, a >> 8, c, |n| !n.dir && held_node(n))?,
                 self.missing_held(root, b >> 4, d)?,
             ),
+            // A file onto an empty directory beside it (3.4.7: replaced or
+            // refused).
+            2 if sub == 1 || sub >= 5 => {
+                let from = self.existing(root, a >> 8, c, |n| !n.dir && held_node(n))?;
+                let up = parent(&from.folded).to_string();
+                let to = self.existing_to(root, b >> 4, d, |n| {
+                    n.dir
+                        && held_node(n)
+                        && !self.has_children(root, &n.folded)
+                        && parent(&n.folded) == up
+                })?;
+                return Some(Plan {
+                    req: mk(root, from.path, to.path),
+                    want: Want::Alts(vec![
+                        Expect::Reply(OwnedReply::Empty),
+                        Expect::Status(Status::IoError),
+                    ]),
+                    wire,
+                    note: "a file onto an empty directory: replaced or refused".into(),
+                    effect: Effect::None,
+                    then: Then::Listing { root, dir: up },
+                });
+            }
+            // `to` an ancestor of `from` (3.4.7).
+            3 if sub == 2 => {
+                let from = self.existing(root, a >> 8, c, |n| {
+                    held_node(n) && n.folded.contains('/') && self.held(root, parent(&n.folded))
+                })?;
+                let stored = from.node.as_ref()?.path.clone();
+                let to = self.target(root, respell_path(parent(&stored), d));
+                (from, to)
+            }
             1 => (
                 self.existing(root, a >> 8, c, held_node)?,
                 self.existing_to(root, b >> 4, d, |n| !n.dir && held_node(n))?,
@@ -1607,8 +2231,14 @@ impl Gen {
             4 => {
                 let from = self.existing(root, a >> 8, c, held_node)?;
                 let stored = from.node.as_ref()?.path.clone();
-                let respelled = respell(leaf(&stored), d | 1);
-                if respelled == leaf(&stored) {
+                // Now and then the same spelling: ST_OK, and nothing
+                // changes (3.4.7).
+                let respelled = if sub == 0 {
+                    leaf(&stored).to_string()
+                } else {
+                    respell(leaf(&stored), d | 1)
+                };
+                if sub != 0 && respelled == leaf(&stored) {
                     return None;
                 }
                 let to = self.target(root, join(parent(&stored), &respelled));
@@ -1666,12 +2296,22 @@ impl Gen {
         } else {
             Effect::None
         };
+        // What a refused rename left, or a rename that changes nothing.
+        let then = if want != Want::Ok || note == "the same name, the same spelling" {
+            Then::GetAttr {
+                root,
+                path: from.folded.clone(),
+            }
+        } else {
+            Then::Nothing
+        };
         Some(Plan {
             req: mk(root, from.path, to.path),
             want,
             wire,
             note: note.into(),
             effect,
+            then,
         })
     }
 
@@ -1689,7 +2329,9 @@ impl Gen {
             .into_iter()
             .filter(|x| x.folded != "." && ok(x))
             .collect();
-        let node = pick(&all, n)?;
+        let node = self
+            .near(root, &all, NEAR_TO)
+            .or_else(|| pick(&all, n).cloned())?;
         Some(self.target(
             root,
             join(parent(&node.path), &respell(leaf(&node.path), bits)),
@@ -1728,12 +2370,16 @@ impl Gen {
             return None;
         }
         if to.folded == from.folded {
-            let respelled = leaf(&to.path) != leaf(&f.path);
-            return respelled.then_some((Want::Ok, "a new spelling of the same name"));
+            if leaf(&to.path) != leaf(&f.path) {
+                return Some((Want::Ok, "a new spelling of the same name"));
+            }
+            return (to.path == f.path).then_some((Want::Ok, "the same name, the same spelling"));
         }
         match &to.node {
             None => Some((Want::Ok, "")),
-            Some(_) if from.folded.starts_with(&format!("{}/", to.folded)) => None,
+            Some(_) if from.folded.starts_with(&format!("{}/", to.folded)) => {
+                Some((Want::Status(Status::IoError), "`to` an ancestor of `from`"))
+            }
             Some(t) if !t.dir && f.dir => {
                 Some((Want::Status(Status::IoError), "a directory onto a file"))
             }
@@ -1774,6 +2420,7 @@ impl Gen {
                 wire: "3.5.1",
                 note: "an unknown root at one end".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
         let from_root = *pick(&writable, a)?;
@@ -1784,6 +2431,58 @@ impl Gen {
             .collect();
         let to_root = *pick(&others, a >> 4)?;
         let held_from = |n: &Node| self.held(from_root, &n.folded);
+        let sub = (a >> 24) % 4;
+        if b % 5 < 2 && sub != 0 {
+            // Onto a directory (`ST_IS_DIR` or `ST_IO_ERROR`), or with a
+            // read-only end (`ST_READ_ONLY`); nothing changes (3.4.13).
+            let from = if sub == 3 {
+                self.existing(from_root, a >> 8, c, |n| {
+                    !n.dir && self.read_only(from_root, &n.folded)
+                })?
+            } else {
+                self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?
+            };
+            let (to, want, note) = match sub {
+                1 => (
+                    self.existing_to(to_root, b >> 4, d, |n| {
+                        n.dir && self.held(to_root, &n.folded)
+                    })?,
+                    Want::Statuses(RENAME_X_ONTO_DIR),
+                    "onto a directory",
+                ),
+                2 => (
+                    self.missing(to_root, b >> 4, d, |n| {
+                        self.read_only(to_root, &fold(&join(&n.path, "x")))
+                    })?,
+                    Want::Status(Status::ReadOnly),
+                    "`to` is read-only",
+                ),
+                _ => (
+                    self.missing_held(to_root, b >> 4, d)?,
+                    Want::Status(Status::ReadOnly),
+                    "`from` is read-only",
+                ),
+            };
+            if !to.parent_dir {
+                return None;
+            }
+            return Some(Plan {
+                req: OwnedRequest::RenameX {
+                    from_root: RootId(from_root),
+                    to_root: RootId(to_root),
+                    from: from.path,
+                    to: to.path,
+                },
+                want,
+                wire: "3.4.13",
+                note: note.into(),
+                effect: Effect::None,
+                then: Then::GetAttr {
+                    root: from_root,
+                    path: from.folded,
+                },
+            });
+        }
         let (from, to) = match b % 5 {
             0 => (
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
@@ -1841,6 +2540,7 @@ impl Gen {
             wire: "3.4.13",
             note: note.into(),
             effect,
+            then: Then::Nothing,
         })
     }
 
@@ -1855,10 +2555,35 @@ impl Gen {
                 wire: "3.4.8",
                 note: "unknown root".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
         let root = self.root(a);
         let held = |n: &Node| self.held(root, &n.folded);
+        if b % 7 == 3 && !(d >> 8).is_multiple_of(4) {
+            let f = self.existing(root, b >> 3, c, |n| !n.dir && held(n))?;
+            if (d >> 8) % 4 == 1 {
+                let leaf = NAMES[(c >> 9) as usize % NAMES.len()];
+                return Some(Plan {
+                    req: OwnedRequest::Delete {
+                        root: RootId(root),
+                        path: join(&f.path, leaf),
+                    },
+                    want: Want::Statuses(BELOW_A_FILE),
+                    wire: "3.4.8, 3.5",
+                    note: "below a file: a missing path".into(),
+                    effect: Effect::None,
+                    then: Then::Nothing,
+                });
+            }
+            let mut t = self.target(root, format!("{}:s", f.path));
+            t.folded = f.folded;
+            let req = OwnedRequest::Delete {
+                root: RootId(root),
+                path: t.path.clone(),
+            };
+            return Some(self.stream_plan(root, req, &t));
+        }
         let t = match b % 7 {
             0 => self.existing(root, b >> 3, c, |n| !n.dir && held(n)),
             1 => self.existing(root, b >> 3, c, |n| {
@@ -1915,6 +2640,7 @@ impl Gen {
             wire: "3.4.8",
             note: note.into(),
             effect,
+            then: Then::Nothing,
         })
     }
 
@@ -1932,6 +2658,7 @@ impl Gen {
                 wire: "3.5.1",
                 note: "unknown root".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
         let root = self.root(a);
@@ -1943,6 +2670,31 @@ impl Gen {
             3 => self.existing(root, b >> 3, c, |n| {
                 !n.dir && self.read_only(root, &n.folded)
             }),
+            _ if !(d >> 8).is_multiple_of(3) => {
+                let below_file = (d >> 8) % 3 == 2;
+                let t = self.orphan_name(root, b >> 3, c, below_file)?;
+                // No parent to make it in (3.4.9, 3.5).
+                let (want, note) = if below_file {
+                    (Want::Statuses(BELOW_A_FILE), "a name below a file")
+                } else {
+                    (
+                        Want::Status(Status::NotFound),
+                        "a name in a missing directory",
+                    )
+                };
+                return Some(Plan {
+                    req: OwnedRequest::Mkdir {
+                        root: RootId(root),
+                        mode,
+                        path: t.path,
+                    },
+                    want,
+                    wire: "3.4.9, 3.5",
+                    note: note.into(),
+                    effect: Effect::None,
+                    then: Then::Nothing,
+                });
+            }
             _ if !self.has_writable(root) => self.missing(root, b >> 3, c, |_| true),
             _ => self.missing_held(root, b >> 3, c),
         }?;
@@ -1985,6 +2737,7 @@ impl Gen {
             wire,
             note: note.into(),
             effect,
+            then: Then::Nothing,
         })
     }
 
@@ -2000,6 +2753,7 @@ impl Gen {
                 wire: "3.5.1",
                 note: "unknown root".into(),
                 effect: Effect::None,
+                then: Then::Nothing,
             });
         }
         let root = self.root(a);
@@ -2017,10 +2771,32 @@ impl Gen {
         if t.path == "." || t.path.is_empty() {
             return None;
         }
-        // Fewer than all of its components: wire.md says nothing of a reply
-        // with no names.
         let components = t.path.split('/').count() as u32;
+        if want == Want::Ok && (d >> 8).is_multiple_of(8) {
+            // Every component known already: an empty reply or
+            // ST_BAD_REQUEST (3.4.12).
+            return Some(Plan {
+                req: OwnedRequest::StoredNames {
+                    root: RootId(root),
+                    skip: components + (d >> 11) % 2,
+                    path: t.path,
+                },
+                want: Want::Alts(vec![
+                    Expect::Reply(OwnedReply::StoredNames(String::new())),
+                    Expect::Status(Status::BadRequest),
+                ]),
+                wire: "3.4.12",
+                note: "a `skip` of every component".into(),
+                effect: Effect::None,
+                then: Then::Nothing,
+            });
+        }
         let skip = d % components;
+        let note = if want == Want::Ok {
+            String::new()
+        } else {
+            "a name the director does not have".into()
+        };
         Some(Plan {
             req: OwnedRequest::StoredNames {
                 root: RootId(root),
@@ -2029,18 +2805,19 @@ impl Gen {
             },
             want,
             wire: "3.4.12",
-            note: if want == Want::Ok {
-                String::new()
-            } else {
-                "a name the director does not have".into()
-            },
+            note,
             effect: Effect::None,
+            then: Then::Nothing,
         })
     }
 
     fn plan_registry(&self, kind: Kind, a: u32, b: u32, c: u32, d: u32) -> Option<Plan> {
         let path = || -> Option<String> {
-            let base = pick(&self.keys, a)?;
+            // Now and then a key a REG_DELETE_KEY tombstoned, or below one.
+            let base = match pick(&self.tombstoned, a >> 4) {
+                Some(t) if (b >> 8).is_multiple_of(4) => t,
+                _ => pick(&self.keys, a)?,
+            };
             let p = if b.is_multiple_of(3) {
                 format!("{base}\\{}", KEY_NAMES[(b >> 2) as usize % KEY_NAMES.len()])
             } else {
@@ -2097,6 +2874,7 @@ impl Gen {
                         wire: "4.3",
                         note: "a new leaf of `.` or `..`".into(),
                         effect: Effect::None,
+                        then: Then::Nothing,
                     });
                 }
                 OwnedRequest::RegRenameKey {
@@ -2107,7 +2885,12 @@ impl Gen {
             Kind::RegChanged => OwnedRequest::RegChanged {
                 path: path()?,
                 subtree: d & 1 == 1,
-                since: *pick(&self.versions, d >> 1)?,
+                // A version seen, the one after the latest, or 0.
+                since: match (d >> 1) % 6 {
+                    4 => self.versions.iter().max()? + 1,
+                    5 => 0,
+                    _ => *pick(&self.versions, d >> 4)?,
+                },
             },
             Kind::RegBadPath => {
                 let bad = BAD_KEY_PATHS[a as usize % BAD_KEY_PATHS.len()].to_string();
@@ -2126,6 +2909,7 @@ impl Gen {
                     wire: if self.registry { "4.2" } else { "4" },
                     note: "a key path that is not canonical".into(),
                     effect: Effect::None,
+                    then: Then::Nothing,
                 });
             }
             _ => return None,
@@ -2140,6 +2924,7 @@ impl Gen {
             wire: if self.registry { "4.3" } else { "4" },
             note: String::new(),
             effect,
+            then: Then::Nothing,
         })
     }
 
@@ -2154,9 +2939,94 @@ impl Gen {
 
     // --- Taking a step.
 
+    /// One op: planned against the state it meets and sent by the client
+    /// its `e` picks. Without a registry layer a registry kind stands for a
+    /// file kind (the case's one probe of the absent layer is
+    /// [`Gen::finish`]'s).
+    fn op(&mut self, op: &RawOp) -> Result<(), String> {
+        if self.done {
+            return Ok(());
+        }
+        let mut op = *op;
+        if !self.registry && op.kind as u32 >= Kind::RegLookup as u32 && op.kind != Kind::Template {
+            op.kind = FILE_KINDS[(op.d >> 24) as usize % FILE_KINDS.len()];
+        }
+        self.focus = op.e;
+        let client = match self.others {
+            0 => 0,
+            n => (op.e >> 16) % (u32::from(n) + 1),
+        };
+        match self.plan(&op) {
+            Some(plan) => self.step(plan, client),
+            None => Ok(()),
+        }
+    }
+
+    /// The case's last step: a REG_DELETE_KEY of a key no layer holds,
+    /// which tombstones it (wire.md 4.3); or, without a registry layer, one
+    /// registry request, `ST_NOT_SUPPORTED` (4).
+    fn finish(&mut self) -> Result<(), String> {
+        self.focus = 0;
+        let path = format!("{REG_BASE}\\Absent");
+        let (req, want, wire, note) = if self.registry {
+            (
+                OwnedRequest::RegDeleteKey { path },
+                Want::Overlay,
+                "4.3",
+                "a key no layer holds: tombstoned",
+            )
+        } else {
+            let req = match self.steps.len() % 4 {
+                0 => OwnedRequest::RegLookup { path },
+                1 => OwnedRequest::RegKey { path },
+                2 => OwnedRequest::RegCreateKey {
+                    path,
+                    volatile: false,
+                },
+                _ => OwnedRequest::RegSetValue {
+                    path,
+                    name: "v".into(),
+                    ty: 1,
+                    data: Vec::new(),
+                },
+            };
+            (
+                req,
+                Want::Status(Status::NotSupported),
+                "4",
+                "no registry layer",
+            )
+        };
+        self.step(
+            Plan {
+                req,
+                want,
+                wire,
+                note: note.into(),
+                effect: Effect::None,
+                then: Then::Nothing,
+            },
+            0,
+        )
+    }
+
     /// Asks the oracle, checks its answer against `plan.want`, records the
-    /// step and moves the state on.
-    fn step(&mut self, plan: Plan) -> Result<(), String> {
+    /// step (sent by `client`), moves the state on, and takes the step
+    /// `plan.then` asks for.
+    fn step(&mut self, plan: Plan, client: u32) -> Result<(), String> {
+        // What the handles a DELETE or RENAME may leave behind held.
+        let snaps = match plan.effect {
+            Effect::Moved { .. } | Effect::Deleted { .. } => self.snapshots(),
+            _ => BTreeMap::new(),
+        };
+        let listing = |root: u32, dir: &str| OwnedRequest::ReadDir {
+            root: RootId(root),
+            path: dir.to_string(),
+        };
+        let before = match &plan.then {
+            Then::Listing { root, dir } => Some(self.oracle.ask(&listing(*root, dir))),
+            _ => None,
+        };
         let got = self.oracle.ask(&plan.req);
         let disagree = || {
             format!(
@@ -2179,9 +3049,11 @@ impl Gen {
             }
             Expect::Reply(r)
         };
-        let expect = match (plan.want, &got) {
+        let statuses =
+            |ss: &[Status]| Expect::OneOf(ss.iter().map(|s| Expect::Status(*s)).collect());
+        let expect = match (&plan.want, &got) {
             (Want::Ok, Ok(r)) | (Want::Overlay, Ok(r)) => reply(r),
-            (Want::Status(s), Err(g)) if s == *g => Expect::Status(s),
+            (Want::Status(s), Err(g)) if s == g => Expect::Status(*s),
             (Want::Overlay, Err(s)) => Expect::Status(*s),
             (Want::OkOrExists, Ok(OwnedReply::Empty) | Err(Status::Exists)) => Expect::OneOf(vec![
                 Expect::Reply(OwnedReply::Empty),
@@ -2199,20 +3071,23 @@ impl Gen {
                 Expect::Reply(OwnedReply::StageExec(String::new())),
             ]),
             (Want::NotFoundOrBadRequest, Err(Status::NotFound | Status::BadRequest)) => {
-                Expect::OneOf(vec![
-                    Expect::Status(Status::NotFound),
-                    Expect::Status(Status::BadRequest),
-                ])
+                statuses(&[Status::NotFound, Status::BadRequest])
             }
-            (Want::IsDirOrReadOnly, Err(Status::IsDir | Status::ReadOnly)) => Expect::OneOf(vec![
-                Expect::Status(Status::IsDir),
-                Expect::Status(Status::ReadOnly),
-            ]),
+            (Want::IsDirOrReadOnly, Err(Status::IsDir | Status::ReadOnly)) => {
+                statuses(&[Status::IsDir, Status::ReadOnly])
+            }
             (Want::BadRequestOrIoError, Err(Status::BadRequest | Status::IoError)) => {
-                Expect::OneOf(vec![
-                    Expect::Status(Status::BadRequest),
-                    Expect::Status(Status::IoError),
-                ])
+                statuses(&[Status::BadRequest, Status::IoError])
+            }
+            (Want::Statuses(ss), Err(g)) if ss.contains(g) => statuses(ss),
+            (Want::Alts(alts), got)
+                if alts.iter().any(|a| {
+                    crate::compare::Session::new()
+                        .check(0, &plan.req, a, got)
+                        .is_ok()
+                }) =>
+            {
+                Expect::OneOf(alts.clone())
             }
             _ => return Err(disagree()),
         };
@@ -2227,18 +3102,158 @@ impl Gen {
             expect,
             cite,
             note: Some(note),
-            client: 0,
+            client,
         });
         if let Ok(r) = &got {
             self.record_version(r);
-            self.apply(&plan, r);
+            self.apply(&plan, r, &snaps);
         }
-        if let OwnedRequest::RegCreateKey { path, .. } = &plan.req {
-            if !self.keys.contains(path) {
-                self.keys.push(path.clone());
+        self.touch(&plan.req, &got);
+        if got.is_ok() {
+            match &plan.req {
+                OwnedRequest::RegCreateKey { path, .. } => {
+                    if !self.keys.contains(path) {
+                        self.keys.push(path.clone());
+                    }
+                }
+                OwnedRequest::RegRenameKey { path, new_leaf } => {
+                    let renamed = match path.rsplit_once('\\') {
+                        Some((up, _)) => format!("{up}\\{new_leaf}"),
+                        None => new_leaf.clone(),
+                    };
+                    if !self.keys.contains(&renamed) {
+                        self.keys.push(renamed);
+                    }
+                }
+                OwnedRequest::RegDeleteKey { path } => self.tombstoned.push(path.clone()),
+                _ => {}
             }
         }
-        Ok(())
+        match plan.then {
+            Then::Nothing => Ok(()),
+            Then::GetAttr { root, path } => self.step(
+                Plan {
+                    req: OwnedRequest::GetAttr {
+                        root: RootId(root),
+                        path,
+                    },
+                    want: Want::Ok,
+                    wire: "3.4.1",
+                    note: "what the step before left".into(),
+                    effect: Effect::None,
+                    then: Then::Nothing,
+                },
+                client,
+            ),
+            Then::Listing { root, dir } => {
+                let again = self.oracle.ask(&plan.req);
+                if again != Err(Status::NotFound) {
+                    return Err(format!(
+                        "generator: {:?} sent again after it succeeded is not ST_NOT_FOUND: {}",
+                        plan.req,
+                        crate::compare::render_got(&again)
+                    ));
+                }
+                self.steps.push(Step {
+                    request: plan.req.clone(),
+                    expect: Expect::OneOf(vec![
+                        Expect::Status(Status::NotFound),
+                        Expect::Status(Status::IoError),
+                    ]),
+                    cite: Some(plan.wire.to_string()),
+                    note: Some(format!(
+                        "wire.md {}: again: `from` is gone if the first moved it, and refused                          again if not",
+                        plan.wire
+                    )),
+                    client,
+                });
+                let after = self.oracle.ask(&listing(root, &dir));
+                let (Some(Ok(b @ OwnedReply::ReadDir(_))), Ok(a @ OwnedReply::ReadDir(_))) =
+                    (&before, &after)
+                else {
+                    return Err(format!(
+                        "generator: READDIR of {dir} in root {root} around step {} is not a \
+                         listing: {before:?}, {after:?}",
+                        self.steps.len()
+                    ));
+                };
+                let expect = if a == b {
+                    Expect::Reply(a.clone())
+                } else {
+                    Expect::OneOf(vec![Expect::Reply(a.clone()), Expect::Reply(b.clone())])
+                };
+                self.steps.push(Step {
+                    request: listing(root, &dir),
+                    cite: matches!(expect, Expect::OneOf(_)).then(|| plan.wire.to_string()),
+                    expect,
+                    note: Some(format!(
+                        "wire.md {}: the listing as either answer to the step before leaves \
+                         it; the case ends, since which it is decides the tree",
+                        plan.wire
+                    )),
+                    client,
+                });
+                self.done = true;
+                Ok(())
+            }
+        }
+    }
+
+    /// Notes the paths and handle `req` named, for the locality bias.
+    fn touch(&mut self, req: &OwnedRequest, got: &Result<OwnedReply, Status>) {
+        use OwnedRequest as O;
+        let mut paths: Vec<(u32, String)> = Vec::new();
+        let mut fh = None;
+        match req {
+            O::GetAttr { root, path }
+            | O::ReadDir { root, path }
+            | O::Open { root, path, .. }
+            | O::Delete { root, path }
+            | O::Mkdir { root, path, .. }
+            | O::StoredNames { root, path, .. } => paths.push((root.0, fold(path))),
+            O::Rename { root, from, to } => {
+                paths.push((root.0, fold(from)));
+                paths.push((root.0, fold(to)));
+            }
+            O::RenameX {
+                from_root,
+                to_root,
+                from,
+                to,
+            } => {
+                paths.push((from_root.0, fold(from)));
+                paths.push((to_root.0, fold(to)));
+            }
+            O::Read { fh: f, .. } | O::Write { fh: f, .. } | O::SetAttr { fh: f, .. } => {
+                fh = Some(*f);
+                if let Some(h) = self.handles.get(f) {
+                    if h.gone.is_none() {
+                        paths.push((h.root, h.folded.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let (O::Open { .. }, Ok(OwnedReply::Open(o))) = (req, got) {
+            fh = Some(o.fh);
+        }
+        for (root, p) in paths {
+            // Not a named stream's: no request makes one (3.2).
+            if p != "." && !p.contains(':') {
+                for q in [parent(&p).to_string(), p] {
+                    self.recent.retain(|x| x != &(root, q.clone()));
+                    self.recent.push((root, q));
+                }
+            }
+        }
+        let excess = self.recent.len().saturating_sub(RECENT);
+        self.recent.drain(..excess);
+        if let Some(f) = fh.filter(|f| self.handles.contains_key(f)) {
+            self.recent_fh.retain(|x| *x != f);
+            self.recent_fh.push(f);
+            let excess = self.recent_fh.len().saturating_sub(RECENT);
+            self.recent_fh.drain(..excess);
+        }
     }
 
     fn record_version(&mut self, r: &OwnedReply) {
@@ -2254,61 +3269,54 @@ impl Gen {
         }
     }
 
-    /// The effect of a step that succeeded.
-    fn apply(&mut self, plan: &Plan, r: &OwnedReply) {
+    /// The effect of a step that succeeded; `snaps` holds the bytes of every
+    /// open handle's file from before it.
+    fn apply(&mut self, plan: &Plan, r: &OwnedReply, snaps: &BTreeMap<u64, Vec<u8>>) {
         match &plan.effect {
             Effect::None => {}
             Effect::Opened {
                 root,
                 path,
                 dir,
-                read,
                 write,
                 append,
                 emptied,
             } => {
                 let OwnedReply::Open(o) = r else { return };
-                if *emptied {
-                    self.taint(*root, path, None);
-                    self.known.insert((*root, path.clone()), 0);
-                }
+                let file = if *dir {
+                    None
+                } else {
+                    let id = self.id_at(*root, path);
+                    if *emptied {
+                        self.changed_file(id);
+                    }
+                    Some(id)
+                };
                 self.handles.insert(
                     o.fh,
                     Handle {
                         root: *root,
                         folded: path.clone(),
                         dir: *dir,
-                        read: *read,
                         write: *write,
                         append: *append,
+                        file,
+                        gone: None,
                         clean: true,
                     },
                 );
                 self.refresh();
             }
-            Effect::Wrote { fh, offset, n } => {
-                let Some(h) = self.handles.get(fh).cloned() else {
-                    return;
-                };
-                let size = self.size_of(h.root, &h.folded);
-                let key = (h.root, h.folded.clone());
-                let known = self.known_of(h.root, &h.folded);
-                let at = if h.append { size } else { *offset };
-                if at <= known {
-                    self.known.insert(key, known.max(at + n));
+            Effect::Wrote(fh) => {
+                if let Some(id) = self.handles.get(fh).and_then(|h| h.file) {
+                    self.changed_file(id);
                 }
-                self.taint(h.root, &h.folded, Some(*fh));
                 self.refresh();
             }
-            Effect::Resized { fh, size } => {
-                let Some(h) = self.handles.get(fh).cloned() else {
-                    return;
-                };
-                let known = self.known_of(h.root, &h.folded);
-                self.known
-                    .insert((h.root, h.folded.clone()), known.min(*size));
-                self.taint(h.root, &h.folded, Some(*fh));
-                self.refresh();
+            Effect::Spent(fh) => {
+                if let Some(g) = self.handles.get_mut(fh).and_then(|h| h.gone.as_mut()) {
+                    g.spent = true;
+                }
             }
             Effect::Closed(fh) => {
                 self.handles.remove(fh);
@@ -2320,35 +3328,192 @@ impl Gen {
                 to_root,
                 to,
             } => {
-                self.taint(*from_root, from, None);
-                self.taint(*to_root, to, None);
+                self.taint_dirs(*from_root, from);
+                self.taint_dirs(*to_root, to);
                 if (from_root, from) != (to_root, to) {
-                    self.known
-                        .retain(|(r, p), _| !(r == to_root && under(p, to)));
-                    let moved: Vec<((u32, String), u64)> = self
-                        .known
+                    // What was at `to` is replaced: deleted, to its handles.
+                    self.end_files(*to_root, to, snaps);
+                    let moved: Vec<(String, u64)> = self
+                        .ids
                         .iter()
                         .filter(|((r, p), _)| r == from_root && under(p, from))
-                        .map(|(k, v)| (k.clone(), *v))
+                        .map(|((_, p), id)| (p.clone(), *id))
                         .collect();
-                    for ((_, p), v) in moved {
-                        self.known.remove(&(*from_root, p.clone()));
+                    for (p, id) in moved {
+                        self.ids.remove(&(*from_root, p.clone()));
                         let tail = &p[from.len()..];
-                        self.known.insert((*to_root, format!("{to}{tail}")), v);
+                        self.ids.insert((*to_root, format!("{to}{tail}")), id);
+                        if from_root != to_root {
+                            // RENAME_X: a handle may follow the file or
+                            // answer as for a deleted one (3.4.7).
+                            for h in self.handles.values_mut() {
+                                if h.file == Some(id) {
+                                    h.file = None;
+                                    h.gone = Some(Gone {
+                                        snap: snaps.get(&id).cloned().unwrap_or_default(),
+                                        writes: false,
+                                        follows: Some(id),
+                                        spent: false,
+                                    });
+                                }
+                            }
+                        }
                     }
+                    self.follow();
                 }
                 self.refresh();
             }
             Effect::Deleted { root, path } => {
-                self.taint(*root, path, None);
-                self.known
-                    .retain(|(r, p), _| !(r == root && under(p, path)));
+                self.taint_dirs(*root, path);
+                self.end_files(*root, path, snaps);
                 self.refresh();
             }
             Effect::Changed => self.refresh(),
         }
     }
 }
+
+/// The ops template `op` stands for ([`TEMPLATES`]) in a tree whose roots
+/// are `roots`, its numbers its own: a root with a writable provider, and
+/// each op's branch and locality the template's.
+fn expand(op: &RawOp, roots: &[RootInfo]) -> Vec<RawOp> {
+    let t = TEMPLATES[op.a as usize % TEMPLATES.len()];
+    let ids: Vec<u32> = roots.iter().map(|r| r.id).collect();
+    let writable: Vec<u32> = roots
+        .iter()
+        .filter(|r| r.whole || !r.entries.is_empty())
+        .map(|r| r.id)
+        .collect();
+    // `a` such that `root(a)` and `writable_root(a)` are one root.
+    let a = (0..64u32)
+        .map(|i| (op.a >> 4).wrapping_add(i))
+        .find(|&a| {
+            !writable.is_empty()
+                && ids[a as usize % ids.len()] == writable[a as usize % writable.len()]
+        })
+        .unwrap_or(op.a);
+    t.iter()
+        .enumerate()
+        .map(|(i, &(kind, b, d, e))| RawOp {
+            kind,
+            a,
+            b: b + 5040 * ((op.b >> 12).wrapping_add(i as u32) % 800_000),
+            c: op.c.rotate_left(5 * i as u32),
+            d: d | 0x40 | (op.d & 0xFFFF_0000),
+            e: e | (op.e & 0xFFFF_0000),
+        })
+        .collect()
+}
+
+/// `input` with every [`Kind::Template`] op replaced by the ops it stands
+/// for, which build the same case: what shrinking takes apart op by op.
+pub fn flatten(input: &CaseInput) -> CaseInput {
+    let (_, roots) = build_tree(&input.tree);
+    let ops = input
+        .ops
+        .iter()
+        .flat_map(|op| match op.kind {
+            Kind::Template => expand(op, &roots),
+            _ => vec![*op],
+        })
+        .collect();
+    CaseInput {
+        tree: input.tree.clone(),
+        ops,
+        others: input.others,
+    }
+}
+
+/// The file kinds a registry kind stands for in a tree with no registry
+/// layer.
+const FILE_KINDS: [Kind; 12] = [
+    Kind::GetAttr,
+    Kind::ReadDir,
+    Kind::OpenRead,
+    Kind::OpenWrite,
+    Kind::Read,
+    Kind::Write,
+    Kind::SetAttr,
+    Kind::Close,
+    Kind::Rename,
+    Kind::Delete,
+    Kind::Mkdir,
+    Kind::Template,
+];
+
+/// Op sequences on the same names and handles, each op a (kind, `b`, `d`,
+/// `e`): `b` picks its branch, `d` its open flags, and `e` which recent
+/// name or handle it takes ([`NEAR_EXISTING`] and the rest; bits 8 and up,
+/// which of them, the latest first). The template's other numbers are the
+/// op's own ([`Gen::template`]).
+const TEMPLATES: [&[(Kind, u32, u32, u32)]; 7] = [
+    // A save: a new file written, renamed over a file with its handle
+    // open, written again through that handle, closed and read back.
+    &[
+        (Kind::OpenWrite, 2, 2, 0),
+        (Kind::Write, 0, 0, NEAR_HANDLE),
+        (Kind::Rename, 1, 0, NEAR_EXISTING),
+        (Kind::Write, 4, 0, NEAR_HANDLE),
+        (Kind::Close, 0, 0, NEAR_HANDLE),
+        (Kind::OpenRead, 2, 0, NEAR_EXISTING),
+        (Kind::Read, 0, 0, NEAR_HANDLE),
+    ],
+    // A file deleted under a handle and created again: the old handle
+    // never reaches the new file.
+    &[
+        (Kind::OpenWrite, 0, 1, 0),
+        (Kind::Delete, 0, 0, NEAR_EXISTING),
+        (Kind::OpenWrite, 2, 2, NEAR_MISSING),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Write, 0, 0, NEAR_HANDLE),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Close, 0, 0, NEAR_HANDLE),
+    ],
+    // Two files swapped through a third name, a handle open on each.
+    &[
+        (Kind::OpenWrite, 0, 1, 0),
+        (Kind::OpenWrite, 0, 1, 0),
+        (Kind::Rename, 0, 0, NEAR_EXISTING | 1 << 8),
+        (Kind::Rename, 0, 0, NEAR_EXISTING | NEAR_MISSING | 1 << 8),
+        (Kind::Rename, 0, 0, NEAR_EXISTING | NEAR_MISSING | 1 << 8),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+    ],
+    // A truncating open under a writer, which then writes past the new end.
+    &[
+        (Kind::OpenWrite, 0, 1, 0),
+        (Kind::OpenWrite, 0, 8, NEAR_EXISTING),
+        (Kind::Write, 4, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::SetAttr, 3, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Read, 6, 0, NEAR_HANDLE | 1 << 8),
+    ],
+    // A directory renamed with a file open below it.
+    &[
+        (Kind::OpenWrite, 0, 1, 0),
+        (Kind::Rename, 5, 0, NEAR_EXISTING),
+        (Kind::Write, 1, 0, NEAR_HANDLE),
+        (Kind::ReadDir, 1, 0, NEAR_EXISTING),
+        (Kind::Read, 0, 0, NEAR_HANDLE),
+        (Kind::Close, 0, 0, NEAR_HANDLE),
+    ],
+    // A file cut by SETATTR and grown again by a WRITE past its end: the
+    // gap reads as zeros, the cut bytes included.
+    &[
+        (Kind::OpenWrite, 0, 1, 0),
+        (Kind::SetAttr, 2, 0, NEAR_HANDLE),
+        (Kind::Write, 4, 0, NEAR_HANDLE),
+        (Kind::Read, 6, 0, NEAR_HANDLE),
+        (Kind::Read, 0, 0, NEAR_HANDLE),
+    ],
+    // A directory renamed away and made again at its old name: empty.
+    &[
+        (Kind::Rename, 5, 0, 0),
+        (Kind::Mkdir, 0, 0, NEAR_MISSING),
+        (Kind::ReadDir, 1, 0, NEAR_EXISTING),
+        (Kind::ReadDir, 1, 0, NEAR_EXISTING | 1 << 8),
+    ],
+];
 
 #[cfg(test)]
 mod tests {
@@ -2442,10 +3607,12 @@ mod tests {
             roots: vec![
                 RootSpec {
                     writable: None,
+                    two: false,
                     entries: vec![file(1, 0b1010), file(5, 0b0101)],
                 },
                 RootSpec {
                     writable: None,
+                    two: false,
                     entries: vec![file(1, 0b0110), file(11, 0b1001)],
                 },
             ],
@@ -2473,7 +3640,7 @@ mod tests {
                         panic!("{:?}", p.req)
                     };
                     let stored = g.node(to_root.0, &fold(&to)).unwrap().path.clone();
-                    g.step(p).unwrap();
+                    g.step(p, 0).unwrap();
                     assert_eq!(g.node(to_root.0, &fold(&to)).unwrap().path, to);
                     if to != stored {
                         respelled += 1;
@@ -2601,6 +3768,67 @@ mod tests {
             }
         }
         assert!(seen > 0);
+    }
+
+    /// Every interaction the generator sends is generated: each by its
+    /// step's note, and steps from other clients.
+    #[test]
+    fn every_interaction_is_generated() {
+        let notes = [
+            "a handle whose file is gone: its last bytes, or a failure",
+            "a handle whose file is gone: changes nothing anyone else sees, or fails",
+            "past the end: the gap reads as zeros",
+            "an extension: it reads as zeros",
+            "past the largest file a director can hold; the file is unchanged",
+            "a write open of a directory",
+            "OPEN_EXCL on an existing directory",
+            "a directory no writable provider holds",
+            "a name in a missing directory",
+            "a name below a file",
+            "below a file: found = 0",
+            "below a file: a missing path",
+            "a named stream: found = 0",
+            "a named stream the director does not hold; the base file is unchanged",
+            "3.4.2: a file",
+            "3.4.2: below a file",
+            "3.4.2: a missing directory",
+            "a file onto an empty directory: replaced or refused",
+            "`to` an ancestor of `from`",
+            "the same name, the same spelling",
+            "`to` in a missing directory",
+            "`to` below a file",
+            "onto a directory",
+            "`to` is read-only",
+            "a `skip` of every component",
+            "the case ends",
+        ];
+        let mut seen = vec![0; notes.len()];
+        let mut others = 0;
+        for s in crate::generate::cases(21, 512, 32).unwrap() {
+            for st in &s.steps {
+                let note = st.note.as_deref().unwrap_or("");
+                for (i, n) in notes.iter().enumerate() {
+                    if note.ends_with(n)
+                        || (n.starts_with("3.4.2") && note.ends_with(&n[..]))
+                        || note.contains(n)
+                    {
+                        seen[i] += 1;
+                    }
+                }
+                if st.client != 0 {
+                    others += 1;
+                }
+            }
+        }
+        let missing: Vec<_> = notes
+            .iter()
+            .zip(&seen)
+            .filter(|(_, n)| **n == 0)
+            .map(|(t, _)| *t)
+            .collect();
+        eprintln!("{:?}", notes.iter().zip(&seen).collect::<Vec<_>>());
+        assert!(missing.is_empty(), "never generated: {missing:?}");
+        assert!(others > 0);
     }
 
     /// Inline READs and WRITEs fit the director's slot: `payload_cap - 8`

@@ -1,5 +1,7 @@
 //! NT create dispositions and access masks, and the decisions made from them.
 
+use aether_protocol::OpenFlags;
+
 /// NtCreateFile create dispositions.
 pub const FILE_SUPERSEDE: u32 = 0;
 pub const FILE_OPEN: u32 = 1;
@@ -105,14 +107,13 @@ pub fn is_append_only(access: u32) -> bool {
 /// folded these straight into `OpenOptions::create/create_new/truncate`, and
 /// its conformance fixture's `open`, which create-if-absent-then-truncate in
 /// that order (both removed) — both agreed with the mapping above.
-pub fn open_create_flags(disposition: u32) -> u32 {
-    use aether_protocol::{OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC};
+pub fn open_create_flags(disposition: u32) -> OpenFlags {
     match disposition {
-        FILE_SUPERSEDE | FILE_OVERWRITE_IF => OPEN_CREATE | OPEN_TRUNC,
-        FILE_CREATE => OPEN_CREATE | OPEN_EXCL,
-        FILE_OPEN_IF => OPEN_CREATE,
-        FILE_OVERWRITE => OPEN_TRUNC,
-        _ => 0, // FILE_OPEN (1), and anything unrecognized.
+        FILE_SUPERSEDE | FILE_OVERWRITE_IF => OpenFlags::CREATE | OpenFlags::TRUNC,
+        FILE_CREATE => OpenFlags::CREATE | OpenFlags::EXCL,
+        FILE_OPEN_IF => OpenFlags::CREATE,
+        FILE_OVERWRITE => OpenFlags::TRUNC,
+        _ => OpenFlags::empty(), // FILE_OPEN (1), and anything unrecognized.
     }
 }
 

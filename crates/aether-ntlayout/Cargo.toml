@@ -8,7 +8,7 @@ publish.workspace = true
 description = "Pure NT byte layouts and decisions (info classes, directory records, dispositions): no OS API, host-testable."
 
 [dependencies]
-# `OPEN_*` flag bits that `open_create_flags` maps a disposition onto.
+# The `OpenFlags` bits that `open_create_flags` maps a disposition onto.
 aether-protocol.workspace = true
 
 [lints]

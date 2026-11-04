@@ -3,7 +3,7 @@
 //! included.
 
 use aether_ipc::{ring, DataArena, OwnedSeg, RingClient, RingServer, SpinNotifier};
-use aether_protocol::{self as P, Opcode, OpenFlags, Request, RequestFlags, RootId, Status};
+use aether_protocol::{Opcode, OpenFlags, ReadReply, Reply, Request, RequestFlags, RootId, Status};
 use aether_refdirector::{pattern, ReadStyle, Reference};
 use aether_rpc::serve_with_arena;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,8 +74,17 @@ fn open(c: &RingClient<'_, SpinNotifier>, path: &str) -> u64 {
             path,
         },
     );
-    assert_eq!(st, 0);
-    P::decode_open_resp(&body).unwrap().fh
+    assert_eq!(st, Status::Ok.code());
+    match Reply::decode(Opcode::Open, 0, &body) {
+        Ok(Reply::Open(o)) => o.fh,
+        r => panic!("not an OPEN reply: {r:?}"),
+    }
+}
+
+fn bytes_of(reply: Reply<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    reply.encode(&mut out);
+    out
 }
 
 #[test]
@@ -99,11 +108,23 @@ fn a_bulk_read_reaches_the_client_as_the_fake_sent_it() {
                     len,
                 },
             );
-            assert_eq!(st, 0);
-            let (n, off) = P::decode_read_bulk_resp(&body).expect("a bulk reply");
+            assert_eq!(st, Status::Ok.code());
+            let Ok(Reply::Read(ReadReply::Bulk {
+                len: n,
+                arena_offset: off,
+            })) = Reply::decode(Opcode::Read, flags.bits(), &body)
+            else {
+                panic!("not a bulk reply");
+            };
             let want = (len as usize).min(BANK);
             assert_eq!(n as usize, want);
-            assert_eq!(body, P::encode_read_resp_bulk(n, off));
+            assert_eq!(
+                body,
+                bytes_of(Reply::Read(ReadReply::Bulk {
+                    len: n,
+                    arena_offset: off
+                }))
+            );
             let bank = (off as usize - ring_bytes()) / BANK;
             assert!(bank < SLOTS as usize);
             assert_eq!(off as usize, ring_bytes() + bank * BANK);
@@ -132,8 +153,11 @@ fn an_inline_read_reaches_the_client_as_the_fake_sent_it() {
                 len: 4000,
             },
         );
-        assert_eq!(st, 0);
-        assert_eq!(body, P::encode_read_resp(&bytes[100..4100]));
+        assert_eq!(st, Status::Ok.code());
+        assert_eq!(
+            body,
+            bytes_of(Reply::Read(ReadReply::Inline(&bytes[100..4100])))
+        );
     });
 }
 
@@ -190,7 +214,7 @@ fn a_reg_key_reply_past_the_slot_is_reply_too_large() {
                     data: &data,
                 },
             );
-            assert_eq!(st, 0);
+            assert_eq!(st, Status::Ok.code());
         }
         assert_eq!(ring::reg_generation(owned.seg()), 3, "published per write");
         let (st, body) = call(c, Request::RegKey { path: k });

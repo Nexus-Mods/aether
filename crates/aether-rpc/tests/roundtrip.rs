@@ -656,7 +656,9 @@ fn a_request_whose_length_is_past_the_slot_is_answered_bad_request() {
         let geom = client.ring().geom();
         // Published by hand, with a header claiming more than the slot holds.
         let slot = ring::claim_free(seg, &geom).unwrap();
-        let req_id = ring::publish_request(seg, &geom, slot, 1, 0, b"\x01\0\0\0a").unwrap();
+        let req_id =
+            ring::publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 0, b"\x01\0\0\0a")
+                .unwrap();
         seg.write_bytes(
             geom.slot_off(slot) + aether_ipc::layout::SH_PAYLOAD_LEN,
             &(CAP + 1).to_le_bytes(),
@@ -886,7 +888,7 @@ fn a_server_with_an_arena_hands_read_its_slot_and_the_arena() {
             .unwrap();
         stop.store(true, Ordering::Release);
         served.join().unwrap().unwrap();
-        assert_eq!(r.status, 0);
+        assert_eq!(r.status, Status::Ok.code());
         let Ok(Reply::Read(ReadReply::Bulk { len, arena_offset })) =
             Reply::decode(Opcode::Read, 0, &r.payload)
         else {

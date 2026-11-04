@@ -15,9 +15,9 @@
 //! generation, so the entry is never used past it.
 //!
 //! **Errors (spec section 6).** Every call returns the director's status as `Err`: a request
-//! that could not be sent or was never answered is `ST_IO_ERROR`, a director with no registry
-//! attached `ST_NOT_SUPPORTED`, a `REG_KEY` answer too large for the ring
-//! `ST_REPLY_TOO_LARGE`. A failed read is counted as a fallback in the shim stats; the caller
+//! that could not be sent or was never answered is `Status::IoError`, a director with no
+//! registry attached `Status::NotSupported`, a `REG_KEY` answer too large for the ring
+//! `Status::ReplyTooLarge`. A failed read is counted as a fallback in the shim stats; the caller
 //! then serves the real key alone. A failed write is never retried against the real registry;
 //! the caller returns `STATUS_UNSUCCESSFUL`.
 
@@ -25,15 +25,9 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Mutex, OnceLock};
 
-use aether_protocol::{
-    decode_reg_changed_reply, decode_reg_key_reply, decode_reg_lookup_reply,
-    decode_reg_version_reply, encode_reg_changed, encode_reg_create_key, encode_reg_delete_value,
-    encode_reg_path, encode_reg_rename_key, encode_reg_set_value, OP_REG_CHANGED,
-    OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP,
-    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR, ST_NOT_FOUND,
-    ST_NOT_SUPPORTED,
-};
+use aether_protocol::{Reply, Request, SliceBuf, Status};
 use aether_registry::{path::fold, Lookup, Node};
+use aether_rpc::CallError;
 
 use crate::director::{self, FuseClient};
 
@@ -113,28 +107,28 @@ pub fn global() -> Option<&'static RegClient<'static>> {
 
 /// `REG_LOOKUP` through [`global`]: the key's overlay state and whether the overlay holds
 /// anything below it. Cached.
-pub fn lookup(path: &str) -> Result<(Lookup, bool), i32> {
+pub fn lookup(path: &str) -> Result<(Lookup, bool), Status> {
     match global() {
         Some(c) => c.lookup(path),
-        None => read_failed(ST_NOT_SUPPORTED),
+        None => read_failed(Status::NotSupported),
     }
 }
 
 /// `REG_KEY` through [`global`]: the key's overlay node, if it has one. Cached.
-pub fn key(path: &str) -> Result<Option<Node>, i32> {
+pub fn key(path: &str) -> Result<Option<Node>, Status> {
     match global() {
         Some(c) => c.key(path),
-        None => read_failed(ST_NOT_SUPPORTED),
+        None => read_failed(Status::NotSupported),
     }
 }
 
 /// `REG_KEY` through [`global`], with `f` run on the (cached) node in place instead of a clone.
 /// `f` runs under the cache lock: it must be pure (no trampolines, no director, no caller
 /// memory).
-pub fn with_key<R>(path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, i32> {
+pub fn with_key<R>(path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, Status> {
     match global() {
         Some(c) => c.with_key(path, f),
-        None => read_failed(ST_NOT_SUPPORTED),
+        None => read_failed(Status::NotSupported),
     }
 }
 
@@ -144,40 +138,46 @@ pub fn generation() -> u64 {
     director::global().map_or(0, |c| c.reg_generation())
 }
 
-pub fn set_value(path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), i32> {
+pub fn set_value(path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), Status> {
     global()
-        .ok_or(ST_NOT_SUPPORTED)?
+        .ok_or(Status::NotSupported)?
         .set_value(path, name, ty, data)
 }
 
-pub fn delete_value(path: &str, name: &str) -> Result<(), i32> {
-    global().ok_or(ST_NOT_SUPPORTED)?.delete_value(path, name)
+pub fn delete_value(path: &str, name: &str) -> Result<(), Status> {
+    global()
+        .ok_or(Status::NotSupported)?
+        .delete_value(path, name)
 }
 
-pub fn create_key(path: &str, volatile: bool) -> Result<(), i32> {
-    global().ok_or(ST_NOT_SUPPORTED)?.create_key(path, volatile)
+pub fn create_key(path: &str, volatile: bool) -> Result<(), Status> {
+    global()
+        .ok_or(Status::NotSupported)?
+        .create_key(path, volatile)
 }
 
-pub fn delete_key(path: &str) -> Result<(), i32> {
-    global().ok_or(ST_NOT_SUPPORTED)?.delete_key(path)
+pub fn delete_key(path: &str) -> Result<(), Status> {
+    global().ok_or(Status::NotSupported)?.delete_key(path)
 }
 
-pub fn rename_key(path: &str, new_leaf: &str) -> Result<(), i32> {
-    global().ok_or(ST_NOT_SUPPORTED)?.rename_key(path, new_leaf)
+pub fn rename_key(path: &str, new_leaf: &str) -> Result<(), Status> {
+    global()
+        .ok_or(Status::NotSupported)?
+        .rename_key(path, new_leaf)
 }
 
 /// `REG_CHANGED` through [`global`]: whether the key (and with `subtree` anything below it)
 /// changed after overlay version `since`, and the current overlay version. Never cached.
-pub fn changed(path: &str, subtree: bool, since: u64) -> Result<(bool, u64), i32> {
+pub fn changed(path: &str, subtree: bool, since: u64) -> Result<(bool, u64), Status> {
     global()
-        .ok_or(ST_NOT_SUPPORTED)?
+        .ok_or(Status::NotSupported)?
         .changed(path, subtree, since)
 }
 
 /// Count a failed read as a fallback to the real registry, and return its status. A read made
 /// for a write ([`WriteScope`]) is not served from the real registry: the write is refused, and
 /// counted as such.
-fn read_failed<T>(status: i32) -> Result<T, i32> {
+fn read_failed<T>(status: Status) -> Result<T, Status> {
     if IN_WRITE.with(|w| w.get()) {
         crate::hookstats::note_reg_write_refused();
     } else {
@@ -244,40 +244,27 @@ impl<'a> RegClient<'a> {
         }
     }
 
-    pub fn lookup(&self, path: &str) -> Result<(Lookup, bool), i32> {
+    pub fn lookup(&self, path: &str) -> Result<(Lookup, bool), Status> {
         self.cached(
             path,
             |c| &mut c.lookups,
             || {
-                let r = self.request(OP_REG_LOOKUP, &encode_reg_path(path))?;
-                let (state, below, _) = decode_reg_lookup_reply(&r).ok_or(ST_BAD_REQUEST)?;
-                let l = match state {
-                    0 => Lookup::Absent,
-                    1 => Lookup::Present { created: false },
-                    2 => Lookup::Present { created: true },
-                    3 => Lookup::Tombstoned,
-                    // Not an answer this client understands: a read failure, so the caller
-                    // serves the real key rather than a guess.
-                    _ => return Err(ST_BAD_REQUEST),
-                };
-                Ok((l, below))
+                // A lookup state outside the table does not decode: a read failure, so the
+                // caller serves the real key rather than a guess.
+                self.read(&Request::RegLookup { path }, |r| match r {
+                    Reply::RegLookup(l) => Some((l.state, l.below)),
+                    _ => None,
+                })
             },
         )
     }
 
-    pub fn key(&self, path: &str) -> Result<Option<Node>, i32> {
-        self.cached(
-            path,
-            |c| &mut c.keys,
-            || {
-                let r = self.request(OP_REG_KEY, &encode_reg_path(path))?;
-                Ok(decode_reg_key_reply(&r).ok_or(ST_BAD_REQUEST)?.0)
-            },
-        )
+    pub fn key(&self, path: &str) -> Result<Option<Node>, Status> {
+        self.cached(path, |c| &mut c.keys, || self.fetch_key(path))
     }
 
     /// [`RegClient::key`] with `f` run on the cached node in place (under the cache lock).
-    pub fn with_key<R>(&self, path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, i32> {
+    pub fn with_key<R>(&self, path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, Status> {
         let generation = self.fc.reg_generation();
         let k = fold(path);
         if generation != 0 {
@@ -289,10 +276,7 @@ impl<'a> RegClient<'a> {
                 }
             }
         }
-        let v = match self
-            .request(OP_REG_KEY, &encode_reg_path(path))
-            .and_then(|r| decode_reg_key_reply(&r).map(|d| d.0).ok_or(ST_BAD_REQUEST))
-        {
+        let v = match self.fetch_key(path) {
             Ok(v) => v,
             Err(st) => return read_failed(st),
         };
@@ -307,60 +291,100 @@ impl<'a> RegClient<'a> {
         Ok(r)
     }
 
-    pub fn set_value(&self, path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), i32> {
-        self.write(
-            OP_REG_SET_VALUE,
-            &encode_reg_set_value(path, name, ty, data),
-        )
+    /// One `REG_KEY` round trip: the key's node, owned (the reply decodes it).
+    fn fetch_key(&self, path: &str) -> Result<Option<Node>, Status> {
+        self.read(&Request::RegKey { path }, |r| match r {
+            Reply::RegKey(k) => Some(k.node.map(std::borrow::Cow::into_owned)),
+            _ => None,
+        })
     }
 
-    pub fn delete_value(&self, path: &str, name: &str) -> Result<(), i32> {
-        self.write(OP_REG_DELETE_VALUE, &encode_reg_delete_value(path, name))
+    pub fn set_value(&self, path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), Status> {
+        self.write(&Request::RegSetValue {
+            path,
+            name,
+            ty,
+            data,
+        })
     }
 
-    pub fn create_key(&self, path: &str, volatile: bool) -> Result<(), i32> {
-        self.write(OP_REG_CREATE_KEY, &encode_reg_create_key(path, volatile))
+    pub fn delete_value(&self, path: &str, name: &str) -> Result<(), Status> {
+        self.write(&Request::RegDeleteValue { path, name })
     }
 
-    pub fn delete_key(&self, path: &str) -> Result<(), i32> {
-        self.write(OP_REG_DELETE_KEY, &encode_reg_path(path))
+    pub fn create_key(&self, path: &str, volatile: bool) -> Result<(), Status> {
+        self.write(&Request::RegCreateKey { path, volatile })
     }
 
-    pub fn rename_key(&self, path: &str, new_leaf: &str) -> Result<(), i32> {
-        self.write(OP_REG_RENAME_KEY, &encode_reg_rename_key(path, new_leaf))
+    pub fn delete_key(&self, path: &str) -> Result<(), Status> {
+        self.write(&Request::RegDeleteKey { path })
     }
 
-    pub fn changed(&self, path: &str, subtree: bool, since: u64) -> Result<(bool, u64), i32> {
-        let r = self.request(OP_REG_CHANGED, &encode_reg_changed(path, subtree, since))?;
-        decode_reg_changed_reply(&r).ok_or(ST_BAD_REQUEST)
+    pub fn rename_key(&self, path: &str, new_leaf: &str) -> Result<(), Status> {
+        self.write(&Request::RegRenameKey { path, new_leaf })
+    }
+
+    pub fn changed(&self, path: &str, subtree: bool, since: u64) -> Result<(bool, u64), Status> {
+        let req = Request::RegChanged {
+            path,
+            subtree,
+            since,
+        };
+        self.read(&req, |r| match r {
+            Reply::RegChanged(c) => Some((c.changed, c.version)),
+            _ => None,
+        })
     }
 
     /// Send one request. One that cannot fit the ring's payload is refused here with
-    /// `ST_BAD_REQUEST` and never submitted (the hooks answer `STATUS_INVALID_PARAMETER`, as
-    /// for anything over the spec's limits).
-    fn request(&self, opcode: u32, payload: &[u8]) -> Result<Vec<u8>, i32> {
-        if !fits(payload.len(), self.fc.payload_cap()) {
-            return Err(ST_BAD_REQUEST);
+    /// `Status::BadRequest` and never submitted (the hooks answer `STATUS_INVALID_PARAMETER`,
+    /// as for anything over the spec's limits).
+    fn request<T>(
+        &self,
+        req: &Request<'_>,
+        read: impl FnOnce(Reply<'_>) -> Option<T>,
+    ) -> Result<T, CallError> {
+        if !fits(encoded_len(req), self.fc.payload_cap()) {
+            return Err(CallError::Status(Status::BadRequest));
         }
-        self.fc.reg_request(opcode, payload)
+        self.fc.call(req, read)
+    }
+
+    /// A read: [`Self::request`], whose failure is a status. An OK reply that does not
+    /// decode is `Status::BadRequest`.
+    fn read<T>(
+        &self,
+        req: &Request<'_>,
+        read: impl FnOnce(Reply<'_>) -> Option<T>,
+    ) -> Result<T, Status> {
+        self.request(req, read).map_err(director::failed)
     }
 
     /// A write. Nothing to invalidate here: the director moves the published generation
     /// before it replies, which makes every cached answer, this client's included, unusable.
-    fn write(&self, opcode: u32, payload: &[u8]) -> Result<(), i32> {
-        let r = self.request(opcode, payload).inspect_err(|&st| {
-            // The director's own answers (over a limit, exists, deleted) are not failures to
-            // reach it.
-            if !matches!(st, ST_BAD_REQUEST | ST_EXISTS | ST_NOT_FOUND) {
+    fn write(&self, req: &Request<'_>) -> Result<(), Status> {
+        let reply = self.request(req, |r| match r {
+            Reply::RegVersion(_) => Some(()),
+            _ => None,
+        });
+        match reply {
+            Ok(()) => Ok(()),
+            // A reply that does not decode says nothing about the request: a failed write
+            // (`STATUS_UNSUCCESSFUL`), not a bad request (`STATUS_INVALID_PARAMETER`).
+            Err(CallError::Undecodable) => {
                 crate::hookstats::note_reg_write_refused();
+                Err(Status::IoError)
             }
-        })?;
-        // A reply that does not decode says nothing about the request: a failed write
-        // (`STATUS_UNSUCCESSFUL`), not a bad request (`STATUS_INVALID_PARAMETER`).
-        decode_reg_version_reply(&r)
-            .ok_or(ST_IO_ERROR)
-            .inspect_err(|_| crate::hookstats::note_reg_write_refused())?;
-        Ok(())
+            Err(e) => {
+                let st = director::failed(e);
+                // The director's own answers (over a limit, exists, deleted) are not failures
+                // to reach it.
+                if !matches!(st, Status::BadRequest | Status::Exists | Status::NotFound) {
+                    crate::hookstats::note_reg_write_refused();
+                }
+                Err(st)
+            }
+        }
     }
 
     /// A read answered from `map` while the published generation is the one the answer was
@@ -370,8 +394,8 @@ impl<'a> RegClient<'a> {
         &self,
         path: &str,
         map: fn(&mut Cache) -> &mut HashMap<String, T>,
-        fetch: impl FnOnce() -> Result<T, i32>,
-    ) -> Result<T, i32> {
+        fetch: impl FnOnce() -> Result<T, Status>,
+    ) -> Result<T, Status> {
         let generation = self.fc.reg_generation();
         let k = fold(path);
         if generation != 0 {
@@ -395,6 +419,17 @@ impl<'a> RegClient<'a> {
             }
         }
         Ok(v)
+    }
+}
+
+/// How many bytes `req` encodes to, counted without keeping them: an empty
+/// [`SliceBuf`] writes nothing and reports the length the message needed.
+fn encoded_len(req: &Request<'_>) -> usize {
+    let mut count = SliceBuf::new(&mut []);
+    req.encode(&mut count);
+    match count.finish() {
+        Ok(n) => n,
+        Err(o) => o.needed,
     }
 }
 
@@ -431,7 +466,17 @@ mod tests {
         assert!(!fits(4097, 4096));
         // The set-value request for a value of exactly the spec's 1 MiB limit does not fit
         // a 1 MiB payload: its path and name come on top.
-        let req = encode_reg_set_value(r"\Registry\Machine\K", "v", 3, &vec![0; 1 << 20]);
-        assert!(!fits(req.len(), 1 << 20));
+        let data = vec![0; 1 << 20];
+        let req = Request::RegSetValue {
+            path: r"\Registry\Machine\K",
+            name: "v",
+            ty: 3,
+            data: &data,
+        };
+        assert!(!fits(encoded_len(&req), 1 << 20));
+        // The count is the encoding's length.
+        let mut bytes = Vec::new();
+        req.encode(&mut bytes);
+        assert_eq!(encoded_len(&req), bytes.len());
     }
 }

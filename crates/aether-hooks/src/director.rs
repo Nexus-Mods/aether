@@ -12,15 +12,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use aether_ipc::{DataGate, Geom, ReadPlan, RingClient};
-use aether_protocol::{
-    decode_getattr_resp, decode_names_resp, decode_open_resp, decode_readdir_resp,
-    decode_write_resp, encode_close_req, encode_mkdir_req, encode_names_req, encode_open_req,
-    encode_path_req, encode_rename_req, encode_setattr_req, encode_write_req, AttrResp,
-    DirEntryWire, OpenResp, SetattrReq, WriteReq, OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE,
-    OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READDIR, OP_RENAME, OP_SETATTR,
-    OP_STORED_NAMES, OP_WRITE, ST_OK,
-};
+use aether_protocol::{AttrResp, DirEntry, OpenFlags, OpenResp, Reply, Request, Status};
 use aether_redirect::{RootId, RootMap};
+use aether_rpc::{CallError, Client};
 use aether_win::SharedMapping;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, Sleep, SwitchToThread};
@@ -483,101 +477,135 @@ impl FuseClient {
         aether_ipc::ring::reg_generation(self.mapping.seg())
     }
 
-    /// One registry request (opcodes 15-22): the reply payload, or the director's status. A
-    /// request that could not be sent or was never answered is `ST_IO_ERROR`.
-    pub fn reg_request(&self, opcode: u32, payload: &[u8]) -> Result<Vec<u8>, i32> {
-        let r = self
-            .client()
-            .submit(opcode, 0, payload)
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
+    /// Sends `req` through `aether_rpc::Client` and hands its reply to
+    /// `read`, whose `None` means the reply was not one to this request.
+    ///
+    /// The request is encoded straight into the slot; the reply payload is
+    /// copied into a buffer of this call's own, which allocates only when
+    /// the reply is not empty (as the ring's `submit` did). A non-OK status
+    /// comes back unread (`docs/wire.md` 3.1).
+    pub(crate) fn call<T>(
+        &self,
+        req: &Request<'_>,
+        read: impl FnOnce(Reply<'_>) -> Option<T>,
+    ) -> Result<T, CallError> {
+        let mut scratch = Vec::new();
+        let reply = Client::new(self.client()).call(req, &mut scratch)?;
+        read(reply).ok_or(CallError::Undecodable)
+    }
+
+    /// [`Self::call`] for a data request (a write, a truncate, an open that
+    /// may copy a file up): sent under one permit of [`Self::gate`] through
+    /// `aether_ipc::submit_data`, which `aether_rpc::Client` has no
+    /// counterpart of. The request is encoded into `payload` (cleared first)
+    /// and sent from there; a caller sending several reuses one buffer.
+    fn call_data<T>(
+        &self,
+        req: &Request<'_>,
+        payload: &mut Vec<u8>,
+        read: impl FnOnce(Reply<'_>) -> Option<T>,
+    ) -> Result<T, Status> {
+        payload.clear();
+        req.encode(payload);
+        let op = req.opcode();
+        let r =
+            aether_ipc::submit_data(&self.client(), &self.gate, op as u32, req.flags(), payload)
+                .map_err(|_| Status::IoError)?;
+        match Status::try_from(r.status) {
+            Ok(Status::Ok) => {}
+            Ok(st) => return Err(st),
+            Err(_) => return Err(Status::IoError),
         }
-        Ok(r.payload)
+        Reply::decode(op, req.flags(), &r.payload)
+            .ok()
+            .and_then(read)
+            .ok_or(Status::BadRequest)
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {
-        let c = self.client();
-        let r = c
-            .submit(OP_HEARTBEAT, 0, &[])
-            .map_err(|e| format!("HEARTBEAT: {e:?}"))?;
-        if r.status != ST_OK {
-            return Err(format!("HEARTBEAT status {}", r.status));
+        match self.call(&Request::Heartbeat {}, |_| Some(())) {
+            Ok(()) => Ok(()),
+            Err(CallError::Status(st)) => Err(format!("HEARTBEAT status {}", st.code())),
+            Err(CallError::UnknownStatus(code)) => Err(format!("HEARTBEAT status {code}")),
+            Err(CallError::Ipc(e)) => Err(format!("HEARTBEAT: {e:?}")),
+            Err(e) => Err(format!("HEARTBEAT: {e}")),
         }
-        Ok(())
     }
 
-    pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_GETATTR, 0, &encode_path_req(root.0, vpath))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        decode_getattr_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, Status> {
+        self.call(&Request::GetAttr { root, path: vpath }, |r| match r {
+            Reply::GetAttr(a) => Some(a),
+            _ => None,
+        })
+        .map_err(failed)
     }
 
-    pub fn readdir(&self, root: RootId, vpath: &str) -> Result<Vec<DirEntryWire>, i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_READDIR, 0, &encode_path_req(root.0, vpath))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        decode_readdir_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    /// The directory's listing, each entry made into a `T` by `each` while
+    /// its name still borrows from the reply.
+    pub fn readdir<T>(
+        &self,
+        root: RootId,
+        vpath: &str,
+        mut each: impl FnMut(DirEntry<'_>) -> T,
+    ) -> Result<Vec<T>, Status> {
+        self.call(&Request::ReadDir { root, path: vpath }, |r| match r {
+            Reply::ReadDir(list) => {
+                let mut out = Vec::with_capacity(list.len());
+                out.extend(list.iter().map(&mut each));
+                Some(out)
+            }
+            _ => None,
+        })
+        .map_err(failed)
     }
 
-    pub fn open(&self, root: RootId, vpath: &str) -> Result<OpenResp, i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_OPEN, 0, &encode_open_req(root.0, OPEN_READ, vpath))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        decode_open_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+    pub fn open(&self, root: RootId, vpath: &str) -> Result<OpenResp, Status> {
+        let req = Request::Open {
+            root,
+            flags: OpenFlags::READ,
+            path: vpath,
+        };
+        self.call(&req, |r| match r {
+            Reply::Open(o) => Some(o),
+            _ => None,
+        })
+        .map_err(failed)
     }
 
     /// Open a virtual path for WRITE. `create_flags` carries the
-    /// `OPEN_CREATE`/`OPEN_EXCL`/`OPEN_TRUNC` bits derived from the caller's NT
-    /// create-disposition (see `hook::open_create_flags`) — folded in here
-    /// rather than hardcoding `OPEN_WRITE` alone, which is what used to make
-    /// every brand-new file report `ST_NOT_FOUND` regardless of disposition.
+    /// `OpenFlags::CREATE`/`EXCL`/`TRUNC` bits derived from the caller's NT
+    /// create-disposition (see `hook::open_create_flags`), folded in here
+    /// rather than sending `OpenFlags::WRITE` alone, which is what used to make
+    /// every brand-new file report `Status::NotFound` regardless of disposition.
     pub fn open_write(
         &self,
         root: RootId,
         vpath: &str,
-        create_flags: u32,
-    ) -> Result<OpenResp, i32> {
+        create_flags: OpenFlags,
+    ) -> Result<OpenResp, Status> {
         // Counted against the gate, unlike a read-open: opening a base file
         // for writing copies the whole of it up inside this one request, and
         // on content that is not cached yet that is a download holding a
         // worker.
-        let c = self.client();
-        let r = aether_ipc::submit_data(
-            &c,
-            &self.gate,
-            OP_OPEN,
-            0,
-            &encode_open_req(root.0, OPEN_WRITE | create_flags, vpath),
-        )
-        .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        decode_open_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)
+        let req = Request::Open {
+            root,
+            flags: OpenFlags::WRITE | create_flags,
+            path: vpath,
+        };
+        self.call_data(&req, &mut Vec::new(), |r| match r {
+            Reply::Open(o) => Some(o),
+            _ => None,
+        })
     }
 
     /// Write `data` at `offset` to a virtual write handle. Chunks to fit the ring
     /// payload (inline; bulk-arena writes are a later step).
-    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
+    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, Status> {
         if data.is_empty() {
             return Ok(0);
         }
         let chunk = (self.payload_cap as usize).saturating_sub(24).max(1);
-        let c = self.client();
+        let mut payload = Vec::new();
         let mut written = 0usize;
         while written < data.len() {
             let end = (written + chunk).min(data.len());
@@ -585,25 +613,15 @@ impl FuseClient {
             // A data request like a read: counted against the gate, one chunk
             // at a time, so a long write does not sit on a permit between
             // chunks.
-            let r = aether_ipc::submit_data(
-                &c,
-                &self.gate,
-                OP_WRITE,
-                0,
-                &encode_write_req(
-                    &WriteReq {
-                        fh,
-                        offset: offset + written as u64,
-                        len: piece.len() as u32,
-                    },
-                    piece,
-                ),
-            )
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-            if r.status != ST_OK {
-                return Err(r.status);
-            }
-            let n = decode_write_resp(&r.payload).ok_or(aether_protocol::ST_BAD_REQUEST)? as usize;
+            let req = Request::Write {
+                fh,
+                offset: offset + written as u64,
+                data: piece,
+            };
+            let n = self.call_data(&req, &mut payload, |r| match r {
+                Reply::Write(n) => Some(n as usize),
+                _ => None,
+            })?;
             written += n;
             if n < piece.len() {
                 break;
@@ -670,115 +688,79 @@ impl FuseClient {
         })
     }
 
-    /// Delete (whiteout) a virtual path via the director overlay (`OP_DELETE`).
-    pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_DELETE, 0, &encode_path_req(root.0, vpath))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        Ok(())
+    /// Delete (whiteout) a virtual path via the director overlay (`Opcode::Delete`).
+    pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), Status> {
+        self.call_empty(&Request::Delete { root, path: vpath })
     }
 
-    /// Rename a virtual path to another virtual path (`OP_RENAME`).
+    /// Rename a virtual path to another virtual path (`Opcode::Rename`).
     ///
     /// One root for both sides: the director resolves `from` and `to` against
     /// the same root, and a caller whose two paths land under *different*
     /// roots must not route the rename here at all — see `hook/file_mutate.rs`'s
     /// rename/delete arm, which declines rather than guessing.
-    pub fn rename(&self, root: RootId, from: &str, to: &str) -> Result<(), i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_RENAME, 0, &encode_rename_req(root.0, from, to))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        Ok(())
+    pub fn rename(&self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
+        self.call_empty(&Request::Rename { root, from, to })
     }
 
     /// Rename `from` under `from_root` to `to` under `to_root`, two different
-    /// roots (`OP_RENAME_X`): the director copies a file across and removes
-    /// it at the source. `Err(ST_CROSS_ROOT)` for a directory.
+    /// roots (`Opcode::RenameX`): the director copies a file across and removes
+    /// it at the source. `Err(Status::CrossRoot)` for a directory.
     pub fn rename_across(
         &self,
         from_root: RootId,
         from: &str,
         to_root: RootId,
         to: &str,
-    ) -> Result<(), i32> {
-        let c = self.client();
-        let r = c
-            .submit(
-                aether_protocol::OP_RENAME_X,
-                0,
-                &aether_protocol::encode_rename_x_req(from_root.0, from, to_root.0, to),
-            )
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        Ok(())
+    ) -> Result<(), Status> {
+        self.call_empty(&Request::RenameX {
+            from_root,
+            to_root,
+            from,
+            to,
+        })
     }
 
     /// Stage the program at `vpath` under `root` onto real disk so a child
-    /// can be started from it (`OP_STAGE_EXEC`): the real path to start it by.
-    pub fn stage_exec(&self, root: RootId, vpath: &str) -> Result<String, i32> {
-        let c = self.client();
-        let r = c
-            .submit(
-                aether_protocol::OP_STAGE_EXEC,
-                0,
-                &aether_protocol::encode_path_req(root.0, vpath),
-            )
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        String::from_utf8(r.payload).map_err(|_| aether_protocol::ST_IO_ERROR)
+    /// can be started from it (`Opcode::StageExec`): the real path to start it by.
+    /// A reply that is not UTF-8 is `Status::IoError`, as it always was here.
+    pub fn stage_exec(&self, root: RootId, vpath: &str) -> Result<String, Status> {
+        self.call(&Request::StageExec { root, path: vpath }, |r| match r {
+            Reply::StageExec(real) => Some(real.to_string()),
+            _ => None,
+        })
+        .map_err(|e| match e {
+            CallError::Undecodable => Status::IoError,
+            e => failed(e),
+        })
     }
 
-    /// Create a virtual directory via the director overlay (`OP_MKDIR`).
-    pub fn mkdir(&self, root: RootId, vpath: &str, mode: u32) -> Result<(), i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_MKDIR, 0, &encode_mkdir_req(root.0, mode, vpath))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        Ok(())
+    /// Create a virtual directory via the director overlay (`Opcode::Mkdir`).
+    pub fn mkdir(&self, root: RootId, vpath: &str, mode: u32) -> Result<(), Status> {
+        self.call_empty(&Request::Mkdir {
+            root,
+            mode,
+            path: vpath,
+        })
     }
 
-    /// Truncate/extend a virtual write handle to `size` bytes (`OP_SETATTR`).
-    pub fn truncate(&self, fh: u64, size: u64) -> Result<(), i32> {
+    /// Truncate/extend a virtual write handle to `size` bytes (`Opcode::SetAttr`).
+    pub fn truncate(&self, fh: u64, size: u64) -> Result<(), Status> {
         // A data request: it rewrites the file's blocks.
-        let c = self.client();
-        let r = aether_ipc::submit_data(
-            &c,
-            &self.gate,
-            OP_SETATTR,
-            0,
-            &encode_setattr_req(&SetattrReq { fh, size }),
+        self.call_data(
+            &Request::SetAttr { fh, size },
+            &mut Vec::new(),
+            |_| Some(()),
         )
-        .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        Ok(())
     }
 
-    pub fn close(&self, fh: u64) -> Result<(), i32> {
-        let c = self.client();
-        let r = c
-            .submit(OP_CLOSE, 0, &encode_close_req(fh))
-            .map_err(|_| aether_protocol::ST_IO_ERROR)?;
-        if r.status != ST_OK {
-            return Err(r.status);
-        }
-        Ok(())
+    pub fn close(&self, fh: u64) -> Result<(), Status> {
+        self.call_empty(&Request::Close { fh })
+    }
+
+    /// [`Self::call`] for a request whose OK reply carries nothing.
+    fn call_empty(&self, req: &Request<'_>) -> Result<(), Status> {
+        self.call(req, |_| Some(())).map_err(failed)
     }
 
     /// The final DOS path of something under a managed root that was opened
@@ -832,16 +814,19 @@ impl FuseClient {
             return known;
         }
         crate::hookstats::note_name_lookup();
+        let req = Request::StoredNames {
+            root,
+            skip: known.len() as u32,
+            path: &under.join("/"),
+        };
         let asked = self
-            .client()
-            .submit(
-                OP_STORED_NAMES,
-                0,
-                &encode_names_req(root.0, known.len() as u32, &under.join("/")),
-            )
-            .ok()
-            .filter(|r| r.status == ST_OK)
-            .and_then(|r| decode_names_resp(&r.payload));
+            .call(&req, |r| match r {
+                Reply::StoredNames(text) => {
+                    Some(text.split('/').map(str::to_string).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .ok();
         let Some(rest) = asked else {
             return known;
         };
@@ -947,6 +932,21 @@ impl FuseClient {
             vpath.push_str(&aether_casefold::fold(stream));
         }
         Some((root, vpath))
+    }
+}
+
+/// The status a failed call stands for, as the shim acts on it.
+///
+/// A status outside the table (the ring's overflow sentinel among them) is
+/// `Status::IoError`: every caller gives an unknown status the answer it
+/// gives `Status::IoError`, so nothing a caller does changes. So is a ring
+/// that gave no answer, as before. An OK reply that does not decode is
+/// `Status::BadRequest` (`docs/wire.md` 3.1).
+pub(crate) fn failed(e: CallError) -> Status {
+    match e {
+        CallError::Status(st) => st,
+        CallError::Undecodable => Status::BadRequest,
+        CallError::UnknownStatus(_) | CallError::Ipc(_) | CallError::BulkRead => Status::IoError,
     }
 }
 

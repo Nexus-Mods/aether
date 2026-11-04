@@ -232,12 +232,12 @@ pub(super) static DELETE_ON_CLOSE_REFUSED: AtomicU64 = AtomicU64::new(0);
 pub(super) static DELETE_ON_CLOSE_REFUSED_PATHS: BoundedTally<String> = BoundedTally::new(2000);
 
 /// A delete-on-close of `path` was refused by the director with `status`.
-pub(crate) fn note_delete_on_close_refused(path: &str, status: i32) {
+pub(crate) fn note_delete_on_close_refused(path: &str, status: aether_protocol::Status) {
     DELETE_ON_CLOSE_REFUSED.fetch_add(1, Ordering::Relaxed);
     if !enabled() {
         return;
     }
-    DELETE_ON_CLOSE_REFUSED_PATHS.add(format!("{path} (status {status})"));
+    DELETE_ON_CLOSE_REFUSED_PATHS.add(format!("{path} (status {})", status.code()));
     note_trace("delete-on-close", path, "REFUSED");
 }
 

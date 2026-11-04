@@ -334,7 +334,10 @@ fn a_read_open_puts_the_folded_vpath_on_the_wire() {
         .tally
         .wire_opens()
         .into_iter()
-        .filter(|(flags, _)| flags & aether_protocol::OPEN_WRITE == 0)
+        .filter(|(flags, _)| {
+            !aether_protocol::OpenFlags::from_bits_retain(*flags)
+                .contains(aether_protocol::OpenFlags::WRITE)
+        })
         .map(|(_, v)| v)
         .collect();
     assert!(

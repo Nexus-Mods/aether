@@ -15,6 +15,7 @@ use crate::ntdef::{
     STATUS_UNSUCCESSFUL,
 };
 use crate::synth_file::FileView;
+use aether_protocol::Status;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
@@ -92,16 +93,16 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
 /// callers, which tolerate only `ERROR_FILE_NOT_FOUND`; this is the same mapping as
 /// `try_fuse_create`'s `Err` arms, kept in one function so the two cannot drift:
 ///
-/// - `ST_NOT_FOUND` -> `STATUS_OBJECT_NAME_NOT_FOUND`: nothing to delete is not a failure.
-/// - `ST_READ_ONLY` -> `STATUS_ACCESS_DENIED`, as a read-only filesystem answers `DeleteFileW`.
-/// - `ST_IS_DIR` -> `STATUS_FILE_IS_A_DIRECTORY`, folded to `ERROR_ACCESS_DENIED`, as
+/// - `Status::NotFound` -> `STATUS_OBJECT_NAME_NOT_FOUND`: nothing to delete is not a failure.
+/// - `Status::ReadOnly` -> `STATUS_ACCESS_DENIED`, as a read-only filesystem answers `DeleteFileW`.
+/// - `Status::IsDir` -> `STATUS_FILE_IS_A_DIRECTORY`, folded to `ERROR_ACCESS_DENIED`, as
 ///   `DeleteFileW` answers a directory.
 /// - Anything else (I/O error, a provider that broke) keeps `STATUS_UNSUCCESSFUL`.
-fn delete_status_for(st: i32) -> NTSTATUS {
+fn delete_status_for(st: Status) -> NTSTATUS {
     match st {
-        aether_protocol::ST_NOT_FOUND => STATUS_OBJECT_NAME_NOT_FOUND,
-        aether_protocol::ST_READ_ONLY => STATUS_ACCESS_DENIED,
-        aether_protocol::ST_IS_DIR => STATUS_FILE_IS_A_DIRECTORY,
+        Status::NotFound => STATUS_OBJECT_NAME_NOT_FOUND,
+        Status::ReadOnly => STATUS_ACCESS_DENIED,
+        Status::IsDir => STATUS_FILE_IS_A_DIRECTORY,
         _ => STATUS_UNSUCCESSFUL,
     }
 }
@@ -236,7 +237,7 @@ unsafe fn director_delete_or_rename(
                         }
                         STATUS_SUCCESS
                     }
-                    Err(aether_protocol::ST_CROSS_ROOT) => crate::ntdef::STATUS_NOT_SAME_DEVICE,
+                    Err(Status::CrossRoot) => crate::ntdef::STATUS_NOT_SAME_DEVICE,
                     Err(_) => STATUS_UNSUCCESSFUL,
                 }
             }

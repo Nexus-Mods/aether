@@ -84,7 +84,8 @@ pub use hookstats::{
     child_inject_refused_count, child_inject_refused_total, delete_on_close_refused_count,
     hook_panic_count, hook_panics_total, link_refused_count, outcome_count, reg_notify_count,
     reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
-    reg_write_refused_count, unrouted_director_opens, OpenOutcome, RegNotify,
+    reg_write_refused_count, section_failure_count, unrouted_director_opens, OpenOutcome,
+    RegNotify,
 };
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or

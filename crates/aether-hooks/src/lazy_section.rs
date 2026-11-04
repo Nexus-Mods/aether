@@ -492,6 +492,7 @@ unsafe fn veh_handler_body(info: *mut EXCEPTION_POINTERS) -> i32 {
     // fails, for the program's handlers (or the end of the process) to see.
     // Parameters as NT gives them: the access type (kept), the address, and
     // the status the read failed with.
+    crate::hookstats::note_in_page_error(fault_addr);
     (*rec).ExceptionCode = STATUS_IN_PAGE_ERROR;
     (*rec).NumberParameters = 3;
     (*rec).ExceptionInformation[1] = fault_addr;

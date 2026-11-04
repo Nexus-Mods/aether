@@ -282,6 +282,8 @@ fn empty_snapshot() -> Snapshot {
         fills_started: 0,
         fills_completed: 0,
         fills_failed: 0,
+        section_failures: [0; super::sections::SECTION_FAILURE_N],
+        last_in_page_addr: 0,
         fill_bytes: 0,
         fill_nanos: 0,
         fill_max_nanos: 0,
@@ -421,4 +423,26 @@ fn a_refused_child_is_counted_and_reported_by_reason() {
     let s = render_child_inject_refused(&snap);
     assert!(s.contains("CHILD PROCESSES REFUSED: 3"), "{s}");
     assert!(s.contains("ready-timeout"), "{s}");
+}
+
+#[test]
+fn a_section_failure_is_counted_by_label_and_reported() {
+    let before = section_failure_count("image-read");
+    note_section_failure(SectionFailure::ImageRead);
+    assert_eq!(section_failure_count("image-read"), before + 1);
+    assert_eq!(section_failure_count("no-such-label"), 0);
+    assert_eq!(SectionFailure::EagerFill.label(), "eager-fill");
+
+    assert_eq!(
+        super::sections::render_section_failures(&empty_snapshot()),
+        ""
+    );
+    let mut snap = empty_snapshot();
+    snap.section_failures[SectionFailure::InPageError as usize] = 2;
+    snap.last_in_page_addr = 0x1234_0000;
+    let s = super::sections::render_section_failures(&snap);
+    assert!(s.contains("SECTION FILLS FAILED"), "{s}");
+    assert!(s.contains("in-page-error"), "{s}");
+    assert!(!s.contains("eager-fill"), "{s}");
+    assert!(s.contains("0x12340000"), "{s}");
 }

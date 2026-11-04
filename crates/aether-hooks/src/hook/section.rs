@@ -134,6 +134,7 @@ unsafe fn fuse_create_section(
         // Whole or not at all, as a data section's fill (docs/wire.md 3.4.4):
         // a truncated image is not the file.
         if !read_whole_retrying(client, fh, &mut pe) {
+            crate::hookstats::note_section_failure(crate::hookstats::SectionFailure::ImageRead);
             return STATUS_UNSUCCESSFUL;
         }
         if !aether_pe::pe_looks_like_image(&pe) {
@@ -276,6 +277,7 @@ unsafe fn fuse_create_section(
         }
     }
     if !fill_ok {
+        crate::hookstats::note_section_failure(crate::hookstats::SectionFailure::EagerFill);
         // SAFETY: FFI call with valid arguments.
         unsafe { VirtualFree(base, 0, MEM_RELEASE) };
         return STATUS_UNSUCCESSFUL;

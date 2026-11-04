@@ -229,6 +229,11 @@ fn a_failed_eager_fill_fails_the_section() {
     );
     assert_eq!(mapping(file, PAGE_READONLY), Err(ERROR_GEN_FAILURE));
     assert_eq!(served.faults.applied(id), 1, "the fault never fired");
+    assert_eq!(
+        aether_hooks::section_failure_count("eager-fill"),
+        1,
+        "a failed eager fill is counted"
+    );
 
     served.faults.clear();
     let section = mapping(file, PAGE_READONLY).expect("the section without the fault");
@@ -477,7 +482,9 @@ unsafe extern "system" fn in_page_witness(info: *mut EXCEPTION_POINTERS) -> i32 
         && rec.ExceptionInformation[0] == 0 // a read
         && rec.ExceptionInformation[1] == addr
         && rec.ExceptionInformation[2] == 0xC000_0001 // STATUS_UNSUCCESSFUL
-        && read_offsets(served, mark) == [TOUCH as u64; 4];
+        && read_offsets(served, mark) == [TOUCH as u64; 4]
+        // Counted for the stats report, ungated.
+        && aether_hooks::section_failure_count("in-page-error") == 1;
     ExitProcess(if ok {
         STATUS_IN_PAGE_ERROR
     } else {
@@ -603,6 +610,11 @@ fn a_short_image_read_fails_the_section() {
         4,
         "READs from offset 0: {:?}",
         read_offsets(served, mark)
+    );
+    assert_eq!(
+        aether_hooks::section_failure_count("image-read"),
+        1,
+        "a failed image read is counted"
     );
     close(file);
 }

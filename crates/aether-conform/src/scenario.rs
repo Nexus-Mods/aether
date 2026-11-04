@@ -642,13 +642,6 @@ impl<'v> Obj<'v> {
     }
 }
 
-/// Whether `path` leaves its root however a director normalises paths: its
-/// first component is `..`, and every other component is a name or `..` (not
-/// empty, not `.`, no backslash). wire.md 3.2: "a director must treat a path
-/// that would leave its root (`..` above the root) as an error". Later `..`
-/// components are allowed: they cannot bring a path that starts above the root
-/// back inside it. A path that goes up only after other components is not
-/// sent, since directors differ on where it ends up.
 /// The most bytes `{"zeros": n}` may stand for: the reference's largest file.
 const MAX_ZEROS: u64 = aether_refdirector::MAX_FILE_LEN as u64;
 
@@ -682,6 +675,13 @@ fn step_bytes(v: &Value) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Whether `path` leaves its root however a director normalises paths: its
+/// first component is `..`, and every other component is a name or `..` (not
+/// empty, not `.`, no backslash). wire.md 3.2: "a director must treat a path
+/// that would leave its root (`..` above the root) as an error". Later `..`
+/// components are allowed: they cannot bring a path that starts above the root
+/// back inside it. A path that goes up only after other components is not
+/// sent, since directors differ on where it ends up.
 fn is_escape(path: &str) -> bool {
     let mut parts = path.split('/');
     parts.next() == Some("..") && !path.contains('\\') && parts.all(|c| !c.is_empty() && c != ".")

@@ -22,7 +22,8 @@
 //! not serve is `Status::NotFound`, or OK with nothing found for GETATTR
 //! (3.4.1, 3.5.1); an unknown handle is `Status::BadFh` and a directory
 //! handle `Status::IsDir` (3.4.4, 3.4.10, 3.5); names match by
-//! `aether_casefold::fold` (3.2).
+//! `aether_casefold::fold` (3.2); it holds no named streams, so a path
+//! naming one is a name it does not have (3.2).
 //!
 //! A test controls how a READ is answered ([`ReadStyle`]), because
 //! a read loop's correctness is mostly about awkward answers: a short read
@@ -340,6 +341,18 @@ impl Graph {
             return Err(Status::NotFound);
         }
         Ok(key(root.0, path))
+    }
+
+    /// [`Graph::resolve`] for a request that names an entry: a path naming a
+    /// named stream (a component holding `:`) is `NotFound` too, since the
+    /// reference holds no streams and never stores such a name (wire.md
+    /// 3.2).
+    fn resolve_name(&self, root: RootId, path: &str) -> Result<String, Status> {
+        let k = self.resolve(root, path)?;
+        if path.split('/').any(|c| c.contains(':')) {
+            return Err(Status::NotFound);
+        }
+        Ok(k)
     }
 
     fn issue(&self, vpath: String, file: Option<u64>, append: bool, tally: &Tally) -> u64 {
@@ -818,7 +831,7 @@ impl Director for Reference {
     /// A missing path, and any path on a root not served, is OK with
     /// nothing found (`docs/wire.md` 3.4.1).
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
-        let vpath = match self.graph.resolve(root, path) {
+        let vpath = match self.graph.resolve_name(root, path) {
             Err(Status::NotFound) => {
                 return Ok(AttrResp {
                     found: false,
@@ -918,7 +931,7 @@ impl Director for Reference {
             .lock()
             .unwrap()
             .push((flags.bits(), path.to_string()));
-        let vpath = g.resolve(root, path)?;
+        let vpath = g.resolve_name(root, path)?;
         let write = flags.contains(OpenFlags::WRITE);
         let append = flags.contains(OpenFlags::APPEND);
         if write && g.write_fails(&vpath) {
@@ -1140,8 +1153,8 @@ impl Director for Reference {
         if escapes(to) {
             return Err(Status::BadRequest);
         }
-        let from_key = self.graph.resolve(root, from)?;
-        self.graph.resolve(root, to)?;
+        let from_key = self.graph.resolve_name(root, from)?;
+        self.graph.resolve_name(root, to)?;
         self.move_entry(from_key, root, to, false)
     }
 
@@ -1150,7 +1163,7 @@ impl Director for Reference {
     /// under it is `Status::IoError`, the root `Status::BadRequest`.
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
         Tally::bump(&self.tally.deletes, &key(root.0, path));
-        let vpath = self.graph.resolve(root, path)?;
+        let vpath = self.graph.resolve_name(root, path)?;
         if is_root_key(&vpath) {
             return Err(Status::BadRequest);
         }
@@ -1184,7 +1197,7 @@ impl Director for Reference {
     /// `Status::NotFound`, as for a creating OPEN.
     fn mkdir(&mut self, root: RootId, _: u32, path: &str) -> Result<(), Status> {
         let g = &self.graph;
-        let vpath = g.resolve(root, path)?;
+        let vpath = g.resolve_name(root, path)?;
         if g.write_fails(&vpath) {
             return Err(Status::IoError);
         }
@@ -1230,7 +1243,7 @@ impl Director for Reference {
     /// components past `skip`. A `skip` past the last component is an empty
     /// reply (wire.md does not say).
     fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
-        self.graph.resolve(root, path)?;
+        self.graph.resolve_name(root, path)?;
         let dirs = self.graph.dirs.lock().unwrap();
         let files = self.graph.files.lock().unwrap();
         let names = stored_components(&dirs, &files, root.0, path);
@@ -1259,8 +1272,8 @@ impl Director for Reference {
         if from_root == to_root {
             return self.rename(from_root, from, to);
         }
-        let from_key = self.graph.resolve(from_root, from)?;
-        self.graph.resolve(to_root, to)?;
+        let from_key = self.graph.resolve_name(from_root, from)?;
+        self.graph.resolve_name(to_root, to)?;
         if self.graph.is_dir(&from_key) {
             return Err(Status::CrossRoot);
         }

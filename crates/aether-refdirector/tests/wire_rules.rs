@@ -724,3 +724,44 @@ fn a_directory_never_replaces_a_file() {
     assert_eq!(d.rename(R0, "f.txt", "empty"), Ok(()));
     assert_eq!(d.contents("empty"), Some(b"f".to_vec()));
 }
+
+/// 3.2: the reference holds no named streams, so every request naming one
+/// is a name it does not have (Status::NotFound, GETATTR found = 0), and no
+/// entry with `:` in its name is ever stored or listed.
+#[test]
+fn a_named_stream_is_a_name_the_reference_does_not_have() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("saves")
+        .with("saves/x.sav", b"data".to_vec(), ReadStyle::Whole)
+        .with_root(1);
+    let nf = Err(Status::NotFound);
+    for s in [
+        "saves/x.sav:stream",
+        "saves/x.sav:zone.identifier:$data",
+        "saves/n:s",
+    ] {
+        assert_eq!(d.get_attr(R0, s), Ok(ABSENT), "{s}");
+        for flags in [
+            OpenFlags::READ,
+            RW | OpenFlags::CREATE,
+            RW | OpenFlags::CREATE | OpenFlags::TRUNC,
+            OpenFlags::WRITE,
+        ] {
+            assert_eq!(d.open(R0, flags, s).map(|_| ()), nf, "{s} {flags:?}");
+        }
+        assert_eq!(d.mkdir(R0, 0o755, s), nf, "{s}");
+        assert_eq!(d.delete(R0, s), nf, "{s}");
+        assert_eq!(d.rename(R0, s, "saves/y.sav"), nf, "{s}");
+        assert_eq!(d.rename(R0, "saves/x.sav", s), nf, "{s}");
+        assert_eq!(d.rename_x(R0, r1, "saves/x.sav", s), nf, "{s}");
+        assert_eq!(d.rename_x(R0, r1, s, "y"), nf, "{s}");
+        assert_eq!(d.stored_names(R0, 0, s), Err(Status::NotFound), "{s}");
+    }
+    assert_eq!(
+        names(&mut d, R0, "saves"),
+        vec![("x.sav".to_string(), false)]
+    );
+    assert_eq!(d.contents("saves/x.sav"), Some(b"data".to_vec()));
+}

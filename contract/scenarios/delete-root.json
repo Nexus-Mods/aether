@@ -1,6 +1,6 @@
 {
   "name": "delete-root",
-  "description": "DELETE of the root itself is ST_BAD_REQUEST (wire.md 3.4.8: \"The root itself is `ST_BAD_REQUEST`\"), said for a name the writable provider holds, so the root is writable as a whole here; nothing is deleted.",
+  "description": "DELETE of the root itself is ST_BAD_REQUEST from a layer provider and the reference, ST_IO_ERROR from a disk-backed upper (wire.md 3.4.8: \"The root itself is `ST_BAD_REQUEST` from a writable layer provider and the reference director, `ST_IO_ERROR` from a disk-backed upper\"), said for a name the writable provider holds, so the root is writable as a whole here; nothing is deleted.",
   "tree": {
     "roots": [
       {"id": 0,
@@ -13,8 +13,8 @@
     ]
   },
   "steps": [
-    {"request": {"op": "delete", "root": 0, "path": "."}, "expect": {"status": "bad-request"}},
-    {"request": {"op": "delete", "root": 1, "path": "."}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "delete", "root": 0, "path": "."}, "expect": {"one_of": [{"status": "bad-request"}, {"status": "io-error"}], "wire": "3.4.8"}},
+    {"request": {"op": "delete", "root": 1, "path": "."}, "expect": {"one_of": [{"status": "bad-request"}, {"status": "io-error"}], "wire": "3.4.8"}},
     {"request": {"op": "getattr", "root": 0, "path": "a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
     {"request": {"op": "getattr", "root": 1, "path": "b.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
     {"request": {"op": "readdir", "root": 0, "path": "."}, "expect": {"reply": {"entries": [{"name": "a.txt", "is_dir": false, "size": 1, "mtime": 0}, {"name": "d", "is_dir": true, "size": 0, "mtime": 0}]}}}

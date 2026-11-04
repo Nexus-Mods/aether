@@ -18,7 +18,8 @@ Conventions used throughout:
 - `u8`/`u32`/`u64` are unsigned, `i32`/`i64` two's-complement signed.
 - `utf8…` means "the rest of the payload, as UTF-8, no length, no
   terminator". `str` means `len:u32 | utf8[len]` (no terminator).
-- Where prose and code disagree, the code is normative (section 8).
+- For the bytes, the code and the golden vectors are normative; for what a
+  director must answer, this document is (section 8).
 
 The three crates that define the wire are `aether-ipc` (shared memory, ring,
 arena), `aether-protocol` (opcodes, statuses, payload codecs, `shim.cfg`) and
@@ -663,8 +664,8 @@ non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
 
 The `size` of a directory is 0, as in a READDIR entry (3.4.2). A file's
 `size` is its length now, WRITEs and SETATTRs through handles still open
-included (both directors: Cairn's write layer reports the live length,
-`provider/layer.clj`, `stat-of`; its disk provider reads the file's
+included (Cairn and the reference: Cairn's write layer reports the live
+length, `provider/layer.clj`, `stat-of`; its disk provider reads the file's
 attributes, `provider/disk.clj`, `attrs`). The same holds for READDIR entries
 and OPEN replies.
 
@@ -809,16 +810,18 @@ Request (`Request::Write`):
 A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`. The
 shim sends at most `VFS_RING_PAYLOAD_CAP - 24` bytes per WRITE and repeats
 until done or a short write. A director writes every byte of a WRITE or
-fails it: on `ST_OK`, `written` is `len` (both directors: Cairn's write layer
-and disk provider loop to the end, `provider/layer.clj` and
+fails it: on `ST_OK`, `written` is `len` (Cairn and the reference: Cairn's
+write layer and disk provider loop to the end, `provider/layer.clj` and
 `provider/disk.clj`, `write-from`).
 
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
 
-A WRITE on a directory handle is `ST_IS_DIR`, whatever access the directory
-was opened with; SETATTR (3.4.6) on one is too (both directors, and the
-reference).
+A WRITE on a directory handle the writable provider holds is `ST_IS_DIR`,
+whatever access the directory was opened with; SETATTR (3.4.6) on one is too
+(Cairn's writable providers and the reference). A directory no writable
+provider holds may answer `ST_READ_ONLY` instead, as Cairn's read-only tree
+does (`source/tree.clj`, `DirHandle`).
 
 #### 3.4.6 SETATTR (7)
 
@@ -846,10 +849,12 @@ that changes only the case respells the name. A file or a directory moves; a
 directory moves with everything under it. A file or an empty directory at
 `to` is replaced; a directory at `to` with anything under it is
 `ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
-inside `from`, is `ST_BAD_REQUEST`. A missing `from` is `ST_NOT_FOUND`; either
-end outside every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
-`provider/layer.clj`, `rename!`; the reference director.) A file with open
-handles is renamed like any other.
+inside `from`, is `ST_BAD_REQUEST` from a writable layer provider and the
+reference director, `ST_IO_ERROR` from a disk-backed upper (Cairn's `--write`
+folder, `provider/disk.clj`, whose `Files/move` fails). A missing `from` is
+`ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`.
+(Cairn's writable layer, `provider/layer.clj`, `rename!`; the reference
+director.) A file with open handles is renamed like any other.
 
 #### 3.4.8 DELETE (9)
 
@@ -859,7 +864,9 @@ For a name the writable provider holds (for names that exist only in a
 read-only layer beneath it, see "Names only in a read-only lower" after
 3.4.9): a file, or a directory with nothing under it, is deleted. A directory
 with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
-is `ST_BAD_REQUEST`. A missing path is `ST_NOT_FOUND`; a path outside every
+is `ST_BAD_REQUEST` from a writable layer provider and the reference director,
+`ST_IO_ERROR` from a disk-backed upper (Cairn's `--write` folder,
+`provider/disk.clj`, whose `Files/delete` fails). A missing path is `ST_NOT_FOUND`; a path outside every
 writable provider `ST_READ_ONLY`. (Cairn's writable layer,
 `provider/layer.clj`, `delete!`; the reference director.) A file with open
 handles is deleted like any other: Cairn's write layer drops its data at the
@@ -881,8 +888,8 @@ that exists only in a read-only layer beneath it, see below):
   client must accept either. Cairn's writable providers answer `ST_OK`
   (`provider/layer.clj` and `provider/disk.clj`, `mkdir!`), its read-only ones
   and the reference director `ST_EXISTS`. The shim, on any failure, asks
-  GETATTR whether a directory is there, so both give the program the same
-  answer for `FILE_OPEN_IF`; for `FILE_CREATE` only `ST_EXISTS` reports the
+  GETATTR whether a directory is there, so either answer gives the program
+  the same result for `FILE_OPEN_IF`; for `FILE_CREATE` only `ST_EXISTS` reports the
   name collision.
 - An existing file: `ST_IO_ERROR` where a writable provider serves the path
   (Cairn's writable providers), `ST_EXISTS` where none does (Cairn's
@@ -964,8 +971,8 @@ Request: path request (the image the program is starting). Reply: the real,
 on-disk Windows path to start it from, UTF-8, the whole payload. The director
 puts the program on real disk first (a child's image is opened by the kernel
 before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
-a director with a stager answers `ST_NOT_FOUND` for a file it does not stage
-(Cairn, `ring.clj`, `op-stage-exec`).
+a director with a stager may answer `ST_NOT_FOUND` for a file it does not
+stage (Cairn, `ring.clj`, `op-stage-exec`).
 
 How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): for each
 candidate image path that routes under a root it first sends GETATTR, and
@@ -1480,9 +1487,16 @@ Rules:
 
 ## 8. Conformance
 
-Until a director conformance harness exists, **the code is normative**: where
-this document and `crates/aether-ipc`, `crates/aether-protocol` or the shim
-disagree, the code is right and this document is wrong.
+**For the bytes** (layouts, codecs, the handshake), the code in
+`crates/aether-ipc`, `crates/aether-protocol` and `crates/aether-env` and the
+golden vectors below are normative: where this document disagrees with them,
+this document is wrong.
+
+**For what a director must answer**, this document is normative.
+`contract/scenarios/` and `aether-conform` (`docs/conformance.md`) check it,
+and the reference director (`crates/aether-refdirector`) follows it; where
+they disagree with this text, they are fixed. Where this document says
+directors may differ, conformance accepts each answer it names.
 
 `contract/protocol.json` is the machine-readable form of the protocol table
 (3.3): a director in another language builds its opcode, status and field

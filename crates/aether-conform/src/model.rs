@@ -630,6 +630,13 @@ enum Want {
     /// An unknown root on RENAME or RENAME_X: `ST_NOT_FOUND` or
     /// `ST_BAD_REQUEST` (3.5.1's table).
     NotFoundOrBadRequest,
+    /// A WRITE or SETATTR on a directory handle no writable provider holds:
+    /// `ST_IS_DIR` or `ST_READ_ONLY` (3.4.5).
+    IsDirOrReadOnly,
+    /// DELETE or RENAME of the root itself, or a RENAME `to` inside `from`:
+    /// `ST_BAD_REQUEST` from a writable layer, `ST_IO_ERROR` from a
+    /// disk-backed upper (3.4.7, 3.4.8).
+    BadRequestOrIoError,
 }
 
 /// What a step changes in the generator's state when it succeeds.
@@ -1038,6 +1045,19 @@ impl Gen {
         pick(&list, a).cloned()
     }
 
+    /// What a WRITE or SETATTR on directory handle `h` answers (3.4.5):
+    /// `ST_IS_DIR` for a directory the writable provider holds, else
+    /// `ST_IS_DIR` or `ST_READ_ONLY` (a read-only provider's directory
+    /// handle may refuse the write as read-only, as Cairn's
+    /// `source/tree.clj` does).
+    fn dir_handle_want(&self, h: &Handle) -> Want {
+        if self.held(h.root, &h.folded) {
+            Want::Status(Status::IsDir)
+        } else {
+            Want::IsDirOrReadOnly
+        }
+    }
+
     /// Marks every handle on `root`'s `path` or below it, but `except`, as
     /// changed under it.
     fn taint(&mut self, root: u32, path: &str, except: Option<u64>) {
@@ -1443,7 +1463,7 @@ impl Gen {
                     offset: 0,
                     data: b"x".to_vec(),
                 },
-                want: Want::Status(Status::IsDir),
+                want: self.dir_handle_want(h),
                 wire: "3.4.5",
                 note: "a directory handle".into(),
                 effect: Effect::None,
@@ -1496,7 +1516,7 @@ impl Gen {
         if h.dir {
             return Some(Plan {
                 req: OwnedRequest::SetAttr { fh: *fh, size: 0 },
-                want: Want::Status(Status::IsDir),
+                want: self.dir_handle_want(h),
                 wire: "3.4.5",
                 note: "a directory handle".into(),
                 effect: Effect::None,
@@ -1671,11 +1691,11 @@ impl Gen {
         let root = from.root;
         let whole = self.info(root)?.whole;
         if from.folded == "." || to.folded == "." {
-            return whole.then_some((Want::Status(Status::BadRequest), "the root at an end"));
+            return whole.then_some((Want::BadRequestOrIoError, "the root at an end"));
         }
         let held_ends = self.held(root, &from.folded) && self.held(root, &to.folded);
         if from.node.is_some() && to.folded.starts_with(&format!("{}/", from.folded)) {
-            return held_ends.then_some((Want::Status(Status::BadRequest), "`to` inside `from`"));
+            return held_ends.then_some((Want::BadRequestOrIoError, "`to` inside `from`"));
         }
         let to_fresh = to.node.is_none() && to.parent_dir;
         let Some(f) = &from.node else {
@@ -1838,7 +1858,7 @@ impl Gen {
             if !self.info(root)?.whole {
                 return None;
             }
-            (Want::Status(Status::BadRequest), "the root itself")
+            (Want::BadRequestOrIoError, "the root itself")
         } else {
             match &t.node {
                 Some(_) if self.read_only(root, &t.folded) => (
@@ -2164,6 +2184,16 @@ impl Gen {
                     Expect::Status(Status::BadRequest),
                 ])
             }
+            (Want::IsDirOrReadOnly, Err(Status::IsDir | Status::ReadOnly)) => Expect::OneOf(vec![
+                Expect::Status(Status::IsDir),
+                Expect::Status(Status::ReadOnly),
+            ]),
+            (Want::BadRequestOrIoError, Err(Status::BadRequest | Status::IoError)) => {
+                Expect::OneOf(vec![
+                    Expect::Status(Status::BadRequest),
+                    Expect::Status(Status::IoError),
+                ])
+            }
             _ => return Err(disagree()),
         };
         let cite = matches!(expect, Expect::OneOf(_)).then(|| plan.wire.to_string());
@@ -2449,6 +2479,82 @@ mod tests {
             }
         }
         assert!(checked > 0);
+    }
+
+    /// A WRITE or SETATTR on a directory handle is ST_IS_DIR where the
+    /// writable provider holds the directory, and ST_IS_DIR or ST_READ_ONLY
+    /// elsewhere (wire.md 3.4.5; Cairn's `source/tree.clj`).
+    #[test]
+    fn a_directory_handle_write_outside_the_writable_provider_may_be_read_only() {
+        let (mut strict, mut either) = (0, 0);
+        for s in crate::generate::cases(11, 256, 48).unwrap() {
+            for st in &s.steps {
+                let dir = st
+                    .note
+                    .as_deref()
+                    .is_some_and(|n| n.ends_with("a directory handle"));
+                if !dir
+                    || !matches!(
+                        st.request,
+                        OwnedRequest::Write { .. } | OwnedRequest::SetAttr { .. }
+                    )
+                {
+                    continue;
+                }
+                match &st.expect {
+                    Expect::Status(Status::IsDir) => strict += 1,
+                    Expect::OneOf(alts) => {
+                        assert_eq!(
+                            alts,
+                            &vec![
+                                Expect::Status(Status::IsDir),
+                                Expect::Status(Status::ReadOnly)
+                            ]
+                        );
+                        assert_eq!(st.cite.as_deref(), Some("3.4.5"));
+                        either += 1;
+                    }
+                    e => panic!("{e:?}"),
+                }
+            }
+        }
+        assert!(strict > 0 && either > 0, "strict {strict}, either {either}");
+    }
+
+    /// DELETE or RENAME of the root itself, and a RENAME `to` inside `from`,
+    /// is ST_BAD_REQUEST or ST_IO_ERROR (wire.md 3.4.7, 3.4.8: Cairn's
+    /// disk-backed upper answers the second).
+    #[test]
+    fn the_root_and_a_rename_into_itself_may_be_io_errors() {
+        let mut seen = 0;
+        for s in crate::generate::cases(12, 256, 48).unwrap() {
+            for st in &s.steps {
+                let root = match &st.request {
+                    OwnedRequest::Delete { path, .. } => path == ".",
+                    OwnedRequest::Rename { from, to, .. } => {
+                        from == "."
+                            || to == "."
+                            || fold(to).starts_with(&format!("{}/", fold(from)))
+                    }
+                    _ => false,
+                };
+                if !root {
+                    continue;
+                }
+                assert!(
+                    !matches!(st.expect, Expect::Status(Status::BadRequest)),
+                    "{:?}",
+                    st.request
+                );
+                if let Expect::OneOf(alts) = &st.expect {
+                    if alts.contains(&Expect::Status(Status::BadRequest)) {
+                        assert!(alts.contains(&Expect::Status(Status::IoError)), "{alts:?}");
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        assert!(seen > 0);
     }
 
     /// Inline READs and WRITEs fit the director's slot: `payload_cap - 8`

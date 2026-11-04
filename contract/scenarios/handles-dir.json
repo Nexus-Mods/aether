@@ -1,28 +1,34 @@
 {
   "name": "handles-dir",
-  "description": "A directory opens with size 0, is_dir set and immutable clear (wire.md 3.4.3: \"The `size` of a directory is 0\"; \"Never set it for a write open or a directory\"), and GETATTR of it says the same (3.4.1). A file operation on that handle is ST_IS_DIR (3.4.4: \"a directory handle `ST_IS_DIR`\"; 3.4.5: a WRITE or SETATTR on a directory handle is `ST_IS_DIR`, whatever access it was opened with; 3.5): READ, inline and bulk, WRITE and SETATTR. CLOSE releases it, and a use after that is ST_BAD_FH.",
+  "description": "A directory opens with size 0, is_dir set and immutable clear (wire.md 3.4.3: \"The `size` of a directory is 0\"; \"Never set it for a write open or a directory\"), and GETATTR of it says the same (3.4.1). A file operation on that handle is ST_IS_DIR (3.4.4: \"a directory handle `ST_IS_DIR`\"; 3.4.5: \"A WRITE on a directory handle the writable provider holds is `ST_IS_DIR`, whatever access the directory was opened with\"; 3.5): READ, inline and bulk, WRITE and SETATTR, on a directory under a writable entry. On a directory no writable provider holds (`ro`), WRITE and SETATTR may also be ST_READ_ONLY (3.4.5: \"A directory no writable provider holds may answer `ST_READ_ONLY` instead\"). CLOSE releases a handle, and a use after that is ST_BAD_FH.",
   "tree": {
     "roots": [
       {"id": 0,
        "files": [
-        {"path": "data/a.esp", "contents": "abc"},
-        {"path": "data/sub/b.txt", "contents": "b"}
+        {"path": "data/sub/b.txt", "contents": "b"},
+        {"path": "data/sub/c/d.txt", "contents": "d"},
+        {"path": "ro/c.txt", "contents": "c"}
       ],
-       "writable": ["."]}
+       "writable": ["data"]}
     ]
   },
   "steps": [
-    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": true, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/sub"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": true, "immutable": false, "mount_gen": 0}}},
     {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"status": "is-dir"}},
     {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16, "slot_flags": ["read_bulk"]}, "expect": {"status": "is-dir"}},
-    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "x"}, "expect": {"status": "is-dir"}, "note": "3.4.5: a WRITE on a directory handle"},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "x"}, "expect": {"status": "is-dir"}, "note": "3.4.5: a WRITE on a directory handle the writable provider holds"},
     {"request": {"op": "setattr", "fh": 1, "size": 0}, "expect": {"status": "is-dir"}, "note": "3.4.5: so is SETATTR"},
-    {"request": {"op": "getattr", "root": 0, "path": "data"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
-    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"}, "expect": {"reply": {"fh": 2, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "the file's handle is unaffected"},
-    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 8}, "expect": {"reply": {"data": "abc"}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/sub"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/sub/b.txt"}, "expect": {"reply": {"fh": 2, "size": 1, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "the file's handle is unaffected"},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 8}, "expect": {"reply": {"data": "b"}}},
     {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
     {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
     {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"status": "bad-fh"}},
-    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "a.esp", "is_dir": false, "size": 3, "mtime": 0}, {"name": "sub", "is_dir": true, "size": 0, "mtime": 0}]}}}
+    {"request": {"op": "readdir", "root": 0, "path": "data/sub"}, "expect": {"reply": {"entries": [{"name": "b.txt", "is_dir": false, "size": 1, "mtime": 0}, {"name": "c", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "ro"}, "expect": {"reply": {"fh": 3, "size": 0, "is_dir": true, "immutable": false, "mount_gen": 0}}, "note": "a directory no writable provider holds"},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 16}, "expect": {"status": "is-dir"}},
+    {"request": {"op": "write", "fh": 3, "offset": 0, "data": "x"}, "expect": {"one_of": [{"status": "is-dir"}, {"status": "read-only"}], "wire": "3.4.5"}},
+    {"request": {"op": "setattr", "fh": 3, "size": 0}, "expect": {"one_of": [{"status": "is-dir"}, {"status": "read-only"}], "wire": "3.4.5"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
   ]
 }

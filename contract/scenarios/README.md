@@ -52,9 +52,11 @@ path implies) and `writable` (directories, or `"."` for the whole root,
 under which a write open is honoured; each is a directory too). Optional
 `registry` is `{"keys": [{"path", "volatile", "values": [{"name", "ty",
 "data"}]}]}`, keys created in the overlay; without it the session has no
-registry layer (wire.md 4: every registry opcode `not-supported`). Root 0
-writable as a whole makes every root writable in the reference, so such a
-tree must make every root writable as a whole. Paths are canonical.
+registry layer (wire.md 4: every registry opcode `not-supported`). Paths
+are canonical. A limitation of the reference director, not a property of
+directors, and one that may be lifted: it makes every root writable when
+root 0 is writable as a whole, so a tree with root 0 writable as a whole
+must make every root writable as a whole, or the reference refuses it.
 
 **Who holds what.** Everything under a `writable` entry (the files and
 directories the tree lists there, and any made there later) is held by the
@@ -109,20 +111,20 @@ flag "sideways", ...`).
 ## Comparison rules
 
 The rule is equality. These are the exceptions, each allowed by the wire.md
-text quoted (line numbers as of the commit that wrote this; the quote is what
-to search for); there are no others (`crates/aether-conform/src/compare.rs`).
+text quoted from the section named; there are no others
+(`crates/aether-conform/src/compare.rs`).
 
 | What | Rule | wire.md |
 |---|---|---|
-| OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number (`Session::translate`): the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. | 3.4.3, line 738: "`fh` is any u64 the director chooses, unique among open handles" |
-| OPEN `mount_gen` | Not compared. | 3.4.3, lines 744-748: "a generation the director bumps whenever a root's content is replaced"; the directors start it differently |
-| OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory. | 3.4.3, lines 740-743: it permits caching; "Never set it for a write open or a directory" |
-| READDIR order | Entries compared as a multiset. | 3.4.2, line 688: "A director may send the entries in any order." |
-| `mtime` (GETATTR, READDIR) | Not compared, and not checked for changed or unchanged after a write either (an earlier plan's idea, dropped: the time is the director's). A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2, lines 567-568: "Which time a director reports for a path, if any, is the director's to choose" |
-| READ inline or bulk | Compared by data; a bulk reply is read from the arena first (`OwnedReply::resolve_bulk`). | 3.4.4, lines 783-784: the client "must accept either whatever flag it sent" |
-| STAGE_EXEC `path` | Not compared. | 3.4.14, lines 889-890: "the real, on-disk Windows path to start it from", wherever the director staged it |
-| Registry `version` | Compared up to one offset per session, fixed by the first registry reply; REG_CHANGED's `since` is sent shifted by it. | 4.3, lines 1035-1039: "The number a director's overlay starts from when it mounts a layer is the director's", versions may differ "by a constant", and "a REG_CHANGED `since` is in the numbering of the director it is sent to" |
-| REG_KEY `last_write` | Not compared. | 4.3, line 1070: a FILETIME, which the overlay stamps with the director's clock |
+| OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number (`Session::translate`): the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles" |
+| OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; the directors start it differently |
+| OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory. | 3.4.3: it permits caching; "Never set it for a write open or a directory" |
+| READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
+| `mtime` (GETATTR, READDIR) | Not compared, and not checked for changed or unchanged after a write either (an earlier plan's idea, dropped: the time is the director's). A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
+| READ inline or bulk | Compared by data; a bulk reply is read from the arena first (`OwnedReply::resolve_bulk`). | 3.4.4: the client "must accept either whatever flag it sent" |
+| STAGE_EXEC `path` | Not compared. | 3.4.14: "the real, on-disk Windows path to start it from", wherever the director staged it |
+| Registry `version` | Compared up to one offset per session, fixed by the first registry reply; REG_CHANGED's `since` is sent shifted by it. | 4.3: "The number a director's overlay starts from when it mounts a layer is the director's", versions may differ "by a constant", and "a REG_CHANGED `since` is in the numbering of the director it is sent to" |
+| REG_KEY `last_write` | Not compared. | 4.3: a FILETIME, which the overlay stamps with the director's clock |
 
 A `one_of` is the only way a scenario allows several answers, and it cites
 its section in `wire`.

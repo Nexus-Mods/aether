@@ -115,7 +115,7 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `stored-names-*` | STORED_NAMES: stored spelling, `skip`, unknown names, after changes (3.4.12) |
 | `case-fold-*` | the fold: ASCII, Unicode (`Σ`, `İ`, composed and decomposed), fold-equal names are one entry (3.2) |
 | `roots-*` | several roots kept apart, unserved roots (3.2, 3.5.1) |
-| `stage-exec` | STAGE_EXEC: `ST_NOT_SUPPORTED` or a path (3.4.14) |
+| `stage-exec` | STAGE_EXEC: `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` or a path (3.4.14) |
 | `registry-none` | no registry layer: all eight opcodes `ST_NOT_SUPPORTED` (4) |
 | `registry-lookup`, `-case`, `-bad-path` | REG_LOOKUP states, case-insensitive keys, non-canonical paths (4.2, 4.3) |
 | `registry-values`, `-delete-value` | REG_SET_VALUE, REG_KEY values, value tombstones (4.3) |
@@ -255,13 +255,13 @@ shrunk case valid and plays each through the adapter's own mount.
 | OPEN, reading (`read`, or `oflags == 0`) | existing files and directories; missing names; unserved roots | a handle (3.4.3); `ST_NOT_FOUND` |
 | OPEN, writing (`write` with any of `read`, `create`, `excl`, `trunc`, `append`) | files the writable provider holds; missing names it would hold; files a read-only provider holds; missing names in a root with no writable provider | a handle, or `ST_EXISTS` with `excl`, or `ST_NOT_FOUND` without `create` (3.4.3); `ST_READ_ONLY` (3.4.3, 3.5) |
 | READ | open handles, at offsets 0, odd, inside, at and past the end, lengths 0, 1, odd, to the end, 4096 and 65536 to 70000, with and without `read_bulk`; directory handles | the data (3.4.4, inline or bulk); `ST_IS_DIR` |
-| WRITE | handles opened for writing, at offsets up to the end (any offset on an `append` handle), 0 to 20000 bytes; directory handles | `written` (3.4.5); `ST_IS_DIR` |
-| SETATTR | handles opened for writing: 0, half, the size, past it; directory handles | `ST_OK` (3.4.6); `ST_IS_DIR` (3.4.5) |
+| WRITE | handles opened for writing, at offsets up to the end (any offset on an `append` handle), 0 to 20000 bytes; directory handles | `written` (3.4.5); `ST_IS_DIR` on a directory the writable provider holds, else `one_of` `ST_IS_DIR`, `ST_READ_ONLY` (3.4.5) |
+| SETATTR | handles opened for writing: 0, half, the size, past it; directory handles | `ST_OK` (3.4.6); as WRITE on a directory handle (3.4.5) |
 | CLOSE | open handles, also ones whose file changed under them | `ST_OK` (3.4.10) |
 | READ, WRITE, SETATTR, CLOSE | closed handles and numbers never issued | `ST_BAD_FH` (3.5) |
-| RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
+| RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers, the root at an end and a `to` inside `from` as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR`; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
 | RENAME_X across roots | files to a missing name (the caller's spelling) or onto a file (its stored spelling: 3.4.13 does not say whose spelling a replaced file keeps, and Cairn keeps the stored one); directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
-| DELETE | files, empty and non-empty directories the writable provider holds; missing names; read-only names; the root (writable as a whole); unserved roots | 3.4.8's answers |
+| DELETE | files, empty and non-empty directories the writable provider holds; missing names; read-only names; the root (writable as a whole); unserved roots | 3.4.8's answers, the root as `one_of` `ST_BAD_REQUEST`, `ST_IO_ERROR` |
 | MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
 | STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
 | STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` (a stager that does not stage it), a path (3.4.14) |

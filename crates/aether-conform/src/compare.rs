@@ -2,49 +2,46 @@
 //! expected (the scenario's, or the reference's).
 //!
 //! The rule is equality, except where `docs/wire.md` lets directors differ.
-//! Each exception below quotes the wire.md text that allows it (line numbers
-//! as of the commit that wrote this; the quote is what to search for), and
-//! `contract/scenarios/README.md` lists them all:
+//! Each exception below names the wire.md section and quotes the text that
+//! allows it, and `contract/scenarios/README.md` lists them all:
 //!
-//! - **Handles** (wire.md 3.4.3, line 738: "`fh` is any u64 the director
-//!   chooses, unique among open handles"). An expected fh and the
-//!   director's are paired at the OPEN that issues them, and the pairing
-//!   must stay one to one while the handle is open; a successful CLOSE ends
-//!   it, so the director may issue the number again. Requests are sent with
-//!   the director's numbers ([`Session::translate`]): an open handle's
-//!   pairing; after its CLOSE, the number the director closed (so a
-//!   use-after-close tests that handle), unless the director has issued it
-//!   again; and for a number never paired, or a closed one reissued, a
-//!   stand-in no open handle of the director has, counted down from
-//!   `u64::MAX` and the same for one number while it fits.
-//! - **`mount_gen`** (wire.md 3.4.3, lines 744-748: "a generation the
-//!   director bumps whenever a root's content is replaced", with the
-//!   directors' differing starting values). Not compared.
-//! - **`immutable`** (wire.md 3.4.3, lines 740-743: "Never set it for a
-//!   write open or a directory"; otherwise it only lets the shim cache). Not
-//!   compared, except that it must be clear on a write open and on a
-//!   directory.
-//! - **Listing order** (wire.md 3.4.2, line 688: "A director may send the
-//!   entries in any order."). Listings compare as multisets of entries.
-//! - **`mtime`** (wire.md 3.2, Timestamps, lines 567-568: "Which time a
-//!   director reports for a path, if any, is the director's to choose").
-//!   Not compared, in GETATTR or READDIR, and not checked for "changed" or
-//!   "unchanged" after a write either.
-//! - **READ transport** (wire.md 3.4.4, lines 783-784: "it must accept
-//!   either whatever flag it sent"). Inline and bulk replies compare by
-//!   their data; a bulk reply must be resolved from the arena first
-//!   ([`OwnedReply::resolve_bulk`]).
-//! - **STAGE_EXEC's path** (wire.md 3.4.14, lines 889-890: "the real,
-//!   on-disk Windows path to start it from", which is wherever the director
-//!   staged it). Not compared.
-//! - **Registry versions** (wire.md 4.3, lines 1035-1039: "The number a
-//!   director's overlay starts from when it mounts a layer is the
-//!   director's", so versions may differ "by a constant", and "a
-//!   REG_CHANGED `since` is in the numbering of the director it is sent
-//!   to"). Compared up to one offset per session, fixed by the first
-//!   registry reply; a REG_CHANGED `since` is sent shifted by it.
-//! - **`last_write`** of a REG_KEY node (wire.md 4.3, line 1070: a FILETIME
-//!   the overlay stamps with the director's clock). Not compared.
+//! - **Handles** (wire.md 3.4.3: "`fh` is any u64 the director chooses,
+//!   unique among open handles"). An expected fh and the director's are
+//!   paired at the OPEN that issues them, and the pairing must stay one to
+//!   one while the handle is open; a successful CLOSE ends it, so the
+//!   director may issue the number again. Requests are sent with the
+//!   director's numbers ([`Session::translate`]): an open handle's pairing;
+//!   after its CLOSE, the number the director closed (so a use-after-close
+//!   tests that handle), unless the director has issued it again; and for a
+//!   number never paired, or a closed one reissued, a stand-in no open handle
+//!   of the director has, counted down from `u64::MAX` and the same for one
+//!   number while it fits.
+//! - **`mount_gen`** (wire.md 3.4.3: "a generation the director bumps
+//!   whenever a root's content is replaced", with the directors' differing
+//!   starting values). Not compared.
+//! - **`immutable`** (wire.md 3.4.3: "Never set it for a write open or a
+//!   directory"; otherwise it only lets the shim cache). Not compared, except
+//!   that it must be clear on a write open and on a directory.
+//! - **Listing order** (wire.md 3.4.2: "A director may send the entries in
+//!   any order."). Listings compare as multisets of entries.
+//! - **`mtime`** (wire.md 3.2, Timestamps: "Which time a director reports for
+//!   a path, if any, is the director's to choose"). Not compared, in GETATTR
+//!   or READDIR, and not checked for "changed" or "unchanged" after a write
+//!   either.
+//! - **READ transport** (wire.md 3.4.4: "it must accept either whatever flag
+//!   it sent"). Inline and bulk replies compare by their data; a bulk reply
+//!   must be resolved from the arena first ([`OwnedReply::resolve_bulk`]).
+//! - **STAGE_EXEC's path** (wire.md 3.4.14: "the real, on-disk Windows path
+//!   to start it from", which is wherever the director staged it). Not
+//!   compared.
+//! - **Registry versions** (wire.md 4.3: "The number a director's overlay
+//!   starts from when it mounts a layer is the director's", so versions may
+//!   differ "by a constant", and "a REG_CHANGED `since` is in the numbering
+//!   of the director it is sent to"). Compared up to one offset per session,
+//!   fixed by the first registry reply; a REG_CHANGED `since` is sent shifted
+//!   by it.
+//! - **`last_write`** of a REG_KEY node (wire.md 4.3: a FILETIME the overlay
+//!   stamps with the director's clock). Not compared.
 
 use std::collections::BTreeMap;
 use std::fmt;

@@ -1,6 +1,6 @@
 {
   "name": "delete-errors",
-  "description": "DELETE: the root itself is ST_BAD_REQUEST; a missing path under a writable provider is ST_NOT_FOUND; an existing path outside every writable provider is ST_READ_ONLY; an unknown root is ST_NOT_FOUND (wire.md 3.4.8, 3.5).",
+  "description": "DELETE: a missing path under a writable provider is ST_NOT_FOUND; an existing path outside every writable provider is ST_READ_ONLY; an unknown root is ST_NOT_FOUND (wire.md 3.4.8, 3.5).",
   "tree": {
     "roots": [
       {"id": 0,
@@ -15,7 +15,6 @@
     ]
   },
   "steps": [
-    {"request": {"op": "delete", "root": 0, "path": "."}, "expect": {"status": "bad-request"}},
     {"request": {"op": "delete", "root": 0, "path": "saves/missing.txt"}, "expect": {"status": "not-found"}},
     {"request": {"op": "delete", "root": 0, "path": "data/a.esp"}, "expect": {"status": "read-only"}, "note": "a file outside every writable provider"},
     {"request": {"op": "delete", "root": 0, "path": "data/sub"}, "expect": {"status": "read-only"}, "note": "a directory outside every writable provider"},

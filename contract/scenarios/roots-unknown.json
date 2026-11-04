@@ -1,6 +1,6 @@
 {
   "name": "roots-unknown",
-  "description": "A root the director does not serve is ST_NOT_FOUND for OPEN, READDIR, DELETE, MKDIR and STORED_NAMES (wire.md 3.4.3, 3.4.2, 3.4.8, 3.5.1) and found=0 or ST_NOT_FOUND for GETATTR (3.4.1, 3.5.1); a path that exists under a served root is not found under an unserved one.",
+  "description": "A root the director does not serve is ST_NOT_FOUND for OPEN, READDIR, DELETE, MKDIR and STORED_NAMES (wire.md 3.4.3, 3.4.2, 3.4.8, 3.5.1) and found=0 for GETATTR (3.4.1, 3.5.1); a path that exists under a served root is not found under an unserved one.",
   "tree": {
     "roots": [
       {"id": 0,
@@ -15,8 +15,8 @@
     {"request": {"op": "delete", "root": 2, "path": "a.txt"}, "expect": {"status": "not-found"}},
     {"request": {"op": "mkdir", "root": 2, "mode": 493, "path": "w/d"}, "expect": {"status": "not-found"}},
     {"request": {"op": "stored-names", "root": 2, "skip": 0, "path": "a.txt"}, "expect": {"status": "not-found"}},
-    {"request": {"op": "getattr", "root": 2, "path": "a.txt"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"status": "not-found"}], "wire": "3.5.1"}},
-    {"request": {"op": "getattr", "root": 4294967295, "path": "a.txt"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"status": "not-found"}], "wire": "3.5.1"}, "note": "the largest root id"},
+    {"request": {"op": "getattr", "root": 2, "path": "a.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 4294967295, "path": "a.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "the largest root id"},
     {"request": {"op": "getattr", "root": 0, "path": "a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}}
   ]
 }

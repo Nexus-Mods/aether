@@ -613,11 +613,13 @@ impl<'v> Obj<'v> {
     }
 }
 
-/// Whether `path` leaves its root whatever way a director normalises paths:
-/// its first component is `..` and the others are plain (not empty, not `.`,
-/// no backslash). wire.md 3.2: "a director must treat a path that would leave
-/// its root (`..` above the root) as an error". A path that goes up only after
-/// other components is not sent, since directors differ on where it ends up.
+/// Whether `path` leaves its root however a director normalises paths: its
+/// first component is `..`, and every other component is a name or `..` (not
+/// empty, not `.`, no backslash). wire.md 3.2: "a director must treat a path
+/// that would leave its root (`..` above the root) as an error". Later `..`
+/// components are allowed: they cannot bring a path that starts above the root
+/// back inside it. A path that goes up only after other components is not
+/// sent, since directors differ on where it ends up.
 fn is_escape(path: &str) -> bool {
     let mut parts = path.split('/');
     parts.next() == Some("..") && !path.contains('\\') && parts.all(|c| !c.is_empty() && c != ".")

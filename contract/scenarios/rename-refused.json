@@ -1,6 +1,6 @@
 {
   "name": "rename-refused",
-  "description": "RENAME refusals (wire.md 3.4.7, 3.5): the root itself at either end, or a `to` inside `from`, is ST_BAD_REQUEST; a missing `from` is ST_NOT_FOUND; either end outside every writable provider is ST_READ_ONLY; nothing moves in any of them.",
+  "description": "RENAME refusals (wire.md 3.4.7, 3.5): a `to` inside `from` is ST_BAD_REQUEST; a missing `from` is ST_NOT_FOUND; either end outside every writable provider is ST_READ_ONLY; nothing moves in any of them.",
   "tree": {
     "roots": [
       {"id": 0,
@@ -18,8 +18,6 @@
     ]
   },
   "steps": [
-    {"request": {"op": "rename", "root": 0, "from": ".", "to": "saves/x"}, "expect": {"status": "bad-request"}, "note": "the root as `from`"},
-    {"request": {"op": "rename", "root": 0, "from": "saves/a.txt", "to": "."}, "expect": {"status": "bad-request"}, "note": "the root as `to`"},
     {"request": {"op": "rename", "root": 0, "from": "saves/dir", "to": "saves/dir/sub/inside"}, "expect": {"status": "bad-request"}, "note": "`to` inside `from`"},
     {"request": {"op": "rename", "root": 0, "from": "saves/dir", "to": "saves/dir/inside"}, "expect": {"status": "bad-request"}},
     {"request": {"op": "rename", "root": 0, "from": "saves/missing.txt", "to": "saves/x.txt"}, "expect": {"status": "not-found"}},

@@ -56,6 +56,18 @@ registry layer (wire.md 4: every registry opcode `not-supported`). Root 0
 writable as a whole makes every root writable in the reference, so such a
 tree must make every root writable as a whole. Paths are canonical.
 
+**Who holds what.** Everything under a `writable` entry (the files and
+directories the tree lists there, and any made there later) is held by the
+writable provider itself, not by a read-only layer beneath it, so wire.md
+3.4.9's allowances for "names only in a read-only lower" never apply, and an
+adapter must mount them that way (a director that serves a writable root as an
+overlay must have the tree's writable part in the upper). A file or directory
+outside every `writable` entry belongs to a read-only provider: a write open,
+DELETE, RENAME or MKDIR of it is `read-only` (wire.md 3.5). A root with no
+`writable` entry has no writable provider at all. A scenario that needs "the
+root itself is held by the writable provider" (wire.md 3.4.7, 3.4.8) makes the
+root writable as a whole, `"."`.
+
 **Bytes** (`contents`, WRITE's `data`, a value's `data`, READ's reply
 `data`): a JSON string is its UTF-8, `{"hex": "00ff"}` is those bytes, and
 `{"size": N, "seed": S}` is N bytes generated from S
@@ -70,9 +82,10 @@ wire.md 3.2 says other syntax is director-defined ("a client must not rely
 on it"), so a scenario never sends it. The one other path it sends is one
 that leaves its root: wire.md 3.2 says a director "must treat a path that
 would leave its root (`..` above the root) as an error", so a path whose
-first component is `..` (`../x`, `..`, `../../a/b`, the other components
-plain) is allowed, and escapes under any way of normalising. A `..` after
-other components is not sent. Registry paths are sent as written.
+first component is `..` (`../x`, `..`, `../../a/b`, `../a/../b`) is
+allowed, the other components being names or `..` (not empty, not `.`), and
+escapes under any way of normalising. A path that goes up only after other
+components (`a/../..`) is not sent. Registry paths are sent as written.
 
 **Expectations.** One of:
 
@@ -108,6 +121,7 @@ to search for); there are no others (`crates/aether-conform/src/compare.rs`).
 | `mtime` (GETATTR, READDIR) | Not compared, and not checked for changed or unchanged after a write either (an earlier plan's idea, dropped: the time is the director's). A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2, lines 567-568: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first (`OwnedReply::resolve_bulk`). | 3.4.4, lines 783-784: the client "must accept either whatever flag it sent" |
 | STAGE_EXEC `path` | Not compared. | 3.4.14, lines 889-890: "the real, on-disk Windows path to start it from", wherever the director staged it |
+| GETATTR and OPEN `size` of a directory | Not compared when `is_dir` is set (`is_dir` is). | 3.4.1, 3.4.3: "The size of a directory is the director's to choose" (3.4.2 fixes it only for READDIR entries) |
 | Registry `version` | Compared up to one offset per session, fixed by the first registry reply; REG_CHANGED's `since` is sent shifted by it. | 4.3, lines 1035-1039: "The number a director's overlay starts from when it mounts a layer is the director's", versions may differ "by a constant", and "a REG_CHANGED `since` is in the numbering of the director it is sent to" |
 | REG_KEY `last_write` | Not compared. | 4.3, line 1070: a FILETIME, which the overlay stamps with the director's clock |
 

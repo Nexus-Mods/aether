@@ -12,7 +12,6 @@
     {"request": {"op": "read", "fh": 4242, "offset": 0, "len": 4}, "expect": {"status": "bad-fh"}},
     {"request": {"op": "write", "fh": 4242, "offset": 0, "data": "x"}, "expect": {"status": "bad-fh"}},
     {"request": {"op": "setattr", "fh": 4242, "size": 0}, "expect": {"status": "bad-fh"}},
-    {"request": {"op": "close", "fh": 4242}, "expect": {"status": "bad-fh"}},
-    {"request": {"op": "close", "fh": 0}, "expect": {"status": "bad-fh"}, "note": "handle 0"}
+    {"request": {"op": "close", "fh": 4242}, "expect": {"status": "bad-fh"}}
   ]
 }

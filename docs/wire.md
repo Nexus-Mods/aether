@@ -661,6 +661,9 @@ directors). The shim treats `ST_NOT_FOUND` the same as `found = 0`; any other
 non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
 (`crates/aether-hooks/src/hook/file_attr.rs`).
 
+The size of a directory is the director's to choose (3.4.2 fixes it only for
+READDIR entries); `is_dir` is not.
+
 #### 3.4.2 READDIR (2)
 
 Request: path request (the directory; `"."` for the root). Reply
@@ -747,6 +750,8 @@ Reply (`Reply::Open`), 24 bytes:
   `mount_gen`), so two immutable opens of one path with equal size and
   `mount_gen` must have identical content. The old Rust director (removed)
   started at 1 and bumped on every mount/unmount; Cairn always sends 1.
+- The size of a directory is the director's to choose, as in GETATTR (3.4.1);
+  `is_dir` is not.
 - Errors: unknown root `ST_NOT_FOUND`; `OPEN_WRITE` on a root with no writable
   provider `ST_READ_ONLY`; `OPEN_EXCL` on an existing path `ST_EXISTS`;
   missing path without `OPEN_CREATE` `ST_NOT_FOUND`.

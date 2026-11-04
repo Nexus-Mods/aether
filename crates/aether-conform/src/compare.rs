@@ -24,6 +24,10 @@
 //!   write open or a directory"; otherwise it only lets the shim cache). Not
 //!   compared, except that it must be clear on a write open and on a
 //!   directory.
+//! - **A directory's size** (wire.md 3.4.1 and 3.4.3: "The size of a
+//!   directory is the director's to choose"; 3.4.2 fixes it only for
+//!   READDIR entries). Not compared in a GETATTR or OPEN reply whose
+//!   `is_dir` is set; `is_dir` itself is.
 //! - **Listing order** (wire.md 3.4.2, line 688: "A director may send the
 //!   entries in any order."). Listings compare as multisets of entries.
 //! - **`mtime`** (wire.md 3.2, Timestamps, lines 567-568: "Which time a
@@ -206,7 +210,9 @@ impl Session {
                         "immutable set on a write open or a directory (wire.md 3.4.3)".into(),
                     );
                 }
-                if (e.size, e.is_dir) != (g.size, g.is_dir) {
+                // A directory's size is the director's (wire.md 3.4.3).
+                let size_differs = !e.is_dir && e.size != g.size;
+                if e.is_dir != g.is_dir || size_differs {
                     return Err("a different size or is_dir".into());
                 }
                 self.pair(e.fh, g.fh)
@@ -221,7 +227,9 @@ impl Session {
                 Ok(())
             }
             (O::GetAttr(e), O::GetAttr(g)) => {
-                if (e.found, e.is_dir, e.size) == (g.found, g.is_dir, g.size) {
+                // A directory's size is the director's (wire.md 3.4.1).
+                let size_ok = (e.found && e.is_dir) || e.size == g.size;
+                if (e.found, e.is_dir) == (g.found, g.is_dir) && size_ok {
                     Ok(())
                 } else {
                     Err("different attributes (mtime aside)".into())

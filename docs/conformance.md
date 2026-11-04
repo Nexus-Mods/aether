@@ -53,6 +53,7 @@ are the only exceptions, and each is allowed by the wire.md text quoted
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and the directors start it differently. |
 | OPEN `immutable` | Not compared, but must be clear on a write open and on a directory. | 3.4.3: "Never set it for a write open or a directory". |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
+| GETATTR and OPEN `size` of a directory | Not compared when `is_dir` is set; `is_dir` is. | 3.4.1 and 3.4.3: "The size of a directory is the director's to choose" (3.4.2 fixes it only for READDIR entries). |
 | `mtime` (GETATTR, READDIR) | Not compared. | 3.2: "Which time a director reports for a path, if any, is the director's to choose". |
 | READ inline or bulk | Compared by data. | 3.4.4: the client "must accept either whatever flag it sent". |
 | STAGE_EXEC `path` | Not compared. | 3.4.14: the reply is the "on-disk Windows path to start it from", wherever the director staged it. |
@@ -71,6 +72,15 @@ identical content (3.4.3). The handshake variables a run does not use
 the tree.
 
 ## The scenarios
+
+**What a tree means.** Files and directories under a `writable` entry are
+held by the writable provider itself, so wire.md 3.4.9's "names only in a
+read-only lower" allowances never apply to them, and an adapter must mount
+them that way (a director that serves a writable root as an overlay puts the
+tree's writable part in the upper). A file or directory outside every
+`writable` entry belongs to a read-only provider, and a root with no
+`writable` entry has none. Scenarios about "the root itself" (3.4.7, 3.4.8)
+make the root writable as a whole.
 
 `contract/scenarios/` holds the suite: what every director must do, as data,
 one scenario per file, named by its file. Each `description` names the
@@ -104,17 +114,34 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `registry-limits`, `-key-too-large` | name, depth and reply limits; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
 
 **Left out because wire.md does not fix the answer**, so no scenario
-asserts it: the `size` GETATTR and OPEN report for a directory (so no
-scenario opens a directory, and `ST_IS_DIR` on a read of a directory handle
-is not covered); READDIR of a path that is not a directory; a path
-below a file (accepted as found=0, `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`);
-a write open, DELETE or RENAME of a missing path outside every writable
-provider; a create whose parent directory is missing; what a
-write past the end puts in the gap; WRITE or SETATTR on a handle opened
-read-only; a WRITE larger than the ring's payload (`payload_cap` is the
-director's); `ST_NO_SPACE`; opcodes outside the table and trailing bytes in
-a registry request (a scenario names opcodes and fields, so cannot send
-them); a registry value over `MAX_DATA` (the request would not fit the ring).
+asserts it: READDIR of a path that is not a directory; a path below a file
+(accepted as found=0, `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`); a write open,
+DELETE or RENAME of a missing path outside every writable provider; a create
+whose parent directory is missing; what a write past the end puts in the gap;
+WRITE or SETATTR on a handle opened read-only; `ST_NO_SPACE`.
+
+**Left out because a scenario cannot send or receive it.** A scenario names
+opcodes and fields of the table and the statuses in `protocol.json`, so these
+rules are not expressible in the scenario format; the ones marked "malformed"
+belong to the malformed-request mode of a later task:
+
+- 3.4.4: a director must accept a 20-byte READ (no trailing pad) (malformed).
+- 3.4.5: a WRITE whose payload is shorter than 24 + `len` is `ST_BAD_REQUEST`
+  (malformed).
+- 3.5.1: short payloads for every opcode, invalid UTF-8 in a path (malformed).
+- 3.3: opcodes outside the table (0, 4, 12, 25 and up) are `ST_BAD_REQUEST`
+  (malformed).
+- 3.6: the slot `flags` word is ignored for every opcode but READ, and bits
+  above bit 0 for READ (malformed: the format sends `read_bulk` only on READ).
+- 4.1, 4.3: registry booleans are exactly 0 or 1, and trailing bytes in a
+  registry request are `ST_BAD_REQUEST` (malformed).
+- 3.4.2: a READDIR listing larger than `payload_cap` is answered with the
+  overflow status `i32::MIN` and an empty payload. It is not in the protocol's
+  status table, so a scenario cannot name it, and a tree large enough to
+  overflow depends on the director's cap.
+- A WRITE or request larger than the ring's payload, and a registry value over
+  `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
+  REG_KEY is covered only as a `one_of`, since the cap is the director's.
 
 ## The adapter protocol
 

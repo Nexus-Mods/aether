@@ -1,0 +1,27 @@
+{
+  "name": "handles-dir",
+  "description": "A directory opens: is_dir set, immutable clear (wire.md 3.4.3: \"Never set it for a write open or a directory\"), its size the director's (3.4.3). A file operation on that handle is ST_IS_DIR (3.4.4: \"a directory handle `ST_IS_DIR`\"; 3.5: \"A file operation on a directory handle\"): READ, inline and bulk, and WRITE. CLOSE releases it, and a use after that is ST_BAD_FH.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "data/a.esp", "contents": "abc"},
+        {"path": "data/sub/b.txt", "contents": "b"}
+      ],
+       "writable": ["."]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": true, "immutable": false, "mount_gen": 0}}, "note": "the size of a directory is not compared"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"status": "is-dir"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16, "slot_flags": ["read_bulk"]}, "expect": {"status": "is-dir"}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "x"}, "expect": {"status": "is-dir"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}, "note": "size not compared"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"}, "expect": {"reply": {"fh": 2, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "the file's handle is unaffected"},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 8}, "expect": {"reply": {"data": "abc"}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"status": "bad-fh"}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "a.esp", "is_dir": false, "size": 3, "mtime": 0}, {"name": "sub", "is_dir": true, "size": 0, "mtime": 0}]}}}
+  ]
+}

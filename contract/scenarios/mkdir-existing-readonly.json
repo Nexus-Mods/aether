@@ -1,0 +1,20 @@
+{
+  "name": "mkdir-existing-readonly",
+  "description": "MKDIR of an existing file where no writable provider serves the path is ST_EXISTS, and of one a writable provider serves ST_IO_ERROR (wire.md 3.4.9: \"`ST_IO_ERROR` where a writable provider serves the path ..., `ST_EXISTS` where none does\"). A file outside every `writable` entry is held by a read-only provider (contract/scenarios/README.md); nothing changes.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "data/a.esp", "contents": "abc"},
+        {"path": "saves/s.sav", "contents": "s"}
+      ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "data/a.esp"}, "expect": {"status": "exists"}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/s.sav"}, "expect": {"status": "io-error"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/s.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}}
+  ]
+}

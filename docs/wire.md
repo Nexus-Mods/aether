@@ -576,6 +576,19 @@ means "no time" and the shim substitutes 2024-01-01T00:00:00Z
 Which time a director reports for a path, if any, is the director's to choose:
 the shim checks no time it is sent.
 
+A file's time is the same in every query that reports it. A directory listing
+and a query by path report the `mtime` its READDIR or GETATTR reply carried.
+A query by handle (the basic, network-open, all-information and stat classes,
+which `GetFileTime` and `GetFileInformationByHandle` reach) has no time from
+OPEN, so once any GETATTR or READDIR reply has carried an `mtime` above 0, the
+handle's first time query sends one GETATTR for its path. The handle keeps
+that answer until a WRITE that lands bytes or a SETATTR through it, after
+which its next time query asks again. Until a reply has carried a time, a
+query by handle reports the substitute and sends nothing, so a director that
+sends no times is never asked for one. A by-handle query made before the first
+time-carrying reply reports the substitute even when the director has a time
+for that file.
+
 ### 3.3 Opcode table
 
 Source: the protocol table in `crates/aether-protocol/src/table.rs` (`Opcode`,

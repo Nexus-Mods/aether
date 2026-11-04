@@ -16,9 +16,10 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
     FileBasicInfo, FileStandardInfo, GetFileAttributesExW, GetFileExInfoStandard,
-    GetFileInformationByHandleEx, GetFileSizeEx, ReadFile, SetFilePointerEx, WriteFile, DELETE,
-    FILE_BASIC_INFO, FILE_BEGIN, FILE_CURRENT, FILE_END, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_STANDARD_INFO, OPEN_EXISTING, WIN32_FILE_ATTRIBUTE_DATA,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx, GetFileTime, ReadFile,
+    SetFilePointerEx, WriteFile, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_BASIC_INFO, FILE_BEGIN,
+    FILE_CURRENT, FILE_END, FILE_FLAG_DELETE_ON_CLOSE, FILE_STANDARD_INFO, OPEN_EXISTING,
+    WIN32_FILE_ATTRIBUTE_DATA,
 };
 
 const KIB: usize = 1024;
@@ -283,39 +284,158 @@ fn an_fh_reissued_after_close_inherits_nothing() {
     close(d);
 }
 
+/// A `FILETIME` as one number.
+fn ticks(t: windows_sys::Win32::Foundation::FILETIME) -> i64 {
+    ((t.dwHighDateTime as i64) << 32) | t.dwLowDateTime as i64
+}
+
+/// The last-write time each handle query reports for `h`:
+/// `FileBasicInformation`, `GetFileTime`, `GetFileInformationByHandle`.
+fn handle_times(h: HANDLE) -> [i64; 3] {
+    let basic = basic(h).LastWriteTime;
+    let mut c = windows_sys::Win32::Foundation::FILETIME::default();
+    let (mut a, mut w) = (c, c);
+    // SAFETY: a handle this test opened and three FILETIMEs.
+    assert_ne!(
+        unsafe { GetFileTime(h, &mut c, &mut a, &mut w) },
+        0,
+        "GetFileTime"
+    );
+    // SAFETY: plain data, all-zero is valid.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { core::mem::zeroed() };
+    // SAFETY: as above.
+    assert_ne!(
+        unsafe { GetFileInformationByHandle(h, &mut info) },
+        0,
+        "GetFileInformationByHandle"
+    );
+    [basic, ticks(w), ticks(info.ftLastWriteTime)]
+}
+
+/// The last-write time each query by path reports for `p`:
+/// `NtQueryFullAttributesFile`, `GetFileAttributesExW`.
+fn path_times(p: &Path) -> [i64; 2] {
+    let (st, full) = ntapi::nt_query_full_attributes_abs(&p.display().to_string());
+    assert!(st >= 0, "NtQueryFullAttributesFile: {st:#x}");
+    [
+        full.last_write_time,
+        ticks(attributes_ex(p).ftLastWriteTime),
+    ]
+}
+
+/// The last-write time of `name`'s record in `FindFirstFileW(dir\*)`.
+fn listed_time(dir: &Path, name: &str) -> i64 {
+    let listed = find_all(dir).expect("list");
+    let d = listed
+        .iter()
+        .find(|d| find_name(d) == name)
+        .unwrap_or_else(|| panic!("{name} listed"));
+    ticks(d.ftLastWriteTime)
+}
+
+/// What every query reports for a file the director sends no time for
+/// (`docs/wire.md` 3.2): 2024-01-01T00:00:00Z.
+const PLACEHOLDER: i64 = 133_485_408_000_000_000;
+
 /// S13 (`docs/wire.md` 3.2, "Timestamps"): one non-zero `mtime` is one
-/// `LastWriteTime` in every query that reports it.
+/// `LastWriteTime` in a listing, in every query by path and in every query
+/// by handle. A handle asks GETATTR once, on its first time query, and
+/// again after a write through it.
 #[test]
-#[ignore = "fails: handle and path queries report SYNTH_FILETIME whatever mtime the director \
-            sends; awaiting a ruling (task-6-report.md, S13)"]
 fn a_nonzero_mtime_agrees_across_basic_info_directory_records_and_full_attributes() {
     isolate!();
     const MTIME: i64 = 1_700_000_000;
     // Seconds since 1970 as 100 ns ticks since 1601.
     let want = MTIME * 10_000_000 + 116_444_736_000_000_000;
-    let (root, _served) = serve(fake().with_mtime("data/c.esp", MTIME));
-    let path = root.join("data").join("c.esp");
+    let (root, served) = serve(
+        fake()
+            .with_mtime("data/c.esp", MTIME)
+            .with_mtime("saves/s.ess", MTIME),
+    );
+    let data = root.join("data");
+    let path = data.join("c.esp");
 
-    let listed = find_all(&root.join("data"))
-        .expect("list data")
-        .into_iter()
-        .find(|d| find_name(d) == "c.esp")
-        .expect("c.esp listed");
-    let t = listed.ftLastWriteTime;
-    let record = (t.dwHighDateTime as i64) << 32 | t.dwLowDateTime as i64;
+    assert_eq!(listed_time(&data, "c.esp"), want, "the listing");
+    let mark = served.recorder.mark();
+    assert_eq!(path_times(&path), [want; 2], "by path");
+    assert_eq!(
+        ops(served, mark),
+        [Some(Opcode::GetAttr); 2],
+        "one GETATTR each, as before"
+    );
 
     let h = open_read(&path);
-    let by_handle = basic(h).LastWriteTime;
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [want; 3], "by handle");
+    assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)], "the first asks");
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [want; 3]);
+    assert_eq!(ops(served, mark), [], "the handle keeps it");
     close(h);
 
-    let (st, full) = ntapi::nt_query_full_attributes_abs(&path.display().to_string());
-    assert!(st >= 0, "NtQueryFullAttributesFile: {st:#x}");
-
-    assert_eq!(
-        (record, by_handle, full.last_write_time),
-        (want, want, want),
-        "(directory record, FileBasicInformation, NtQueryFullAttributesFile)"
+    // A write through the handle: its next time query asks again, once.
+    let h = open_with(
+        &root.join("saves").join("s.ess"),
+        GENERIC_READ | GENERIC_WRITE,
     );
+    assert_eq!(handle_times(h), [want; 3]);
+    write_next(h, b"x");
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [want; 3]);
+    assert_eq!(
+        ops(served, mark),
+        [Some(Opcode::GetAttr)],
+        "after the write"
+    );
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [want; 3]);
+    assert_eq!(ops(served, mark), []);
+    close(h);
+}
+
+/// A director that sends no time: every query keeps the placeholder, and a
+/// handle's time queries send nothing.
+#[test]
+fn a_director_that_sends_no_time_gets_the_placeholder_and_no_getattr() {
+    isolate!();
+    let (root, served) = serve(fake());
+    let data = root.join("data");
+    let path = data.join("c.esp");
+    assert_eq!(listed_time(&data, "c.esp"), PLACEHOLDER);
+    assert_eq!(path_times(&path), [PLACEHOLDER; 2]);
+    let h = open_with(
+        &root.join("saves").join("s.ess"),
+        GENERIC_READ | GENERIC_WRITE,
+    );
+    write_next(h, b"x");
+    let mark = served.recorder.mark();
+    for _ in 0..2 {
+        assert_eq!(handle_times(h), [PLACEHOLDER; 3]);
+    }
+    assert_eq!(ops(served, mark), []);
+    close(h);
+}
+
+/// The limit of the rule above: the shim knows a director sends times only
+/// once a GETATTR or READDIR reply has carried one. A handle asked for its
+/// times before then reports the placeholder without asking; once a time
+/// has been seen, its next query asks.
+#[test]
+fn a_handle_asked_before_any_time_was_seen_gets_the_placeholder() {
+    isolate!();
+    const MTIME: i64 = 1_700_000_000;
+    let want = MTIME * 10_000_000 + 116_444_736_000_000_000;
+    let (root, served) = serve(fake().with_mtime("data/c.esp", MTIME));
+    let path = root.join("data").join("c.esp");
+    let h = open_read(&path);
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [PLACEHOLDER; 3]);
+    assert_eq!(ops(served, mark), []);
+    assert_eq!(path_times(&path), [want; 2]);
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [want; 3]);
+    assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)]);
+    close(h);
 }
 
 #[test]

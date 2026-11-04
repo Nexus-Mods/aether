@@ -186,7 +186,6 @@ pub(super) unsafe fn write_hook_body(
         let explicit = unsafe { crate::ntbuf::explicit_offset(byte_offset) };
         if let Some(FileView {
             fh,
-            size,
             position: pos,
             append_only,
             ..
@@ -254,9 +253,10 @@ pub(super) unsafe fn write_hook_body(
             // Only reachable now that writes actually reach the director
             // instead of falling through to a real file (whose kernel FCB
             // would have tracked this for free).
-            let end = off + n as u64;
-            if end > size {
-                crate::synth_file::grow_size(handle as isize, end);
+            // A write that landed anything also drops the time the handle kept
+            // (`docs/wire.md` 3.2, "Timestamps").
+            if n > 0 {
+                crate::synth_file::wrote(handle as isize, off + n as u64);
             }
             if let Some(st) = failed {
                 // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).

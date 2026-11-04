@@ -3,7 +3,8 @@
 
 use super::{
     allow_disk_fallthrough, attributes, caller_buf, in_hook_reenter, path_file_id, path_of,
-    put_basic, put_network_open, BASIC_LEN, NETWORK_OPEN_LEN, TRAMP_QATTR, TRAMP_QFULL, TRAMP_QIBN,
+    put_basic, put_network_open, time_or, BASIC_LEN, NETWORK_OPEN_LEN, TRAMP_QATTR, TRAMP_QFULL,
+    TRAMP_QIBN,
 };
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes,
@@ -32,6 +33,8 @@ unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), Status>>
 struct PathStat {
     is_dir: bool,
     size: u64,
+    /// The director's `mtime` (0 or less: none).
+    mtime: i64,
 }
 
 /// What a stat-by-path call saw, for the hook's `note_stat` label.
@@ -76,9 +79,13 @@ fn stat_by_path(
     // SAFETY: `fuse_path_attr` takes no pointer; it asks the director about a path.
     match unsafe { fuse_path_attr(path) } {
         None => note(StatEvent::Outside),
-        Some(Ok((is_dir, size, _mtime))) => {
+        Some(Ok((is_dir, size, mtime))) => {
             note(StatEvent::Found);
-            if fill(&PathStat { is_dir, size }) {
+            if fill(&PathStat {
+                is_dir,
+                size,
+                mtime,
+            }) {
                 return Some(STATUS_SUCCESS);
             }
         }
@@ -138,13 +145,20 @@ pub(super) unsafe fn qibn_hook_body(
             |st| {
                 // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                 let buf = unsafe { caller_buf(info, length as usize) };
-                let Some(n) = aether_ntlayout::by_name_info(class_raw, buf, st.is_dir, st.size)
-                else {
+                let Some(n) = aether_ntlayout::by_name_info(
+                    class_raw,
+                    buf,
+                    st.is_dir,
+                    st.size,
+                    time_or(st.mtime, 0),
+                ) else {
                     crate::hookstats::note_stat(&path, &format!("byname{class_raw}-UNSUP"));
                     let mut probe = [0u8; 512];
                     refusal = Some(
-                        if aether_ntlayout::by_name_info(class_raw, &mut probe, st.is_dir, st.size)
-                            .is_some()
+                        if aether_ntlayout::by_name_info(
+                            class_raw, &mut probe, st.is_dir, st.size, 0,
+                        )
+                        .is_some()
                         {
                             STATUS_INFO_LENGTH_MISMATCH
                         } else {
@@ -202,7 +216,11 @@ pub(super) unsafe fn qattr_hook_body(
                 if !info.is_null() {
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                     let buf = unsafe { caller_buf(info.cast(), BASIC_LEN) };
-                    put_basic(buf, SYNTH_FILETIME, attributes(st.is_dir));
+                    put_basic(
+                        buf,
+                        time_or(st.mtime, SYNTH_FILETIME),
+                        attributes(st.is_dir),
+                    );
                 }
                 true
             },
@@ -240,7 +258,12 @@ pub(super) unsafe fn qfull_hook_body(
                 if !info.is_null() {
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                     let buf = unsafe { caller_buf(info.cast(), NETWORK_OPEN_LEN) };
-                    put_network_open(buf, SYNTH_FILETIME, st.size, attributes(st.is_dir));
+                    put_network_open(
+                        buf,
+                        time_or(st.mtime, SYNTH_FILETIME),
+                        st.size,
+                        attributes(st.is_dir),
+                    );
                 }
                 true
             },

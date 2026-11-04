@@ -368,6 +368,11 @@ pub struct FuseClient {
     names: std::sync::Mutex<aether_redirect::finalname::NameCache>,
     /// What the cache's clock counts from.
     started: std::time::Instant,
+    /// Whether a GETATTR or READDIR reply has carried a time (an `mtime`
+    /// above 0): only then does a handle's time query ask GETATTR, so a
+    /// director that sends no time is asked nothing for one
+    /// ([`FuseClient::sends_times`]).
+    times_seen: std::sync::atomic::AtomicBool,
     /// The arena's length, or 0 when the ring has none this client uses
     /// ([`arena_rule`]).
     arena_len: usize,
@@ -512,6 +517,7 @@ impl FuseClient {
                 NAME_CACHE_ENTRIES,
             )),
             started: std::time::Instant::now(),
+            times_seen: std::sync::atomic::AtomicBool::new(false),
             arena_len,
             inline_chunk,
             server_ev,
@@ -627,10 +633,28 @@ impl FuseClient {
 
     pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, Status> {
         self.call(&Request::GetAttr { root, path: vpath }, |r| match r {
-            Reply::GetAttr(a) => Some(a),
+            Reply::GetAttr(a) => {
+                self.saw_time(a.mtime);
+                Some(a)
+            }
             _ => None,
         })
         .map_err(failed)
+    }
+
+    /// Remember that the director sends times, once a reply carries one.
+    fn saw_time(&self, mtime: i64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if mtime > 0 && !self.times_seen.load(Relaxed) {
+            self.times_seen.store(true, Relaxed);
+        }
+    }
+
+    /// Whether a GETATTR or READDIR reply has carried a time: a handle's
+    /// time query asks GETATTR only then (`docs/wire.md` 3.2,
+    /// "Timestamps").
+    pub fn sends_times(&self) -> bool {
+        self.times_seen.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The directory's listing, each entry made into a `T` by `each` while
@@ -644,7 +668,10 @@ impl FuseClient {
         self.call(&Request::ReadDir { root, path: vpath }, |r| match r {
             Reply::ReadDir(list) => {
                 let mut out = Vec::with_capacity(list.len());
-                out.extend(list.iter().map(&mut each));
+                out.extend(list.iter().map(|e| {
+                    self.saw_time(e.mtime);
+                    each(e)
+                }));
                 Some(out)
             }
             _ => None,

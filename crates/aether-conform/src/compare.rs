@@ -330,7 +330,8 @@ impl Session {
     }
 }
 
-fn render_expect(e: &Expect) -> String {
+/// `e` as a person reads it, as a mismatch and a report show it.
+pub fn render_expect(e: &Expect) -> String {
     match e {
         Expect::Reply(r) => render_reply(r),
         Expect::Status(s) => format!("status {}", s.name()),
@@ -341,7 +342,9 @@ fn render_expect(e: &Expect) -> String {
     }
 }
 
-fn render_got(g: &Result<OwnedReply, Status>) -> String {
+/// A director's answer as a person reads it, as a mismatch and a report
+/// show it.
+pub fn render_got(g: &Result<OwnedReply, Status>) -> String {
     match g {
         Ok(r) => render_reply(r),
         Err(s) => format!("status {}", s.name()),

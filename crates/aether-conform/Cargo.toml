@@ -8,15 +8,28 @@ publish.workspace = true
 
 [dependencies]
 aether-casefold.workspace = true
+# The handshake variables an adapter answers a mount with.
+aether-env.workspace = true
+# A file ring, on every OS.
+aether-filering.workspace = true
+aether-ipc.workspace = true
 aether-protocol.workspace = true
 # The tree a scenario mounts, and the reference it is compared with.
 aether-refdirector = { workspace = true, features = ["scenario"] }
 # The registry node a REG_KEY reply carries.
 aether-registry.workspace = true
+# The typed client a run plays steps through, and the serve loop the
+# reference adapter answers with.
+aether-rpc.workspace = true
 serde_json.workspace = true
+
+# A named section and its events, on Windows.
+[target.'cfg(windows)'.dependencies]
+aether-win.workspace = true
 
 [dev-dependencies]
 aether-testkit.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

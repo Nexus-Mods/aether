@@ -9,10 +9,21 @@
 //! ([`scenario::load`], [`scenario::load_dir`]). A [`compare::Session`]
 //! decides, step by step, whether a director's answer is the one expected,
 //! allowing only the differences `docs/wire.md` allows.
+//!
+//! The `aether-conform` binary plays scenarios against a director under
+//! test: [`adapter`] is the protocol the director's adapter speaks, [`attach`]
+//! joins the ring the adapter names as the shim would, [`run`] plays and
+//! compares, and [`report`] writes TAP or JSON. [`adapters`] holds the
+//! built-in reference adapter. `docs/conformance.md` is the user's guide.
 
 #![forbid(unsafe_code)]
 
+pub mod adapter;
+pub mod adapters;
+pub mod attach;
 pub mod compare;
+pub mod report;
+pub mod run;
 pub mod scenario;
 
 pub use aether_refdirector::tree;

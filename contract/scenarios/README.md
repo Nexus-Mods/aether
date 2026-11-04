@@ -108,3 +108,5 @@ to search for); there are no others (`crates/aether-conform/src/compare.rs`).
 
 A `one_of` is the only way a scenario allows several answers, and it cites
 its section in `wire`.
+
+To play scenarios against a director, see `docs/conformance.md`.

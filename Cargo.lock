@@ -11,11 +11,17 @@ name = "aether-conform"
 version = "0.1.0"
 dependencies = [
  "aether-casefold",
+ "aether-env",
+ "aether-filering",
+ "aether-ipc",
  "aether-protocol",
  "aether-refdirector",
  "aether-registry",
+ "aether-rpc",
  "aether-testkit",
+ "aether-win",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

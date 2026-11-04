@@ -258,6 +258,9 @@ fn load_dir_loads_every_json_file_in_name_order() {
 
 // ---- comparison ----
 
+/// A request for the steps whose rules do not look at it.
+const HB: OwnedRequest = OwnedRequest::Heartbeat;
+
 fn open_resp(fh: u64, size: u64) -> OwnedReply {
     OwnedReply::Open(OpenResp {
         fh,
@@ -286,29 +289,34 @@ fn handles_scenario() -> aether_conform::scenario::Scenario {
 #[test]
 fn handles_compare_up_to_a_consistent_renaming() {
     let s = handles_scenario();
-    let mut sess = Session::new(&s.steps);
+    let mut sess = Session::new();
     let e = |i: usize| s.steps[i].expect.clone();
-    sess.check(0, &e(0), &Ok(open_resp(7, 3))).unwrap();
-    sess.check(1, &e(1), &Ok(open_resp(9, 3))).unwrap();
+    sess.check(0, &s.steps[0].request, &e(0), &Ok(open_resp(7, 3)))
+        .unwrap();
+    sess.check(1, &s.steps[1].request, &e(1), &Ok(open_resp(9, 3)))
+        .unwrap();
     // The scenario's fh 1 is the director's 7 in a request.
     assert_eq!(
         sess.translate(&s.steps[2].request),
         OwnedRequest::Close { fh: 7 }
     );
-    sess.check(2, &e(2), &Ok(OwnedReply::Empty)).unwrap();
+    sess.check(2, &s.steps[2].request, &e(2), &Ok(OwnedReply::Empty))
+        .unwrap();
     // Closed, 7 may be issued again (wire.md 3.4.3: unique among open handles).
-    sess.check(3, &e(3), &Ok(open_resp(7, 3))).unwrap();
+    sess.check(3, &s.steps[3].request, &e(3), &Ok(open_resp(7, 3)))
+        .unwrap();
 }
 
 #[test]
 fn an_inconsistent_handle_renaming_is_a_mismatch() {
     let s = handles_scenario();
-    let mut sess = Session::new(&s.steps);
+    let mut sess = Session::new();
     let e = |i: usize| s.steps[i].expect.clone();
-    sess.check(0, &e(0), &Ok(open_resp(7, 3))).unwrap();
+    sess.check(0, &s.steps[0].request, &e(0), &Ok(open_resp(7, 3)))
+        .unwrap();
     // Two open handles cannot both be the director's 7.
     let m = sess
-        .check(1, &e(1), &Ok(open_resp(7, 3)))
+        .check(1, &s.steps[1].request, &e(1), &Ok(open_resp(7, 3)))
         .expect_err("fh 7 is already the scenario's fh 1");
     let text = m.to_string();
     assert!(text.contains("step 1") && text.contains('7'), "{text}");
@@ -317,18 +325,28 @@ fn an_inconsistent_handle_renaming_is_a_mismatch() {
 #[test]
 fn a_different_status_or_field_is_a_mismatch_showing_both() {
     let s = handles_scenario();
-    let mut sess = Session::new(&s.steps);
+    let mut sess = Session::new();
     let m = sess
-        .check(0, &s.steps[0].expect, &Err(Status::NotFound))
+        .check(
+            0,
+            &s.steps[0].request,
+            &s.steps[0].expect,
+            &Err(Status::NotFound),
+        )
         .unwrap_err();
     let text = m.to_string();
     assert!(
         text.contains("not-found") && text.contains("size: 3"),
         "{text}"
     );
-    let mut sess = Session::new(&s.steps);
+    let mut sess = Session::new();
     assert!(sess
-        .check(0, &s.steps[0].expect, &Ok(open_resp(7, 4)))
+        .check(
+            0,
+            &s.steps[0].request,
+            &s.steps[0].expect,
+            &Ok(open_resp(7, 4))
+        )
         .is_err());
 }
 
@@ -346,20 +364,22 @@ fn entry(name: &str, size: u64) -> OwnedDirEntry {
 #[test]
 fn listings_compare_as_sets_of_entries() {
     let expected = Expect::Reply(OwnedReply::ReadDir(vec![entry("a", 1), entry("b", 2)]));
-    let mut sess = Session::new(&[]);
+    let mut sess = Session::new();
     let got = |v: Vec<OwnedDirEntry>| Ok(OwnedReply::ReadDir(v));
-    sess.check(0, &expected, &got(vec![entry("b", 2), entry("a", 1)]))
+    sess.check(0, &HB, &expected, &got(vec![entry("b", 2), entry("a", 1)]))
         .unwrap();
-    assert!(sess.check(0, &expected, &got(vec![entry("a", 1)])).is_err());
     assert!(sess
-        .check(0, &expected, &got(vec![entry("a", 1), entry("a", 1)]))
+        .check(0, &HB, &expected, &got(vec![entry("a", 1)]))
         .is_err());
     assert!(sess
-        .check(0, &expected, &got(vec![entry("a", 1), entry("b", 3)]))
+        .check(0, &HB, &expected, &got(vec![entry("a", 1), entry("a", 1)]))
+        .is_err());
+    assert!(sess
+        .check(0, &HB, &expected, &got(vec![entry("a", 1), entry("b", 3)]))
         .is_err());
     // Names are compared as stored (wire.md 3.2), not folded.
     assert!(sess
-        .check(0, &expected, &got(vec![entry("A", 1), entry("b", 2)]))
+        .check(0, &HB, &expected, &got(vec![entry("A", 1), entry("b", 2)]))
         .is_err());
 }
 
@@ -367,7 +387,7 @@ fn listings_compare_as_sets_of_entries() {
 /// and nothing about which time a director reports.
 #[test]
 fn mtimes_are_not_compared() {
-    let mut sess = Session::new(&[]);
+    let mut sess = Session::new();
     let attr = |mtime| {
         OwnedReply::GetAttr(AttrResp {
             found: true,
@@ -376,12 +396,13 @@ fn mtimes_are_not_compared() {
             mtime,
         })
     };
-    sess.check(0, &Expect::Reply(attr(0)), &Ok(attr(1_700_000_000)))
+    sess.check(0, &HB, &Expect::Reply(attr(0)), &Ok(attr(1_700_000_000)))
         .unwrap();
     let mut e = entry("a", 1);
     e.mtime = 42;
     sess.check(
         0,
+        &HB,
         &Expect::Reply(OwnedReply::ReadDir(vec![entry("a", 1)])),
         &Ok(OwnedReply::ReadDir(vec![e])),
     )
@@ -390,29 +411,29 @@ fn mtimes_are_not_compared() {
 
 #[test]
 fn one_of_accepts_any_of_its_answers() {
-    let mut sess = Session::new(&[]);
+    let mut sess = Session::new();
     let e = Expect::OneOf(vec![
         Expect::Reply(OwnedReply::StoredNames("zz".into())),
         Expect::Status(Status::NotFound),
     ]);
-    sess.check(0, &e, &Err(Status::NotFound)).unwrap();
-    sess.check(0, &e, &Ok(OwnedReply::StoredNames("zz".into())))
+    sess.check(0, &HB, &e, &Err(Status::NotFound)).unwrap();
+    sess.check(0, &HB, &e, &Ok(OwnedReply::StoredNames("zz".into())))
         .unwrap();
-    assert!(sess.check(0, &e, &Err(Status::IoError)).is_err());
+    assert!(sess.check(0, &HB, &e, &Err(Status::IoError)).is_err());
 }
 
 /// wire.md 4.3: how far a mounted layer's version starts is the director's,
 /// how it moves is the overlay's. One offset per session, then.
 #[test]
 fn registry_versions_compare_up_to_one_offset() {
-    let mut sess = Session::new(&[]);
+    let mut sess = Session::new();
     let v = |n| Expect::Reply(OwnedReply::RegVersion(n));
-    sess.check(0, &v(3), &Ok(OwnedReply::RegVersion(10)))
+    sess.check(0, &HB, &v(3), &Ok(OwnedReply::RegVersion(10)))
         .unwrap();
-    sess.check(1, &v(4), &Ok(OwnedReply::RegVersion(11)))
+    sess.check(1, &HB, &v(4), &Ok(OwnedReply::RegVersion(11)))
         .unwrap();
     assert!(sess
-        .check(2, &v(5), &Ok(OwnedReply::RegVersion(13)))
+        .check(2, &HB, &v(5), &Ok(OwnedReply::RegVersion(13)))
         .is_err());
     let since = OwnedRequest::RegChanged {
         path: r"\Registry\Machine".into(),
@@ -450,10 +471,13 @@ fn immutable_is_the_directors_except_on_a_write_open() {
             ..Default::default()
         }))
     };
-    let mut sess = Session::new(&s.steps);
-    sess.check(0, &s.steps[0].expect, &imm(5)).unwrap();
-    let mut sess = Session::new(&s.steps);
-    assert!(sess.check(1, &s.steps[1].expect, &imm(5)).is_err());
+    let mut sess = Session::new();
+    sess.check(0, &s.steps[0].request, &s.steps[0].expect, &imm(5))
+        .unwrap();
+    let mut sess = Session::new();
+    assert!(sess
+        .check(1, &s.steps[1].request, &s.steps[1].expect, &imm(5))
+        .is_err());
 }
 
 #[test]
@@ -489,4 +513,118 @@ fn the_readmes_example_loads() {
     std::fs::write(&p, &readme[start..end]).unwrap();
     let s = load(&p).unwrap_or_else(|e| panic!("{e}"));
     assert!(!s.steps.is_empty());
+}
+
+/// A use-after-close goes to the director with the number it closed, so
+/// the step tests that handle and not some other one.
+#[test]
+fn a_closed_handle_is_sent_as_the_directors_old_number() {
+    let s = handles_scenario();
+    let mut sess = Session::new();
+    let e = |i: usize| s.steps[i].expect.clone();
+    sess.check(0, &s.steps[0].request, &e(0), &Ok(open_resp(7, 3)))
+        .unwrap();
+    sess.check(1, &s.steps[1].request, &e(1), &Ok(open_resp(9, 3)))
+        .unwrap();
+    sess.check(2, &s.steps[2].request, &e(2), &Ok(OwnedReply::Empty))
+        .unwrap();
+    let read = OwnedRequest::Read {
+        slot_flags: RequestFlags::empty(),
+        fh: 1,
+        offset: 0,
+        len: 3,
+    };
+    let OwnedRequest::Read { fh, .. } = sess.translate(&read) else {
+        panic!("read");
+    };
+    assert_eq!(fh, 7);
+    sess.check(
+        4,
+        &read,
+        &Expect::Status(Status::BadFh),
+        &Err(Status::BadFh),
+    )
+    .unwrap();
+    // Once the director issues 7 again, the scenario's closed 1 must not
+    // reach the new open: it goes to a number no open handle has.
+    sess.check(3, &s.steps[3].request, &e(3), &Ok(open_resp(7, 3)))
+        .unwrap();
+    let OwnedRequest::Read { fh, .. } = sess.translate(&read) else {
+        panic!("read");
+    };
+    assert!(fh != 7 && fh != 9, "{fh}");
+}
+
+/// A number no OPEN paired is sent as one no open handle of the director
+/// has, the same one each time.
+#[test]
+fn a_never_paired_handle_is_sent_as_a_number_no_open_handle_has() {
+    let s = handles_scenario();
+    let mut sess = Session::new();
+    // The director's first handle is u64::MAX, which a naive substitute
+    // would collide with.
+    sess.check(
+        0,
+        &s.steps[0].request,
+        &s.steps[0].expect,
+        &Ok(open_resp(u64::MAX, 3)),
+    )
+    .unwrap();
+    let close = |fh| OwnedRequest::Close { fh };
+    let a = sess.translate(&close(99));
+    let b = sess.translate(&close(99));
+    assert_eq!(a, b);
+    let OwnedRequest::Close { fh } = a else {
+        panic!("close")
+    };
+    assert!(fh != u64::MAX && fh != 99, "{fh}");
+    assert_ne!(sess.translate(&close(98)), a);
+}
+
+/// `Status::name()` is `contract/protocol.json`'s name for every status, so
+/// a scenario's status names are the table's.
+#[test]
+fn status_names_are_the_protocol_tables() {
+    let table: Value = serde_json::from_slice(
+        &std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contract/protocol.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let theirs: Vec<(String, i64)> = table["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["number"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    let ours: Vec<(String, i64)> = Status::ALL
+        .iter()
+        .map(|s| (s.name().to_string(), i64::from(s.code())))
+        .collect();
+    assert_eq!(ours, theirs);
+}
+
+#[test]
+fn a_registry_key_the_overlay_refuses_is_a_load_error_naming_the_tree() {
+    let dir = aether_testkit::tempdir().unwrap();
+    for keys in [
+        json!([{"path": r"\Nope"}]),
+        json!([{"path": r"\Registry\Machine\T", "values": [{"name": "v", "ty": 3, "data": {"size": 1048577}}]}]),
+        json!([{"path": r"\Registry\Machine\T", "volatile": true},
+               {"path": r"\Registry\Machine\t", "volatile": false}]),
+    ] {
+        let mut v = scenario(json!([heartbeat_ok()]));
+        v["tree"]["registry"] = json!({"keys": keys});
+        let e = load(&write(dir.path(), "r.json", &v))
+            .expect_err("must not load")
+            .to_string();
+        assert!(e.contains("r.json") && e.contains(": tree:"), "{keys}: {e}");
+    }
 }

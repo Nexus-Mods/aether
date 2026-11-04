@@ -30,10 +30,8 @@
 //! directory too. Without `registry` the session has no registry layer and
 //! every registry opcode is `Status::NotSupported` (wire.md 4).
 
-use std::collections::BTreeSet;
-
-use aether_protocol::Status;
 use aether_rpc::Director;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::reference::{ReadStyle, Reference, MAX_FILE_LEN};
 
@@ -281,9 +279,11 @@ impl Reference {
     /// mount of a layer sets it; how far is the director's business
     /// (`contract/scenarios/README.md`).
     ///
-    /// Panics if the tree's registry keys cannot be created or valued (a
-    /// path the overlay refuses); [`Tree::validate`] checks the rest.
-    pub fn from_tree(tree: &Tree) -> Reference {
+    /// An error, naming the key or value, if the overlay refuses one of
+    /// the tree's registry keys or values (a path that is not canonical, a
+    /// name or data past wire.md 4.1's limits), or if a key is listed twice
+    /// with different `volatile`. [`Tree::validate`] checks the rest.
+    pub fn from_tree(tree: &Tree) -> Result<Reference, String> {
         let mut d = Reference::new();
         for r in &tree.roots {
             d = d.with_root(r.id);
@@ -307,24 +307,37 @@ impl Reference {
             let mut keys: Vec<&RegKey> = reg.keys.iter().collect();
             // Parents first, so a parent's own flags are the tree's.
             keys.sort_by_key(|k| k.path.split('\\').count());
+            let mut seen: BTreeMap<String, (&str, bool)> = BTreeMap::new();
             for k in keys {
-                match d.reg_create_key(&k.path, k.volatile) {
-                    Ok(_) | Err(Status::Exists) => {}
-                    Err(st) => panic!("tree registry key {:?}: {}", k.path, st.name()),
+                let folded = aether_casefold::fold(&k.path);
+                if let Some(&(first, volatile)) = seen.get(&folded) {
+                    if volatile != k.volatile {
+                        return Err(format!(
+                            "registry key {:?}: listed again as {first:?} with a different \
+                             volatile",
+                            k.path
+                        ));
+                    }
+                } else {
+                    seen.insert(folded, (&k.path, k.volatile));
+                    d.reg_create_key(&k.path, k.volatile).map_err(|st| {
+                        format!("registry key {:?}: refused, {}", k.path, st.name())
+                    })?;
                 }
                 for v in &k.values {
-                    if let Err(st) = d.reg_set_value(&k.path, &v.name, v.ty, &v.data.bytes()) {
-                        panic!(
-                            "tree registry value {:?} of {:?}: {}",
-                            v.name,
-                            k.path,
-                            st.name()
-                        );
-                    }
+                    d.reg_set_value(&k.path, &v.name, v.ty, &v.data.bytes())
+                        .map_err(|st| {
+                            format!(
+                                "registry value {:?} of {:?}: refused, {}",
+                                v.name,
+                                k.path,
+                                st.name()
+                            )
+                        })?;
                 }
             }
         }
-        d
+        Ok(d)
     }
 }
 

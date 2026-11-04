@@ -57,7 +57,7 @@ fn tree() -> Tree {
 
 #[test]
 fn getattr_and_read_answer_the_trees_files_with_their_bytes() {
-    let mut d = Reference::from_tree(&tree());
+    let mut d = Reference::from_tree(&tree()).unwrap();
     let a = d.get_attr(RootId(0), "data/a.esp").unwrap();
     assert!(a.found && !a.is_dir);
     assert_eq!(a.size, 5);
@@ -72,7 +72,7 @@ fn getattr_and_read_answer_the_trees_files_with_their_bytes() {
 
 #[test]
 fn a_files_ancestors_and_the_named_directories_are_directories() {
-    let mut d = Reference::from_tree(&tree());
+    let mut d = Reference::from_tree(&tree()).unwrap();
     for p in ["data", "data/sub", "empty"] {
         let a = d.get_attr(RootId(0), p).unwrap();
         assert!(a.found && a.is_dir, "{p}");
@@ -92,7 +92,7 @@ fn a_files_ancestors_and_the_named_directories_are_directories() {
 
 #[test]
 fn writes_stick_only_under_a_writable_prefix() {
-    let mut d = Reference::from_tree(&tree());
+    let mut d = Reference::from_tree(&tree()).unwrap();
     let w = OpenFlags::WRITE | OpenFlags::CREATE;
     assert!(d.open(RootId(0), w, "saves/s1.sav").is_ok());
     assert_eq!(
@@ -123,7 +123,7 @@ fn a_tree_with_a_registry_serves_its_keys_and_values() {
             }],
         }],
     });
-    let mut d = Reference::from_tree(&t);
+    let mut d = Reference::from_tree(&t).unwrap();
     let k = d.reg_key(r"\Registry\Machine\Software\Cairn").unwrap();
     let node = k.node.expect("a node for the tree's key");
     assert_eq!(node.values.len(), 1);
@@ -131,7 +131,23 @@ fn a_tree_with_a_registry_serves_its_keys_and_values() {
     assert_eq!(node.values[0].data, b"C:\\x");
     // Without a registry in the tree there is no registry layer.
     assert_eq!(
-        Reference::from_tree(&tree()).reg_lookup(r"\Registry\Machine"),
+        Reference::from_tree(&tree())
+            .unwrap()
+            .reg_lookup(r"\Registry\Machine"),
         Err(Status::NotSupported)
     );
+}
+
+#[test]
+fn a_registry_key_the_overlay_refuses_is_an_error_not_a_panic() {
+    let mut t = tree();
+    t.registry = Some(Registry {
+        keys: vec![RegKey {
+            path: r"\Nope".into(),
+            volatile: false,
+            values: vec![],
+        }],
+    });
+    let e = Reference::from_tree(&t).err().expect("refused");
+    assert!(e.contains("Nope"), "{e}");
 }

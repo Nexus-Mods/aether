@@ -564,6 +564,8 @@ and out-of-range values.
 **Timestamps.** `mtime` is seconds since the Unix epoch, signed; 0 or less
 means "no time" and the shim substitutes 2024-01-01T00:00:00Z
 (`crates/aether-ntlayout/src/dirinfo.rs`, `filetime_of`, `SYNTH_FILETIME`).
+Which time a director reports for a path, if any, is the director's to choose:
+the shim checks no time it is sent.
 
 ### 3.3 Opcode table
 
@@ -683,6 +685,7 @@ over it is `EnumState`, `crates/aether-hooks/src/hook/dirquery.rs`), apart from
 dropping old `<name>.__vfs_wh__` whiteout markers. It adds no `.` or `..`
 entries, so a director should not include them either; it does not sort or
 otherwise interpret the order, so the program sees entries in the order sent.
+A director may send the entries in any order.
 `size` is copied into both `EndOfFile` and `AllocationSize` of the NT
 directory record for every entry, directories included
 (`crates/aether-ntlayout/src/dirinfo.rs`, `write_dir_info`); send 0 for a
@@ -1029,6 +1032,11 @@ included) (`crates/aether-hooks/src/regwrite.rs`).
 
 Every reply starts with `version:u64`, the overlay's version after (or at) the
 operation.
+The number a director's overlay starts from when it mounts a layer is the
+director's (part of the persisted layer, `Overlay::set_version`), so two
+directors serving one layer may number its versions apart by a constant, and a
+REG_CHANGED `since` is in the numbering of the director it is sent to; how the
+version moves from one operation to the next is the overlay's (below).
 
 | # | Op | Request | Reply |
 |---:|---|---|---|

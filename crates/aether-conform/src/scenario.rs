@@ -639,6 +639,9 @@ fn parse_scenario(v: &Value) -> R<Scenario> {
     let tree: Tree =
         serde_json::from_value(tree_v.clone()).map_err(|e| o.bad("tree", e.to_string()))?;
     tree.validate().map_err(|e| o.bad("tree", e))?;
+    // A trial mount: what only the registry overlay can refuse (a key path,
+    // a name or data past its limits) is a load error, not a failed run.
+    aether_refdirector::Reference::from_tree(&tree).map_err(|e| o.bad("tree", e))?;
     let steps_v = o.get("steps")?;
     let list = steps_v
         .as_array()

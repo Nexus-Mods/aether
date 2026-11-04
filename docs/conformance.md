@@ -47,6 +47,18 @@ For every scenario, and for each generated case and the malformed part:
   slot_count`"); and when `VFS_ARENA_OFFSET` is given the arena lies inside
   the mapping (2.6: "Every arena byte must lie inside the first
   `VFS_RING_BYTES` bytes of the mapping").
+- **What the environment says of the tree** (`attach::against_tree`), which
+  fails the scenario (its `error` begins "the mount's environment"):
+  `VFS_REGISTRY` is affirmative exactly when the tree has a registry layer
+  (5.3: "Set to `1` only while a registry layer is attached; otherwise
+  remove it"); every root of the tree is declared, root 0 by
+  `VFS_VIRTUAL_DIR` and the others by `VFS_VIRTUAL_ROOTS` as the shim reads
+  it, no two at one path (3.2, 5.3: a root the shim is not told of is never
+  routed, and the program's files there go to the real disk); a
+  `VFS_SHIM_CONFIG` the mount names decodes as the shim decodes it and its
+  `root` is root 0's (5.1); and no value is one of the stale session's the
+  run leaves in the adapter's own environment ("The adapter protocol"
+  below; 5.2: "A launch sets or removes every one of these").
 - **A HEARTBEAT on attach**, as the shim sends one once it has connected.
 - **Every step's answer**: the status, and on `ok` every reply field, equal
   to the step's expectation except where wire.md lets directors differ
@@ -114,9 +126,10 @@ warns on a hint of 0 or above the slot count), how quickly a director wakes
 injector (6), a
 process killed while it holds a slot (a slot left `CLAIMED` is lost to the
 ring, and wire.md says nothing to recover it), and the read cache's rule
-(3.4.3) across a remount, which no scenario makes. The handshake variables a
-run does not use (`VFS_VIRTUAL_ROOTS`, `VFS_REGISTRY` and the rest) are not
-checked against the tree.
+(3.4.3) across a remount, which no scenario makes. A TRANSPORT name a
+launch should remove is seen only if the adapter reports the launch's value
+for it: an adapter that reports only what it sets hides a stale one it
+passes on.
 
 ## The scenarios
 
@@ -509,8 +522,17 @@ its stdout, never two requests at once.
   every value a string. At least the ring (`VFS_RING_PATH`, or
   `VFS_RING_SECTION` with `VFS_SERVER_EV` and `VFS_CLIENT_EV`),
   `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_LEN` (and
-  `VFS_ARENA_OFFSET`) for bulk reads, and `VFS_VIRTUAL_DIR`. A refusal
-  (`"ok":false`) fails that scenario and the run goes on.
+  `VFS_ARENA_OFFSET`) for bulk reads, and `VFS_VIRTUAL_DIR`;
+  `VFS_VIRTUAL_ROOTS` for a tree with other roots and `VFS_REGISTRY` for one
+  with a registry layer. It may give `VFS_SHIM_CONFIG`, the path of the
+  `shim.cfg` its director writes for the launch (5.1; the injector passes it
+  on), which the run then decodes. A refusal (`"ok":false`) fails that
+  scenario and the run goes on.
+- The run starts the adapter with a stale session's TRANSPORT variables in
+  its environment (every name of 5.2's table but `VFS_REGISTRY`, with values
+  like `aether-conform-stale-VFS_RING_SECTION` and `7`,
+  `aether_conform::adapter::stale`). A mount answer that holds one passed it
+  on, as a launch built on the director's own environment would.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed

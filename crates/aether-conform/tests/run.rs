@@ -1046,3 +1046,68 @@ fn a_director_moving_reg_gen_before_the_write_fails_the_reader() {
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("wire.md 4.5"), "{notes:?}");
 }
+
+// ---------------------------------------------------------------------------
+// What a mount's environment says of its tree (`attach::against_tree`).
+
+/// The committed suite against `test-adapter --misbehave <how>`: the
+/// scenarios that failed, each with its error, every failure having one
+/// that names `cite`.
+fn environment_failures(how: &str, cite: &str) -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let (code, entries, _, all) =
+        run_json(&format!("test-adapter --misbehave {how}"), &dir, "20", &[]);
+    assert_eq!(code, Some(1), "{all}");
+    let failed: Vec<&Entry> = entries.iter().filter(|e| !e.1).collect();
+    for e in &failed {
+        let error = e.2.as_deref().unwrap_or("");
+        assert!(error.contains("the mount's environment"), "{e:?}");
+        assert!(error.contains(cite), "{e:?}");
+        assert!(e.3.is_empty(), "only the environment fails: {e:?}");
+    }
+    failed.iter().map(|e| e.0.clone()).collect()
+}
+
+/// wire.md 5.3: `VFS_REGISTRY` is set while a registry layer is attached. A
+/// director that leaves it out fails every scenario whose tree has a
+/// registry, and no other.
+#[test]
+fn a_mount_without_vfs_registry_for_a_registry_fails_those_scenarios() {
+    let failed = environment_failures("no-registry-env", "VFS_REGISTRY");
+    assert!(
+        failed.contains(&"registry-values".to_string()),
+        "{failed:?}"
+    );
+    assert!(
+        failed.contains(&"multi-registry-gen".to_string()),
+        "{failed:?}"
+    );
+    for name in &failed {
+        assert!(name.contains("registry"), "{failed:?}");
+    }
+    assert!(!failed.contains(&"registry-none".to_string()), "{failed:?}");
+}
+
+/// wire.md 3.2 and 5.3: every root served is declared. A director that
+/// leaves `VFS_VIRTUAL_ROOTS` out fails the scenarios with a root besides 0.
+#[test]
+fn a_mount_not_declaring_its_roots_fails_the_scenarios_with_several() {
+    let failed = environment_failures("undeclared-roots", "wire.md 3.2, 5.3");
+    assert!(failed.contains(&"roots-isolated".to_string()), "{failed:?}");
+    assert!(!failed.contains(&"heartbeat".to_string()), "{failed:?}");
+}
+
+/// wire.md 5.1: a shim.cfg with a byte after its table fails every mount.
+#[test]
+fn a_shim_cfg_that_does_not_decode_fails_every_mount() {
+    let failed = environment_failures("bad-shim-cfg", "wire.md 5.1");
+    assert!(failed.contains(&"heartbeat".to_string()), "{failed:?}");
+}
+
+/// wire.md 5.2: a launch sets or removes every TRANSPORT name. A director
+/// that passes on its own environment's fails every mount.
+#[test]
+fn a_mount_passing_on_a_stale_session_fails_every_mount() {
+    let failed = environment_failures("inherit-env", "wire.md 5.2");
+    assert!(failed.contains(&"heartbeat".to_string()), "{failed:?}");
+}

@@ -221,7 +221,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
         // wire.md 2.5: the shim gives up on a request after
         // RESPONSE_DEADLINE, 60 s.
         eprintln!(
-            "aether-conform: warning: --timeout {} s is longer than the shim waits for an              answer (60 s, wire.md 2.5, RESPONSE_DEADLINE): a director this run accepts may              still be one the shim gives up on",
+            "aether-conform: warning: --timeout {} s is longer than the shim waits for an \
+             answer (60 s, wire.md 2.5, RESPONSE_DEADLINE): a director this run accepts may \
+             still be one the shim gives up on",
             timeout.as_secs_f64()
         );
     }

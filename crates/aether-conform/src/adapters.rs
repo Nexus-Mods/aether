@@ -116,6 +116,21 @@ pub enum Break {
     /// read before asking, so the new generation must not come before the
     /// write).
     BumpBeforeWrite,
+    /// `VFS_REGISTRY` is left out of the mount's environment though the tree
+    /// has a registry layer (wire.md 5.3: set to 1 while a layer is
+    /// attached; 4: the shim sends no registry request without it).
+    NoRegistryEnv,
+    /// `VFS_VIRTUAL_ROOTS` is left out, so roots other than 0 are served but
+    /// never declared (wire.md 3.2, 5.3).
+    UndeclaredRoots,
+    /// The shim.cfg written has a byte after its table (wire.md 5.1:
+    /// "Nothing may follow the table").
+    BadShimCfg,
+    /// Every TRANSPORT name the adapter does not set itself is passed on
+    /// from its own environment, as a launch built on the director's
+    /// environment would pass a stale session's on (wire.md 5.2: a launch
+    /// sets or removes every one).
+    InheritEnv,
 }
 
 impl Break {
@@ -136,6 +151,10 @@ impl Break {
             "late-bank" => Some(Break::LateBank),
             "complete-abandoned" => Some(Break::CompleteAbandoned),
             "bump-before-write" => Some(Break::BumpBeforeWrite),
+            "no-registry-env" => Some(Break::NoRegistryEnv),
+            "undeclared-roots" => Some(Break::UndeclaredRoots),
+            "bad-shim-cfg" => Some(Break::BadShimCfg),
+            "inherit-env" => Some(Break::InheritEnv),
             _ => None,
         }
     }
@@ -181,6 +200,8 @@ struct Mounted {
     threads: Vec<JoinHandle<Result<(), IpcError>>>,
     backing: Arc<dyn RingBacking>,
     file: Option<PathBuf>,
+    /// The shim.cfg written for the mount.
+    cfg: PathBuf,
     env: Env,
 }
 
@@ -192,6 +213,7 @@ impl Mounted {
         if let Some(f) = &self.file {
             let _ = std::fs::remove_file(f);
         }
+        let _ = std::fs::remove_file(&self.cfg);
         for s in served {
             match s {
                 Ok(Ok(())) => {}
@@ -270,17 +292,38 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
         .filter(|r| r.id != 0)
         .map(|r| format!("{}={}", r.id, root(r.id)))
         .collect();
-    if !extra.is_empty() {
+    if !extra.is_empty() && broken != Some(Break::UndeclaredRoots) {
         env.insert(aether_env::VIRTUAL_ROOTS.into(), extra.join(";"));
     }
-    if s.tree.registry.is_some() {
+    if s.tree.registry.is_some() && broken != Some(Break::NoRegistryEnv) {
         env.insert(aether_env::REGISTRY.into(), "1".into());
+    }
+    // The shim.cfg a launch would hand the injector (wire.md 5.1): root 0,
+    // no static imports.
+    let cfg = std::env::temp_dir().join(format!("{}.cfg", unique("shimcfg")));
+    let mut bytes = aether_protocol::shimcfg::encode_config(&root(0));
+    if broken == Some(Break::BadShimCfg) {
+        bytes.push(0);
+    }
+    std::fs::write(&cfg, &bytes).map_err(|e| format!("write {}: {e}", cfg.display()))?;
+    env.insert(
+        aether_env::SHIM_CONFIG.into(),
+        cfg.to_string_lossy().into_owned(),
+    );
+    if broken == Some(Break::InheritEnv) {
+        // What a launch built on the director's own environment passes on.
+        for &name in aether_env::handshake::TRANSPORT {
+            if let (false, Ok(v)) = (env.contains_key(name), std::env::var(name)) {
+                env.insert(name.into(), v);
+            }
+        }
     }
     Ok(Mounted {
         stop,
         threads,
         backing,
         file,
+        cfg,
         env,
     })
 }

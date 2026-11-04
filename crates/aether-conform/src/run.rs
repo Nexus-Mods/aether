@@ -274,6 +274,15 @@ fn one(
             if let Err(e) = play(&ring, &env, timeout, s, &mut out.steps) {
                 out.error = Some(format!("{}: {e}", ring.describe()));
             }
+            // What the environment says of the tree, beyond what attaching
+            // needs (`attach::against_tree`).
+            if let Err(e) = crate::attach::against_tree(&env, &s.tree) {
+                let e = format!("the mount's environment: {e}");
+                out.error = Some(match out.error.take() {
+                    Some(before) => format!("{before}; {e}"),
+                    None => e,
+                });
+            }
             // Detached before the unmount, so the adapter can remove the
             // ring (a mapped file cannot be removed on Windows).
             drop(ring);

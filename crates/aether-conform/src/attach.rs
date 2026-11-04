@@ -350,6 +350,117 @@ pub fn shim_roots(env: &Env) -> Result<(), String> {
         })
 }
 
+/// What a mount's environment must say about the tree it mounted, beyond
+/// what attaching needs: why it does not, one reason per rule broken.
+///
+/// - **`VFS_REGISTRY`** is affirmative (an opt-in: `1`, `true`, `yes`, `on`)
+///   exactly when the tree has a registry layer (wire.md 5.3: "Set to `1`
+///   only while a registry layer is attached; otherwise remove it"; 4: the
+///   shim sends registry requests only when it is affirmative).
+/// - **Every root the tree serves is declared**: root 0 by
+///   `VFS_VIRTUAL_DIR`, every other by an entry of `VFS_VIRTUAL_ROOTS`, as
+///   the shim reads them (`merge_extra_roots`), and no two at one path
+///   (wire.md 3.2: "Root 0 is `VFS_VIRTUAL_DIR`; others come from
+///   `VFS_VIRTUAL_ROOTS`"; 5.3). A root the shim is not told of is never
+///   routed: the program's files there go to the real disk.
+/// - **`shim.cfg`**, when the mount names it (`VFS_SHIM_CONFIG`), decodes
+///   (`aether_protocol::decode_config`: magic `VFSC`, version 2, nothing
+///   after the table) and its `root` is root 0's path (wire.md 5.1: "Write
+///   `root` as root 0"; any decoding error fails the shim's load).
+/// - **Nothing stale**: no value is the one the run planted in the adapter's
+///   own environment ([`crate::adapter::stale`]): wire.md 5.2, "A launch
+///   sets or removes every one of these, so nothing inherited from an
+///   earlier session reaches the child".
+pub fn against_tree(env: &Env, tree: &aether_refdirector::tree::Tree) -> Result<(), String> {
+    let get = |k: &str| env.get(k).map(String::as_str);
+    let mut why = Vec::new();
+    let registry = get(aether_env::REGISTRY)
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    match (tree.registry.is_some(), registry) {
+        (true, false) => why.push(format!(
+            "the tree has a registry layer but {} is {:?}: the shim would send no registry \
+             request (wire.md 4, 5.3: set to 1 while a registry layer is attached)",
+            aether_env::REGISTRY,
+            get(aether_env::REGISTRY)
+        )),
+        (false, true) => why.push(format!(
+            "the tree has no registry layer but {} is {:?}: every registry write the program \
+             makes would fail (wire.md 5.3: otherwise remove it)",
+            aether_env::REGISTRY,
+            get(aether_env::REGISTRY)
+        )),
+        _ => {}
+    }
+    let declared = merge_extra_roots(
+        get(aether_env::VIRTUAL_DIR).unwrap_or_default(),
+        get(aether_env::VIRTUAL_ROOTS),
+    );
+    let mut paths: Vec<(u32, String)> = Vec::new();
+    for root in &tree.roots {
+        match declared.iter().find(|(id, _)| id.0 == root.id) {
+            None => why.push(format!(
+                "root {} is served but {} does not declare it ({:?}), so the shim never routes \
+                 its paths (wire.md 3.2, 5.3)",
+                root.id,
+                aether_env::VIRTUAL_ROOTS,
+                get(aether_env::VIRTUAL_ROOTS)
+            )),
+            Some((_, p)) => {
+                let folded = normalize_path_for_root(p)
+                    .trim_end_matches('\\')
+                    .to_string();
+                if let Some((other, _)) = paths.iter().find(|(_, q)| *q == folded) {
+                    why.push(format!(
+                        "roots {other} and {} are both declared at {p:?} (wire.md 3.2: each \
+                         root is a path of its own)",
+                        root.id
+                    ));
+                }
+                paths.push((root.id, folded));
+            }
+        }
+    }
+    if let Some(cfg) = get(aether_env::SHIM_CONFIG) {
+        match std::fs::read(cfg) {
+            Err(e) => why.push(format!(
+                "{}={cfg} cannot be read: {e} (wire.md 5.1)",
+                aether_env::SHIM_CONFIG
+            )),
+            Ok(bytes) => match aether_protocol::shimcfg::decode_config(&bytes) {
+                Err(e) => why.push(format!(
+                    "{}={cfg} does not decode: {e:?} (wire.md 5.1: the shim fails its load with \
+                     bootstrap-failed)",
+                    aether_env::SHIM_CONFIG
+                )),
+                Ok(c) => {
+                    let root0 = get(aether_env::VIRTUAL_DIR).unwrap_or_default();
+                    if normalize_path_for_root(&c.root) != normalize_path_for_root(root0) {
+                        why.push(format!(
+                            "{cfg}'s root is {:?}, not root 0's {root0:?} (wire.md 5.1: \
+                             \"Write `root` as root 0\")",
+                            c.root
+                        ));
+                    }
+                }
+            },
+        }
+    }
+    for (name, stale) in crate::adapter::stale() {
+        if get(name) == Some(stale.as_str()) {
+            why.push(format!(
+                "{name} is {stale:?}, the value the run left in the adapter's own environment: a \
+                 launch inherits it (wire.md 5.2: a launch sets or removes every TRANSPORT name, \
+                 so nothing inherited from an earlier session reaches the child)"
+            ));
+        }
+    }
+    if why.is_empty() {
+        Ok(())
+    } else {
+        Err(why.join("; "))
+    }
+}
+
 /// `director.rs`, `merge_extra_roots`.
 fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
     let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];

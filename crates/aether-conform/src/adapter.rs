@@ -77,6 +77,32 @@ pub struct Adapter {
     timeout: Duration,
 }
 
+/// The handshake variables of a stale session that a run leaves in its
+/// adapter's environment, as a director's own environment may hold them from
+/// an earlier launch: every TRANSPORT name (wire.md 5.2) but `VFS_REGISTRY`,
+/// with a value no director gives (`attach::against_tree` checks
+/// `VFS_REGISTRY` against the tree instead). A mount answer holding one of
+/// them passed it on.
+pub fn stale() -> Vec<(&'static str, String)> {
+    aether_env::handshake::TRANSPORT
+        .iter()
+        .filter(|&&n| n != aether_env::REGISTRY)
+        .map(|&n| {
+            let v = match n {
+                aether_env::RING_BYTES
+                | aether_env::RING_PAYLOAD_CAP
+                | aether_env::ARENA_OFFSET
+                | aether_env::ARENA_LEN => "7".to_string(),
+                aether_env::VIRTUAL_ROOTS | aether_env::ROOT_BACKINGS => {
+                    "9=aether-conform-stale".to_string()
+                }
+                n => format!("aether-conform-stale-{n}"),
+            };
+            (n, v)
+        })
+        .collect()
+}
+
 impl Adapter {
     /// Starts `command_line` ([`split_command_line`]) with piped stdio.
     /// `timeout` bounds every answer.
@@ -90,6 +116,12 @@ impl Adapter {
         };
         let mut cmd = Command::new(program);
         cmd.args(args);
+        // A stale session's handshake, which a launch must not pass on
+        // (wire.md 5.2); `attach::against_tree` fails a mount whose answer
+        // has any of it.
+        for (name, value) in stale() {
+            cmd.env(name, value);
+        }
         Adapter::spawn(cmd, program, timeout)
     }
 

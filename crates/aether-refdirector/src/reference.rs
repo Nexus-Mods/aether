@@ -36,6 +36,10 @@
 //! `OpenFlags::EXCL`). DELETE, RENAME, RENAME_X and MKDIR refuse the same
 //! way, so a test of a
 //! sealed path cannot pass because the director said yes to everything.
+//! WRITE and SETATTR through a read handle on a file outside every writable
+//! prefix are `Status::ReadOnly` too, so such a file never changes, and a
+//! read open of one is answered `immutable` (wire.md 3.4.3), which lets the
+//! shim's read cache hold it.
 //!
 //! **Roots.** Root 0's files are keyed by their bare vpath; any other root's
 //! by `@<id>/<vpath>` ([`key`]). A request that lost its root then finds the
@@ -906,11 +910,20 @@ impl Director for Reference {
         let size = e.bytes.len() as u64;
         drop(files);
         drop(dirs);
+        // A read open of a file a read-only provider holds is immutable
+        // (wire.md 3.4.3): nothing the reference serves changes it (a write
+        // open, DELETE, RENAME, RENAME_X and MKDIR of it are refused, and so
+        // are WRITE and SETATTR through the read handle), and
+        // the reference never replaces a root's content, so `mount_gen`
+        // stays 0. Never on a write open, a directory, or a file the
+        // writable provider holds.
+        let immutable = !write && !g.is_writable(&vpath);
         let fh = g.issue(vpath, append, &self.tally);
         Ok(OpenResp {
             fh,
             size,
             is_dir: false,
+            immutable,
             ..Default::default()
         })
     }
@@ -980,6 +993,11 @@ impl Director for Reference {
         if self.graph.is_dir(&vpath) {
             return Err(Status::IsDir);
         }
+        // Only a read open reaches a file no writable provider holds, and
+        // its bytes stay as they are: OPEN called them immutable.
+        if !self.graph.is_writable(&vpath) {
+            return Err(Status::ReadOnly);
+        }
         let mut files = self.graph.files.lock().unwrap();
         let Some(e) = files.get_mut(&vpath) else {
             return Err(Status::NotFound);
@@ -1004,6 +1022,9 @@ impl Director for Reference {
         };
         if self.graph.is_dir(&vpath) {
             return Err(Status::IsDir);
+        }
+        if !self.graph.is_writable(&vpath) {
+            return Err(Status::ReadOnly);
         }
         if size > MAX_FILE_LEN as u64 {
             return Err(Status::NoSpace);

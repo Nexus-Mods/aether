@@ -129,6 +129,33 @@ fn read_dir_lists_immediate_children_sorted_whiteouts_included() {
     assert_eq!(listing(&mut d, R0, "missing"), vec![]);
 }
 
+/// wire.md 3.4.3: `immutable` on a read open of a file a read-only provider
+/// holds, whose bytes nothing changes; never on a write open, a directory,
+/// or a file under a writable prefix.
+#[test]
+fn only_a_read_open_of_a_read_only_file_is_immutable() {
+    let mut d = Reference::new()
+        .with("data/a.esp", b"abc".to_vec(), ReadStyle::Whole)
+        .with("saves/s.sav", b"s".to_vec(), ReadStyle::Whole)
+        .with_dir("data/sub")
+        .writable_under("saves/");
+    let imm = |d: &mut Reference, flags, path| d.open(R0, flags, path).unwrap().immutable;
+    assert!(imm(&mut d, OpenFlags::READ, "data/a.esp"));
+    assert!(!imm(&mut d, OpenFlags::READ, "data/sub"));
+    assert!(!imm(&mut d, OpenFlags::READ, "saves/s.sav"));
+    assert!(!imm(&mut d, OpenFlags::WRITE, "saves/s.sav"));
+    assert!(!imm(
+        &mut d,
+        OpenFlags::WRITE | OpenFlags::CREATE,
+        "saves/new.sav"
+    ));
+    // Nor can the read handle change the read-only file.
+    let fh = d.open(R0, OpenFlags::READ, "data/a.esp").unwrap().fh;
+    assert_eq!(d.write(fh, 0, b"x"), Err(Status::ReadOnly));
+    assert_eq!(d.set_attr(fh, 0), Err(Status::ReadOnly));
+    assert_eq!(d.contents("data/a.esp"), Some(b"abc".to_vec()));
+}
+
 #[test]
 fn open_for_read_issues_handles_and_records_the_wire_spelling() {
     let mut d = Reference::new()
@@ -141,6 +168,7 @@ fn open_for_read_issues_handles_and_records_the_wire_spelling() {
             fh: 1,
             size: 10,
             is_dir: false,
+            immutable: true,
             ..Default::default()
         }
     );

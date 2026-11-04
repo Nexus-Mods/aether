@@ -259,6 +259,8 @@ fn malformed_requests_against_the_reference_pass_on_a_named_section() {
         "8",
         "--seed",
         "3",
+        "--failures",
+        tmp.path().join("failures").to_str().unwrap(),
     ]);
     let out = stdout(&o);
     assert_eq!(o.status.code(), Some(0), "{out}\n{}", stderr(&o));

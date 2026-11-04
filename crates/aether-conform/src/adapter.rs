@@ -77,6 +77,32 @@ pub struct Adapter {
     timeout: Duration,
 }
 
+/// The handshake variables of a stale session that a run leaves in its
+/// adapter's environment, as a director's own environment may hold them from
+/// an earlier launch: every TRANSPORT name (wire.md 5.2) but `VFS_REGISTRY`,
+/// with a value no director gives (`attach::against_tree` checks
+/// `VFS_REGISTRY` against the tree instead). A mount answer holding one of
+/// them passed it on.
+pub fn stale() -> Vec<(&'static str, String)> {
+    aether_env::handshake::TRANSPORT
+        .iter()
+        .filter(|&&n| n != aether_env::REGISTRY)
+        .map(|&n| {
+            let v = match n {
+                aether_env::RING_BYTES
+                | aether_env::RING_PAYLOAD_CAP
+                | aether_env::ARENA_OFFSET
+                | aether_env::ARENA_LEN => "7".to_string(),
+                aether_env::VIRTUAL_ROOTS | aether_env::ROOT_BACKINGS => {
+                    "9=aether-conform-stale".to_string()
+                }
+                n => format!("aether-conform-stale-{n}"),
+            };
+            (n, v)
+        })
+        .collect()
+}
+
 impl Adapter {
     /// Starts `command_line` ([`split_command_line`]) with piped stdio.
     /// `timeout` bounds every answer.
@@ -89,8 +115,25 @@ impl Adapter {
             });
         };
         let mut cmd = Command::new(program);
-        cmd.args(args)
-            .stdin(Stdio::piped())
+        cmd.args(args);
+        // A stale session's handshake, which a launch must not pass on
+        // (wire.md 5.2); `attach::against_tree` fails a mount whose answer
+        // has any of it.
+        for (name, value) in stale() {
+            cmd.env(name, value);
+        }
+        Adapter::spawn(cmd, program, timeout)
+    }
+
+    /// Starts `cmd` with piped stdio, as [`Adapter::start`] does a command
+    /// line: any child that answers one JSON line per JSON line, as the
+    /// client workers do ([`crate::clients`]). `program` names it in errors.
+    pub fn spawn(
+        mut cmd: Command,
+        program: &str,
+        timeout: Duration,
+    ) -> Result<Adapter, AdapterError> {
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let (mut child, tree) = ProcessTree::spawn(&mut cmd).map_err(|e| AdapterError {
@@ -194,6 +237,20 @@ impl Adapter {
             std::thread::sleep(Duration::from_millis(10));
         }
         // Drop kills the tree.
+    }
+
+    /// Sends `request` as one line and returns the JSON object answered,
+    /// within the timeout: the protocol's one round trip, for a child that
+    /// is not a mount adapter ([`Adapter::spawn`]).
+    pub fn request(&mut self, request: &Value) -> Result<Value, AdapterError> {
+        self.ask(request)
+    }
+
+    /// Kills the child and every process it started now, and reaps it: a
+    /// process that is killed, as a game's processes may be (`docs/wire.md`
+    /// 2.8.1). A tree that could not be killed is returned.
+    pub fn kill_now(&mut self) -> Option<String> {
+        self.kill()
     }
 
     /// Kills the adapter and every process it started. A tree that could

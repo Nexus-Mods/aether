@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aether_protocol::{Opcode, Reply, Request, RequestFlags, Status};
+use aether_protocol::{Opcode, Reply, Request, Status};
 use aether_rpc::CallError;
 
 use crate::adapter::{Adapter, AdapterError};
@@ -50,8 +50,12 @@ pub struct RunOptions {
     pub timeout: Duration,
     /// Also send the malformed requests ([`crate::malformed`]).
     pub malformed: bool,
+    /// Also play the requests sized from the ring ([`crate::limits`]).
+    pub limits: bool,
     /// Also play generated cases ([`crate::generate`]).
     pub generate: Option<GenerateOptions>,
+    /// Also play rounds of clients at once ([`crate::concurrent`]).
+    pub concurrent: Option<crate::concurrent::ConcurrentOptions>,
 }
 
 /// One step as played.
@@ -138,6 +142,11 @@ pub fn scenario_files(dir: &Path) -> Result<Vec<PathBuf>, LoadError> {
 }
 
 /// Runs every scenario in `opts.scenarios` against the adapter.
+///
+/// A scenario's clients other than 0 are processes of this program
+/// (`std::env::current_exe()`, run as `client-worker`), so a caller of this
+/// function other than the `aether-conform` binary can play only scenarios
+/// whose steps are all client 0's.
 pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
     let files = scenario_files(&opts.scenarios).map_err(|e| RunError::Scenarios(e.to_string()))?;
     let scenarios: Vec<(PathBuf, Scenario)> = files
@@ -155,7 +164,11 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
     let mut report = RunReport {
         scenarios: Vec::new(),
         adapter_error: None,
-        seed: opts.generate.as_ref().map(|g| g.seed),
+        seed: opts
+            .generate
+            .as_ref()
+            .map(|g| g.seed)
+            .or(opts.concurrent.as_ref().map(|c| c.seed)),
     };
     for (file, s) in &scenarios {
         let mut result = ScenarioResult {
@@ -187,8 +200,27 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             }
         }
     }
+    if opts.limits {
+        match crate::limits::run(&mut adapter, opts.timeout) {
+            Ok(r) => report.scenarios.push(r),
+            Err(e) => {
+                report.adapter_error = Some(e.to_string());
+                return Ok(report);
+            }
+        }
+    }
     if let Some(g) = &opts.generate {
         match crate::generate::run(&mut adapter, g, opts.timeout) {
+            Ok(r) => report.scenarios.push(r),
+            Err(GenerateError::Adapter(e)) => {
+                report.adapter_error = Some(e.to_string());
+                return Ok(report);
+            }
+            Err(GenerateError::Generator(e)) => return Err(RunError::Generator(e)),
+        }
+    }
+    if let Some(c) = &opts.concurrent {
+        match crate::concurrent::run(&mut adapter, c, opts.timeout) {
             Ok(r) => report.scenarios.push(r),
             Err(GenerateError::Adapter(e)) => {
                 report.adapter_error = Some(e.to_string());
@@ -239,8 +271,17 @@ fn one(
     };
     match Attached::from_env(&env, timeout) {
         Ok(ring) => {
-            if let Err(e) = play(&ring, s, &mut out.steps) {
+            if let Err(e) = play(&ring, &env, timeout, s, &mut out.steps) {
                 out.error = Some(format!("{}: {e}", ring.describe()));
+            }
+            // What the environment says of the tree, beyond what attaching
+            // needs (`attach::against_tree`).
+            if let Err(e) = crate::attach::against_tree(&env, &s.tree) {
+                let e = format!("the mount's environment: {e}");
+                out.error = Some(match out.error.take() {
+                    Some(before) => format!("{before}; {e}"),
+                    None => e,
+                });
             }
             // Detached before the unmount, so the adapter can remove the
             // ring (a mapped file cannot be removed on Windows).
@@ -260,27 +301,48 @@ enum Sent {
     Bad(String),
 }
 
-/// Plays `s`'s steps on `ring`. `Err` when the ring stopped answering.
-fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), String> {
+/// Plays `s`'s steps on `ring`, the steps of client 0 from this process and
+/// those of every other client number from a client process of its own
+/// ([`crate::clients::ProcessClient`]) attached from `env`. One session
+/// pairs the handles of all of them, since handles are ring-global (wire.md
+/// 2.8.1), and one [`RegGen`] reads the generation each step's own client
+/// read. `Err` when the ring stopped answering.
+pub(crate) fn play(
+    ring: &Attached,
+    env: &crate::adapter::Env,
+    timeout: Duration,
+    s: &Scenario,
+    out: &mut Vec<StepResult>,
+) -> Result<(), String> {
     let client = ring.client();
     let mut scratch = Vec::new();
     client
         .call(&Request::Heartbeat {}, &mut scratch)
         .map_err(|e| format!("the HEARTBEAT sent on attach failed: {e}"))?;
+    let mut others = Others::start(env, timeout, s)?;
     let mut session = Session::new();
     let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
-        let gen_before = ring.reg_gen();
-        let gen_broken = reg_gen.before(&step.request, gen_before);
         let mut req = session.translate(&step.request);
-        if let OwnedRequest::Read { slot_flags, .. } = &mut req {
-            if ring.arena_len() == 0 && slot_flags.contains(RequestFlags::READ_BULK) {
-                slot_flags.remove(RequestFlags::READ_BULK);
-                notes.push("sent without read_bulk: the ring has no arena (wire.md 2.6)".into());
-            }
+        if crate::clients::fit_to_ring(ring, &mut req) {
+            notes.push("sent without read_bulk: the ring has no arena (wire.md 2.6)".into());
         }
-        let sent = match send(ring, &client, &req, &mut scratch) {
+        let (sent, gen_before, gen_now) = match step.client {
+            0 => {
+                let before = ring.reg_gen();
+                let sent = send(ring, &client, &req, &mut scratch);
+                (sent, before, ring.reg_gen())
+            }
+            k => match others.send(k, &req) {
+                Ok((sent, slot, before, after)) => {
+                    notes.push(format!("sent by client {k}, in slot {slot}"));
+                    (Ok(sent), before, after)
+                }
+                Err(e) => (Err(e), 0, 0),
+            },
+        };
+        let sent = match sent {
             Ok(sent) => sent,
             Err(e) => {
                 out.push(StepResult {
@@ -294,6 +356,9 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
                 return Err(format!("step {i}: the ring gave no answer: {e}"));
             }
         };
+        // Only once there is an answer: without one there are no generations
+        // read either.
+        let gen_broken = reg_gen.before(&step.request, gen_before);
         let (got, mut passed) = match &sent {
             Sent::Answer(got) => {
                 let r = session.check(i, &step.request, &step.expect, got);
@@ -307,8 +372,22 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
                 (why.clone(), false)
             }
         };
+        if let (
+            Sent::Answer(Ok(OwnedReply::StageExec(staged))),
+            OwnedRequest::StageExec { root, path },
+        ) = (&sent, &req)
+        {
+            match stage_check(ring, env, *root, path, staged) {
+                Stage::Fine => {}
+                Stage::Warn(w) => notes.push(w),
+                Stage::Wrong(why) => {
+                    notes.insert(0, why);
+                    passed = false;
+                }
+            }
+        }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
-        let gen_after = reg_gen.after(&step.request, succeeded, gen_before, ring.reg_gen());
+        let gen_after = reg_gen.after(&step.request, succeeded, gen_before, gen_now);
         if let Some(why) = gen_broken.or(gen_after) {
             notes.insert(0, why);
             passed = false;
@@ -323,6 +402,51 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
         });
     }
     Ok(())
+}
+
+/// The scenario's clients other than 0, each a process of its own.
+struct Others {
+    clients: std::collections::BTreeMap<u32, crate::clients::ProcessClient>,
+}
+
+impl Others {
+    /// Starts a client process for every client number `s`'s steps name
+    /// besides 0.
+    fn start(env: &crate::adapter::Env, timeout: Duration, s: &Scenario) -> Result<Others, String> {
+        let wanted: std::collections::BTreeSet<u32> = s
+            .steps
+            .iter()
+            .map(|st| st.client)
+            .filter(|&k| k != 0)
+            .collect();
+        let mut clients = std::collections::BTreeMap::new();
+        if !wanted.is_empty() {
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("cannot find this program to start clients: {e}"))?;
+            for k in wanted {
+                clients.insert(
+                    k,
+                    crate::clients::ProcessClient::start(&exe, k, env, timeout)?,
+                );
+            }
+        }
+        Ok(Others { clients })
+    }
+
+    /// Sends `req` from client `k`: the answer, the slot it went in, and the
+    /// generations the client read before and after.
+    fn send(&mut self, k: u32, req: &OwnedRequest) -> Result<(Sent, u32, u64, u64), String> {
+        let c = self
+            .clients
+            .get_mut(&k)
+            .ok_or_else(|| format!("client {k} was not started"))?;
+        let r = c.send(req)?;
+        let sent = match r.outcome.answer {
+            crate::clients::Answer::Got(a) => Sent::Answer(a),
+            crate::clients::Answer::Bad(why) => Sent::Bad(why),
+        };
+        Ok((sent, r.outcome.slot, r.gen_before, r.gen_after))
+    }
 }
 
 /// wire.md 4.5's rules for the registry generation (`reg_gen`) in the ring
@@ -440,6 +564,122 @@ fn join(mut notes: Vec<String>, scenario_note: Option<&str>) -> String {
     notes.join("; ")
 }
 
+/// What a STAGE_EXEC reply's path is.
+enum Stage {
+    Fine,
+    /// Fine, with something to say.
+    Warn(String),
+    /// Not what wire.md 3.4.14 says it is.
+    Wrong(String),
+}
+
+/// Whether `staged`, a STAGE_EXEC reply for `path` under `root`, is what
+/// wire.md 3.4.14 says it is: "the real, on-disk Windows path to start it
+/// from", so an absolute Windows path (a drive letter's or a UNC one) and,
+/// where this host can read it, a file with the bytes the director serves
+/// for `path` (read through the ring here). A director that stages but
+/// gives no `VFS_ROOT_BACKINGS` is told so: the shim asks STAGE_EXEC only
+/// with a backing (`hook/child_start.rs`, `plan`).
+fn stage_check(
+    ring: &Attached,
+    env: &crate::adapter::Env,
+    root: aether_protocol::RootId,
+    path: &str,
+    staged: &str,
+) -> Stage {
+    let b = staged.as_bytes();
+    let drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    let unc = staged.starts_with("\\\\");
+    if !drive && !unc {
+        return Stage::Wrong(format!(
+            "STAGE_EXEC answered {staged:?}, not an absolute Windows path (wire.md 3.4.14: \
+             \"the real, on-disk Windows path to start it from\")"
+        ));
+    }
+    let backings = env
+        .get(aether_env::ROOT_BACKINGS)
+        .is_some_and(|v| !v.trim().is_empty());
+    let mut warn = (!backings).then(|| {
+        format!(
+            "warning: the director stages, but the mount gives no {}, and the shim sends \
+             STAGE_EXEC only when it names a backing (hook/child_start.rs, plan)",
+            aether_env::ROOT_BACKINGS
+        )
+    });
+    let on_disk = match std::fs::read(staged) {
+        Ok(b) => b,
+        // A path of the shim's host this one cannot read (a Wine drive).
+        Err(_) => {
+            return match warn {
+                Some(w) => Stage::Warn(w),
+                None => Stage::Fine,
+            }
+        }
+    };
+    match served(ring, root, path) {
+        Ok(served) if served == on_disk => {}
+        Ok(served) => {
+            return Stage::Wrong(format!(
+                "STAGE_EXEC staged {staged}, {} bytes that differ from the {} bytes served for \
+                 {path} (wire.md 3.4.14: the director puts the program on real disk, and the \
+                 child is started from that copy)",
+                on_disk.len(),
+                served.len()
+            ))
+        }
+        Err(e) => warn = Some(format!("warning: the staged copy was not compared: {e}")),
+    }
+    match warn {
+        Some(w) => Stage::Warn(w),
+        None => Stage::Fine,
+    }
+}
+
+/// The bytes the director serves for `path` under `root`: OPEN, READs of
+/// inline size to the end, CLOSE.
+fn served(ring: &Attached, root: aether_protocol::RootId, path: &str) -> Result<Vec<u8>, String> {
+    let client = ring.client();
+    let mut scratch = Vec::new();
+    let fh = match client.call(
+        &Request::Open {
+            root,
+            flags: aether_protocol::OpenFlags::READ,
+            path,
+        },
+        &mut scratch,
+    ) {
+        Ok(Reply::Open(o)) => o.fh,
+        other => return Err(format!("OPEN {path} gave {other:?}")),
+    };
+    let step = ring.geom().payload_cap.saturating_sub(8).min(60_000);
+    let mut out = Vec::new();
+    let got = loop {
+        let read = Request::Read {
+            slot_flags: aether_protocol::RequestFlags::empty(),
+            fh,
+            offset: out.len() as u64,
+            len: step,
+        };
+        match self::read(ring, &client, &read) {
+            Ok(Sent::Answer(Ok(OwnedReply::Read(d)))) => {
+                let short = d.len() < step as usize;
+                out.extend_from_slice(&d);
+                if short {
+                    break Ok(out);
+                }
+            }
+            Ok(Sent::Answer(other)) => break Err(format!("a READ of {path} gave {other:?}")),
+            Ok(Sent::Bad(why)) => break Err(why),
+            Err(e) => break Err(e),
+        }
+    };
+    let _ = client.call(&Request::Close { fh }, &mut scratch);
+    got
+}
+
 /// Sends `req`. `Err` when the ring gave no answer at all.
 fn send<N: aether_ipc::Notifier>(
     ring: &Attached,
@@ -450,6 +690,9 @@ fn send<N: aether_ipc::Notifier>(
     let request = req.as_request();
     if request.opcode() == Opcode::Read {
         return read(ring, client, &request);
+    }
+    if request.opcode() == Opcode::Open {
+        return open(client, &request);
     }
     Ok(match client.call(&request, scratch) {
         Ok(reply) => Sent::Answer(Ok(OwnedReply::from_reply(&reply))),
@@ -462,6 +705,40 @@ fn send<N: aether_ipc::Notifier>(
         ),
         Err(CallError::Ipc(e)) => return Err(format!("{e:?}")),
         Err(CallError::BulkRead) => unreachable!("READ is sent on a held slot"),
+    })
+}
+
+/// An OPEN on a held slot, so its payload's reserved bytes can be read
+/// (`compare::open_reply_reserved`) before it is decoded.
+fn open<N: aether_ipc::Notifier>(
+    client: &aether_rpc::Client<'_, N>,
+    request: &Request<'_>,
+) -> Result<Sent, String> {
+    let mut body = Vec::new();
+    request.encode(&mut body);
+    let (mut replies, slots) = client
+        .ring()
+        .submit_many_held(&[(Opcode::Open as u32, 0, body)])
+        .map_err(|e| format!("{e:?}"))?;
+    client.ring().release_slots(&slots);
+    let reply = replies.pop().expect("one reply per request");
+    Ok(if reply.status != Status::Ok.code() {
+        match Status::try_from(reply.status) {
+            Ok(s) => Sent::Answer(Err(s)),
+            Err(_) => Sent::Bad(format!(
+                "status {}, which the protocol table does not have",
+                reply.status
+            )),
+        }
+    } else if let Some(why) = crate::compare::open_reply_reserved(&reply.payload) {
+        Sent::Bad(why)
+    } else {
+        match Reply::decode(Opcode::Open, 0, &reply.payload) {
+            Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
+            Err(_) => Sent::Bad(
+                "an OK reply whose payload does not decode as an OPEN reply (wire.md 3.1)".into(),
+            ),
+        }
     })
 }
 

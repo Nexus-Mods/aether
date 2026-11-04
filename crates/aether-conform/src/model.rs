@@ -275,6 +275,12 @@ pub const TEXTS: [&str; 7] = [
 ];
 
 const REG_BASE: &str = r"\Registry\Machine\Software\Conform";
+/// The keys every generated registry layer has, one per hive.
+const REG_BASES: [&str; 3] = [
+    REG_BASE,
+    r"\Registry\User\<CurrentUser>\Software\Conform",
+    r"\Registry\User\<CurrentUser>_Classes\Conform",
+];
 pub const KEY_NAMES: [&str; 6] = ["Sub", "Ünï", "deep", "Other", "x", "Größe"];
 pub const VALUE_NAMES: [&str; 4] = ["v", "Value", "Größe", "count"];
 pub const VALUE_TYPES: [u32; 6] = [1, 3, 4, 7, 11, 0x1234];
@@ -566,12 +572,17 @@ fn build_tree(spec: &TreeSpec) -> (Tree, Vec<RootInfo>) {
         });
     }
     let registry = spec.registry.as_ref().map(|keys| {
-        let mut out = vec![RegKey {
-            path: REG_BASE.to_string(),
-            volatile: false,
-            values: Vec::new(),
-        }];
-        let mut taken: BTreeSet<String> = [fold(REG_BASE)].into_iter().collect();
+        // A base key in each hive the shim virtualises (wire.md 4.2): HKLM,
+        // the current user's, and the user's classes.
+        let mut out: Vec<RegKey> = REG_BASES
+            .iter()
+            .map(|b| RegKey {
+                path: b.to_string(),
+                volatile: false,
+                values: Vec::new(),
+            })
+            .collect();
+        let mut taken: BTreeSet<String> = REG_BASES.iter().map(|b| fold(b)).collect();
         for k in keys {
             let p = &out[k.parent as usize % out.len()];
             let (parent_path, parent_volatile) = (p.path.clone(), p.volatile);
@@ -2029,15 +2040,18 @@ impl Gen {
             } else {
                 base.clone()
             };
-            // Keys compare by fold (4.2). `\Registry\Machine` keeps its
-            // canonical spelling here (`registry-case` covers other
-            // spellings of it); the components below are respelled.
+            // Keys compare by fold (4.2). The hive (`\Registry\Machine`, or
+            // `\Registry\User` and its `<CurrentUser>` component) keeps its
+            // canonical spelling here, as the shim sends it
+            // (`registry-case` covers other spellings of `Machine`); the
+            // components below are respelled.
             let parts: Vec<&str> = p.split('\\').collect();
+            let hive = if parts.get(2) == Some(&"User") { 4 } else { 3 };
             let respelled: Vec<String> = parts
                 .iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    if i < 3 {
+                    if i < hive {
                         s.to_string()
                     } else {
                         respell(s, c.rotate_left(5 * i as u32))
@@ -2207,6 +2221,7 @@ impl Gen {
             expect,
             cite,
             note: Some(note),
+            client: 0,
         });
         if let Ok(r) = &got {
             self.record_version(r);

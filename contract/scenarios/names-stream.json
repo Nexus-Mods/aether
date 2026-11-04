@@ -1,0 +1,17 @@
+{
+  "name": "names-stream",
+  "description": "A vpath with a named stream suffix (wire.md 3.2: \"A named stream suffix (`file.esp:stream`) is carried through, folded\") names a stream the director does not hold, never the base file: GETATTR finds nothing, OPEN refuses it, and the base file and its folder's listing are as they were (3.2: neither Cairn's read-only sources nor the reference holds streams).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "data/a.esp", "contents": "plugin"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp:zone.identifier"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"status": "not-found"}], "wire": "3.2"}, "note": "found = 0, or ST_NOT_FOUND, which the shim reads the same (3.4.1)"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp:zone.identifier"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.2"}, "note": "a name it does not have, or a name it does not accept; never the base file's handle"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp:$data"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.2"}, "note": "nor the base file through NTFS's name for its unnamed stream"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "a.esp", "is_dir": false, "size": 6, "mtime": 0}]}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 6, "mtime": 0}}}
+  ]
+}

@@ -484,6 +484,10 @@ STAGE_EXEC:
   name (a write OPEN, MKDIR, RENAME targets), which keeps the caller's
   spelling so that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
+  Neither Cairn's read-only sources nor the reference holds named streams:
+  to both, `file.esp:stream` is a name they do not have (GETATTR `found =
+  0`, OPEN `ST_NOT_FOUND`), and a director that holds no stream of that
+  name must never answer it with the base file's attributes or bytes.
 
 A director must look paths up case-insensitively under the same fold, and must
 treat a path that would leave its root (`..` above the root) as an error.
@@ -757,7 +761,10 @@ Reply (`Reply::Open`), 24 bytes:
 | 20 | 4 | u32 | `mount_gen` |
 
 - `fh` is any u64 the director chooses, unique among open handles. Both
-  directors start at 1 and count up.
+  directors start at 1 and count up. Neither issues 0, and a director must
+  not: the shim keeps 0 for a directory it created with MKDIR, which it holds
+  no director handle for, and sends `CLOSE(0)` when the program closes it
+  (`crates/aether-hooks/src/hook/file_open.rs`, `try_fuse_mkdir`).
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
   read cache (`crates/aether-ipc/src/readcache/mod.rs`) caches small reads only
   through read-only, immutable handles. Never set it for a write open or a
@@ -802,10 +809,29 @@ Bulk reply (`ReadReply::Bulk`), 16 bytes, `n <= min(len, bank_size)`:
 | 4 | 4 | — | zero |
 | 8 | 8 | u64 | `arena_offset`: mapping offset of the data (the slot's bank) |
 
+A handle serves READ whatever access it was opened with: the shim's write
+opens send `OPEN_WRITE` and the create bits but never `OPEN_READ`
+(`FuseClient::open_write`), and a program reads its save back through the
+handle that wrote it. Cairn opens every file it serves for reading
+(`provider/disk.clj`, `options`; its write layer's handles read whatever
+their access), and the reference does not look at the access.
+
 The client tells the forms apart by bit 31 of the first word
 (`ReadReply`'s decoder), so it must accept either whatever flag it sent. `n <
 len` means end of file; the shim stops there. Errors: unknown `fh`
 `ST_BAD_FH`; a directory handle `ST_IS_DIR`.
+
+So a READ comes back whole, `n = min(len, size - offset)`, whenever its form
+can hold that many bytes; a shorter answer is a truncated file to the shim
+(Cairn and the reference: Cairn's `read-into` is "short only at end of file",
+`provider.clj`). Both answer a READ that sets `FLAG_READ_BULK` in bulk when
+they have an arena, so a director that gives an arena (`VFS_ARENA_LEN`) must
+answer such a READ of more than `payload_cap - 8` bytes in bulk: an inline
+reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
+remainders of 64 KiB up to it, with the flag, and inline READs of at most
+65 535 bytes, or of at most `payload_cap - 8` with no arena
+(`aether_ipc::read_fragmented`); its read cache fetches runs of up to 16
+blocks of 64 KiB the same way.
 
 For a section over a file (a program's `CreateFileMappingW`), the shim takes
 OPEN's `size` as the file's end: a READ that fails, or answers short of
@@ -835,6 +861,12 @@ fails it: on `ST_OK`, `written` is `len` (Cairn and the reference: Cairn's
 write layer and disk provider loop to the end, `provider/layer.clj` and
 `provider/disk.clj`, `write-from`).
 
+A WRITE past the end of the file grows it, and the bytes between the old end
+and the WRITE's offset read as zeros, as NTFS fills them (Cairn's write layer
+reads a grown block it holds no data for as zeros, `provider/layer.clj`,
+`read-into`; its disk provider's file system fills the gap; the reference
+fills it with zeros). The same holds for SETATTR (3.4.6).
+
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
 
@@ -858,7 +890,10 @@ does (`source/tree.clj`, `DirHandle`).
 
 Request (`Request::SetAttr`), 16 bytes: `fh:u64 | size:u64`. Sets the file's
 length (truncate or extend) on an open handle; there is no path-keyed form.
-Reply: status only. Unknown `fh` `ST_BAD_FH`.
+Reply: status only. Unknown `fh` `ST_BAD_FH`. An extension reads as zeros,
+bytes a truncation cut off included when the file grows again (Cairn's
+write layer zeroes them, `provider/layer.clj`, `truncate!`; its disk provider
+truncates the file; the reference resizes with zeros).
 
 #### 3.4.7 RENAME (8)
 
@@ -881,9 +916,9 @@ directory moves with everything under it. A file or an empty directory at
 `to` is replaced; a directory at `to` with anything under it is
 `ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
 inside `from`, is `ST_BAD_REQUEST` from a writable layer provider and the
-reference director, `ST_IO_ERROR` from Cairn's overlay on a disk-backed upper
-(its `--write` folder: `provider/compose.clj`, `rename!`, whose move of
-the upper's root fails, and which never moves a lower directory). A missing `from` is
+reference director, `ST_IO_ERROR` from Cairn's overlay (`provider/compose.clj`,
+`rename!`, which never moves a directory that only its lower layer holds, as
+it holds the root). A missing `from` is
 `ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`.
 (Cairn's writable layer, `provider/layer.clj`, `rename!`; the reference
 director.) A file with open handles is renamed like any other.
@@ -896,10 +931,10 @@ For a name the writable provider holds (for names that exist only in a
 read-only layer beneath it, see "Names only in a read-only lower" after
 3.4.9): a file, or a directory with nothing under it, is deleted. A directory
 with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
-is `ST_BAD_REQUEST` from a writable layer provider and the reference director,
-`ST_IO_ERROR` from Cairn's overlay on a disk-backed upper (its
-`--write` folder: `provider/compose.clj`, `delete!`, whose delete of the
-upper's root fails). A missing path is `ST_NOT_FOUND`; a path outside
+is `ST_BAD_REQUEST` (a writable layer provider, the reference director) or
+`ST_IO_ERROR`, and is never deleted. Cairn's overlay answers `ST_OK` today and
+hides the root behind a whiteout (`provider/compose.clj`, `delete!`): a bug,
+which conformance reports. A missing path is `ST_NOT_FOUND`; a path outside
 every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
 `provider/layer.clj`, `delete!`; the reference director.) A file with open
 handles is deleted like any other: Cairn's write layer drops its data at the
@@ -1013,7 +1048,9 @@ before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
 a director with a stager may answer `ST_NOT_FOUND` for a file it does not
 stage (Cairn, `ring.clj`, `op-stage-exec`).
 
-How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): for each
+How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): only
+when `VFS_ROOT_BACKINGS` names at least one backing (`plan` returns early
+otherwise, and the child starts as it would without the VFS). Then, for each
 candidate image path that routes under a root it first sends GETATTR, and
 sends STAGE_EXEC only for the first candidate that is a file (`found`, not
 `is_dir`). On success the child is started from the returned path. If no

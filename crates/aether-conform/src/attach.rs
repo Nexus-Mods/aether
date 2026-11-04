@@ -73,6 +73,9 @@ pub struct Attached {
     geom: Geom,
     ring_bytes: usize,
     arena_len: usize,
+    arena_offset: usize,
+    /// Whether `VFS_ARENA_OFFSET` gave `arena_offset`, or it was assumed.
+    arena_offset_given: bool,
     #[cfg(windows)]
     server_ev: Option<crate::job::WakeEvent>,
     deadline: Duration,
@@ -130,7 +133,11 @@ impl Attached {
             ));
         }
         check_arena(arena_len, geom.slot_count)?;
-        if let Some(off) = get(aether_env::ARENA_OFFSET).and_then(|s| s.parse::<usize>().ok()) {
+        let given_offset = get(aether_env::ARENA_OFFSET).and_then(|s| s.parse::<usize>().ok());
+        // Without `VFS_ARENA_OFFSET` the arena follows the last slot, where
+        // both directors put it (wire.md 2.1).
+        let arena_offset = given_offset.unwrap_or(ring_end);
+        if let Some(off) = given_offset {
             if arena_len > 0 && off.saturating_add(arena_len) > ring_bytes {
                 return Err(format!(
                     "the arena ({}={off}, {}={arena_len}) runs past {}={ring_bytes} (wire.md 2.6)",
@@ -150,6 +157,8 @@ impl Attached {
             geom,
             ring_bytes,
             arena_len,
+            arena_offset,
+            arena_offset_given: given_offset.is_some(),
             #[cfg(windows)]
             server_ev,
             deadline,
@@ -207,6 +216,38 @@ impl Attached {
     /// `VFS_ARENA_LEN`; 0 means the shim sends no bulk READ.
     pub fn arena_len(&self) -> usize {
         self.arena_len
+    }
+
+    /// Where the arena starts in the mapping: `VFS_ARENA_OFFSET`, or right
+    /// after the last slot (wire.md 2.1).
+    pub fn arena_offset(&self) -> usize {
+        self.arena_offset
+    }
+
+    /// Whether `VFS_ARENA_OFFSET` named the arena's start. Without it the
+    /// start is assumed (after the last slot, where both directors put it,
+    /// wire.md 2.1), and the shim, which takes data offsets from bulk replies
+    /// and never needs the start (5.3: "Informational"), would accept an
+    /// arena elsewhere; so the bank a bulk reply lies in is checked only
+    /// when this is true.
+    pub fn arena_offset_given(&self) -> bool {
+        self.arena_offset_given
+    }
+
+    /// The arena bank `offset .. offset + len` lies in, if it lies in one:
+    /// banks are `max(arena_len / slot_count, 4096)` bytes, bank `b` at
+    /// `arena_offset + b * bank_size` (wire.md 2.6). `None` outside the
+    /// arena or across a bank's end.
+    pub fn bank_of(&self, offset: u64, len: u32) -> Option<u32> {
+        if self.arena_len == 0 {
+            return None;
+        }
+        let banks = u64::from(self.geom.slot_count.max(1));
+        let size = (self.arena_len as u64 / banks).max(4096);
+        let rel = offset.checked_sub(self.arena_offset as u64)?;
+        let bank = rel / size;
+        let end = rel.checked_add(u64::from(len))?;
+        (bank < banks && end <= (bank + 1) * size).then_some(bank as u32)
     }
 
     /// Which ring this is, for messages.
@@ -307,6 +348,117 @@ pub fn shim_roots(env: &Env) -> Result<(), String> {
             "the shim refuses these roots (managed root is not a usable path: {e:?}): {routing:?}"
         )
         })
+}
+
+/// What a mount's environment must say about the tree it mounted, beyond
+/// what attaching needs: why it does not, one reason per rule broken.
+///
+/// - **`VFS_REGISTRY`** is affirmative (an opt-in: `1`, `true`, `yes`, `on`)
+///   exactly when the tree has a registry layer (wire.md 5.3: "Set to `1`
+///   only while a registry layer is attached; otherwise remove it"; 4: the
+///   shim sends registry requests only when it is affirmative).
+/// - **Every root the tree serves is declared**: root 0 by
+///   `VFS_VIRTUAL_DIR`, every other by an entry of `VFS_VIRTUAL_ROOTS`, as
+///   the shim reads them (`merge_extra_roots`), and no two at one path
+///   (wire.md 3.2: "Root 0 is `VFS_VIRTUAL_DIR`; others come from
+///   `VFS_VIRTUAL_ROOTS`"; 5.3). A root the shim is not told of is never
+///   routed: the program's files there go to the real disk.
+/// - **`shim.cfg`**, when the mount names it (`VFS_SHIM_CONFIG`), decodes
+///   (`aether_protocol::decode_config`: magic `VFSC`, version 2, nothing
+///   after the table) and its `root` is root 0's path (wire.md 5.1: "Write
+///   `root` as root 0"; any decoding error fails the shim's load).
+/// - **Nothing stale**: no value is the one the run planted in the adapter's
+///   own environment ([`crate::adapter::stale`]): wire.md 5.2, "A launch
+///   sets or removes every one of these, so nothing inherited from an
+///   earlier session reaches the child".
+pub fn against_tree(env: &Env, tree: &aether_refdirector::tree::Tree) -> Result<(), String> {
+    let get = |k: &str| env.get(k).map(String::as_str);
+    let mut why = Vec::new();
+    let registry = get(aether_env::REGISTRY)
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    match (tree.registry.is_some(), registry) {
+        (true, false) => why.push(format!(
+            "the tree has a registry layer but {} is {:?}: the shim would send no registry \
+             request (wire.md 4, 5.3: set to 1 while a registry layer is attached)",
+            aether_env::REGISTRY,
+            get(aether_env::REGISTRY)
+        )),
+        (false, true) => why.push(format!(
+            "the tree has no registry layer but {} is {:?}: every registry write the program \
+             makes would fail (wire.md 5.3: otherwise remove it)",
+            aether_env::REGISTRY,
+            get(aether_env::REGISTRY)
+        )),
+        _ => {}
+    }
+    let declared = merge_extra_roots(
+        get(aether_env::VIRTUAL_DIR).unwrap_or_default(),
+        get(aether_env::VIRTUAL_ROOTS),
+    );
+    let mut paths: Vec<(u32, String)> = Vec::new();
+    for root in &tree.roots {
+        match declared.iter().find(|(id, _)| id.0 == root.id) {
+            None => why.push(format!(
+                "root {} is served but {} does not declare it ({:?}), so the shim never routes \
+                 its paths (wire.md 3.2, 5.3)",
+                root.id,
+                aether_env::VIRTUAL_ROOTS,
+                get(aether_env::VIRTUAL_ROOTS)
+            )),
+            Some((_, p)) => {
+                let folded = normalize_path_for_root(p)
+                    .trim_end_matches('\\')
+                    .to_string();
+                if let Some((other, _)) = paths.iter().find(|(_, q)| *q == folded) {
+                    why.push(format!(
+                        "roots {other} and {} are both declared at {p:?} (wire.md 3.2: each \
+                         root is a path of its own)",
+                        root.id
+                    ));
+                }
+                paths.push((root.id, folded));
+            }
+        }
+    }
+    if let Some(cfg) = get(aether_env::SHIM_CONFIG) {
+        match std::fs::read(cfg) {
+            Err(e) => why.push(format!(
+                "{}={cfg} cannot be read: {e} (wire.md 5.1)",
+                aether_env::SHIM_CONFIG
+            )),
+            Ok(bytes) => match aether_protocol::shimcfg::decode_config(&bytes) {
+                Err(e) => why.push(format!(
+                    "{}={cfg} does not decode: {e:?} (wire.md 5.1: the shim fails its load with \
+                     bootstrap-failed)",
+                    aether_env::SHIM_CONFIG
+                )),
+                Ok(c) => {
+                    let root0 = get(aether_env::VIRTUAL_DIR).unwrap_or_default();
+                    if normalize_path_for_root(&c.root) != normalize_path_for_root(root0) {
+                        why.push(format!(
+                            "{cfg}'s root is {:?}, not root 0's {root0:?} (wire.md 5.1: \
+                             \"Write `root` as root 0\")",
+                            c.root
+                        ));
+                    }
+                }
+            },
+        }
+    }
+    for (name, stale) in crate::adapter::stale() {
+        if get(name) == Some(stale.as_str()) {
+            why.push(format!(
+                "{name} is {stale:?}, the value the run left in the adapter's own environment: a \
+                 launch inherits it (wire.md 5.2: a launch sets or removes every TRANSPORT name, \
+                 so nothing inherited from an earlier session reaches the child)"
+            ));
+        }
+    }
+    if why.is_empty() {
+        Ok(())
+    } else {
+        Err(why.join("; "))
+    }
 }
 
 /// `director.rs`, `merge_extra_roots`.
@@ -602,6 +754,38 @@ mod tests {
                 payload_cap: 4096
             }
         );
+    }
+
+    /// wire.md 2.6: bank `b` is `bank_size` bytes at `arena_offset + b *
+    /// bank_size`, `bank_size = max(arena_len / slot_count, 4096)`.
+    #[test]
+    fn a_range_is_in_the_bank_that_holds_all_of_it() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 4 * MIN_BULK_CHUNK, 2, 4096);
+        let arena = (2 * MIN_BULK_CHUNK).to_string();
+        let off = (2 * MIN_BULK_CHUNK).to_string();
+        let e = file_env(
+            &path,
+            4 * MIN_BULK_CHUNK,
+            4096,
+            &[
+                (aether_env::ARENA_LEN, &arena),
+                (aether_env::ARENA_OFFSET, &off),
+            ],
+        );
+        let a = Attached::from_env(&e, DEADLINE).unwrap_or_else(|m| panic!("{m}"));
+        let (start, bank) = (2 * MIN_BULK_CHUNK as u64, MIN_BULK_CHUNK as u64);
+        assert_eq!(a.arena_offset(), 2 * MIN_BULK_CHUNK);
+        assert_eq!(a.bank_of(start, 10), Some(0));
+        assert_eq!(a.bank_of(start + bank - 10, 10), Some(0));
+        assert_eq!(
+            a.bank_of(start + bank - 10, 11),
+            None,
+            "across the end of bank 0"
+        );
+        assert_eq!(a.bank_of(start + bank, bank as u32), Some(1));
+        assert_eq!(a.bank_of(start + 2 * bank, 1), None, "past the arena");
+        assert_eq!(a.bank_of(start - 1, 1), None, "before the arena");
     }
 
     #[test]

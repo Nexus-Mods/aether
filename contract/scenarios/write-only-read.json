@@ -1,0 +1,25 @@
+{
+  "name": "write-only-read",
+  "description": "A handle opened with OPEN_WRITE and not OPEN_READ serves READ (wire.md 3.4.4: a handle serves READ whatever access it was opened with, as Cairn and the reference serve it; the shim's write opens send OPEN_WRITE alone and read through them): reads see the file, then its writes, its truncation and a new file's bytes.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/s.txt", "contents": "0123456789"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/s.txt"}, "expect": {"reply": {"fh": 1, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "FILE_OPEN for GENERIC_READ | GENERIC_WRITE, as the shim sends it"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "0123456789"}}},
+    {"request": {"op": "write", "fh": 1, "offset": 10, "data": "AB"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "0123456789AB"}}, "note": "a save read back through the handle that wrote it"},
+    {"request": {"op": "setattr", "fh": 1, "size": 4}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "0123"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/New.txt"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "FILE_CREATE"},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "hi"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "hi"}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

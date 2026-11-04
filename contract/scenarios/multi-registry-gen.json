@@ -1,0 +1,22 @@
+{
+  "name": "multi-registry-gen",
+  "description": "`reg_gen` in the shared ring header is how one process's registry write invalidates every other process's cache (wire.md 2.8.1, 4.5). Client 1, a process of its own, reads the generation in its own mapping around each of its steps: non-zero at its first registry request, past every write client 0 made by the time it next asks (never backward), moved by its own writes; and it gets the new answers (4.3). Then client 0 sees what client 1 wrote.",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Conform", "values": [{"name": "v", "ty": 1, "data": {"hex": "61006200"}}]}
+    ]}
+  },
+  "steps": [
+    {"client": 1, "request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 1, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 1, "data": {"hex": "61006200"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Conform", "name": "w", "ty": 4, "data": {"hex": "2a000000"}}, "expect": {"reply": {"version": 2}}},
+    {"client": 1, "request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 2, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 1, "data": {"hex": "61006200"}}, {"name": "w", "ty": 4, "data": {"hex": "2a000000"}}], "value_tombstones": [], "children": []}}}, "note": "client 0's write, seen by client 1"},
+    {"client": 1, "request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Conform", "name": "v"}, "expect": {"reply": {"version": 3}}},
+    {"client": 1, "request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Conform\\Sub", "volatile": false}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform\\Sub"}, "expect": {"reply": {"version": 4, "state": "created", "below": false}}, "note": "client 1's key, seen by client 0"},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Conform", "subtree": true, "since": 2}, "expect": {"reply": {"version": 4, "changed": true}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "w", "ty": 4, "data": {"hex": "2a000000"}}], "value_tombstones": ["v"], "children": [{"folded": "sub", "spelling": "Sub", "state": "present"}]}}}}
+  ]
+}

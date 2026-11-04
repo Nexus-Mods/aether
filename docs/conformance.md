@@ -8,16 +8,25 @@ each answer with the one the scenario expects. Scenarios live in
 `contract/scenarios/` and their format is described in
 `contract/scenarios/README.md`.
 
-A run has up to three parts, all through the same adapter:
+A run has up to five parts, all through the same adapter:
 
-- **Scenarios**, the files in `--scenarios` (always).
+- **Scenarios**, the files in `--scenarios` (always). A step may name the
+  client that sends it; every client but 0 is a process of its own
+  ("Several clients" below).
 - **Malformed requests** (`--malformed`): payloads that are not valid
   requests, sent on the raw ring, and the answers wire.md gives them
   ("Malformed requests" below).
+- **Requests sized from the ring** (`--limits`): READs, a WRITE and
+  listings of the director's own limits, READs of one handle in flight
+  together, an abandoned slot, and a registry writer against a reader
+  ("Requests sized from the ring" below).
 - **Generated cases** (`--generate`): trees and operation sequences made
   from a seed, each step compared with the reference director's answer, and
   the first failure shrunk and written as a scenario file ("Generated cases"
   below).
+- **Concurrent clients** (`--concurrent N`): N clients at once, each playing
+  a generated case over a subtree of its own, their requests in flight
+  together across every slot of the ring ("Concurrent clients" below).
 
 ## What it checks
 
@@ -38,6 +47,18 @@ For every scenario, and for each generated case and the malformed part:
   slot_count`"); and when `VFS_ARENA_OFFSET` is given the arena lies inside
   the mapping (2.6: "Every arena byte must lie inside the first
   `VFS_RING_BYTES` bytes of the mapping").
+- **What the environment says of the tree** (`attach::against_tree`), which
+  fails the scenario (its `error` begins "the mount's environment"):
+  `VFS_REGISTRY` is affirmative exactly when the tree has a registry layer
+  (5.3: "Set to `1` only while a registry layer is attached; otherwise
+  remove it"); every root of the tree is declared, root 0 by
+  `VFS_VIRTUAL_DIR` and the others by `VFS_VIRTUAL_ROOTS` as the shim reads
+  it, no two at one path (3.2, 5.3: a root the shim is not told of is never
+  routed, and the program's files there go to the real disk); a
+  `VFS_SHIM_CONFIG` the mount names decodes as the shim decodes it and its
+  `root` is root 0's (5.1); and no value is one of the stale session's the
+  run leaves in the adapter's own environment ("The adapter protocol"
+  below; 5.2: "A launch sets or removes every one of these").
 - **A HEARTBEAT on attach**, as the shim sends one once it has connected.
 - **Every step's answer**: the status, and on `ok` every reply field, equal
   to the step's expectation except where wire.md lets directors differ
@@ -56,7 +77,15 @@ For every scenario, and for each generated case and the malformed part:
     is non-zero before the first registry request; a successful
     REG_SET_VALUE, REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY or
     REG_RENAME_KEY leaves it greater after the reply than before the
-    request; and it never goes backward.
+    request; and it never goes backward. With several clients, each step's
+    generation is the one its own client read in its own mapping, so a write
+    by one process must be visible to the next request of another.
+- **What only a second client sees** (2.5, 2.6, 2.8.1): handles paired
+  across every client of the ring, so one process may present another's
+  handle and a number open in any process is open for all; a request in a
+  slot other than 0 answered within the timeout; a bulk reply's data in the
+  bank of the slot it answers ("Slot `s` owns bank `s % banks`"); a
+  completed slot's `ack` naming the request it holds.
 
 ## What it does not check
 
@@ -76,26 +105,31 @@ are the only exceptions, and each is allowed by the wire.md text quoted
 
 | What | Rule | wire.md |
 |---|---|---|
-| OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles." |
+| OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. Never 0. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles"; the shim keeps 0 for a directory it made. |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and the directors start it differently. |
-| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). | 3.4.3: "Never set it for a write open or a directory". |
+| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). The reply's other flag bits and bytes 18-19 must be zero. | 3.4.3: "Never set it for a write open or a directory"; "other bits zero"; 7. |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
-| `mtime` (GETATTR, READDIR) | Not compared. | 3.2: "Which time a director reports for a path, if any, is the director's to choose". |
+| `mtime` (GETATTR, READDIR) | Not compared, but below 2^40 (the year 36812): a time in milliseconds is past it. | 3.2: "Which time a director reports for a path, if any, is the director's to choose"; "`mtime` is seconds since the Unix epoch". |
 | READ inline or bulk | Compared by data. | 3.4.4: the client "must accept either whatever flag it sent". |
-| STAGE_EXEC `path` | Not compared. | 3.4.14: the reply is the "on-disk Windows path to start it from", wherever the director staged it. |
-| Registry `version` | Compared up to one constant offset per scenario, fixed by the first registry reply; a REG_CHANGED `since` is sent shifted by it. | 4.3: "two directors serving one layer may number its versions apart by a constant, and a REG_CHANGED `since` is in the numbering of the director it is sent to". |
+| STAGE_EXEC `path` | Not compared, but it must be an absolute Windows path (a drive letter's or UNC), and where the run's host can read it, its bytes must be the ones the director serves for the image (read through the ring). A mount without `VFS_ROOT_BACKINGS` gets a warning: the shim sends STAGE_EXEC only with one. | 3.4.14: the reply is the "on-disk Windows path to start it from", wherever the director staged it. |
+| Registry `version` | Compared up to one constant offset per scenario, fixed by the first registry reply; a REG_CHANGED `since` is sent shifted by it, except `u64::MAX`, the shim's probe for the current version, sent as it is. | 4.3: "two directors serving one layer may number its versions apart by a constant, and a REG_CHANGED `since` is in the numbering of the director it is sent to". |
 | REG_KEY `last_write` | Not compared. | 4.3: a "FILETIME" the overlay stamps from the director's clock. |
 
 Where wire.md allows more than one answer to a request, the scenario lists
 them (`one_of`) and names the section that allows it.
 
-**What a run does not exercise.** Several processes on one ring, concurrent
-requests, the director's thread count against `worker_hint` (2.8), how
-quickly a director wakes (2.11), `shim.cfg` and the injector (5.1, 6), and
-the read cache's rule (3.4.3) across a remount, which no scenario makes. The
-handshake variables a run does not use
-(`VFS_VIRTUAL_ROOTS`, `VFS_REGISTRY` and the rest) are not checked against
-the tree.
+**What a run does not exercise.** The director's thread count against
+`worker_hint` (2.8: a run keeps its data requests below the limit the hint
+gives, as the shim does, but cannot count a director's threads; `--limits`
+warns on a hint of 0 or above the slot count), how quickly a director wakes
+(2.11; `--limits` reports a HEARTBEAT round trip, never failing it), the
+injector (6), a
+process killed while it holds a slot (a slot left `CLAIMED` is lost to the
+ring, and wire.md says nothing to recover it), and the read cache's rule
+(3.4.3) across a remount, which no scenario makes. A TRANSPORT name a
+launch should remove is seen only if the adapter reports the launch's value
+for it: an adapter that reports only what it sets hides a stale one it
+passes on.
 
 ## The scenarios
 
@@ -123,7 +157,7 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `open-read`, `open-flags-zero`, `open-errors`, `open-write-existing-readonly-path` | OPEN: handles, `oflags == 0`, the statuses of 3.4.3 and 3.5 |
 | `read-inline`, `read-eof`, `read-bulk`, `read-bulk-threshold` | READ: offsets, short reads, end of file, inline and bulk (3.4.4, 3.6) |
 | `handles-*` | handles unique while open, unknown and closed handles (3.4.3, 3.4.10, 3.5) |
-| `write-*` | write opens (create, excl, trunc, append), WRITE, SETATTR, spelling kept (3.4.3 to 3.4.6, 3.2) |
+| `write-*` | write opens (create, excl, trunc, append), WRITE, SETATTR, spelling kept, the gap a WRITE past the end or a SETATTR leaves read as zeros (`write-growth`), READ through a handle opened for writing alone (`write-only-read`) (3.4.3 to 3.4.6, 3.2) |
 | `rename-*` | RENAME: replace, respell, directories, refusals, unknown root (3.4.7, 3.5.1) |
 | `rename-x-*` | RENAME_X: files across roots, directories `ST_CROSS_ROOT`, equal roots, errors (3.4.13) |
 | `mkdir-*`, `delete-*` | MKDIR and DELETE: spelling, existing names, non-empty directories, read-only, errors (3.4.8, 3.4.9) |
@@ -132,21 +166,31 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `readdir-*` | READDIR: listing, case, changes, unknown root (3.4.2) |
 | `stored-names-*` | STORED_NAMES: stored spelling, `skip`, unknown names, after changes (3.4.12) |
 | `case-fold-*` | the fold: ASCII, Unicode (`Σ`, `İ`, composed and decomposed), fold-equal names are one entry (3.2) |
+| `names-stream` | a path with a named stream suffix is a name the director does not have, never its base file (3.2) |
+| `names-non-bmp` | names with characters outside the BMP read, created, listed, respelled and renamed like any other (3.2) |
 | `roots-*` | several roots kept apart, unserved roots (3.2, 3.5.1) |
 | `stage-exec` | STAGE_EXEC: `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` or a path (3.4.14) |
 | `registry-none` | no registry layer: all eight opcodes `ST_NOT_SUPPORTED` (4) |
 | `registry-lookup`, `-case`, `-bad-path` | REG_LOOKUP states, case-insensitive keys, non-canonical paths (4.2, 4.3) |
 | `registry-values`, `-delete-value` | REG_SET_VALUE, REG_KEY values, value tombstones (4.3) |
 | `registry-create-key`, `-delete-key`, `-rename-key` | key create, delete, rename, children (4.3) |
-| `registry-changed` | REG_CHANGED, with `since` in the director's numbering (4.3) |
+| `registry-changed` | REG_CHANGED, with `since` in the director's numbering, and the shim's `u64::MAX` probe (4.3) |
+| `registry-current-user` | keys under `\Registry\User\<CurrentUser>` and `<CurrentUser>_Classes`, apart from HKLM and from each other (4.2, 4.3) |
 | `registry-limits`, `-key-too-large` | name, depth and reply limits; `ST_REPLY_TOO_LARGE` (4.1, 4.3) |
+| `multi-handle-shared` | a handle opened by one process read, written and closed by another; closed for all once one closes it; a bulk READ from slot 1 in bank 1 (2.6, 2.8.1, 3.4.3) |
+| `multi-handles-unique` | three processes' handles, all open at once, unique across them (2.8.1, 3.4.3) |
+| `multi-write-visible` | one process's writes, truncation and new file seen by another in GETATTR, READDIR, OPEN and READ (2.8.1, 3.4.1 to 3.4.5) |
+| `multi-registry-gen` | one process's registry writes move `reg_gen` in another's mapping and change its answers (2.8.1, 4.3, 4.5) |
 
 **Left out because wire.md does not fix the answer**, so no scenario
 asserts it: READDIR of a path that is not a directory; a path below a file
 (accepted as found=0, `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`); a write open,
 DELETE or RENAME of a missing path outside every writable provider; a create
-whose parent directory is missing; what a write past the end puts in the gap;
-WRITE or SETATTR on a handle opened read-only; `ST_NO_SPACE`.
+whose parent directory is missing; WRITE or SETATTR on a handle opened
+read-only; `ST_NO_SPACE`. (What a write past the end, or a SETATTR, puts in
+the gap is zeros, and a handle opened for writing alone serves READ: wire.md
+3.4.4 to 3.4.6 now say so, and `write-growth` and `write-only-read` check
+them.)
 
 **Left out because a scenario cannot send or receive it.** A scenario names
 opcodes and fields of the table and the statuses in `protocol.json`, so these
@@ -164,15 +208,148 @@ rules are not expressible in the scenario format. The malformed part of a run
 - 2.5: a slot whose header claims more than `payload_cap` bytes is completed
   with `ST_BAD_REQUEST` and no payload.
 
+Left out of the scenarios because their sizes are the director's (its
+`payload_cap`, slot count and arena), and played by the limits part of a run
+(`--limits`, "Requests sized from the ring" below): READs of the shim's own
+sizes, a WRITE of exactly `payload_cap`, a READDIR listing at the cap and one
+byte over it (3.4.2: the overflow status `i32::MIN`).
+
 Still left out of every part of a run:
 
-- 3.4.2: a READDIR listing larger than `payload_cap` is answered with the
-  overflow status `i32::MIN` and an empty payload. A tree large enough to
-  overflow depends on the director's cap, which the run learns only once the
-  tree is mounted.
 - A WRITE or request larger than the ring's payload, and a registry value over
   `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
   REG_KEY is covered only as a `one_of`, since the cap is the director's.
+
+## Several clients
+
+A step may carry `"client": n` (default 0, `contract/scenarios/README.md`).
+The run attaches one client per number a scenario names. Client 0 is the
+run itself. Every other client is a process of its own, `aether-conform
+client-worker` (`crates/aether-conform/src/clients.rs`):
+
+- it starts with the mount's handshake variables as its environment (any
+  `VFS_*` variable of the run's own removed first);
+- it attaches from them exactly as the run does, to a file ring or to a
+  named section and its events;
+- it sends the HEARTBEAT the shim sends, then the requests the run gives it,
+  one at a time.
+
+Client `k` claims from slot `k` (mod the slot count), as a client thread
+whose hint is `k` does (2.5). So a scenario with two clients uses two slots
+and two banks, where one client sending one request at a time only ever
+uses slot 0. The wire's promises are about processes (2.8.1: "every process
+of the launch shares it"). That is why scenario clients are processes, each
+mapping the ring for itself, and not threads sharing the run's mapping.
+
+One comparison session serves all the clients of a scenario, so handles are
+paired ring-global, as 2.8.1 has them. The loader refuses an OPEN that
+expects a number still open in any client. A client process that cannot
+start, attach or send its HEARTBEAT fails the scenario, as a failed attach
+does.
+
+A scenario cannot say that a process is killed (2.8.1: it "never sends
+CLOSE for its open handles"), so a test does it
+(`crates/aether-conform/tests/run.rs`, `a_killed_client`), on a file ring
+and on a section. It kills a client process holding open handles, then
+checks:
+
+- the director goes on answering this process and a new client process;
+- the new client reads through a handle the killed one left open (the
+  director keeps them until the session ends);
+- new handles do not collide with the old ones.
+
+## Concurrent clients
+
+`run --concurrent N` plays `--concurrent-cases C` rounds (default 64) of N
+clients at once (`crates/aether-conform/src/concurrent.rs`). The rounds come
+from `--seed` (as `--generate`'s cases do, and the same seed if both are
+given) and have at most `--steps` operations per client.
+
+**A round.** Each client `k` gets a generated case ("Generated cases" below)
+limited to one root with a writable provider and no registry layer. The
+overlay's version is one counter for the whole session, so one client's
+registry writes would change another's answers. The case's tree and paths
+move under the directory `c<k>` of root 0: a STORED_NAMES `skip` goes up by
+one, and expected handle numbers move into a range of their own. The
+clients' subtrees are disjoint, so each client's answers are its own case's
+whatever the others do, and the reference predicts them exactly. Before a
+round is played, it is checked against an in-process reference serving the
+combined tree; a case that answers otherwise there is a generator error.
+Root 0 also holds one file per slot under `sweep/`, each with its own size
+and bytes.
+
+**Playing it.** Every client is a thread with its own mapping of the ring,
+its own HEARTBEAT, its own comparison session and its own registry
+generation rules. Each sends its steps one at a time, claiming from the next
+slot of a cursor the clients share. Data requests (READ, WRITE, SETATTR and
+write OPENs) stay below 2.8's limit, `data_limit(worker_hint, slot_count)`,
+as the shim keeps them. A case's steps that present a closed handle, or a
+number never issued, are left out of its round (the generated cases send
+them): a client knows only its own handles, and a director may issue any
+u64 (3.4.3), so any number one client sent for a handle it does not have
+could be another client's live handle, which would answer it, or which a
+CLOSE would close. Such a step expects `ST_BAD_FH` and changes nothing, so
+the other steps' answers stay the same. An OPEN that may answer a handle or
+an error (a `one_of` with both) ends its client's case: the later steps were
+made after the reference's choice, and the director may choose the other.
+Then the sweep, which gives every slot and bank work:
+
+- an OPEN of each sweep file, each claimed from its own slot, so every slot
+  carries a request;
+- a GETATTR in every slot at once;
+- a bulk READ of each sweep file from its own slot, in waves of the data
+  limit, each wave in flight together.
+
+Each answer must have its own file's size or bytes.
+
+**What fails a round**, besides a step whose answer is not its client's
+expectation:
+
+| Rule | wire.md |
+|---|---|
+| Every request is answered within `--timeout`, whichever slot it is in. | 2.5: "Every taken slot MUST be completed"; slots are taken "in any order and from any number of threads" |
+| A reply is the answer to the request in its slot: each client's requests name its own paths and contents, so a reply written into another request's slot fails that client's comparison, and the sweep's answers differ slot by slot. | 2.5 |
+| A completed slot's `ack` is the low 32 bits of its request's `req_id`. | 2.5, "The client's read" |
+| A bulk reply's data lies in the bank of the slot it answers. | 2.6: "Slot `s` owns bank `s % banks`" |
+| An `fh` is not issued to one client while another has it open; a number counts as closed once its CLOSE is sent. | 2.8.1: "a director must issue them uniquely across all processes of the ring"; 3.4.3 |
+| `reg_gen` never goes backward in any client's mapping. | 4.5 |
+
+At the end, every slot must have carried a request. A director may answer
+any READ inline (3.4.4), so a bank that never carried a bulk reply is not a
+failure. The report's `concurrent` entry, and a line on stderr, say how many
+slots and banks were used and the most requests in flight at once. The first
+round that fails is written to the failures folder as
+`concurrent-<seed>-<round>.json`. It is a scenario whose steps are marked
+with their clients, which `run --scenarios` replays one step at a time. A
+fault that needs requests in flight together may not show in the replay.
+
+Concurrent clients are threads of the run, not processes, since a round has
+many of them. The processes the wire speaks of are what the `multi-*`
+scenarios and the killed-client test cover, over both kinds of ring.
+
+## Requests sized from the ring
+
+`run --limits` (`crates/aether-conform/src/limits.rs`) mounts an empty tree
+to learn the ring's `payload_cap`, slot count and `VFS_ARENA_LEN`, then a
+tree sized from them: a file of eight of the shim's read chunks and a bit,
+a directory whose READDIR reply is exactly `payload_cap` bytes and one whose
+reply is a byte longer, a writable directory, and a registry key. The report
+has one entry, `limits`: its steps first, played as a scenario's are (every
+comparison rule applies), then the checks a step cannot say.
+
+| What | Answer | wire.md |
+|---|---|---|
+| READs of the shim's bulk chunk `clamp(VFS_ARENA_LEN / slot_count, 256 KiB, 1 MiB)` with `FLAG_READ_BULK`, at the start, inside, at the last whole chunk and at the end; remainders of 64 KiB and of a chunk less a byte; the read cache's run of 16 blocks of 64 KiB; 65 535 bytes inline; `payload_cap - 8` and `payload_cap - 9` without the flag | the bytes, all of them to the end of the file | 2.6, 3.4.4: `n < len` means end of file, so a READ comes back whole when its form can hold it; a director with an arena answers a flagged READ over `payload_cap - 8` in bulk |
+| A READ of the chunk plus one byte | all of it, or at most a bank | 3.4.4: a bulk reply's `n <= min(len, bank_size)` |
+| With no arena, READs of `payload_cap - 7` bytes and of `2 * payload_cap` | `payload_cap - 8` bytes, inline | 3.4.4: an inline reply's `n <= min(len, payload_cap - 8)`, whole whenever its form can hold it |
+| Two WRITEs of `payload_cap - 24` bytes (requests of exactly `payload_cap`), then GETATTR and READs back | `written` = the length; the size and bytes of both | 3.4.5 |
+| READDIR of a listing of exactly `payload_cap` bytes | the whole listing | 3.4.2 |
+| READDIR of a listing a byte longer | status `i32::MIN`, payload length 0 | 3.4.2, 2.5 step 3 |
+| 4 and then up to 8 bulk READs of one handle (one slot kept free), and 4 inline READs of 65 535 bytes, each set published at once at offsets out of order, held until all are `COMPLETED`, another READ answered meanwhile, and only then copied out, as `read_fragmented` does | each its own offset's bytes, in its own slot's bank | 2.5, "Order of service" (a pipelined read publishes up to 4 requests at once, 8 for reads of 4 MiB or more); 2.6: the bank is the client's while the slot is `COMPLETED` |
+| A bulk READ given up (`abandon`) the moment the director takes it, tried up to 100 times until it is caught `PROCESSING` | the slot ends `FREE`, never `COMPLETED`; then a HEARTBEAT from every slot is answered. A director never caught processing is not failed: the step says the rule was not exercised | 2.5: "a director must never store `COMPLETED` over `ABANDONED`" |
+| 300 REG_SET_VALUEs of one value from one client while another reads it with REG_KEY, reading `reg_gen` before each read | a read made at a generation a write's reply had already published sees that write (the writer reads `reg_gen` after each reply, which is at least the generation its write published) | 4.5: it moves "before the write's reply is published", and the shim caches an answer under the generation it read before asking. A director with no registry layer skips it |
+| `worker_hint` | a warning, never a failure, when it is 0 or above the slot count | 2.8 |
+| 200 HEARTBEATs one after another | the median and slowest round trip, a warning only | 2.11 |
 
 ## Malformed requests
 
@@ -283,7 +460,7 @@ shrunk case valid and plays each through the adapter's own mount.
 | MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
 | STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
 | STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` (a stager that does not stage it), a path (3.4.14) |
-| The eight registry requests | keys of the tree and below them in any spelling under `\Registry\Machine`, values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
+| The eight registry requests | keys of the tree and below them in any spelling below the hive, under a base key in each of `\Registry\Machine`, `\Registry\User\<CurrentUser>` and `\Registry\User\<CurrentUser>_Classes` (4.2), values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
 
 **What is not generated, and why:**
 
@@ -295,11 +472,13 @@ shrunk case valid and plays each through the adapter's own mount.
   DELETE or RENAME of a missing name outside every writable provider in a
   root that has one; a create whose parent is missing; READDIR of a missing
   path or a file; a path below a file; a write open of a directory.
-- Bytes wire.md does not fix: a WRITE starts at most at the end of the bytes
-  that are fixed, and after a SETATTR extends a file only the bytes before the
-  old end are read (what the extension holds is the director's).
-- WRITE and SETATTR on a handle opened without `write`, READ on one opened
-  without `read`: wire.md says nothing of them.
+- Growth: a WRITE starts at most at the end of the bytes that are fixed, and
+  after a SETATTR extends a file only the bytes before the old end are read.
+  wire.md 3.4.5 and 3.4.6 now fix the gap as zeros (`write-growth` checks
+  it); the generator has not been taught it yet.
+- WRITE and SETATTR on a handle opened without `write`: wire.md says nothing
+  of them. READ on one opened without `read`, which wire.md 3.4.4 now says a
+  handle serves (`write-only-read` checks it), is not generated yet.
 - A handle whose file changed through another handle or a path (a WRITE or
   SETATTR through another handle, a truncating open, a RENAME, RENAME_X or
   DELETE of it or of a directory above it) is only closed afterwards: what it
@@ -354,8 +533,17 @@ its stdout, never two requests at once.
   every value a string. At least the ring (`VFS_RING_PATH`, or
   `VFS_RING_SECTION` with `VFS_SERVER_EV` and `VFS_CLIENT_EV`),
   `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_LEN` (and
-  `VFS_ARENA_OFFSET`) for bulk reads, and `VFS_VIRTUAL_DIR`. A refusal
-  (`"ok":false`) fails that scenario and the run goes on.
+  `VFS_ARENA_OFFSET`) for bulk reads, and `VFS_VIRTUAL_DIR`;
+  `VFS_VIRTUAL_ROOTS` for a tree with other roots and `VFS_REGISTRY` for one
+  with a registry layer. It may give `VFS_SHIM_CONFIG`, the path of the
+  `shim.cfg` its director writes for the launch (5.1; the injector passes it
+  on), which the run then decodes. A refusal (`"ok":false`) fails that
+  scenario and the run goes on.
+- The run starts the adapter with a stale session's TRANSPORT variables in
+  its environment (every name of 5.2's table but `VFS_REGISTRY`, with values
+  like `aether-conform-stale-VFS_RING_SECTION` and `7`,
+  `aether_conform::adapter::stale`). A mount answer that holds one passed it
+  on, as a launch built on the director's own environment would.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed
@@ -442,28 +630,38 @@ aether-conform run --director "java -jar my-director-adapter.jar" --scenarios co
 | `--out FILE` | Where the report goes. Default stdout. |
 | `--timeout SECS` | How long every adapter answer and every ring request may take. Default 30. |
 | `--malformed` | Also send the malformed requests ("Malformed requests"). |
+| `--limits` | Also play the requests sized from the ring ("Requests sized from the ring"). |
 | `--generate` | Also play generated cases ("Generated cases"). |
 | `--cases N` | How many generated cases. Default 64. |
 | `--seed S` | The seed the cases are made from. Default: from the clock, printed. |
 | `--steps M` | The most operations per case. Default 32. |
-| `--failures DIR` | Where the shrunk failing case is written. Default `aether-conform-failures-<seed>` in the temporary directory. |
+| `--failures DIR` | Where the shrunk failing case, and a failing concurrent round, are written. Default `aether-conform-failures-<seed>` in the temporary directory. |
+| `--concurrent N` | Also play rounds of N clients at once ("Concurrent clients"). `--seed`, `--steps` and `--failures` apply to them too. |
+| `--concurrent-cases C` | How many rounds, each a case per client. Default 64. |
 
 Exit code: 0 when every scenario passes, 1 when any fails, 2 on a usage
 error, a scenario that does not load, an adapter error, or a generator error
 (the reference answered a generated request otherwise than wire.md says).
 
-CI runs the committed scenarios, `--malformed` and `--generate --cases 1024`
-against the reference, over a file ring on Linux and Windows and over a
-section on Windows, with the workflow run's id as the seed. Measured on a
+CI runs the committed scenarios, `--malformed`, `--limits`, `--generate --cases 1024`
+and `--concurrent 4 --concurrent-cases 256` against the reference, over a
+file ring on Linux and Windows and over a section on Windows, with the
+workflow run's id as the seed; and the committed scenarios, `--malformed`,
+`--limits` and `--generate --cases 256` over a ring file with no arena
+(`--no-arena`), on Windows. The concurrent rounds take about 15 s per
+ring with a debug build on a 16-thread Windows machine. Measured on a
 16-thread Windows machine with a debug build, 1024 cases take about 19 s over
 a file ring (each mount creates a 16 MiB ring file) and 8 s over a section;
 pinned to two cores, 512 take 8.4 s and 3.5 s. At two to three times slower
 on CI's 2-vCPU runners that is about one minute for the Windows step.
 
-`aether-conform reference-adapter [--ring file|section]` is an adapter for
-the reference director (`aether_refdirector::Reference`, built with
-`Reference::from_tree`), served with the same loop a Rust director runs
-(`aether_rpc::serve_with_arena`) on its own thread. It is what a run is
+`aether-conform reference-adapter [--ring file|section] [--no-arena]` is an
+adapter for the reference director (`aether_refdirector::Reference`, built
+with `Reference::from_tree`), served with the same loop a Rust director runs
+(`aether_rpc::serve_with_arena`) on four threads, each with its own handle
+on the reference (`Reference::share`), with `worker_hint` 4. Its ring has a
+bulk arena of 1 MiB per slot, or, with `--no-arena`, none (`VFS_ARENA_LEN`
+unset, every READ answered inline). It is what a run is
 checked against in this repository's tests, and an example of what an
 adapter does. Its hidden `--break <rule>` switch, for this repository's tests
 only, makes it break one rule on purpose (`aether_conform::adapters::Break`),
@@ -471,7 +669,19 @@ so the tests can show that generation and the malformed part find it; the
 hidden `test-adapter --misbehave stale-immutable` (every read open of a file
 `immutable`, under one `mount_gen`) and `--misbehave frozen-reg-gen` (the
 registry generation never moved by a write) do the same for the checks
-across steps.
+across steps. These four do it for the checks across clients:
+
+- `--misbehave per-slot-fh`: handles numbered per slot, as a per-connection
+  handle table would number them;
+- `--misbehave slot-zero-only`: only slot 0 ever taken;
+- `--misbehave bank-zero`: every bulk reply in bank 0;
+- `--misbehave swap-replies`: two requests in flight together each get the
+  other's reply, under their own `ack`.
+
+Each passes every single-client scenario, since one client sending one
+request at a time only uses slot 0. `swap-replies` passes every scenario,
+since a scenario's steps go one at a time. Each fails the concurrent
+clients.
 
 ## Reading a report
 

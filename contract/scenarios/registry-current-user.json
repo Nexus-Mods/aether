@@ -1,0 +1,33 @@
+{
+  "name": "registry-current-user",
+  "description": "Keys under the current user's hives, as the shim names them (wire.md 4.2: under \\Registry\\User the SID is the literal <CurrentUser>, and <SID>_Classes is <CurrentUser>_Classes): looked up, created, given values, renamed and deleted like any key (4.3), each hive apart from \\Registry\\Machine and from the other.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform", "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}]},
+      {"path": "\\Registry\\User\\<CurrentUser>_Classes\\Conform"}
+    ]}
+  },
+  "steps": [
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>_Classes\\Conform"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}, "note": "the same key name under another hive is another key"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>_Classes\\Software\\Conform"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}, "note": "and so is the user's classes hive"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>\\software\\CONFORM"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}, "note": "below the hive, keys compare by fold"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform"}, "expect": {"reply": {"version": 2, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "v", "ty": 4, "data": {"hex": "01000000"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-create-key", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform\\Saves", "volatile": false}, "expect": {"reply": {"version": 3}}},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform\\Saves", "name": "Slot", "ty": 1, "data": {"hex": "610062000000"}}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\User\\<CurrentUser>_Classes\\Conform", "name": "", "ty": 1, "data": {"hex": "780000"}}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\User\\<CurrentUser>_Classes\\Conform"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "", "ty": 1, "data": {"hex": "780000"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform"}, "expect": {"reply": {"version": 5, "state": "created", "below": true}}},
+    {"request": {"op": "reg-delete-value", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform", "name": "v"}, "expect": {"reply": {"version": 6}}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform\\Saves", "new_leaf": "Profiles"}, "expect": {"reply": {"version": 7}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform\\Profiles"}, "expect": {"reply": {"version": 7, "state": "created", "below": false}}},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\User\\<CurrentUser>_Classes\\Conform"}, "expect": {"reply": {"version": 8}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>_Classes\\Conform"}, "expect": {"reply": {"version": 8, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\User\\<CurrentUser>\\Software\\Conform"}, "expect": {"reply": {"version": 8, "state": "created", "below": true}}, "note": "the other hive's delete leaves this one as it was"}
+  ]
+}

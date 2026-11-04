@@ -59,6 +59,10 @@ pub struct Step {
     pub cite: Option<String>,
     /// What the step is for, if the scenario says.
     pub note: Option<String>,
+    /// Which client sends it (`"client"`, default 0): the run attaches one
+    /// client per number, each a process of the session as the shim's are
+    /// (`docs/wire.md` 2.8.1), and pairs handles across all of them.
+    pub client: u32,
 }
 
 /// What a step expects: a reply (status OK), an error status, or any of
@@ -730,13 +734,44 @@ fn parse_step(i: usize, v: &Value) -> R<Step> {
         Some(_) => Some(o.str("note")?),
     };
     let (expect, cite) = parse_expect(i, request.opcode(), o.get("expect")?, "expect.", true)?;
+    let client = match o.opt("client") {
+        None => 0,
+        Some(_) => o.u32("client")?,
+    };
     o.done()?;
     Ok(Step {
         request,
         expect,
         cite,
         note,
+        client,
     })
+}
+
+/// A request in the scenario format ([`request_json`]) read back, as a
+/// client worker receives it; the error says which field is wrong.
+pub fn parse_request_value(v: &Value) -> Result<OwnedRequest, String> {
+    parse_request(0, v).map_err(|b| format!("{}: {}", b.field, b.message))
+}
+
+/// A director's answer in the scenario's expectation format: `{"reply":
+/// ...}`, `{"status": "ok"}` for an empty reply, or `{"status": name}`. How a
+/// client worker hands an answer back ([`parse_answer`] reads it).
+pub fn answer_json(a: &Result<OwnedReply, Status>) -> Value {
+    match a {
+        Ok(r) => expect_json(&Expect::Reply(r.clone()), None),
+        Err(s) => expect_json(&Expect::Status(*s), None),
+    }
+}
+
+/// [`answer_json`]'s output for a request with opcode `op`, read back.
+pub fn parse_answer(op: Opcode, v: &Value) -> Result<Result<OwnedReply, Status>, String> {
+    match parse_expect(0, op, v, "", false) {
+        Ok((Expect::Reply(r), _)) => Ok(Ok(r)),
+        Ok((Expect::Status(s), _)) => Ok(Err(s)),
+        Ok((Expect::OneOf(_), _)) => Err("an answer is not a one_of".into()),
+        Err(b) => Err(format!("{}: {}", b.field, b.message)),
+    }
 }
 
 fn parse_request(i: usize, v: &Value) -> R<OwnedRequest> {
@@ -1186,6 +1221,9 @@ fn step_json(s: &Step) -> Value {
     });
     if let Some(n) = &s.note {
         v["note"] = Value::String(n.clone());
+    }
+    if s.client != 0 {
+        v["client"] = Value::from(s.client);
     }
     v
 }

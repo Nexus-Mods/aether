@@ -70,9 +70,10 @@
 //! in the slot's arena bank, the reply carrying length and offset), chosen as
 //! a director chooses: `RequestFlags::READ_BULK`, or a request of at least
 //! [`BULK_THRESHOLD`] bytes, when the server has an arena
-//! ([`aether_rpc::serve_with_arena`]). A real copy-up of a large file takes
-//! the bulk path, so a fixture with no arena tests the transport production
-//! does not use.
+//! ([`aether_rpc::serve_with_arena`]); an inline answer holds at most
+//! `ReadSlot::inline_cap` (`payload_cap - 8`) bytes. A real copy-up of a
+//! large file takes the bulk path, so a fixture with no arena tests the
+//! transport production does not use.
 //!
 //! **Handles.** A [`Reference`] is one handle on a graph; [`Reference::share`]
 //! makes another (the server thread's, say) with the same files, handles,
@@ -1173,6 +1174,9 @@ impl Director for Reference {
                 Err(st) => Err(Status::try_from(st).unwrap_or(Status::IoError)),
             };
         }
+        // Inline: at most what the reply holds, and that much when the file
+        // has it (wire.md 3.4.4: `n <= min(len, payload_cap - 8)`).
+        let src = &src[..src.len().min(at.inline_cap)];
         self.read_buf.clear();
         self.read_buf.extend_from_slice(src);
         drop(files);

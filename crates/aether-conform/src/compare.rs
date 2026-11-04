@@ -39,9 +39,16 @@
 //!   differ "by a constant", and "a REG_CHANGED `since` is in the numbering
 //!   of the director it is sent to"). Compared up to one offset per session,
 //!   fixed by the first registry reply; a REG_CHANGED `since` is sent shifted
-//!   by it.
+//!   by it, except `u64::MAX`, the shim's probe for the current version.
 //! - **`last_write`** of a REG_KEY node (wire.md 4.3: a FILETIME the overlay
 //!   stamps with the director's clock). Not compared.
+//!
+//! Some fields the rules do not compare must still be well formed, whatever
+//! the expectation: an OPEN reply's `fh` is never 0 (wire.md 3.4.3: the shim
+//! keeps 0 for a directory it made with MKDIR), and an `mtime` is below 2^40,
+//! as a time in seconds is (3.2, Timestamps). The runner checks the raw OPEN
+//! reply's reserved bits ([`open_reply_reserved`]) and a STAGE_EXEC path
+//! (`run.rs`, `stage_check`).
 //!
 //! Besides comparing, a session checks one rule across steps, which no single
 //! answer shows:
@@ -88,6 +95,8 @@ pub struct Session {
     /// What READs through immutable handles returned, by key, offset and
     /// length: the shim's read cache, which outlives the handles.
     cached: BTreeMap<(CacheKey, u64, u32), Vec<u8>>,
+    /// Never send a closed handle's old number ([`Session::among_others`]).
+    no_reuse: bool,
 }
 
 /// What the shim's read cache keys a file's blocks by (wire.md 3.4.3): the
@@ -128,6 +137,19 @@ impl Session {
         Session::default()
     }
 
+    /// A session for one of several clients sending at once, each pairing
+    /// its own handles: a closed handle, or a number never paired, is always
+    /// sent as a stand-in, never as the number the director closed, since
+    /// the director may already have issued that number to another client
+    /// (wire.md 2.8.1: handles are ring-global), and this session cannot
+    /// know.
+    pub fn among_others() -> Session {
+        Session {
+            no_reuse: true,
+            ..Session::default()
+        }
+    }
+
     /// `req` as the director should get it: an expected handle replaced as
     /// the module doc says (paired, closed, or a stand-in), and a
     /// REG_CHANGED `since` shifted by the registry version offset. Mutable
@@ -140,7 +162,10 @@ impl Session {
             | OwnedRequest::SetAttr { fh: n, .. }
             | OwnedRequest::Close { fh: n } => *n = self.director_fh(*n),
             OwnedRequest::RegChanged { since, .. } => {
-                if let Some(off) = self.reg_offset {
+                // `u64::MAX` is the probe the shim sends to learn the current
+                // version (`crates/aether-hooks/src/regnotify.rs`): "after
+                // every version", in any numbering, so it is not shifted.
+                if let (Some(off), false) = (self.reg_offset, *since == u64::MAX) {
                     *since = (i128::from(*since) + off).clamp(0, i128::from(u64::MAX)) as u64;
                 }
             }
@@ -154,7 +179,12 @@ impl Session {
         if let Some(&d) = self.fh.get(&n) {
             return d;
         }
-        for m in [&self.released, &self.stand_in] {
+        let reuse = if self.no_reuse {
+            &[&self.stand_in][..]
+        } else {
+            &[&self.released, &self.stand_in][..]
+        };
+        for m in reuse {
             if let Some(&d) = m.get(&n) {
                 if !self.fh_back.contains_key(&d) {
                     return d;
@@ -239,6 +269,13 @@ impl Session {
                 if (e.size, e.is_dir) != (g.size, g.is_dir) {
                     return Err("a different size or is_dir".into());
                 }
+                if g.fh == 0 {
+                    return Err(
+                        "fh 0, which a director never issues (wire.md 3.4.3: the shim keeps 0 \
+                         for a directory it made with MKDIR, and sends CLOSE(0) for it)"
+                            .into(),
+                    );
+                }
                 self.pair(e.fh, g.fh)?;
                 match req {
                     OwnedRequest::Open { root, path, .. } if g.immutable => {
@@ -280,6 +317,7 @@ impl Session {
                 }
             }
             (O::GetAttr(e), O::GetAttr(g)) => {
+                seconds(g.mtime)?;
                 if (e.found, e.is_dir, e.size) == (g.found, g.is_dir, g.size) {
                     Ok(())
                 } else {
@@ -287,6 +325,9 @@ impl Session {
                 }
             }
             (O::ReadDir(e), O::ReadDir(g)) => {
+                for x in g {
+                    seconds(x.mtime).map_err(|why| format!("{:?}: {why}", x.name))?;
+                }
                 let set = |v: &[crate::scenario::OwnedDirEntry]| {
                     let mut v: Vec<_> = v
                         .iter()
@@ -417,6 +458,42 @@ impl Session {
             )),
         }
     }
+}
+
+/// The latest `mtime` taken as seconds: 2^40 seconds is the year 36812, and
+/// a time in milliseconds is past it from 1970-02-13 on.
+const MTIME_LIMIT: i64 = 1 << 40;
+
+/// Why `mtime` is not a time in seconds, if it is not (wire.md 3.2,
+/// Timestamps: "`mtime` is seconds since the Unix epoch, signed"; the shim
+/// turns it into a FILETIME as seconds, so milliseconds give dates
+/// thousands of years away).
+fn seconds(mtime: i64) -> Result<(), String> {
+    if mtime < MTIME_LIMIT {
+        return Ok(());
+    }
+    Err(format!(
+        "mtime {mtime} is past 2^40 seconds (the year 36812): not seconds since the Unix \
+         epoch, milliseconds perhaps (wire.md 3.2, Timestamps: \"`mtime` is seconds since the \
+         Unix epoch, signed\")"
+    ))
+}
+
+/// Why an OPEN reply's payload is not one wire.md 3.4.3 allows beyond what
+/// its decoder reads, if it is not: byte 17's bits 1 to 7 and bytes 18 and
+/// 19 are zero ("other bits zero", "zero"; section 7: a newer field is read
+/// only where "an old director writes zero").
+pub fn open_reply_reserved(payload: &[u8]) -> Option<String> {
+    let flags = *payload.get(17)?;
+    let pad = payload.get(18..20)?;
+    (flags & !1 != 0 || pad != [0, 0]).then(|| {
+        format!(
+            "an OPEN reply whose flags byte is {flags:#04x} and bytes 18 and 19 are {:02x}{:02x}: \
+             only bit 0 (immutable) may be set, and bytes 18-19 are zero (wire.md 3.4.3; 7: a \
+             later field is read only where an old director writes zero)",
+            pad[0], pad[1]
+        )
+    })
 }
 
 /// `e` as a person reads it, as a mismatch and a report show it.
@@ -590,5 +667,93 @@ mod tests {
         open_read_close(&mut sess, "a", 1, opened(7, 3, true, 0), b"abc").unwrap();
         // The same expected fh, now for a mutable open of the same path.
         open_read_close(&mut sess, "a", 1, opened(7, 3, false, 0), b"xyz").unwrap();
+    }
+
+    fn changed(since: u64) -> OwnedRequest {
+        OwnedRequest::RegChanged {
+            path: r"\Registry\Machine\Software\T".into(),
+            subtree: true,
+            since,
+        }
+    }
+
+    /// wire.md 4.3: `since` is in the numbering of the director it is sent
+    /// to, so it is shifted by the session's offset; but `u64::MAX` is the
+    /// probe the shim sends to learn the current version
+    /// (`regnotify.rs`), in every numbering, and goes as it is.
+    #[test]
+    fn fh_0_is_never_a_handle() {
+        let mut sess = Session::new();
+        let m = sess
+            .check(
+                0,
+                &open("a"),
+                &Expect::Reply(opened(1, 3, false, 0)),
+                &Ok(opened(0, 3, false, 0)),
+            )
+            .unwrap_err();
+        assert!(m.why.contains("wire.md 3.4.3"), "{m}");
+    }
+
+    #[test]
+    fn an_mtime_in_milliseconds_fails() {
+        let attr = |mtime| {
+            OwnedReply::GetAttr(aether_protocol::AttrResp {
+                found: true,
+                is_dir: false,
+                size: 1,
+                mtime,
+            })
+        };
+        let get = OwnedRequest::GetAttr {
+            root: RootId(0),
+            path: "a".into(),
+        };
+        let mut sess = Session::new();
+        for ok in [0, -5, 1_577_836_800, MTIME_LIMIT - 1] {
+            sess.check(0, &get, &Expect::Reply(attr(0)), &Ok(attr(ok)))
+                .unwrap();
+        }
+        let m = sess
+            .check(
+                0,
+                &get,
+                &Expect::Reply(attr(0)),
+                &Ok(attr(1_577_836_800_000)),
+            )
+            .unwrap_err();
+        assert!(m.why.contains("wire.md 3.2"), "{m}");
+    }
+
+    #[test]
+    fn an_open_reply_with_reserved_bits_set_is_named() {
+        let mut p = vec![0u8; 24];
+        p[17] = 1;
+        assert_eq!(open_reply_reserved(&p), None);
+        p[17] = 3;
+        assert!(open_reply_reserved(&p).unwrap().contains("wire.md 3.4.3"));
+        p[17] = 1;
+        p[19] = 1;
+        assert!(open_reply_reserved(&p).is_some());
+    }
+
+    #[test]
+    fn a_reg_changed_probe_of_u64_max_is_sent_unshifted() {
+        for off in [-5i128, 5] {
+            let mut sess = Session {
+                reg_offset: Some(off),
+                ..Session::default()
+            };
+            assert_eq!(
+                sess.translate(&changed(u64::MAX)),
+                changed(u64::MAX),
+                "{off}"
+            );
+            assert_eq!(
+                sess.translate(&changed(10)),
+                changed((10 + off) as u64),
+                "{off}"
+            );
+        }
     }
 }

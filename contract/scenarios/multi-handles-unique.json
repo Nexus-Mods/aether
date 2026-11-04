@@ -1,0 +1,42 @@
+{
+  "name": "multi-handles-unique",
+  "description": "A director issues `fh` uniquely across every process of the ring (wire.md 2.8.1: \"a director must issue them uniquely across all processes of the ring\"; 3.4.3: unique among open handles). Three processes, each claiming a slot of its own, open the same files and different ones, all open at once; the run pairs every handle with the scenario's number one to one across the clients, so a number issued twice fails. Each handle then reads its own file from another client.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "a.txt", "contents": "AAAA"},
+        {"path": "b.txt", "contents": "BBBBB"},
+        {"path": "c.txt", "contents": "CCCCCC"},
+        {"path": "w/d.txt", "contents": "DD"}
+       ],
+       "writable": ["w"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 1, "size": 4, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"client": 1, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 2, "size": 4, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"client": 2, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 3, "size": 4, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"client": 1, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "b.txt"}, "expect": {"reply": {"fh": 4, "size": 5, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"client": 2, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "c.txt"}, "expect": {"reply": {"fh": 5, "size": 6, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "w/d.txt"}, "expect": {"reply": {"fh": 6, "size": 2, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"client": 1, "request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "w/d.txt"}, "expect": {"reply": {"fh": 7, "size": 2, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"client": 2, "request": {"op": "open", "root": 0, "flags": ["read"], "path": "."}, "expect": {"reply": {"fh": 8, "size": 0, "is_dir": true, "immutable": false, "mount_gen": 0}}},
+    {"client": 2, "request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": "AAAA"}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": "AAAA"}}},
+    {"client": 1, "request": {"op": "read", "fh": 3, "offset": 0, "len": 16}, "expect": {"reply": {"data": "AAAA"}}},
+    {"client": 2, "request": {"op": "read", "fh": 4, "offset": 0, "len": 16}, "expect": {"reply": {"data": "BBBBB"}}},
+    {"request": {"op": "read", "fh": 5, "offset": 0, "len": 16}, "expect": {"reply": {"data": "CCCCCC"}}},
+    {"client": 2, "request": {"op": "read", "fh": 6, "offset": 0, "len": 16}, "expect": {"reply": {"data": "DD"}}},
+    {"client": 2, "request": {"op": "read", "fh": 7, "offset": 0, "len": 16}, "expect": {"reply": {"data": "DD"}}},
+    {"request": {"op": "read", "fh": 8, "offset": 0, "len": 16}, "expect": {"status": "is-dir"}},
+    {"client": 1, "request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"client": 2, "request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}},
+    {"client": 1, "request": {"op": "close", "fh": 5}, "expect": {"status": "ok"}},
+    {"client": 2, "request": {"op": "close", "fh": 6}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 7}, "expect": {"status": "ok"}},
+    {"client": 1, "request": {"op": "close", "fh": 8}, "expect": {"status": "ok"}}
+  ]
+}

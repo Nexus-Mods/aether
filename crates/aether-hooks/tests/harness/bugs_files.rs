@@ -313,7 +313,7 @@ fn listed(r: &aether_refdirector::harness::Recorded) -> Vec<String> {
 // ---- B3, S5: MKDIR answered OK on an existing directory -------------------
 
 /// A writable `save/` holding the directory `save/sub`, whose MKDIR the
-/// director answers `ST_OK` (Cairn's writable providers, wire.md 3.4.9).
+/// director answers `ST_OK` (a writable provider may, wire.md 3.4.9).
 fn existing_dir_ok() -> Fake {
     Fake::new()
         .with_dir("save/sub")

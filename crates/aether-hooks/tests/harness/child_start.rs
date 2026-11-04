@@ -3,7 +3,7 @@
 //! hook (`hook/process.rs`).
 //!
 //! The test process calls `CreateProcessW` with an image path under root 0,
-//! which has a backing directory (`VFS_ROOT_BACKINGS`), as Cairn's roots do.
+//! which has a backing directory (`VFS_ROOT_BACKINGS`), as a director's roots may.
 //! A real copy of `aether-probe.exe` sits at that path on disk too, so a
 //! child the shim let the kernel start from what is really there would show.
 //! What the kernel started is read from the process itself

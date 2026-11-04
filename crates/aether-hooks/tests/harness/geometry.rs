@@ -1,5 +1,5 @@
 //! Every ring geometry and transport a director may choose (gap item S10):
-//! the 1 MiB payload cap Cairn's director uses, banks of 1 and 4 MiB, rings
+//! the 1 MiB payload cap a production director uses, banks of 1 and 4 MiB, rings
 //! of one and two slots, a worker hint below, above and equal to what the
 //! ring can serve, the director's wake event, and the file ring that Wine
 //! and Proton use.

@@ -718,7 +718,7 @@ impl Reference {
     }
 
     /// An answer other directors give: MKDIR of a directory that exists
-    /// under a writable prefix is `Status::Ok`, as Cairn's writable providers
+    /// under a writable prefix is `Status::Ok`, as a writable provider may
     /// answer, instead of `Status::Exists` (`docs/wire.md` 3.4.9 allows
     /// either). Off by default; conformance never sets it.
     pub fn mkdir_existing_ok(mut self) -> Reference {
@@ -760,7 +760,7 @@ impl Reference {
 
     /// An answer other directors give: a file held only in a read-only
     /// lower under a writable prefix, answered as `docs/wire.md` 3.4.9's
-    /// "Names only in a read-only lower" says Cairn's overlay answers: DELETE
+    /// "Names only in a read-only lower" says an overlay may answer: DELETE
     /// hides it, RENAME copies it up (to another case of itself, `Status::Ok`
     /// with the lower's spelling kept), MKDIR over it makes the directory. A
     /// write open copies it up, after which it is an ordinary file. Meant
@@ -1306,7 +1306,7 @@ impl Director for Reference {
         let mut dirs = g.dirs.lock().unwrap();
         let mut files = g.files.lock().unwrap();
         if is_dir_in(&dirs, &vpath) {
-            // Cairn's writable providers answer OK ([`mkdir_existing_ok`]).
+            // A writable provider may answer OK ([`mkdir_existing_ok`]).
             return if g.mkdir_existing_ok && g.is_writable(&vpath) {
                 Ok(())
             } else {
@@ -1402,8 +1402,8 @@ impl Director for Reference {
 
     /// The reference stages nothing, which wire.md 3.4.14 says is answered
     /// first, unless a test staged a path ([`Reference::staging`]): then a
-    /// path it did not stage is `Status::NotFound`, as Cairn's stager
-    /// answers.
+    /// path it did not stage is `Status::NotFound`, as a director that
+    /// stages may answer.
     fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
         if self.graph.staging.is_empty() {
             return Err(Status::NotSupported);

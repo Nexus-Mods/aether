@@ -792,7 +792,7 @@ filled on first touch is asked again up to three times and then raises
 Past `size`, a page holds zeros.
 
 None of this changes what the director sees; it is how the shim holds the
-bytes (`crates/aether-hooks/src/lazy_section.rs`). A section filled on first
+bytes. A section filled on first
 touch (a file over 256 MiB) is a view of a pagefile section of the shim's
 own, so no thread reads a page before its fill is in place. That costs about
 4 MiB of commit and 2 MiB of paged pool per GiB of file while it is mapped

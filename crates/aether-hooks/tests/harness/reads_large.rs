@@ -408,7 +408,7 @@ fn a_5_mib_read_uses_the_deep_pipeline_and_is_byte_exact() {
     );
 }
 
-/// Pinned: at Cairn's 16 workers (on its 32 slots) the gate, not
+/// Pinned: at 16 workers (on 32 slots) the gate, not
 /// `PIPELINE_DEPTH_STREAM`, sets the depth: limit 12, so 6 per call.
 #[test]
 fn a_5_mib_read_at_16_workers_is_6_deep() {

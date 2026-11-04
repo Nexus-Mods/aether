@@ -200,6 +200,9 @@ fn read_failed<T>(status: Status) -> Result<T, Status> {
 thread_local! {
     static IN_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The folded path a cache lookup asks with, in a buffer each thread keeps.
+    /// It never shrinks: it is as large as the longest key path the thread has
+    /// asked about (a registry path is at most 32767 units), kept for the
+    /// thread's life.
     static FOLDED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 

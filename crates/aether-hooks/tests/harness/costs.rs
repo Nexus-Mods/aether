@@ -20,7 +20,9 @@
 //!   allocator's on the test's own thread (`aether_testkit::alloc`), so it
 //!   leaves out the director's serve threads and any thread of the shim's
 //!   own. It can move with the machine (a longer path can take one more
-//!   reallocation), so only an increase fails. A decrease passes and prints
+//!   reallocation), so only an increase fails. The usual cause is the
+//!   temporary folder, which is part of every path the cases use: the record
+//!   is taken with `TMP` and `TEMP` set to `C:\vfstmp`, as CI sets them. A decrease passes and prints
 //!   the command that rewrites the record, so the record follows a saving.
 //!
 //! A count that differs fails with the recorded and the measured value. A

@@ -200,6 +200,9 @@ pub(super) unsafe fn path_of(oa: *const ObjectAttributes) -> Result<Option<Strin
 thread_local! {
     /// The name [`surely_outside`] decides on, decoded into a buffer each
     /// thread keeps, so the test allocates nothing once the buffer has grown.
+    /// It never shrinks: it is as large as the longest name the thread has
+    /// asked about, at most about 96 KiB (a `UNICODE_STRING` holds 32767
+    /// units), kept for the thread's life.
     static NAME_SCRATCH: core::cell::RefCell<String> =
         const { core::cell::RefCell::new(String::new()) };
 }
@@ -207,10 +210,10 @@ thread_local! {
 /// Whether `oa` names a path outside every root, answered without allocating:
 /// the passthrough of every file a program touches outside the roots. The
 /// name is decoded as [`path_of`] decodes it, into a buffer kept per thread,
-/// and asked whether it is under a root, as [`path_is_ours`] asks. `false` when this cannot tell cheaply (no name,
-/// a name relative to a handle, a name NT refuses, the buffer already in use
-/// on this thread): the caller then takes its full path, which decides the
-/// same way.
+/// and asked whether it is under a root, as [`path_is_ours`] asks. `false`
+/// when this cannot tell cheaply (no name, a name relative to a handle, a
+/// name NT refuses, the buffer already in use on this thread): the caller
+/// then takes its full path, which decides the same way.
 pub(super) unsafe fn surely_outside(oa: *const ObjectAttributes) -> bool {
     if oa.is_null() {
         return false;

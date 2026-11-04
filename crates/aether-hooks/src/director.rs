@@ -1068,6 +1068,13 @@ impl FuseClient {
             .map(|(root, vpath)| (root, wire_vpath(vpath)))
     }
 
+    /// Whether `path` is under a root: [`Self::vpath_under_root`]`.is_some()`,
+    /// without building the vpath. A path asked about before allocates
+    /// nothing.
+    pub fn is_under_root(&self, path: &str) -> bool {
+        self.roots.contains(path)
+    }
+
     /// Map an absolute path into the virtual namespace: **which root** it
     /// belongs to, and its path relative to that root.
     ///
@@ -1098,13 +1105,6 @@ impl FuseClient {
     /// preserves that behaviour, so a stream nothing serves still comes back
     /// not-found. Verified by `aether-fixture-escape`'s vector 11, which flipped
     /// to `opened` the moment the suffix was dropped.
-    /// Whether `path` is under a root: [`Self::vpath_under_root`]`.is_some()`,
-    /// without building the vpath. A path asked about before allocates
-    /// nothing.
-    pub fn is_under_root(&self, path: &str) -> bool {
-        self.roots.contains(path)
-    }
-
     pub fn vpath_under_root(&self, path: &str) -> Option<(RootId, String)> {
         let (_, stream) = aether_redirect::split_stream_suffix(path);
         let (root, comps) = self.roots.resolve(path)?;

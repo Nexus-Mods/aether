@@ -427,7 +427,7 @@ fn a_lazy_section_s_director_handle_closes_with_the_last_holder_in_every_order()
 }
 
 #[test]
-fn a_failed_lazy_fill_is_retried_at_the_next_touch() {
+fn a_failed_lazy_fill_is_asked_again_before_the_fault_returns() {
     isolate!();
     let want = pattern(LAZY);
     let (root, served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
@@ -695,6 +695,68 @@ fn a_second_thread_never_reads_a_chunk_before_its_fill_is_done() {
         "one fill serves both threads"
     );
     unmap(v as *const u8);
+    close(section);
+    close(file);
+}
+
+// ---- unmapping: real views, and the process an unmap names ---------------
+
+/// A view of a real file (outside every root) unmaps through the hooks: its
+/// range is free afterwards.
+#[test]
+fn a_real_file_s_view_still_unmaps() {
+    isolate!();
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE};
+    let (_root, _served) = serve(Fake::new(), false);
+    let dir = aether_testkit::tempdir().expect("temp folder");
+    let real = dir.path().join("real.bin");
+    std::fs::write(&real, pattern(64 * 1024)).unwrap();
+    let file = open(&real, GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("a real section");
+    let v = view(section);
+    assert!(bytes(v, 0, 16) == pattern(16));
+    unmap(v);
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    // SAFETY: a query of an address this test owned.
+    let n = unsafe {
+        VirtualQuery(
+            v.cast(),
+            &mut mbi,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    assert_ne!(n, 0);
+    assert_eq!(mbi.State, MEM_FREE, "the real view is still mapped");
+    close(section);
+    close(file);
+}
+
+/// An unmap that names this process by a real handle (not the
+/// `NtCurrentProcess` pseudo-handle) retires a synthetic view as the
+/// pseudo-handle does.
+#[test]
+fn an_unmap_naming_this_process_by_a_real_handle_retires_a_synthetic_view() {
+    isolate!();
+    use windows_sys::Win32::System::Memory::UnmapViewOfFile2;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, PROCESS_VM_OPERATION,
+    };
+    let want = pattern(MIB);
+    let (root, _served) = serve(Fake::new().with(FILE, want, ReadStyle::Whole), false);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section);
+    // SAFETY: a handle to this process, closed below.
+    let me = unsafe { OpenProcess(PROCESS_VM_OPERATION, 0, GetCurrentProcessId()) };
+    assert!(!me.is_null(), "OpenProcess: {}", last_error());
+    // SAFETY: a view this test mapped, unmapped once.
+    let ok = unsafe { UnmapViewOfFile2(me, MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ }, 0) };
+    assert_ne!(ok, 0, "UnmapViewOfFile2: {}", last_error());
+    // Retired: a second unmap finds no view there.
+    // SAFETY: as above; expected to fail.
+    let again = unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ }) };
+    assert_eq!(again, 0, "the synthetic view was not retired");
+    close(me);
     close(section);
     close(file);
 }

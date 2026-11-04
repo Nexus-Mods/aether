@@ -18,6 +18,7 @@
 
 use crate::handle_tags::SYNTH_SECTION_TAG;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// A synthetic section: the base address of the region it covers and its byte
@@ -41,6 +42,10 @@ struct SynthView {
 
 /// Mapped synthetic views: base address → view (for UnmapView no-op).
 static SYNTH_VIEWS: Mutex<BTreeMap<usize, SynthView>> = Mutex::new(BTreeMap::new());
+/// How many bases [`SYNTH_VIEWS`] holds, written under its lock: while it is
+/// 0, [`is_synth_view`] answers without the lock, so the unmap of every real
+/// view (each `UnmapViewOfFile`, the loader's) takes none.
+static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SLOT: Mutex<usize> = Mutex::new(0);
 
 /// Whether `handle` is a synthetic section (from [`register_mapped_image`]).
@@ -118,6 +123,7 @@ pub(crate) fn map_view(
                 length: size,
                 refs: 1,
             });
+        LIVE_VIEWS.store(views.len(), Ordering::Release);
     }
     Some((base, size))
 }
@@ -136,6 +142,9 @@ pub(crate) fn has_view_in(base: usize, len: usize) -> bool {
 
 /// Whether `base` is a synthetic mapped view (should no-op on UnmapView).
 pub(crate) fn is_synth_view(base: usize) -> bool {
+    if LIVE_VIEWS.load(Ordering::Acquire) == 0 {
+        return false;
+    }
     SYNTH_VIEWS
         .lock()
         .map(|v| v.contains_key(&base))
@@ -155,6 +164,7 @@ pub(crate) fn unmap_view(base: usize) -> bool {
         }
         Some(_) => {
             views.remove(&base);
+            LIVE_VIEWS.store(views.len(), Ordering::Release);
             true
         }
         None => false,

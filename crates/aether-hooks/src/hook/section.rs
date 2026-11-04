@@ -453,7 +453,7 @@ pub(super) unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) ->
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if unmap_synth_view(base) {
+    if unmap_synth_view(process, base) {
         return STATUS_SUCCESS;
     }
     // SAFETY: the original NT function, called with valid NT arguments.
@@ -473,7 +473,7 @@ pub(super) unsafe fn unmap_view_ex_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if unmap_synth_view(base) {
+    if unmap_synth_view(process, base) {
         return STATUS_SUCCESS;
     }
     // SAFETY: the original NT function, called with valid NT arguments.
@@ -484,14 +484,38 @@ pub(super) unsafe fn unmap_view_ex_hook_body(
 /// not one. The backing VA outlives it unless the section handle is already
 /// closed and this was the last view: a BSA reader slides views over one open
 /// section and must keep the others.
-fn unmap_synth_view(base: *mut c_void) -> bool {
+///
+/// Only an unmap in this process: synthetic views are this process's, so an
+/// unmap that names another (`UnmapViewOfFile2` of a child) at an address
+/// that happens to be one of ours goes to NT untouched.
+fn unmap_synth_view(process: HANDLE, base: *mut c_void) -> bool {
     if base.is_null() || !crate::synth_section::is_synth_view(base as usize) {
+        return false;
+    }
+    if !is_this_process(process) {
         return false;
     }
     let b = base as usize;
     crate::synth_section::unmap_view(b);
     crate::lazy_section::on_view_unmapped(b);
     true
+}
+
+/// Whether `process` names this process: the `NtCurrentProcess()`
+/// pseudo-handle (-1), or a real handle to it. A handle whose process id
+/// cannot be read (one opened with `PROCESS_VM_OPERATION` only, enough for
+/// an unmap) is taken as this process's, as every unmap was before: a
+/// handle to a child from `CreateProcess` has full access and is told apart.
+fn is_this_process(process: HANDLE) -> bool {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetProcessId};
+    if process as isize == -1 {
+        return true;
+    }
+    // SAFETY: plain FFI; it answers 0 for a handle it cannot query.
+    match unsafe { GetProcessId(process) } {
+        0 => true,
+        pid => pid == unsafe { GetCurrentProcessId() },
+    }
 }
 
 /// Where images served from the VFS are written for the loader to map: beside

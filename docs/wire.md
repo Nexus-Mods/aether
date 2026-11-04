@@ -841,10 +841,14 @@ through any handle, or a truncating OPEN, by any client, is seen by the next
 READ through every other handle of that file, as NTFS shows it.
 A director that gives an arena (`VFS_ARENA_LEN`) must answer a READ that sets
 `FLAG_READ_BULK` of more than `payload_cap - 8` bytes in bulk: an inline
-reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
-remainders of 64 KiB up to it, with the flag, and inline READs of at most
-65 535 bytes, or of at most `payload_cap - 8` with no arena; its read cache
-fetches runs of up to 16 blocks of 64 KiB the same way.
+reply cannot hold it. The shim's own READs on a ring whose arena meets
+section 2.6's rule are that section's bulk chunk and remainders of 64 KiB up
+to it, with the flag, and inline READs of at most 65 535 bytes. With
+`VFS_ARENA_LEN` unset or 0 it sends no flag and its inline READs are of at
+most `payload_cap - 8` bytes. An arena below 2.6's rule counts as none, except
+that the inline READs stay at 65 535 bytes at most, so that a director with
+that arena still answers them inline. The read cache fetches runs of up to 16
+blocks of 64 KiB the same way.
 
 For a section over a file (a program's `CreateFileMappingW`), the shim takes
 OPEN's `size` as the file's end: a READ that fails, or answers short of
@@ -853,7 +857,9 @@ fails (`STATUS_UNSUCCESSFUL`); an image section (`SEC_IMAGE`) is read whole,
 asked again up to three times, and then fails (`STATUS_UNSUCCESSFUL`); a page
 filled on first touch is asked again up to three times and then raises
 `STATUS_IN_PAGE_ERROR`, as NT does when a mapped file's paging read fails.
-Past `size`, a page holds zeros.
+Each of those READs is bounded by the client's deadline. Past `size`, a page
+holds zeros. An image section over a file larger than 256 MiB is refused
+(`STATUS_INVALID_FILE_FOR_SECTION`) before any READ.
 
 None of this changes what the director sees; it is how the shim holds the
 bytes. A section filled on first
@@ -1654,7 +1660,7 @@ case-insensitive); an **opt-out** switch is off only for `0`, `false`, `no`,
 | `VFS_RING_PATH` | director | shim | Ring file path as the shim sees it (2.10). Wins over the section. |
 | `VFS_RING_BYTES` | director | shim | Decimal bytes to map. Must cover the ring and the arena. Shim default if unparsable: 2 097 152. |
 | `VFS_RING_PAYLOAD_CAP` | director | shim | Decimal. Must equal the header's `payload_cap`: the shim sizes WRITE chunks and inline reads from this value, and a request over the header's cap is refused locally. Shim default: 1 048 576. |
-| `VFS_ARENA_OFFSET` | director | nobody | Decimal mapping offset of the arena. Informational: the shim takes data offsets from bulk replies. |
+| `VFS_ARENA_OFFSET` | director | shim | Decimal mapping offset of the arena. Authoritative when set: the shim locates each slot's bank from it (2.6) and fails a bulk reply whose data lies outside that bank, so a wrong value fails every bulk READ. Unset or unparsable: the arena is taken to start directly after the last slot (2.1). |
 | `VFS_ARENA_LEN` | director | shim | Decimal arena length; 0 or unset disables bulk reads (2.6). |
 | `VFS_SERVER_EV` | director | shim | Server event name (section mode only). |
 | `VFS_CLIENT_EV` | director | nobody | Client event name. The shim does not open it. |

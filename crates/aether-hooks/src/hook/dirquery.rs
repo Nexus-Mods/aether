@@ -227,7 +227,7 @@ unsafe fn serve_dir_query(
                         }
                         items
                     }
-                    // The directory is gone: an empty listing, as before.
+                    // The directory is gone: an empty listing.
                     Err(aether_protocol::Status::NotFound) => Vec::new(),
                     // Any other failure (a status, the overflow status of a listing
                     // past `payload_cap`, a reply that does not decode, no reply in

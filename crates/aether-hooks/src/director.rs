@@ -204,7 +204,7 @@ const MIN_BULK_CHUNK: usize = 256 * 1024;
 /// [`BULK_THRESHOLD`]: a director with an arena answers an unflagged READ of
 /// 64 KiB or more in bulk (wire.md 3.4.4), from the same small bank, so only
 /// a smaller one comes back whole from every director. A ring that meets
-/// the rule, or states no arena, is used as before.
+/// the rule, or states no arena, is used as it states.
 fn arena_rule(arena_len: usize, slot_count: u32, payload_cap: u32) -> (usize, usize) {
     let inline = payload_cap.saturating_sub(8) as usize;
     let needed = MIN_BULK_CHUNK.saturating_mul(slot_count.max(1) as usize);

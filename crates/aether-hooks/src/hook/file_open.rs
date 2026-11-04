@@ -392,7 +392,7 @@ unsafe fn try_fuse_mkdir(
     // it was created. FILE_CREATE of one is a name collision
     // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), and
     // FILE_OPEN_IF opens it. Anything else (missing, a file, a failed
-    // GETATTR) goes on to MKDIR, which answers as before.
+    // GETATTR) goes on to MKDIR, whose answer stands.
     if matches!(disp, 2 | 3) {
         if let Ok(a) = client.getattr(root, &folded) {
             if a.found && a.is_dir {
@@ -415,7 +415,7 @@ unsafe fn try_fuse_mkdir(
         // mkdir failed — most often the directory already exists (the overlay
         // raises :already-exists, which the director has no dedicated status for and
         // reports as a generic error). Probe: if a directory is really there,
-        // honor the disposition — FILE_CREATE(2) must report a name collision,
+        // honor the disposition: FILE_CREATE(2) must report a name collision,
         // while FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
         // (For 2 and 3 the GETATTR above usually answered already; this one
         // covers a directory made between the two requests.)

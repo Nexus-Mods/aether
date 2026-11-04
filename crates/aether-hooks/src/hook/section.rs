@@ -506,7 +506,7 @@ fn unmap_synth_view(process: HANDLE, base: *mut c_void) -> bool {
 /// Whether `process` names this process: the `NtCurrentProcess()`
 /// pseudo-handle (-1), or a real handle to it. A handle whose process id
 /// cannot be read (one opened with `PROCESS_VM_OPERATION` only, enough for
-/// an unmap) is taken as this process's, as every unmap was before: a
+/// an unmap) is taken as this process's: a
 /// handle to a child from `CreateProcess` has full access and is told apart.
 fn is_this_process(process: HANDLE) -> bool {
     use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetProcessId};

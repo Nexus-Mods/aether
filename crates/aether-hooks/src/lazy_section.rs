@@ -21,8 +21,8 @@
 //! the bytes. Where a second view cannot fill ([`second_view_fills`]: a host
 //! whose second view does not see the first view's commit), or the region's
 //! section cannot be had (the commit or pool limit, 32-bit address space),
-//! the region is private memory committed readable before its fill, as
-//! before, and there another thread can read the chunk's zeros while it
+//! the region is private memory committed readable before its fill, and
+//! there another thread can read the chunk's zeros while it
 //! fills. Each region's backing is counted (`hookstats::lazy_region_count`).
 //!
 //! **Cost.** A private `MEM_RESERVE` charges nothing until a chunk is

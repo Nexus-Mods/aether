@@ -162,9 +162,11 @@ fn a_json_report_lists_every_step_of_every_scenario() {
     let step = &s[1]["steps"][5];
     assert_eq!(step["index"], 5);
     assert_eq!(step["passed"], true);
-    for k in ["request", "expected", "got"] {
+    for k in ["expected", "got"] {
         assert!(step[k].is_string(), "{k}: {step}");
     }
+    // The request as the scenario wrote it, in the scenario format.
+    assert_eq!(step["request"]["op"], "read", "{step}");
     assert!(step["got"].as_str().unwrap().contains("bad-fh"), "{step}");
 }
 
@@ -208,6 +210,11 @@ fn a_wrong_expectation_fails_with_both_values_in_the_report() {
     assert_eq!(s["passed"], false);
     let step = &s["steps"][0];
     assert_eq!(step["passed"], false);
+    assert_eq!(
+        step["request"],
+        json!({"op": "getattr", "root": 0, "path": "a.txt"}),
+        "{step}"
+    );
     assert!(
         step["expected"].as_str().unwrap().contains("size: 4"),
         "{step}"
@@ -222,6 +229,16 @@ fn a_wrong_expectation_fails_with_both_values_in_the_report() {
     let out = stdout(&o);
     assert!(out.contains("not ok 1 - wrong"), "{out}");
     assert!(out.contains("size: 4") && out.contains("size: 3"), "{out}");
+    let line = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("request: "))
+        .unwrap_or_else(|| panic!("no request line: {out}"));
+    let request: Value = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        request,
+        json!({"op": "getattr", "root": 0, "path": "a.txt"}),
+        "{out}"
+    );
 }
 
 /// Runs `test-adapter --misbehave <how>` with a 2 s timeout and returns its

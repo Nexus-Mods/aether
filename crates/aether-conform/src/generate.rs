@@ -174,11 +174,7 @@ fn probe(adapter: &mut Adapter, file: &Path) -> Result<Limits, GenerateError> {
 /// the same way, so shrinking cannot wander to another failure.
 fn failure_class(r: &ScenarioResult) -> Option<String> {
     if let Some(st) = r.steps.iter().find(|st| !st.passed) {
-        let op = st
-            .request
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .next()
-            .unwrap_or("");
+        let op = st.request["op"].as_str().unwrap_or("");
         return Some(format!("mismatch at {op}"));
     }
     r.error
@@ -289,7 +285,7 @@ mod tests {
     use super::*;
     use crate::run::StepResult;
 
-    fn result(steps: &[(&str, bool)], error: Option<&str>) -> ScenarioResult {
+    fn result(steps: &[(serde_json::Value, bool)], error: Option<&str>) -> ScenarioResult {
         ScenarioResult {
             name: "c".into(),
             file: PathBuf::new(),
@@ -299,7 +295,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, (request, passed))| StepResult {
                     index,
-                    request: request.to_string(),
+                    request: request.clone(),
                     expected: String::new(),
                     got: String::new(),
                     passed: *passed,
@@ -314,20 +310,30 @@ mod tests {
     /// a mismatch at a step of the same kind, or the same kind of error.
     #[test]
     fn a_failure_is_classed_by_its_first_failing_step() {
+        use serde_json::json;
         let a = result(
             &[
-                ("Heartbeat", true),
-                ("GetAttr { root: RootId(0), path: \"a\" }", false),
+                (json!({"op": "heartbeat"}), true),
+                (json!({"op": "getattr", "root": 0, "path": "a"}), false),
             ],
             None,
         );
-        let b = result(&[("GetAttr { root: RootId(7), path: \"b\" }", false)], None);
-        let c = result(&[("ReadDir { root: RootId(0), path: \".\" }", false)], None);
-        let d = result(&[("Heartbeat", true)], Some("mount refused: no"));
+        let b = result(
+            &[(json!({"op": "getattr", "root": 7, "path": "b"}), false)],
+            None,
+        );
+        let c = result(
+            &[(json!({"op": "readdir", "root": 0, "path": "."}), false)],
+            None,
+        );
+        let d = result(
+            &[(json!({"op": "heartbeat"}), true)],
+            Some("mount refused: no"),
+        );
         assert_eq!(failure_class(&a), failure_class(&b));
         assert_ne!(failure_class(&a), failure_class(&c));
         assert_ne!(failure_class(&a), failure_class(&d));
-        assert_eq!(failure_class(&a).as_deref(), Some("mismatch at GetAttr"));
+        assert_eq!(failure_class(&a).as_deref(), Some("mismatch at getattr"));
         assert_eq!(failure_class(&d).as_deref(), Some("error: mount refused"));
     }
 }

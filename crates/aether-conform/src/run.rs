@@ -51,8 +51,10 @@ pub struct RunOptions {
 pub struct StepResult {
     /// The step's position in the scenario, from 0.
     pub index: usize,
-    /// The request as the scenario wrote it.
-    pub request: String,
+    /// The request as the scenario wrote it, in the scenario format
+    /// ([`crate::scenario::request_json`]); for a malformed request, which
+    /// that format cannot say, a string describing it.
+    pub request: serde_json::Value,
     pub expected: String,
     pub got: String,
     pub passed: bool,
@@ -272,7 +274,7 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
             Err(e) => {
                 out.push(StepResult {
                     index: i,
-                    request: format!("{:?}", step.request),
+                    request: crate::scenario::request_json(&step.request),
                     expected: render_expect(&step.expect),
                     got: format!("no answer: {e}"),
                     passed: false,
@@ -296,7 +298,7 @@ fn play(ring: &Attached, s: &Scenario, out: &mut Vec<StepResult>) -> Result<(), 
         };
         out.push(StepResult {
             index: i,
-            request: format!("{:?}", step.request),
+            request: crate::scenario::request_json(&step.request),
             expected: render_expect(&step.expect),
             got,
             passed,

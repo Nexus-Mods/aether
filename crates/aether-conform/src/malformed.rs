@@ -920,7 +920,7 @@ fn play(ring: &Attached, mount: Mount, out: &mut Vec<StepResult>) -> Result<(), 
             Err(e) => {
                 out.push(StepResult {
                     index: i,
-                    request,
+                    request: request.into(),
                     expected,
                     got: format!("no answer: {e}"),
                     passed: false,
@@ -953,7 +953,7 @@ fn play(ring: &Attached, mount: Mount, out: &mut Vec<StepResult>) -> Result<(), 
         let passed = note.is_none();
         out.push(StepResult {
             index: i,
-            request,
+            request: request.into(),
             expected,
             got,
             passed,

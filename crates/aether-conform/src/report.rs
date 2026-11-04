@@ -2,14 +2,16 @@
 //!
 //! TAP (version 13) has one test point per scenario; a failed one carries a
 //! YAML block with the scenario's error, if any, and each failed step's
-//! request, expected and got answers and note. An adapter error ends the
+//! request (in the scenario format, so it can be pasted into a scenario;
+//! a malformed request, which that format cannot say, is described in a
+//! string), expected and got answers and note. An adapter error ends the
 //! run with `Bail out!`, so the plan's count is not reached.
 //!
 //! JSON is one object:
 //!
 //! ```json
 //! {"scenarios": [{"name": "files", "file": "...", "passed": false, "error": null,
-//!                 "steps": [{"index": 0, "request": "...", "expected": "...",
+//!                 "steps": [{"index": 0, "request": {"op": "..."}, "expected": "...",
 //!                            "got": "...", "passed": false, "note": "..."}]}],
 //!  "seed": null,
 //!  "adapter_error": null}
@@ -49,7 +51,7 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
             out.push_str("  failures:\n");
             for st in failed {
                 out.push_str(&format!("    - index: {}\n", st.index));
-                out.push_str(&format!("      request: {}\n", yaml_str(&st.request)));
+                out.push_str(&format!("      request: {}\n", yaml_value(&st.request)));
                 out.push_str(&format!("      expected: {}\n", yaml_str(&st.expected)));
                 out.push_str(&format!("      got: {}\n", yaml_str(&st.got)));
                 if let Some(note) = &st.note {
@@ -72,6 +74,15 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
 /// A double-quoted YAML scalar, which a JSON string is.
 fn yaml_str(s: &str) -> String {
     Value::String(s.to_string()).to_string()
+}
+
+/// A JSON value as YAML: a string double-quoted, anything else (a request
+/// in the scenario format) as JSON, which YAML reads as flow style.
+fn yaml_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => yaml_str(s),
+        v => v.to_string(),
+    }
 }
 
 /// The report as JSON.

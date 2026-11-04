@@ -459,7 +459,7 @@ not ok 2 - wrong
   file: "contract/scenarios/wrong.json"
   failures:
     - index: 0
-      request: "GetAttr { root: RootId(0), path: \"a.txt\" }"
+      request: {"op":"getattr","path":"a.txt","root":0}
       expected: "GetAttr(AttrResp { found: true, is_dir: false, size: 4, mtime: 0 })"
       got: "GetAttr(AttrResp { found: true, is_dir: false, size: 3, mtime: 0 })"
       note: "different attributes (mtime aside)"
@@ -467,10 +467,12 @@ not ok 2 - wrong
 ```
 
 `request` is the request as the scenario wrote it (before handles were
-translated), `expected` and `got` the two answers, and `note` the rule that
-failed followed by the scenario's own note. An adapter error ends the
-report with `# ` lines holding the message and the adapter's stderr, and a
-`Bail out!` line.
+translated), in the scenario format, so it can be pasted into a scenario (a
+malformed request, which that format cannot say, is described in a string);
+`expected` and `got` the two answers, and `note` the rule that failed
+followed by the scenario's own note. An adapter error ends the report with
+`# ` lines holding the message and the adapter's stderr, and a `Bail out!`
+line.
 
 JSON has every step, passed or not:
 
@@ -479,7 +481,7 @@ JSON has every step, passed or not:
   "scenarios": [
     {"name": "wrong", "file": "contract/scenarios/wrong.json", "passed": false, "error": null,
      "steps": [
-       {"index": 0, "request": "GetAttr { root: RootId(0), path: \"a.txt\" }",
+       {"index": 0, "request": {"op": "getattr", "path": "a.txt", "root": 0},
         "expected": "GetAttr(AttrResp { found: true, is_dir: false, size: 4, mtime: 0 })",
         "got": "GetAttr(AttrResp { found: true, is_dir: false, size: 3, mtime: 0 })",
         "passed": false, "note": "different attributes (mtime aside)"}]}

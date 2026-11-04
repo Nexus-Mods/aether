@@ -171,7 +171,17 @@ unsafe fn serve_dir_query(
                 }
                 return passthrough();
             }
-            Some(t) => (restart || t.state.is_none(), t.dir_nt_path.clone()),
+            // The path is needed only to build the listing: a query served
+            // from the one the handle keeps copies nothing.
+            Some(t) => {
+                let build = restart || t.state.is_none();
+                let path = if build {
+                    t.dir_nt_path.clone()
+                } else {
+                    String::new()
+                };
+                (build, path)
+            }
         }
     };
 

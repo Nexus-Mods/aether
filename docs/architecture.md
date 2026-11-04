@@ -679,6 +679,20 @@ than work that errors. Tests are shaped around that.
   test whose prerequisite is missing prints `SKIP` and passes;
   `VFS_TEST_REQUIRE_ALL=1` makes a skip a failure (see the root README's Test
   section).
+- **The fake director records, and can be told to misbehave.** It is built
+  on `aether-refdirector`'s `harness` module: `Recorder` keeps every request
+  and reply that crossed the ring (so a test asserts what the shim sent, not
+  only what the program saw), `Faults` gives the reply a director should not
+  (a status, a truncated or padded payload, an oversize reply, a bulk reply
+  naming data outside its bank, a delay past the client's deadline) for the
+  nth matching request, and `Override` changes the fields of a reply a
+  director may legitimately vary (an OPEN's flags and size, a file's time).
+  All three are taps on `aether-rpc`'s serve loop. The fault table in
+  `wire.md` 3.7 is checked against the tests' own table, and generated
+  sequences of faulted calls check that the program neither crashes nor
+  hangs. `tests/harness/` also holds the counted costs of each hooked call
+  (`costs.txt`), and `aether-fuzz` and `fuzz/` fuzz the decoders;
+  [`benchmarks.md`](benchmarks.md) describes those and the timed tools.
 - **Every naming form is covered, not just the convenient one.** The
   relative-name battery exercises each decoding hook through a real directory
   handle, because Win32 decides on its own whether a relative path becomes an
@@ -744,8 +758,10 @@ observer before concluding the process is idle.
 | `aether-protocol` | ring wire codecs, opcodes, statuses, open flags and `RootId`; the shim bootstrap config (`VFSC` v2) |
 | `aether-ipc` | control ring + bulk arena + read cache, OS-free |
 | `aether-rpc` | typed ring ends over `aether-protocol`: the `Client` the shim calls the director with (compiled into the shim DLL) and the `Director` trait a director in Rust implements |
-| `aether-refdirector` | the reference director (answers every file and registry opcode from memory, the server the shim's tests run against) and a null one for measuring the ring; not shipped |
+| `aether-refdirector` | the reference director (answers every file and registry opcode from memory, the server the shim's tests run against), a null one for measuring the ring, and the `harness` the shim's tests record and inject faults with; not shipped |
 | `aether-conform` | the conformance tool: scenarios, malformed requests, generated cases and concurrent clients played against a director (`docs/conformance.md`) |
+| `aether-fuzz` | the bodies of the fuzz targets over the decoders that read a director's output, and their replay on stable Rust; `fuzz/` (outside the workspace) runs them under cargo-fuzz |
+| `aether-shimbench` | times Win32 calls natively and under the shim, with the requests per call counted (`docs/benchmarks.md`); not shipped |
 | `aether-filering` | a ring in a memory-mapped file on any OS (`FileRing`), the Linux-under-Wine backing of wire.md 2.10 for a native tool |
 | `aether-win` | Windows shared memory, events and volume lookups |
 | `aether-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |

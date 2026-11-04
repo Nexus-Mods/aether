@@ -961,6 +961,9 @@ Times are microseconds; `bulk_mib_s` is the bytes bulk READs returned over
 the phase's wall time, `null` for a phase that sent none. The numbers above
 show the shape, not a machine's results.
 
+How to compare two commits, and the other benchmarks of this repository, are
+in [benchmarks.md](benchmarks.md).
+
 `aether-conform null-adapter [--ring file|section] [--slots N]
 [--payload-cap N] [--arena-len N] [--workers N]` is the floor: the adapter
 protocol with a director behind it that answers every opcode OK with the

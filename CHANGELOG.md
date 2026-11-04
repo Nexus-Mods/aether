@@ -6,7 +6,13 @@ Aether's crates. Newest first.
 ## Unreleased
 
 The wire is unchanged: the wire version (4), the golden vectors,
-`contract/env.json` and `contract/artifacts.json` are as in 1.0.0.
+`contract/env.json` and `contract/artifacts.json` are as in 1.0.0. The shim
+sends a director that follows `docs/wire.md` the same requests, except where
+an entry below says otherwise (a `CreateDirectoryW` is a GETATTR then a
+MKDIR, and starting a managed child process is two requests). What the shim does when
+a director answers outside the contract is written down (`docs/wire.md`
+3.7), and the fixes below are what a program sees when one does. The shim's code changed, so the natives key changes and the
+next release signs new natives.
 
 ### Fixed
 
@@ -16,6 +22,64 @@ The wire is unchanged: the wire version (4), the golden vectors,
   keys at any depth and with any name length, and REG_RENAME_KEY did not
   check its path's names or the depth of the keys it moves; each is now
   `ST_BAD_REQUEST`. Scenario `registry-write-depth` checks it.
+- The shim, files and directories:
+  - `CreateDirectoryW` of a directory that exists fails
+    `ERROR_ALREADY_EXISTS`, and an open-if of one reports `FILE_OPENED`,
+    whichever of `ST_OK` and `ST_EXISTS` the director answers to MKDIR
+    (`docs/wire.md` 3.4.9). The shim asks GETATTR first, so a directory
+    create is two requests.
+  - A directory the shim creates has no handle at the director, so closing
+    it sends no CLOSE. A director that issues handle 0 for a file keeps that
+    file open when a program creates a directory.
+  - A READDIR that fails, or whose listing does not fit `payload_cap`,
+    fails the enumeration with `ERROR_GEN_FAILURE`, and the next query asks
+    again. Only `ST_NOT_FOUND` is an empty directory (`docs/wire.md`
+    3.4.2).
+  - A write that fails part way reports the bytes that landed with the
+    failure status, `STATUS_DISK_FULL` for `ST_NO_SPACE`, and leaves the
+    file pointer where the call found it, as NTFS does.
+  - A file's times agree across listings, path queries and handle queries;
+    the first time query on a handle asks GETATTR, and a write drops the
+    time every handle on the file kept (`docs/wire.md` 3.2).
+  - A stored name that does not fold to the component asked about is
+    ignored, not remembered as the file's spelling. A size or position set
+    from a buffer that is not aligned is read where it lies.
+  - Starting a managed child process costs two requests, GETATTR and
+    STAGE_EXEC. The check of the child's backing directory reads the disk and
+    asks the director nothing.
+- The shim, mapped files:
+  - A demand-paged section keeps its director handle until its file handle,
+    the section and its views are all gone, so a mapping outlives the
+    `CloseHandle` of its file. `UnmapViewOfFile` of a view of a director file
+    succeeds (the shim hooks `NtUnmapViewOfSectionEx`).
+  - A page fill that fails or comes back short is asked again, up to three
+    more times, and then raises `STATUS_IN_PAGE_ERROR`; it is never filled
+    with zeros. An eager section or a `SEC_IMAGE` section whose read fails or
+    comes back short fails `STATUS_UNSUCCESSFUL`. A demand-paged chunk is
+    readable only once its fill is in place, and a region whose own
+    reservation cannot be had takes private memory (`docs/wire.md` 3.4.4).
+  - A mapping larger than the address space of a 32-bit process fails
+    `STATUS_SECTION_TOO_BIG`; sizes are 64-bit there.
+- The shim, reads:
+  - A bulk READ reply is copied only from its own slot's bank, found from
+    `VFS_ARENA_OFFSET`, and only as many bytes as were asked; a reply that
+    names other memory, or more bytes than the request, is a failed read and
+    not file data.
+  - An arena smaller than `docs/wire.md` 2.6 allows (256 KiB times the slot
+    count) is not used: reads are inline and answered in full.
+  - Nothing under a path the process deleted or renamed is cached again,
+    whether it was opened before or not.
+- The shim, the registry:
+  - A key create the director answers `ST_EXISTS` looks the key up afresh.
+  - A registry write finds a value as a read does.
+  - A key whose overlay does not fit one reply (`ST_REPLY_TOO_LARGE`, or the
+    ring's overflow) fails every read of it with
+    `STATUS_REGISTRY_IO_FAILED` (`ERROR_REGISTRY_IO_FAILED`), and is not
+    answered from the real key (`docs/wire.md` 4.4).
+- `docs/wire.md` 3.7 is the table of what the shim does with each reply a
+  director should not give, per operation: a status, a truncated, padded or
+  oversize payload, a bulk reply out of place, a reply that is late or
+  never comes.
 
 ### Added
 
@@ -49,6 +113,40 @@ The wire is unchanged: the wire version (4), the golden vectors,
   rather than truncating it.
 - Releases carry `aether-conform-windows-x64.zip` and
   `aether-conform-linux-x64.tar.gz` (unsigned), listed in `SHA256SUMS`.
+- `aether-conform bench --director "<adapter command>"` times a director on
+  the workloads of `contract/workloads/` (shipped in `contract.zip`: launch
+  storm, random small reads, large listings, saves, sequential bulk reads)
+  through the same adapter as `run`, and reports each opcode's latency over
+  the ring's floor, measured on `aether-conform null-adapter`, a director
+  that answers every request with the smallest valid reply. `--clients`,
+  `--quick`, `--out`, `--baseline` and `--fail-over` are described in
+  `docs/conformance.md` and `docs/benchmarks.md`.
+- `aether-shimbench`, which times eight kinds of Win32 call natively and under
+  the shim, and counts the requests and ring bytes per call
+  (`docs/benchmarks.md`). Criterion benches of the codecs, the case fold,
+  path resolution, the read cache and the ring
+  (`cargo bench -p <crate> --bench <name>`).
+- `crates/aether-hooks/tests/harness/costs.txt`, the requests, ring bytes and
+  allocations of each hooked call, checked on every push;
+  `AETHER_COSTS_UPDATE=1` rewrites it.
+- `aether-fuzz` and `fuzz/`: cargo-fuzz targets for the reply and request
+  decoders, the shim's config, the ring's response slot, directory records and
+  the `VFS_*` environment, replayed on stable Rust on every push and fuzzed
+  weekly by `fuzz.yml`. `bench.yml` compares a base commit with the head on
+  one runner, by hand.
+- `aether_rpc::Tap`, `TapAction`, `serve_tapped` and `serve_one_tapped`: a
+  hook on the serve loop that sees each request and may answer it or change
+  its reply before it is sent.
+- `aether_refdirector::harness`: `Recorder` (what crossed the ring), `Faults`
+  (replies a director should not give), `Override` (replies it may vary),
+  `Geometry` and `serve_threads_of`, for testing a client against the
+  reference.
+- `aether_env::session`: the parsing of the `VFS_*` variables (the ring's
+  size and cap, its source, the roots and their backings, the switches, the
+  timeouts) as pure functions of their text. The shim and `aether-conform`'s
+  attach check call them.
+- `aether_casefold::eq_folded` compares two names by their fold without
+  building either.
 
 ### Changed
 
@@ -68,6 +166,11 @@ The wire is unchanged: the wire version (4), the golden vectors,
   `FuseClient::read_cached` (`Option<usize>`).
 - `docs/wire.md` says where directors may differ and which answers each
   rule allows.
+- `aether_ipc::ReadPlan` has two more public fields, `arena_len` and
+  `arena_offset`, so that a bulk reply is checked against its own bank. Code
+  that builds a `ReadPlan` sets them.
+- `aether-refdirector` mounts a file of up to 512 MiB (a write still stops at
+  64 MiB).
 - The natives' sources change (the shim compiles in `aether-rpc`), so the
   next release signs new natives. The natives key leaves out the crates no
   native depends on, and releases check that exclusion with

@@ -382,7 +382,10 @@ unsafe fn try_fuse_mkdir(
     // folded path. See `FuseClient::vpath_as_spelled`.
     let (root, vp) = client.route_as_spelled(path)?;
     let vp = vp.as_str();
-    client.names_changed(root, &aether_casefold::fold(vp));
+    // Every request about the name but MKDIR, which creates it, sends it
+    // folded (docs/wire.md 3.2).
+    let folded = aether_casefold::fold(vp);
+    client.names_changed(root, &folded);
     // FILE_CREATE and FILE_OPEN_IF ask first whether a directory is there:
     // a director may answer MKDIR of an existing directory `ST_OK` or
     // `ST_EXISTS` (docs/wire.md 3.4.9), so MKDIR's answer cannot say whether
@@ -391,7 +394,7 @@ unsafe fn try_fuse_mkdir(
     // FILE_OPEN_IF opens it. Anything else (missing, a file, a failed
     // GETATTR) goes on to MKDIR, which answers as before.
     if matches!(disp, 2 | 3) {
-        if let Ok(a) = client.getattr(root, vp) {
+        if let Ok(a) = client.getattr(root, &folded) {
             if a.found && a.is_dir {
                 if disp == 2 {
                     return Some(STATUS_OBJECT_NAME_COLLISION);
@@ -416,7 +419,7 @@ unsafe fn try_fuse_mkdir(
         // while FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
         // (For 2 and 3 the GETATTR above usually answered already; this one
         // covers a directory made between the two requests.)
-        Err(st) => match client.getattr(root, vp) {
+        Err(st) => match client.getattr(root, &folded) {
             Ok(a) if a.found && a.is_dir => {
                 if disp == 2 {
                     Some(STATUS_OBJECT_NAME_COLLISION)

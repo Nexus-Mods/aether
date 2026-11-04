@@ -398,6 +398,37 @@ fn create_directory_of_a_new_name_still_costs_getattr_then_mkdir() {
     );
 }
 
+/// The GETATTR before MKDIR names the path folded, as every request but one
+/// that creates a name does (wire.md 3.2); MKDIR keeps the caller's spelling.
+#[test]
+fn the_getattr_before_mkdir_sends_the_folded_path() {
+    isolate!();
+    let root = root();
+    let served = fakedirector::install_with(&root, existing_dir_ok(), Options::default());
+    let _hooks = aether_hooks::install().expect("install");
+    for (name, made) in [("Sub", false), ("NewDir", true)] {
+        let mark = served.recorder.mark();
+        let got = create_directory(&root.join("Save").join(name));
+        assert_eq!(got.is_ok(), made, "{name}: {got:?}");
+        let sent: Vec<(Opcode, String)> = served
+            .recorder
+            .since(mark)
+            .iter()
+            .filter_map(|r| match r.request()? {
+                Request::GetAttr { path, .. } => Some((Opcode::GetAttr, path.to_string())),
+                Request::Mkdir { path, .. } => Some((Opcode::Mkdir, path.to_string())),
+                _ => None,
+            })
+            .collect();
+        let folded = format!("save/{}", name.to_lowercase());
+        let mut want = vec![(Opcode::GetAttr, folded)];
+        if made {
+            want.push((Opcode::Mkdir, format!("Save/{name}")));
+        }
+        assert_eq!(sent, want, "{name}");
+    }
+}
+
 // ---- B4, S2: READDIR failing, overflowing, vanished; large listings -------
 
 /// `save/` with three files, and an empty `empty/`.

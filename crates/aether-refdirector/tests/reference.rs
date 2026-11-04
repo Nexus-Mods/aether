@@ -415,11 +415,13 @@ fn close_releases_the_handle_and_refuses_an_unknown_one() {
 }
 
 #[test]
-fn the_ops_it_does_not_serve_are_not_supported() {
+fn only_stage_exec_is_not_supported() {
     let mut d = Reference::new();
-    assert_eq!(d.mkdir(R0, 0o755, "dir"), Err(Status::NotSupported));
-    assert_eq!(d.stored_names(R0, 0, "a"), Err(Status::NotSupported));
-    assert_eq!(d.rename_x(R0, R0, "a", "b"), Err(Status::NotSupported));
+    // An empty, read-only graph answers the rest as wire.md has them
+    // (tests/wire_rules.rs covers each).
+    assert_eq!(d.mkdir(R0, 0o755, "dir"), Err(Status::ReadOnly));
+    assert_eq!(d.stored_names(R0, 0, "a"), Ok("a"));
+    assert_eq!(d.rename_x(R0, R0, "a", "b"), Err(Status::NotFound));
     assert_eq!(d.stage_exec(R0, "a.exe"), Err(Status::NotSupported));
     // wire.md 3.4.14: a director that stages nothing says so first.
     assert_eq!(

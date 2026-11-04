@@ -81,10 +81,11 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
     let renamed_read = std::fs::read(root1.join("renamed.txt"));
     let rename_src_gone = std::fs::read(root1.join("created.txt")).is_err();
 
-    // --- A rename ACROSS roots fails, and moves nothing (gate 4, Task 5) ---
+    // --- A rename ACROSS roots moves the file in the director, never on disk ---
     //
-    // `Opcode::Rename` carries one root for both sides and the provider contract has no cross-root
-    // move, so the shim refuses. It must never fall to the real `NtSetInformationFile`, which
+    // `Opcode::Rename` carries one root for both sides, so the shim sends `Opcode::RenameX`, and
+    // the director copies a file to the other root and removes it from the first
+    // (`docs/wire.md` 3.4.13). It must never fall to the real `NtSetInformationFile`, which
     // would move whatever the handle is on onto real disk under root 0.
     let escape_target = root0.join("escaped-across-roots.txt");
     let cross_result = std::fs::rename(root1.join("renamed.txt"), &escape_target);
@@ -156,21 +157,18 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
         !escape_target.exists(),
         "the cross-root rename physically created {escape_target:?} on real disk under root 0"
     );
-    assert!(
-        cross_result.is_err(),
-        "a rename whose two sides land under different managed roots must fail rather than \
-         report a success it did not perform"
-    );
+    cross_result
+        .expect("a rename across roots is a RENAME_X the director performs (wire.md 3.4.13)");
     assert_eq!(
-        fake.contents(&key(0, "escaped-across-roots.txt")),
-        None,
-        "the cross-root rename landed under root 0 — refusing must not mean picking one of the \
-         two roots"
-    );
-    assert_eq!(
-        fake.contents(&key(1, "renamed.txt")).as_deref(),
+        fake.contents(&key(0, "escaped-across-roots.txt"))
+            .as_deref(),
         Some(&b"NEW"[..]),
-        "the refused rename destroyed or moved its source"
+        "the cross-root rename must put the bytes under root 0 at the target name"
+    );
+    assert_eq!(
+        fake.contents(&key(1, "renamed.txt")),
+        None,
+        "the cross-root rename must remove root 1's source"
     );
 
     // Neither real root directory gained anything.

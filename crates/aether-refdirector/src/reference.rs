@@ -9,12 +9,14 @@
 //! ring is in memory.
 //!
 //! **What it answers.** HEARTBEAT, GETATTR, READDIR, OPEN, READ, WRITE,
-//! SETATTR (truncate), DELETE, RENAME and CLOSE, and the registry opcodes when
-//! it has a registry layer ([`Reference::with_registry`]). MKDIR,
-//! STORED_NAMES, RENAME_X and STAGE_EXEC are `Status::NotSupported` once
-//! their paths are checked, so an unexpected request never looks like a
-//! healthy exchange. Where the fake it was moved from differed from
-//! `docs/wire.md`, it answers as wire.md says: an opcode outside the table or
+//! SETATTR (truncate), DELETE, RENAME, MKDIR, CLOSE, STORED_NAMES and
+//! RENAME_X, and the registry opcodes when it has a registry layer
+//! ([`Reference::with_registry`]). STAGE_EXEC is `Status::NotSupported`: it
+//! stages nothing. A name keeps the spelling it was created with (a fixture's
+//! vpath, a creating OPEN, MKDIR, a RENAME or RENAME_X target), and READDIR
+//! and STORED_NAMES answer with it (wire.md 3.2). Where the fake it was
+//! moved from differed from `docs/wire.md`, it answers as wire.md says: an
+//! opcode outside the table or
 //! a payload that does not decode is `Status::BadRequest` (3.3, 3.5); a path
 //! that leaves its root is `Status::BadRequest` (3.2, 3.5.1); a root it does
 //! not serve is `Status::NotFound`, or OK with nothing found for GETATTR
@@ -31,7 +33,8 @@
 //! write open: here you are (inside a [`Reference::writable_under`] prefix),
 //! no such place (`Status::NotFound`), not allowed (`Status::ReadOnly`, served
 //! but outside every writable prefix) and already there (`Status::Exists` for
-//! `OpenFlags::EXCL`). DELETE and RENAME refuse the same way, so a test of a
+//! `OpenFlags::EXCL`). DELETE, RENAME, RENAME_X and MKDIR refuse the same
+//! way, so a test of a
 //! sealed path cannot pass because the director said yes to everything.
 //!
 //! **Roots.** Root 0's files are keyed by their bare vpath; any other root's
@@ -107,6 +110,23 @@ pub enum ReadStyle {
 struct Entry {
     bytes: Vec<u8>,
     style: ReadStyle,
+    /// The vpath as it was spelled when the name was created, without the
+    /// root's `@<id>/` ([`spelling`]): what READDIR and STORED_NAMES answer.
+    name: String,
+}
+
+/// The spelling a name is stored with: the vpath as given, without a
+/// [`key`]'s `@<id>/` root prefix.
+fn spelling(vpath: &str) -> String {
+    match vpath.strip_prefix('@').and_then(|r| r.split_once('/')) {
+        Some((_, rest)) => rest.to_string(),
+        None => vpath.to_string(),
+    }
+}
+
+/// Component `i` of a stored spelling, if it has that many.
+fn component(spelled: &str, i: usize) -> Option<&str> {
+    spelled.split('/').nth(i)
 }
 
 /// Per-vpath request tallies. Keyed by vpath rather than kept as running
@@ -216,8 +236,8 @@ impl Tally {
 /// Folded (`aether_casefold::fold`, the wire's fold, `docs/wire.md` 3.2),
 /// because a director looks names up case-insensitively and the shim does not
 /// always send the folded spelling: a write open carries the caller's. So the
-/// reference stores and finds every name folded, and does not model the
-/// stored case.
+/// reference finds every name by its fold, and keeps the spelling it was
+/// created with beside it, for READDIR and STORED_NAMES.
 pub fn key(root: u32, vpath: &str) -> String {
     let vpath = fold(vpath);
     if root == 0 {
@@ -245,10 +265,10 @@ struct Graph {
     /// Behind a `Mutex` because WRITE changes it and a creating OPEN adds to
     /// it, from whichever handle serves.
     files: Mutex<HashMap<String, Entry>>,
-    /// Vpaths that resolve as directories. Fixed once built: nothing here
-    /// creates one, since the shim takes directory creates before they reach
-    /// a create open.
-    dirs: Vec<String>,
+    /// Vpaths that resolve as directories, by table key ([`key`]), each with
+    /// its stored spelling. MKDIR adds to it. Locked before `files` wherever
+    /// both are held.
+    dirs: Mutex<HashMap<String, String>>,
     handles: Mutex<HashMap<u64, Handle>>,
     next_fh: AtomicU64,
     writable: Vec<String>,
@@ -264,7 +284,7 @@ struct Graph {
 impl Graph {
     /// A root itself (`"."` on the wire) is always a directory.
     fn is_dir(&self, vpath: &str) -> bool {
-        vpath == "." || vpath.ends_with("/.") || self.dirs.iter().any(|d| d == vpath)
+        is_dir_in(&self.dirs.lock().unwrap(), vpath)
     }
 
     fn is_writable(&self, vpath: &str) -> bool {
@@ -322,6 +342,81 @@ impl Graph {
     }
 }
 
+/// Whether table key `k` names a root itself (`"."` on the wire).
+fn is_root_key(k: &str) -> bool {
+    k.is_empty() || k == "." || k.ends_with("/.") || (k.starts_with('@') && k.ends_with('/'))
+}
+
+/// Whether anything, directory or file, is below table key `k`.
+fn has_children(dirs: &HashMap<String, String>, files: &HashMap<String, Entry>, k: &str) -> bool {
+    let below = format!("{k}/");
+    dirs.keys()
+        .chain(files.keys())
+        .any(|p| p.starts_with(&below))
+}
+
+/// Whether table key `vpath` is a directory in `dirs`; a root itself is.
+fn is_dir_in(dirs: &HashMap<String, String>, vpath: &str) -> bool {
+    vpath == "." || vpath.ends_with("/.") || dirs.contains_key(vpath)
+}
+
+/// The stored spelling of each component of `path` under `root`
+/// (`docs/wire.md` 3.2, 3.4.12): taken from the entry the component names,
+/// else from any entry below it (a directory the graph implies but does not
+/// hold), else as `path` spells it.
+fn stored_components(
+    dirs: &HashMap<String, String>,
+    files: &HashMap<String, Entry>,
+    root: u32,
+    path: &str,
+) -> Vec<String> {
+    let sent: Vec<&str> = path.split('/').collect();
+    (0..sent.len())
+        .map(|i| {
+            let k = key(root, &sent[..=i].join("/"));
+            let below = format!("{k}/");
+            let exact = dirs
+                .get(&k)
+                .map(String::as_str)
+                .or_else(|| files.get(&k).map(|e| e.name.as_str()));
+            let under = || {
+                dirs.iter()
+                    .map(|(k, n)| (k, n.as_str()))
+                    .chain(files.iter().map(|(k, e)| (k, e.name.as_str())))
+                    .filter(|(k, _)| k.starts_with(below.as_str()))
+                    // The first by key, so the answer does not depend on
+                    // the map's order when two entries spell it apart.
+                    .min_by(|a, b| a.0.cmp(b.0))
+                    .map(|(_, n)| n)
+            };
+            exact
+                .or_else(under)
+                .and_then(|n| component(n, i))
+                .unwrap_or(sent[i])
+                .to_string()
+        })
+        .collect()
+}
+
+/// The spelling a name created at `path` is stored with: the components
+/// above it as they are stored, its own as the request spells it (3.2,
+/// "Keep the spelling a name was created with").
+fn created_spelling(
+    dirs: &HashMap<String, String>,
+    files: &HashMap<String, Entry>,
+    root: u32,
+    path: &str,
+) -> String {
+    match path.rsplit_once('/') {
+        None => path.to_string(),
+        Some((parent, leaf)) => {
+            let mut c = stored_components(dirs, files, root, parent);
+            c.push(leaf.to_string());
+            c.join("/")
+        }
+    }
+}
+
 /// Whether `path` walks above its root: a `..` with no component before it
 /// to undo (`docs/wire.md` 3.2).
 fn escapes(path: &str) -> bool {
@@ -356,6 +451,8 @@ pub struct Reference {
     pub tally: Arc<Tally>,
     /// An inline READ reply's bytes, copied out of the locked table.
     read_buf: Vec<u8>,
+    /// A STORED_NAMES reply.
+    names_buf: String,
 }
 
 impl Default for Reference {
@@ -370,7 +467,7 @@ impl Reference {
         Reference {
             graph: Arc::new(Graph {
                 files: Mutex::new(HashMap::new()),
-                dirs: Vec::new(),
+                dirs: Mutex::new(HashMap::new()),
                 handles: Mutex::new(HashMap::new()),
                 next_fh: AtomicU64::new(1),
                 writable: Vec::new(),
@@ -380,6 +477,7 @@ impl Reference {
             }),
             tally: Arc::new(Tally::default()),
             read_buf: Vec::new(),
+            names_buf: String::new(),
         }
     }
 
@@ -412,6 +510,7 @@ impl Reference {
             graph: self.graph.clone(),
             tally: self.tally.clone(),
             read_buf: Vec::new(),
+            names_buf: String::new(),
         }
     }
 
@@ -463,9 +562,14 @@ impl Reference {
     /// bits the shim reads as write access are `FILE_ADD_FILE` and
     /// `FILE_ADD_SUBDIRECTORY`, which every backup-semantics directory open
     /// carries, so these answers matter.
+    /// The directory keeps `vpath`'s spelling, as one MKDIR created would.
     pub fn with_dir(mut self, vpath: &str) -> Reference {
         self.note_root(vpath);
-        self.building().dirs.push(fold(vpath));
+        self.building()
+            .dirs
+            .get_mut()
+            .unwrap()
+            .insert(fold(vpath), spelling(vpath));
         self
     }
 
@@ -483,25 +587,29 @@ impl Reference {
         self
     }
 
-    /// Declare a vpath prefix whose write opens fail with `Status::IoError`,
-    /// the answer a provider gives when its own I/O breaks. Checked before
-    /// anything else a write open looks at.
+    /// Declare a vpath prefix whose write opens (and MKDIRs) fail with
+    /// `Status::IoError`, the answer a provider gives when its own I/O
+    /// breaks. Checked before anything else a write open looks at. Such a
+    /// prefix does not count as a writable provider: it makes neither its
+    /// paths nor its root writable (see [`Reference::writable_under`]).
     pub fn failing_writes_under(mut self, prefix: &str) -> Reference {
         self.note_root(prefix);
         self.building().failing.push(fold(prefix));
         self
     }
 
-    /// Add a file to the provider graph. `vpath` is the folded, `/`-joined
-    /// remainder the shim builds from the path (`Data\A.esp` is
-    /// `data/a.esp`).
+    /// Add a file to the provider graph. `vpath` is the `/`-joined remainder
+    /// the shim builds from the path (`Data\A.esp` is `Data/A.esp`); it is
+    /// found by its fold and stored with this spelling, as a name created
+    /// through the ring would be.
     pub fn with(mut self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Reference {
         self.note_root(vpath);
+        let name = spelling(vpath);
         self.graph
             .files
             .lock()
             .unwrap()
-            .insert(fold(vpath), Entry { bytes, style });
+            .insert(fold(vpath), Entry { bytes, style, name });
         self
     }
 
@@ -514,6 +622,99 @@ impl Reference {
             .unwrap()
             .get(&fold(vpath))
             .map(|e| e.bytes.clone())
+    }
+
+    /// Move the entry at table key `from` to `to` under `to_root`, stored
+    /// with `to`'s spelling: RENAME's and RENAME_X's common part, once both
+    /// paths are resolved. A source with no entry is `Status::NotFound`;
+    /// either end outside every writable prefix `Status::ReadOnly`.
+    ///
+    /// Within a root (`across` false) it does what Cairn's writable layer
+    /// does (`docs/wire.md` 3.4.7): the root at either end, or a target
+    /// inside the source, is `Status::BadRequest`; a directory moves with
+    /// everything under it; a non-empty directory at the target is
+    /// `Status::IoError`, and an empty one or a file is replaced. Across
+    /// roots (RENAME_X, which refuses a directory source before this) a
+    /// directory at the target is `Status::IsDir` and a file is replaced.
+    fn move_entry(
+        &self,
+        from: String,
+        to_root: RootId,
+        to: &str,
+        across: bool,
+    ) -> Result<(), Status> {
+        let g = &self.graph;
+        let to_key = key(to_root.0, to);
+        let mut dirs = g.dirs.lock().unwrap();
+        let mut files = g.files.lock().unwrap();
+        if !across
+            && (is_root_key(&from)
+                || is_root_key(&to_key)
+                || to_key.starts_with(&format!("{from}/")))
+        {
+            return Err(Status::BadRequest);
+        }
+        let is_file = files.contains_key(&from);
+        if !is_file && !dirs.contains_key(&from) {
+            return Err(Status::NotFound);
+        }
+        if !g.is_writable(&from) || !g.is_writable(&to_key) {
+            return Err(Status::ReadOnly);
+        }
+        if to_key != from && dirs.contains_key(&to_key) {
+            if across {
+                return Err(Status::IsDir);
+            }
+            if has_children(&dirs, &files, &to_key) {
+                return Err(Status::IoError);
+            }
+            dirs.remove(&to_key);
+        }
+        if to_key != from {
+            files.remove(&to_key);
+        }
+        if is_file {
+            let mut e = files.remove(&from).expect("just checked");
+            e.name = created_spelling(&dirs, &files, to_root.0, to);
+            files.insert(to_key, e);
+            return Ok(());
+        }
+        // A directory: it and everything under it, each respelled under
+        // the new name.
+        let old = dirs.remove(&from).expect("just checked");
+        let depth = old.split('/').count();
+        let name = created_spelling(&dirs, &files, to_root.0, to);
+        let below = format!("{from}/");
+        let moved = |k: &str, n: &str| {
+            let tail = n.splitn(depth + 1, '/').nth(depth).unwrap_or("");
+            (
+                format!("{to_key}{}", &k[from.len()..]),
+                format!("{name}/{tail}"),
+            )
+        };
+        let sub: Vec<String> = dirs
+            .keys()
+            .filter(|k| k.starts_with(&below))
+            .cloned()
+            .collect();
+        for k in sub {
+            let n = dirs.remove(&k).expect("listed");
+            let (k, n) = moved(&k, &n);
+            dirs.insert(k, n);
+        }
+        let sub: Vec<String> = files
+            .keys()
+            .filter(|k| k.starts_with(&below))
+            .cloned()
+            .collect();
+        for k in sub {
+            let mut e = files.remove(&k).expect("listed");
+            let (k, n) = moved(&k, &e.name);
+            e.name = n;
+            files.insert(k, e);
+        }
+        dirs.insert(to_key, name);
+        Ok(())
     }
 
     /// The registry layer, counting the request; `NotSupported` without one.
@@ -585,24 +786,36 @@ impl Director for Reference {
                 .filter(|rest| !rest.is_empty() && !rest.contains('/'))
                 .map(str::to_string)
         };
-        let mut rows: Vec<(String, bool, u64)> = Vec::new();
-        let mut push = |name: String, is_dir: bool, size: u64| {
-            if !rows.iter().any(|(n, ..)| *n == name) {
-                rows.push((name, is_dir, size));
+        // (folded name, stored name, is_dir, size): one row per fold, the
+        // stored spelling listed (wire.md 3.2, 3.4.2), ordered by the fold.
+        let mut rows: Vec<(String, String, bool, u64)> = Vec::new();
+        let mut push = |folded: String, stored: &str, is_dir: bool, size: u64| {
+            if !rows.iter().any(|(n, ..)| *n == folded) {
+                let stored = stored.rsplit('/').next().unwrap_or(stored);
+                // A spelling whose leaf is not this name's fold (a fixture
+                // key that is not a plain path) lists the fold.
+                let name = if fold(stored) == folded {
+                    stored.to_string()
+                } else {
+                    folded.clone()
+                };
+                rows.push((folded, name, is_dir, size));
             }
         };
-        for d in &self.graph.dirs {
+        let dirs = self.graph.dirs.lock().unwrap();
+        for (d, stored) in dirs.iter() {
             if let Some(name) = child(d) {
-                push(name, true, 0);
+                push(name, stored, true, 0);
             }
         }
         for (p, e) in self.graph.files.lock().unwrap().iter() {
             if let Some(name) = child(p) {
-                push(name, false, e.bytes.len() as u64);
+                push(name, &e.name, false, e.bytes.len() as u64);
             }
         }
+        drop(dirs);
         rows.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, is_dir, size) in &rows {
+        for (_, name, is_dir, size) in &rows {
             out.push(DirEntry {
                 name,
                 is_dir: *is_dir,
@@ -649,6 +862,7 @@ impl Director for Reference {
                 ..Default::default()
             });
         }
+        let dirs = g.dirs.lock().unwrap();
         let mut files = g.files.lock().unwrap();
         let exists = files.contains_key(&vpath);
         if write {
@@ -669,11 +883,14 @@ impl Director for Reference {
                 if !flags.contains(OpenFlags::CREATE) {
                     return Err(Status::NotFound);
                 }
+                // A create keeps the caller's spelling (wire.md 3.2).
+                let name = created_spelling(&dirs, &files, root.0, path);
                 files.insert(
                     vpath.clone(),
                     Entry {
                         bytes: Vec::new(),
                         style: ReadStyle::Whole,
+                        name,
                     },
                 );
             } else if flags.contains(OpenFlags::TRUNC) {
@@ -685,6 +902,7 @@ impl Director for Reference {
         };
         let size = e.bytes.len() as u64;
         drop(files);
+        drop(dirs);
         let fh = g.issue(vpath, append, &self.tally);
         Ok(OpenResp {
             fh,
@@ -717,7 +935,8 @@ impl Director for Reference {
         let limit = match e.style {
             ReadStyle::Error => return Err(Status::IoError),
             ReadStyle::Whole | ReadStyle::Short(_) => e.bytes.len() as u64,
-            ReadStyle::ShorterThanClaimed(n) => n,
+            // Never past the bytes it has, whatever `n` claims.
+            ReadStyle::ShorterThanClaimed(n) => n.min(e.bytes.len() as u64),
         };
         let start = offset.min(limit) as usize;
         let mut want = (limit as usize - start).min(len as usize);
@@ -796,45 +1015,84 @@ impl Director for Reference {
 
     /// RENAME and DELETE refuse as a real overlay-backed graph does: a vpath
     /// nothing serves is `Status::NotFound`, and one outside every writable
-    /// mount `Status::ReadOnly`.
+    /// mount `Status::ReadOnly`. The target keeps the caller's spelling
+    /// (`docs/wire.md` 3.2), so a rename to another case respells the file.
     fn rename(&mut self, root: RootId, from: &str, to: &str) -> Result<(), Status> {
         Tally::bump(&self.tally.renames, &key(root.0, from));
         if escapes(to) {
             return Err(Status::BadRequest);
         }
-        let (from, to) = (
-            self.graph.resolve(root, from)?,
-            self.graph.resolve(root, to)?,
-        );
-        let mut files = self.graph.files.lock().unwrap();
-        if !files.contains_key(&from) {
-            return Err(Status::NotFound);
-        }
-        if !self.graph.is_writable(&from) || !self.graph.is_writable(&to) {
-            return Err(Status::ReadOnly);
-        }
-        let e = files.remove(&from).expect("just checked");
-        files.insert(to, e);
-        Ok(())
+        let from_key = self.graph.resolve(root, from)?;
+        self.graph.resolve(root, to)?;
+        self.move_entry(from_key, root, to, false)
     }
 
+    /// A file, or a directory with nothing under it, as Cairn's writable
+    /// layer deletes them (`docs/wire.md` 3.4.8): a directory with anything
+    /// under it is `Status::IoError`, the root `Status::BadRequest`.
     fn delete(&mut self, root: RootId, path: &str) -> Result<(), Status> {
         Tally::bump(&self.tally.deletes, &key(root.0, path));
         let vpath = self.graph.resolve(root, path)?;
+        if is_root_key(&vpath) {
+            return Err(Status::BadRequest);
+        }
+        let mut dirs = self.graph.dirs.lock().unwrap();
         let mut files = self.graph.files.lock().unwrap();
-        if !files.contains_key(&vpath) {
+        let is_dir = dirs.contains_key(&vpath);
+        if !is_dir && !files.contains_key(&vpath) {
             return Err(Status::NotFound);
         }
         if !self.graph.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
-        files.remove(&vpath);
+        if !is_dir {
+            files.remove(&vpath);
+        } else if has_children(&dirs, &files, &vpath) {
+            return Err(Status::IoError);
+        } else {
+            dirs.remove(&vpath);
+        }
         Ok(())
     }
 
+    /// Creates the directory with the caller's spelling (`docs/wire.md`
+    /// 3.2, 3.4.9); the mode is ignored, as both directors ignore it. A
+    /// broken provider's prefix is `Status::IoError`; an existing directory
+    /// `Status::Exists` (wire.md 3.4.9 lets a director answer OK or
+    /// `ST_EXISTS`); an existing file `Status::IoError` where a writable
+    /// provider serves it and `Status::Exists` where none does, as Cairn's
+    /// providers answer; outside every writable prefix it refuses as a write
+    /// open does (3.4.3). Parents are not checked, as a creating OPEN does
+    /// not check them.
     fn mkdir(&mut self, root: RootId, _: u32, path: &str) -> Result<(), Status> {
-        self.graph.resolve(root, path)?;
-        Err(Status::NotSupported)
+        let g = &self.graph;
+        let vpath = g.resolve(root, path)?;
+        if g.write_fails(&vpath) {
+            return Err(Status::IoError);
+        }
+        let mut dirs = g.dirs.lock().unwrap();
+        let files = g.files.lock().unwrap();
+        if is_dir_in(&dirs, &vpath) {
+            return Err(Status::Exists);
+        }
+        if files.contains_key(&vpath) {
+            return Err(if g.is_writable(&vpath) {
+                Status::IoError
+            } else {
+                Status::Exists
+            });
+        }
+        if !g.is_writable(&vpath) {
+            return Err(if g.root_writable(root.0) {
+                Status::NotFound
+            } else {
+                Status::ReadOnly
+            });
+        }
+        let name = created_spelling(&dirs, &files, root.0, path);
+        drop(files);
+        dirs.insert(vpath, name);
+        Ok(())
     }
 
     /// Releases and counts the handle; an unknown one is `Status::BadFh`
@@ -847,11 +1105,28 @@ impl Director for Reference {
         Ok(())
     }
 
-    fn stored_names(&mut self, root: RootId, _: u32, path: &str) -> Result<&str, Status> {
+    /// The stored spelling of each component of `path` from `skip` on,
+    /// joined by `/` (`docs/wire.md` 3.4.12). A component with no entry comes
+    /// back as sent (the SHOULD), so the reply always has as many names as
+    /// components past `skip`. A `skip` past the last component is an empty
+    /// reply, as Cairn's is (wire.md does not say).
+    fn stored_names(&mut self, root: RootId, skip: u32, path: &str) -> Result<&str, Status> {
         self.graph.resolve(root, path)?;
-        Err(Status::NotSupported)
+        let dirs = self.graph.dirs.lock().unwrap();
+        let files = self.graph.files.lock().unwrap();
+        let names = stored_components(&dirs, &files, root.0, path);
+        drop(files);
+        drop(dirs);
+        let skip = (skip as usize).min(names.len());
+        self.names_buf.clear();
+        self.names_buf.push_str(&names[skip..].join("/"));
+        Ok(&self.names_buf)
     }
 
+    /// A file moves to `to_root` (replacing what is there) and leaves
+    /// `from_root`; a directory is `Status::CrossRoot`; equal roots are a
+    /// RENAME (`docs/wire.md` 3.4.13). Otherwise it refuses as RENAME does,
+    /// both ends checked before anything moves.
     fn rename_x(
         &mut self,
         from_root: RootId,
@@ -862,9 +1137,15 @@ impl Director for Reference {
         if escapes(from) || escapes(to) {
             return Err(Status::BadRequest);
         }
-        self.graph.resolve(from_root, from)?;
+        if from_root == to_root {
+            return self.rename(from_root, from, to);
+        }
+        let from_key = self.graph.resolve(from_root, from)?;
         self.graph.resolve(to_root, to)?;
-        Err(Status::NotSupported)
+        if self.graph.is_dir(&from_key) {
+            return Err(Status::CrossRoot);
+        }
+        self.move_entry(from_key, to_root, to, true)
     }
 
     /// The reference stages nothing, which wire.md 3.4.14 says is answered

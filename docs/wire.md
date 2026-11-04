@@ -385,10 +385,11 @@ A page-file section has no identity outside one Windows (or Wine) session, so a
 native Linux director and a shim under Wine share a file:
 
 - The director creates the file, grows it to at least the map size before
-  mapping it (an `mmap` past end of file faults on touch), never shrinks an
-  existing file, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`. The Rust
-  `FileRing::create` reuses an existing file grow-only; Cairn deletes and
-  recreates it (`ring/backing.clj`) so a stale reader keeps the old inode.
+  mapping it (an `mmap` past end of file faults on touch), never truncates an
+  existing file in place, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`.
+  An existing file is removed and a new one created in its place, so a stale
+  reader keeps the old file's pages: the Rust `FileRing::create` and Cairn
+  (`ring/backing.clj`) both do this.
 - The shim opens `VFS_RING_PATH` with `CreateFileW(FILE_GENERIC_READ |
   FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)`, refuses
   a file shorter than `VFS_RING_BYTES`, and maps it with an unnamed
@@ -820,14 +821,43 @@ Request (`Request::Rename`):
 
 Reply: status only.
 
+`to` is stored with the caller's spelling (section 3.2), so a rename that
+changes only the case respells the name. A file or a directory moves; a
+directory moves with everything under it. A file or an empty directory at
+`to` is replaced; a directory at `to` with anything under it is
+`ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
+inside `from`, is `ST_BAD_REQUEST`. A missing `from` is `ST_NOT_FOUND`; either
+end outside every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
+`provider/layer.clj`, `rename!`; the reference director.)
+
 #### 3.4.8 DELETE (9)
 
 Request: path request. Reply: status only. Unknown root `ST_NOT_FOUND`.
+
+A file, or a directory with nothing under it, is deleted. A directory with
+anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
+is `ST_BAD_REQUEST`. A missing path is `ST_NOT_FOUND`; a path outside every
+writable provider `ST_READ_ONLY`. (Cairn's writable layer,
+`provider/layer.clj`, `delete!`; the reference director.)
 
 #### 3.4.9 MKDIR (10)
 
 Request (`Request::Mkdir`): `root:u32 | mode:u32 | vpath utf8…`. The shim
 sends `mode = 0o755` (493); both directors ignore it. Reply: status only.
+
+The directory is stored with the caller's spelling (section 3.2). On an
+existing path the directors differ:
+
+- An existing directory: a director may answer `ST_OK` or `ST_EXISTS`, and a
+  client must accept either. Cairn's writable providers answer `ST_OK`
+  (`provider/layer.clj` and `provider/disk.clj`, `mkdir!`), its read-only ones
+  and the reference director `ST_EXISTS`. The shim, on any failure, asks
+  GETATTR whether a directory is there, so both give the program the same
+  answer for `FILE_OPEN_IF`; for `FILE_CREATE` only `ST_EXISTS` reports the
+  name collision.
+- An existing file: `ST_IO_ERROR` where a writable provider serves the path
+  (Cairn's writable providers), `ST_EXISTS` where none does (Cairn's
+  read-only providers). The reference director answers the same.
 
 #### 3.4.10 CLOSE (11)
 

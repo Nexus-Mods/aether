@@ -34,7 +34,7 @@ use windows_sys::Win32::System::Registry::{
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-const BASE: &str = r"Software\AetherVfsRegQueryTest";
+static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsRegQueryTest");
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_NO_MORE_ENTRIES: i32 = 0x8000_001Au32 as i32;
@@ -195,7 +195,7 @@ fn merged_values() -> Vec<Value> {
 }
 
 fn build_real_keys() {
-    reg::reset_base(BASE, &["Limited"]);
+    BASE.reset(&["Limited"]);
     // The key the overlay changes, and its children.
     make(r"M\Merge", Some("MCls"), &merge_real_values());
     make(r"M\Merge\Sa", None, &[val("x", REG_DWORD, &dword(1))]);
@@ -302,7 +302,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         let merge_real_lw = last_write_of(r"M\Merge");
         let limited_as_expected = !grants("Limited", KEY_READ)
             && grants("Limited", KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS);
-        let paths = Paths::new(BASE);
+        let paths = Paths::new(&BASE);
         let (st, pre) = open_abs(&paths.nt("Pre"), KEY_ENUMERATE_SUB_KEYS);
         assert_eq!(st, STATUS_SUCCESS);
         let fake = reg::install_hooks("regquery");

@@ -50,12 +50,13 @@ fn every_registry_call_is_the_real_one() {
     );
 
     // A volatile scratch key under HKCU, through Win32 (so through `NtCreateKey`): created
-    // for real, then deleted for real.
+    // for real, then deleted for real. Named per process, as another test run on the machine
+    // may be making its own.
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS,
         REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
     };
-    let sub: Vec<u16> = r"Software\AetherVfsRegKeysOffTest"
+    let sub: Vec<u16> = format!(r"Software\AetherVfsRegKeysOffTest-{}", std::process::id())
         .encode_utf16()
         .chain(Some(0))
         .collect();

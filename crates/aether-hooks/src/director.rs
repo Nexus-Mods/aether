@@ -974,6 +974,16 @@ impl FuseClient {
         if rest.len() != under.len() - known.len() {
             return known;
         }
+        // A stored spelling is a spelling of the name asked about
+        // (`docs/wire.md` 3.4.12): one that folds to another name is not an
+        // answer either, and nothing is learned.
+        if !rest
+            .iter()
+            .zip(&under[known.len()..])
+            .all(|(stored, asked)| aether_casefold::eq_folded(stored, asked))
+        {
+            return known;
+        }
         if let Ok(mut names) = self.names.lock() {
             names.remember(root.0, under, known.len(), &rest, now);
         }

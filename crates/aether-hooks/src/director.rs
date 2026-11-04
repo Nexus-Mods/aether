@@ -1040,8 +1040,7 @@ impl FuseClient {
     /// The providers resolve either spelling to the same entry (the provider
     /// contract's case rule), so this changes what a new name is called and
     /// nothing about what an existing one resolves to. A path whose spelling
-    /// cannot be read off it (a short name under the root) is sent folded,
-    /// as before.
+    /// cannot be read off it (a short name under the root) is sent folded.
     pub fn vpath_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
         let (root, folded) = self.vpath_under_root(path)?;
         let (plain, stream) = aether_redirect::split_stream_suffix(path);
@@ -1135,7 +1134,7 @@ pub struct WriteFailed {
 /// A status outside the table (the ring's overflow sentinel among them) is
 /// `Status::IoError`: every caller gives an unknown status the answer it
 /// gives `Status::IoError`, so nothing a caller does changes. So is a ring
-/// that gave no answer, as before. An OK reply that does not decode is
+/// that gave no answer. An OK reply that does not decode is
 /// `Status::BadRequest` (`docs/wire.md` 3.1).
 pub(crate) fn failed(e: CallError) -> Status {
     match e {

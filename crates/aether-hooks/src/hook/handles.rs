@@ -122,8 +122,8 @@ const HANDLE_PATHS_MAX: usize = 65_536;
 /// record, left behind by a close whose `try_lock` lost; without this, the stale `under_root`
 /// path of a closed handle would be read as the new handle's (a `DeleteFile` of a real file
 /// outside the root would then act on an unrelated path). The open then writes only what it
-/// knows. `blocking` is for an open that goes on to take the table's lock anyway; otherwise
-/// the clear is a `try_lock`, and a clear that loses it leaves the stale record, as before.
+/// knows. `blocking` waits for the table's lock, so the stale record is always cleared;
+/// without it the clear is a `try_lock`, and a clear that loses it leaves the record.
 pub(super) fn reset_key(key: isize, blocking: bool) {
     if blocking {
         if let Ok(mut t) = HANDLES.lock() {

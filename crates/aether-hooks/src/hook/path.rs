@@ -186,7 +186,7 @@ unsafe fn decode_relative(oa_ref: &ObjectAttributes, name: String) -> Option<Dec
 
 /// Fully-qualified NT/Win32 path for an open.
 ///
-/// Absolute names work as before. **Relative** opens (`RootDirectory` set) only
+/// Absolute names resolve directly. **Relative** opens (`RootDirectory` set) only
 /// resolve when the root is a FUSE synthetic directory handle whose absolute
 /// path was recorded in `PATH_TABLE`. Real kernel roots return `None` so the
 /// caller can tramp. Without this, steam_api / CRT opens like

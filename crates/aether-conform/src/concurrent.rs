@@ -1715,7 +1715,7 @@ mod tests {
     /// An OPEN that may answer a handle or an error: the director's choice
     /// decides whether later steps have a handle to send, and what the
     /// tree holds, so the client's case stops after it. A definite OPEN, a
-    /// use after CLOSE and a never-issued number are handled as before.
+    /// use after CLOSE and a never-issued number are handled as any other step.
     #[test]
     fn a_case_stops_after_an_open_that_may_fail() {
         let open = |path: &str| OwnedRequest::Open {

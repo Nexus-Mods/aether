@@ -69,7 +69,8 @@ const WAKE_WAIT_MS: u32 = 1_000;
 /// request: a test's calls in quick succession see no added latency. After
 /// that the thread looks once a millisecond (Windows rounds `Sleep(1)` up to
 /// its timer resolution, up to about 15.6 ms), the cost of a request after a
-/// quiet spell.
+/// quiet spell. So a burst stays hot, not the first request after a pause: a
+/// test that bounds one call's latency serves with `RingKind::SectionWithWake`.
 const HOT_FOR: Duration = Duration::from_millis(20);
 
 /// The ring's transport.

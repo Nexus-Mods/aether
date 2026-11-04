@@ -553,6 +553,36 @@ fn a_failed_listing_is_asked_again() {
     );
 }
 
+/// A restart that fails drops the listing the handle had served: the next
+/// query asks again rather than going on from the old listing's cursor.
+#[test]
+fn a_failed_restart_drops_the_listing_it_replaced() {
+    isolate!();
+    let root = root();
+    let served = fakedirector::install_with(&root, three_files(), Options::default());
+    let _hooks = aether_hooks::install().expect("install");
+    let (st, h) = nt_open_dir_abs(&root.join("save").to_string_lossy(), FILE_LIST_DIRECTORY);
+    assert_eq!(st, 0, "open {st:#x}");
+    let h: HANDLE = h;
+    let all: Vec<String> = vec!["a.txt".into(), "b.txt".into(), "c.txt".into()];
+    let mark = served.recorder.mark();
+    assert_eq!(query_dir(h, 4096, false), (0, all.clone()));
+    let fault = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..on(Opcode::ReadDir)
+        },
+        Fault::Status(Status::IoError),
+    );
+    let (restart, _) = query_dir(h, 4096, true);
+    let next = query_dir(h, 4096, false);
+    close(h);
+    assert_eq!(served.faults.applied(fault), 1);
+    assert_eq!(restart, STATUS_UNSUCCESSFUL);
+    assert_eq!(next, (0, all), "the query after the failed restart");
+    assert_eq!(served.recorder.count_since(mark, Opcode::ReadDir), 3);
+}
+
 #[test]
 fn a_listing_of_3000_entries_is_resumed_over_many_buffers_complete_and_in_order() {
     isolate!();
@@ -848,6 +878,6 @@ fn a_written_count_past_the_chunk_is_not_believed() {
         0,
         "the pointer is not past the data"
     );
-    assert!(size_of(h) <= 10, "the size is not past the data");
+    assert_eq!(size_of(h), 0, "no chunk counted, so the size stays 0");
     close(h);
 }

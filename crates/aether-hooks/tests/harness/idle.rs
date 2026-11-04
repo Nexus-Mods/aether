@@ -49,6 +49,8 @@ fn idle_serve_threads_use_little_cpu() {
     println!("idle second: {used:?} of CPU on 4 serve threads");
     // Four threads polling flat out use a second each where they get a
     // processor (at least one second on two). Backed off, they use a few
-    // milliseconds.
+    // milliseconds. A bound on CPU time, not wall-clock time: it does not
+    // move with the machine's load, and the margin is wide (250 ms against
+    // about 0 measured).
     assert!(used < Duration::from_millis(250), "{used:?}");
 }

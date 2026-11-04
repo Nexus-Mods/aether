@@ -1,113 +1,75 @@
-//! The pure wire contract for the VFS stack: wire codecs, opcodes, statuses, open flags and
-//! the root id. No OS I/O. The vocabulary is FUSE-style RPC, but nothing here touches
+//! The pure wire contract for the VFS stack: the protocol table (opcodes,
+//! requests, replies and their codecs), statuses, flags and the root id. No
+//! OS I/O. The vocabulary is FUSE-style RPC, but nothing here touches
 //! `/dev/fuse`. Registry ops use `aether-registry`'s portable node model.
+//!
+//! The wire is defined once, in `table.rs`: [`Request`] and [`Reply`] decode
+//! borrowing from a payload and encode into any [`Buf`]. The `OP_*`, `ST_*`
+//! and `OPEN_*` constants and the `encode_*`/`decode_*` functions below are
+//! the older numeric API, kept as thin wrappers over the table until their
+//! callers move to the typed one.
 #![forbid(unsafe_code)]
 
+mod buf;
+mod field;
 mod root;
 pub mod shimcfg;
 mod status;
+mod table;
 mod wire;
-use wire::{put_str, Rd};
 
+pub use aether_registry::Lookup;
+pub use buf::{Buf, Overflow, SliceBuf};
 pub use root::RootId;
 pub use status::{
-    OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, ST_BAD_FH,
-    ST_BAD_REQUEST, ST_CROSS_ROOT, ST_EXISTS, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY,
-    ST_NOT_FOUND, ST_NOT_SUPPORTED, ST_NO_SPACE, ST_OK, ST_READ_ONLY, ST_REPLY_TOO_LARGE,
+    OpenFlags, RequestFlags, Status, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC,
+    OPEN_WRITE, STATUSES, ST_BAD_FH, ST_BAD_REQUEST, ST_CROSS_ROOT, ST_EXISTS, ST_IO_ERROR,
+    ST_IS_DIR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_NOT_SUPPORTED, ST_NO_SPACE, ST_OK,
+    ST_READ_ONLY, ST_REPLY_TOO_LARGE,
 };
+#[cfg(feature = "testing")]
+pub use table::{any_reply_for, any_request, any_request_for};
+pub use table::{
+    AttrResp, ChangedReply, DirEntries, DirEntry, DirIter, KeyReply, LookupReply, Opcode, OpenResp,
+    ReadReply, Reply, Request, OPCODES, READ_RESP_BULK_BIT,
+};
+pub use wire::DecodeError;
 
-// The opcode catalog. This is the only definition: `aether_ipc::layout`
-// re-exports it. Numbers 4 and 12 are reserved (once `materialize` and
-// `register-process`); nothing sends them and the director answers
-// `ST_BAD_REQUEST`. Never renumber.
+use aether_registry::Node;
+use std::borrow::Cow;
 
-pub const OP_GETATTR: u32 = 1;
-pub const OP_READDIR: u32 = 2;
-pub const OP_OPEN: u32 = 3;
-pub const OP_READ: u32 = 5;
-pub const OP_WRITE: u32 = 6;
-pub const OP_SETATTR: u32 = 7;
-pub const OP_RENAME: u32 = 8;
-pub const OP_DELETE: u32 = 9;
-pub const OP_MKDIR: u32 = 10;
-pub const OP_CLOSE: u32 = 11;
-pub const OP_HEARTBEAT: u32 = 13;
-/// The stored spelling of a path's components: see [`encode_names_req`].
-pub const OP_STORED_NAMES: u32 = 14;
-/// Registry overlay ops (15-22). Requests are built by the `encode_reg_*`
-/// functions below; every reply starts with the overlay version (`u64 LE`).
-pub const OP_REG_LOOKUP: u32 = 15;
-pub const OP_REG_KEY: u32 = 16;
-pub const OP_REG_SET_VALUE: u32 = 17;
-pub const OP_REG_DELETE_VALUE: u32 = 18;
-pub const OP_REG_CREATE_KEY: u32 = 19;
-pub const OP_REG_DELETE_KEY: u32 = 20;
-pub const OP_REG_RENAME_KEY: u32 = 21;
-pub const OP_REG_CHANGED: u32 = 22;
-/// A rename whose source and destination are under different roots (a root
-/// and one nested in its location): the director copies a file into the
-/// destination root and removes it at the source. See [`encode_rename_x_req`].
-pub const OP_RENAME_X: u32 = 23;
-/// Stage the program at a vpath onto real disk for a process the launched
-/// program starts (`encode_path_req`); the reply is the real path to start it
-/// by. See `Director::stage_exec`.
-pub const OP_STAGE_EXEC: u32 = 24;
+// ---------------------------------------------------------------------------
+// The numeric API, on top of the table. Every function here encodes or
+// decodes through `Request`/`Reply`; none has a layout of its own.
+// ---------------------------------------------------------------------------
 
-/// Every live opcode with its name, in number order.
-pub const OPCODES: &[(&str, u32)] = &[
-    ("getattr", OP_GETATTR),
-    ("readdir", OP_READDIR),
-    ("open", OP_OPEN),
-    ("read", OP_READ),
-    ("write", OP_WRITE),
-    ("setattr", OP_SETATTR),
-    ("rename", OP_RENAME),
-    ("delete", OP_DELETE),
-    ("mkdir", OP_MKDIR),
-    ("close", OP_CLOSE),
-    ("heartbeat", OP_HEARTBEAT),
-    ("stored-names", OP_STORED_NAMES),
-    ("reg-lookup", OP_REG_LOOKUP),
-    ("reg-key", OP_REG_KEY),
-    ("reg-set-value", OP_REG_SET_VALUE),
-    ("reg-delete-value", OP_REG_DELETE_VALUE),
-    ("reg-create-key", OP_REG_CREATE_KEY),
-    ("reg-delete-key", OP_REG_DELETE_KEY),
-    ("reg-rename-key", OP_REG_RENAME_KEY),
-    ("reg-changed", OP_REG_CHANGED),
-    ("rename-x", OP_RENAME_X),
-    ("stage-exec", OP_STAGE_EXEC),
-];
-
-/// Every status code with its name, in number order.
-pub const STATUSES: &[(&str, i32)] = &[
-    ("ok", ST_OK),
-    ("not-found", ST_NOT_FOUND),
-    ("not-a-directory", ST_NOT_A_DIRECTORY),
-    ("bad-request", ST_BAD_REQUEST),
-    ("io-error", ST_IO_ERROR),
-    ("is-dir", ST_IS_DIR),
-    ("bad-fh", ST_BAD_FH),
-    ("no-space", ST_NO_SPACE),
-    ("not-supported", ST_NOT_SUPPORTED),
-    ("read-only", ST_READ_ONLY),
-    ("exists", ST_EXISTS),
-    ("reply-too-large", ST_REPLY_TOO_LARGE),
-    ("cross-root", ST_CROSS_ROOT),
-];
+pub const OP_GETATTR: u32 = Opcode::GetAttr as u32;
+pub const OP_READDIR: u32 = Opcode::ReadDir as u32;
+pub const OP_OPEN: u32 = Opcode::Open as u32;
+pub const OP_READ: u32 = Opcode::Read as u32;
+pub const OP_WRITE: u32 = Opcode::Write as u32;
+pub const OP_SETATTR: u32 = Opcode::SetAttr as u32;
+pub const OP_RENAME: u32 = Opcode::Rename as u32;
+pub const OP_DELETE: u32 = Opcode::Delete as u32;
+pub const OP_MKDIR: u32 = Opcode::Mkdir as u32;
+pub const OP_CLOSE: u32 = Opcode::Close as u32;
+pub const OP_HEARTBEAT: u32 = Opcode::Heartbeat as u32;
+pub const OP_STORED_NAMES: u32 = Opcode::StoredNames as u32;
+pub const OP_REG_LOOKUP: u32 = Opcode::RegLookup as u32;
+pub const OP_REG_KEY: u32 = Opcode::RegKey as u32;
+pub const OP_REG_SET_VALUE: u32 = Opcode::RegSetValue as u32;
+pub const OP_REG_DELETE_VALUE: u32 = Opcode::RegDeleteValue as u32;
+pub const OP_REG_CREATE_KEY: u32 = Opcode::RegCreateKey as u32;
+pub const OP_REG_DELETE_KEY: u32 = Opcode::RegDeleteKey as u32;
+pub const OP_REG_RENAME_KEY: u32 = Opcode::RegRenameKey as u32;
+pub const OP_REG_CHANGED: u32 = Opcode::RegChanged as u32;
+pub const OP_RENAME_X: u32 = Opcode::RenameX as u32;
+pub const OP_STAGE_EXEC: u32 = Opcode::StageExec as u32;
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
-pub const FLAG_READ_BULK: u32 = 0x1;
-/// High bit on READ response `bytes_read` means bulk: data lives at arena_offset.
-pub const READ_RESP_BULK_BIT: u32 = 0x8000_0000;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttrResp {
-    pub found: bool,
-    pub is_dir: bool,
-    pub size: u64,
-    pub mtime: i64,
-}
+pub const FLAG_READ_BULK: u32 = RequestFlags::READ_BULK.bits();
+/// Bit 0 of an OPEN reply's flags byte: [`OpenResp::immutable`].
+pub const OPEN_RESP_IMMUTABLE: u8 = 0x01;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntryWire {
@@ -117,248 +79,11 @@ pub struct DirEntryWire {
     pub mtime: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpenResp {
-    pub fh: u64,
-    pub size: u64,
-    pub is_dir: bool,
-    /// The bytes behind `fh` cannot change while it is open (the director's
-    /// layer that serves it says so). A client may cache
-    /// what it reads through such a handle. Always `false` for a write open.
-    /// Carried in what was padding, so a director that predates it says
-    /// `false` and a client that predates it ignores it.
-    pub immutable: bool,
-    /// The director's mount generation when it opened `fh`: bumped whenever
-    /// a root's provider is replaced. Two immutable opens of one path with
-    /// the same generation (and size) are the same content; across a remount
-    /// they need not be. `0` from a director that predates it.
-    pub mount_gen: u32,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadReq {
     pub fh: u64,
     pub offset: u64,
     pub len: u32,
-}
-
-/// Path-carrying request: `root:u32 | path_utf8…`. Used by GETATTR, READDIR
-/// and DELETE.
-///
-/// **Stage 2b task 5 widened this from a bare UTF-8 path.** A session
-/// virtualizes several roots, and a path alone cannot say which one it belongs
-/// to — the shim classifies an open as "root 1" and, before this, had no field
-/// in which to say so, leaving `dispatch_director` to assume `RootId::DEFAULT`
-/// for every request. The root rides ahead of the path rather than in a
-/// parallel opcode so there is one code path per operation, not two that can
-/// drift.
-///
-/// The layout is a contract with the injected DLL: a shim built against the
-/// old shape would have its first four path bytes read as a root id, which is
-/// plausible-looking garbage rather than a clean failure. `aether_ipc::layout`'s
-/// `VERSION` was bumped to 2 in the same change so such a shim is rejected at
-/// ring open instead of misparsing every request.
-pub fn encode_path_req(root: u32, vpath: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(4 + vpath.len());
-    b.extend_from_slice(&root.to_le_bytes());
-    b.extend_from_slice(vpath.as_bytes());
-    b
-}
-
-pub fn decode_path_req(payload: &[u8]) -> Option<(u32, String)> {
-    let mut r = Rd(payload);
-    let root = r.u32()?;
-    let path = r.rest_str()?.to_string();
-    Some((root, path))
-}
-
-pub fn encode_getattr_resp(r: &AttrResp) -> Vec<u8> {
-    let mut b = Vec::with_capacity(18);
-    b.push(r.found as u8);
-    b.push(r.is_dir as u8);
-    b.extend_from_slice(&r.size.to_le_bytes());
-    b.extend_from_slice(&r.mtime.to_le_bytes());
-    b
-}
-
-pub fn decode_getattr_resp(p: &[u8]) -> Option<AttrResp> {
-    let mut r = Rd(p);
-    let found = r.flag()?;
-    let is_dir = r.flag()?;
-    let size = r.u64()?;
-    let mtime = r.u64()? as i64;
-    Some(AttrResp {
-        found,
-        is_dir,
-        size,
-        mtime,
-    })
-}
-
-pub fn encode_readdir_resp(entries: &[DirEntryWire]) -> Vec<u8> {
-    let mut b = Vec::new();
-    b.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    for e in entries {
-        let name = e.name.as_bytes();
-        b.extend_from_slice(&(name.len() as u32).to_le_bytes());
-        b.extend_from_slice(name);
-        b.push(e.is_dir as u8);
-        b.extend_from_slice(&e.size.to_le_bytes());
-        b.extend_from_slice(&e.mtime.to_le_bytes());
-    }
-    b
-}
-
-pub fn decode_readdir_resp(p: &[u8]) -> Option<Vec<DirEntryWire>> {
-    let mut r = Rd(p);
-    let count = r.u32()?;
-    let mut out = Vec::new();
-    for _ in 0..count {
-        let name = r.str()?.to_string();
-        let is_dir = r.flag()?;
-        let size = r.u64()?;
-        let mtime = r.u64()? as i64;
-        out.push(DirEntryWire {
-            name,
-            is_dir,
-            size,
-            mtime,
-        });
-    }
-    Some(out)
-}
-
-/// OPEN req: `root:u32 | flags:u32 | path_utf8…`
-///
-/// See [`encode_path_req`] for why the root leads every path-carrying payload.
-pub fn encode_open_req(root: u32, flags: u32, path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + path.len());
-    b.extend_from_slice(&root.to_le_bytes());
-    b.extend_from_slice(&flags.to_le_bytes());
-    b.extend_from_slice(path.as_bytes());
-    b
-}
-
-/// Returns `(root, flags, path)`.
-pub fn decode_open_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    let mut r = Rd(p);
-    let root = r.u32()?;
-    let flags = r.u32()?;
-    let path = r.rest_str()?.to_string();
-    Some((root, flags, path))
-}
-
-/// Bit 0 of an OPEN reply's flags byte: [`OpenResp::immutable`].
-pub const OPEN_RESP_IMMUTABLE: u8 = 0x01;
-
-/// OPEN resp: `fh:u64 | size:u64 | is_dir:u8 | flags:u8 | pad[2] | mount_gen:u32`
-///
-/// `flags` and `mount_gen` were padding (zero) until the shim's read cache
-/// needed them, so the layout and length are unchanged and either side may
-/// be older than the other: an old director's reply decodes as mutable,
-/// generation 0, which a cache never serves from.
-pub fn encode_open_resp(r: &OpenResp) -> Vec<u8> {
-    let mut b = Vec::with_capacity(24);
-    b.extend_from_slice(&r.fh.to_le_bytes());
-    b.extend_from_slice(&r.size.to_le_bytes());
-    b.push(r.is_dir as u8);
-    b.push(if r.immutable { OPEN_RESP_IMMUTABLE } else { 0 });
-    b.extend_from_slice(&[0u8; 2]);
-    b.extend_from_slice(&r.mount_gen.to_le_bytes());
-    b
-}
-
-pub fn decode_open_resp(p: &[u8]) -> Option<OpenResp> {
-    let mut r = Rd(p);
-    let fh = r.u64()?;
-    let size = r.u64()?;
-    let is_dir = r.flag()?;
-    let immutable = r.u8()? & OPEN_RESP_IMMUTABLE != 0;
-    r.take(2)?; // padding
-    let mount_gen = r.u32()?;
-    Some(OpenResp {
-        fh,
-        size,
-        is_dir,
-        immutable,
-        mount_gen,
-    })
-}
-
-/// READ req: `fh:u64 | offset:u64 | len:u32 | pad:u32`
-pub fn encode_read_req(r: &ReadReq) -> Vec<u8> {
-    let mut b = Vec::with_capacity(24);
-    b.extend_from_slice(&r.fh.to_le_bytes());
-    b.extend_from_slice(&r.offset.to_le_bytes());
-    b.extend_from_slice(&r.len.to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b
-}
-
-pub fn decode_read_req(p: &[u8]) -> Option<ReadReq> {
-    // The trailing `pad:u32` is not required: a 20-byte request decodes.
-    let mut r = Rd(p);
-    let fh = r.u64()?;
-    let offset = r.u64()?;
-    let len = r.u32()?;
-    Some(ReadReq { fh, offset, len })
-}
-
-/// READ resp: `bytes_read:u32 | pad:u32 | data[bytes_read]`
-pub fn encode_read_resp(data: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + data.len());
-    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b.extend_from_slice(data);
-    b
-}
-
-pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
-    let mut r = Rd(p);
-    let n = r.u32()? as usize;
-    r.take(4)?; // pad
-    Some(r.take(n)?.to_vec())
-}
-
-/// **A3:** copy READ response data into `out` without allocating a second Vec.
-/// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
-/// Inline responses only (not bulk).
-pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
-    let mut r = Rd(p);
-    let raw = r.u32()?;
-    if raw & READ_RESP_BULK_BIT != 0 {
-        return None; // use decode_read_bulk_resp + arena
-    }
-    r.take(4)?; // pad
-    let data = r.take(raw as usize)?;
-    let n = data.len().min(out.len());
-    out[..n].copy_from_slice(&data[..n]);
-    Some(n)
-}
-
-/// Bulk READ response: `bytes_read|BULK_BIT : u32 | pad:u32 | arena_offset:u64`
-pub fn encode_read_resp_bulk(bytes_read: u32, arena_offset: u64) -> Vec<u8> {
-    let mut b = Vec::with_capacity(16);
-    b.extend_from_slice(&(bytes_read | READ_RESP_BULK_BIT).to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b.extend_from_slice(&arena_offset.to_le_bytes());
-    b
-}
-
-/// Returns `(bytes_read, arena_offset)` for a bulk response, or `None` if inline/malformed.
-pub fn decode_read_bulk_resp(p: &[u8]) -> Option<(u32, u64)> {
-    let mut r = Rd(p);
-    let raw = r.u32()?;
-    if raw & READ_RESP_BULK_BIT == 0 {
-        return None;
-    }
-    r.take(4)?; // pad
-    let off = r.u64()?;
-    Some((raw & !READ_RESP_BULK_BIT, off))
-}
-
-pub fn is_read_resp_bulk(p: &[u8]) -> bool {
-    Rd(p).u32().is_some_and(|raw| raw & READ_RESP_BULK_BIT != 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,63 +93,235 @@ pub struct WriteReq {
     pub len: u32,
 }
 
-/// WRITE req: `fh:u64 | offset:u64 | len:u32 | pad:u32 | data[len]`
-pub fn encode_write_req(r: &WriteReq, data: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(24 + data.len());
-    b.extend_from_slice(&r.fh.to_le_bytes());
-    b.extend_from_slice(&r.offset.to_le_bytes());
-    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b.extend_from_slice(data);
-    b
-}
-
-pub fn decode_write_req(p: &[u8]) -> Option<(WriteReq, Vec<u8>)> {
-    let mut r = Rd(p);
-    let fh = r.u64()?;
-    let offset = r.u64()?;
-    let len = r.u32()?;
-    r.take(4)?; // pad
-    let data = r.take(len as usize)?.to_vec();
-    Some((WriteReq { fh, offset, len }, data))
-}
-
-/// WRITE resp: `bytes_written:u32 | pad:u32`
-pub fn encode_write_resp(n: u32) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8);
-    b.extend_from_slice(&n.to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b
-}
-
-pub fn decode_write_resp(p: &[u8]) -> Option<u32> {
-    Rd(p).u32()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetattrReq {
     pub fh: u64,
     pub size: u64,
 }
 
-/// MKDIR req: `root:u32 | mode:u32 | path_utf8…`
-///
-/// See [`encode_path_req`] for why the root leads every path-carrying payload.
-pub fn encode_mkdir_req(root: u32, mode: u32, path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + path.len());
-    b.extend_from_slice(&root.to_le_bytes());
-    b.extend_from_slice(&mode.to_le_bytes());
-    b.extend_from_slice(path.as_bytes());
+fn req(r: Request<'_>) -> Vec<u8> {
+    let mut b = Vec::new();
+    r.encode(&mut b);
     b
+}
+
+fn rep(r: Reply<'_>) -> Vec<u8> {
+    let mut b = Vec::new();
+    r.encode(&mut b);
+    b
+}
+
+fn dreq(op: Opcode, p: &[u8]) -> Option<Request<'_>> {
+    Request::decode(op, 0, p).ok()
+}
+
+fn drep(op: Opcode, p: &[u8]) -> Option<Reply<'_>> {
+    Reply::decode(op, 0, p).ok()
+}
+
+/// Path-carrying request: `root:u32 | path_utf8…`, used by GETATTR, READDIR,
+/// DELETE and STAGE_EXEC. The root rides ahead of the path so one director
+/// can serve several roots with one code path per operation.
+pub fn encode_path_req(root: u32, vpath: &str) -> Vec<u8> {
+    req(Request::GetAttr {
+        root: RootId(root),
+        path: vpath,
+    })
+}
+
+pub fn decode_path_req(payload: &[u8]) -> Option<(u32, String)> {
+    let Request::GetAttr { root, path } = dreq(Opcode::GetAttr, payload)? else {
+        return None;
+    };
+    Some((root.0, path.to_string()))
+}
+
+pub fn encode_getattr_resp(r: &AttrResp) -> Vec<u8> {
+    rep(Reply::GetAttr(r.clone()))
+}
+
+pub fn decode_getattr_resp(p: &[u8]) -> Option<AttrResp> {
+    let Reply::GetAttr(a) = drep(Opcode::GetAttr, p)? else {
+        return None;
+    };
+    Some(a)
+}
+
+pub fn encode_readdir_resp(entries: &[DirEntryWire]) -> Vec<u8> {
+    let list: Vec<DirEntry<'_>> = entries
+        .iter()
+        .map(|e| DirEntry {
+            name: &e.name,
+            is_dir: e.is_dir,
+            size: e.size,
+            mtime: e.mtime,
+        })
+        .collect();
+    rep(Reply::ReadDir(DirEntries::new(&list)))
+}
+
+pub fn decode_readdir_resp(p: &[u8]) -> Option<Vec<DirEntryWire>> {
+    let Reply::ReadDir(list) = drep(Opcode::ReadDir, p)? else {
+        return None;
+    };
+    Some(
+        list.iter()
+            .map(|e| DirEntryWire {
+                name: e.name.to_string(),
+                is_dir: e.is_dir,
+                size: e.size,
+                mtime: e.mtime,
+            })
+            .collect(),
+    )
+}
+
+/// OPEN req: `root:u32 | flags:u32 | path_utf8…`
+pub fn encode_open_req(root: u32, flags: u32, path: &str) -> Vec<u8> {
+    req(Request::Open {
+        root: RootId(root),
+        flags: OpenFlags::from_bits_retain(flags),
+        path,
+    })
+}
+
+/// Returns `(root, flags, path)`.
+pub fn decode_open_req(p: &[u8]) -> Option<(u32, u32, String)> {
+    let Request::Open { root, flags, path } = dreq(Opcode::Open, p)? else {
+        return None;
+    };
+    Some((root.0, flags.bits(), path.to_string()))
+}
+
+pub fn encode_open_resp(r: &OpenResp) -> Vec<u8> {
+    rep(Reply::Open(r.clone()))
+}
+
+pub fn decode_open_resp(p: &[u8]) -> Option<OpenResp> {
+    let Reply::Open(o) = drep(Opcode::Open, p)? else {
+        return None;
+    };
+    Some(o)
+}
+
+/// READ req: `fh:u64 | offset:u64 | len:u32 | pad:u32`
+pub fn encode_read_req(r: &ReadReq) -> Vec<u8> {
+    req(Request::Read {
+        slot_flags: RequestFlags::empty(),
+        fh: r.fh,
+        offset: r.offset,
+        len: r.len,
+    })
+}
+
+pub fn decode_read_req(p: &[u8]) -> Option<ReadReq> {
+    let Request::Read {
+        fh, offset, len, ..
+    } = dreq(Opcode::Read, p)?
+    else {
+        return None;
+    };
+    Some(ReadReq { fh, offset, len })
+}
+
+/// READ resp: `bytes_read:u32 | pad:u32 | data[bytes_read]`
+pub fn encode_read_resp(data: &[u8]) -> Vec<u8> {
+    rep(Reply::Read(ReadReply::Inline(data)))
+}
+
+fn read_reply(p: &[u8]) -> Option<ReadReply<'_>> {
+    let Reply::Read(r) = drep(Opcode::Read, p)? else {
+        return None;
+    };
+    Some(r)
+}
+
+pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
+    match read_reply(p)? {
+        ReadReply::Inline(data) => Some(data.to_vec()),
+        ReadReply::Bulk { .. } => None,
+    }
+}
+
+/// Copy READ response data into `out` without allocating a second Vec.
+/// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
+/// Inline responses only (not bulk).
+pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
+    let ReadReply::Inline(data) = read_reply(p)? else {
+        return None; // use decode_read_bulk_resp + arena
+    };
+    let n = data.len().min(out.len());
+    out[..n].copy_from_slice(&data[..n]);
+    Some(n)
+}
+
+/// Bulk READ response: `bytes_read|BULK_BIT : u32 | pad:u32 | arena_offset:u64`
+pub fn encode_read_resp_bulk(bytes_read: u32, arena_offset: u64) -> Vec<u8> {
+    rep(Reply::Read(ReadReply::Bulk {
+        len: bytes_read,
+        arena_offset,
+    }))
+}
+
+/// Returns `(bytes_read, arena_offset)` for a bulk response, or `None` if inline/malformed.
+pub fn decode_read_bulk_resp(p: &[u8]) -> Option<(u32, u64)> {
+    match read_reply(p)? {
+        ReadReply::Bulk { len, arena_offset } => Some((len, arena_offset)),
+        ReadReply::Inline(_) => None,
+    }
+}
+
+/// A well-formed bulk READ reply. (A malformed one is `false`, and fails the
+/// inline decoders too.)
+pub fn is_read_resp_bulk(p: &[u8]) -> bool {
+    matches!(read_reply(p), Some(ReadReply::Bulk { .. }))
+}
+
+/// WRITE req: `fh:u64 | offset:u64 | len:u32 | pad:u32 | data[len]`; `len`
+/// is `data.len()`, whatever `r.len` says.
+pub fn encode_write_req(r: &WriteReq, data: &[u8]) -> Vec<u8> {
+    req(Request::Write {
+        fh: r.fh,
+        offset: r.offset,
+        data,
+    })
+}
+
+pub fn decode_write_req(p: &[u8]) -> Option<(WriteReq, Vec<u8>)> {
+    let Request::Write { fh, offset, data } = dreq(Opcode::Write, p)? else {
+        return None;
+    };
+    let len = data.len() as u32;
+    Some((WriteReq { fh, offset, len }, data.to_vec()))
+}
+
+/// WRITE resp: `bytes_written:u32 | pad:u32`
+pub fn encode_write_resp(n: u32) -> Vec<u8> {
+    rep(Reply::Write(n))
+}
+
+pub fn decode_write_resp(p: &[u8]) -> Option<u32> {
+    let Reply::Write(n) = drep(Opcode::Write, p)? else {
+        return None;
+    };
+    Some(n)
+}
+
+/// MKDIR req: `root:u32 | mode:u32 | path_utf8…`
+pub fn encode_mkdir_req(root: u32, mode: u32, path: &str) -> Vec<u8> {
+    req(Request::Mkdir {
+        root: RootId(root),
+        mode,
+        path,
+    })
 }
 
 /// Returns `(root, mode, path)`.
 pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    let mut r = Rd(p);
-    let root = r.u32()?;
-    let mode = r.u32()?;
-    let path = r.rest_str()?.to_string();
-    Some((root, mode, path))
+    let Request::Mkdir { root, mode, path } = dreq(Opcode::Mkdir, p)? else {
+        return None;
+    };
+    Some((root.0, mode, path.to_string()))
 }
 
 /// STORED_NAMES req: `root:u32 | skip:u32 | path_utf8`. Asks how the
@@ -433,100 +330,100 @@ pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, u32, String)> {
 /// about (a name has no `/` in it); a component nothing has comes back as it
 /// was sent.
 pub fn encode_names_req(root: u32, skip: u32, path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + path.len());
-    b.extend_from_slice(&root.to_le_bytes());
-    b.extend_from_slice(&skip.to_le_bytes());
-    b.extend_from_slice(path.as_bytes());
-    b
+    req(Request::StoredNames {
+        root: RootId(root),
+        skip,
+        path,
+    })
 }
 
 /// Returns `(root, skip, path)`.
 pub fn decode_names_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    let mut r = Rd(p);
-    let root = r.u32()?;
-    let skip = r.u32()?;
-    let path = r.rest_str()?.to_string();
-    Some((root, skip, path))
+    let Request::StoredNames { root, skip, path } = dreq(Opcode::StoredNames, p)? else {
+        return None;
+    };
+    Some((root.0, skip, path.to_string()))
 }
 
 /// STORED_NAMES reply: the names joined by `/` (a name has no `/` in it).
 pub fn encode_names_resp(names: &[String]) -> Vec<u8> {
-    names.join("/").into_bytes()
+    rep(Reply::StoredNames(&names.join("/")))
 }
 
 /// The names of a STORED_NAMES reply, or `None` if it is not UTF-8. An empty
 /// payload is one empty name, as `str::split` has it.
 pub fn decode_names_resp(p: &[u8]) -> Option<Vec<String>> {
-    let text = core::str::from_utf8(p).ok()?;
+    let Reply::StoredNames(text) = drep(Opcode::StoredNames, p)? else {
+        return None;
+    };
     Some(text.split('/').map(str::to_string).collect())
 }
 
 /// RENAME req: `root:u32 | from_len:u32 | from_utf8 | to_utf8`
-///
-/// One root, not two: `Director::rename` resolves both sides against a single
-/// root, and a cross-root rename has no meaning in the provider contract.
 pub fn encode_rename_req(root: u32, from: &str, to: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + from.len() + to.len());
-    b.extend_from_slice(&root.to_le_bytes());
-    b.extend_from_slice(&(from.len() as u32).to_le_bytes());
-    b.extend_from_slice(from.as_bytes());
-    b.extend_from_slice(to.as_bytes());
-    b
+    req(Request::Rename {
+        root: RootId(root),
+        from,
+        to,
+    })
 }
 
 /// Returns `(root, from, to)`.
 pub fn decode_rename_req(p: &[u8]) -> Option<(u32, String, String)> {
-    let mut r = Rd(p);
-    let root = r.u32()?;
-    let from_len = r.u32()? as usize;
-    let from = core::str::from_utf8(r.take(from_len)?).ok()?.to_string();
-    let to = r.rest_str()?.to_string();
-    Some((root, from, to))
+    let Request::Rename { root, from, to } = dreq(Opcode::Rename, p)? else {
+        return None;
+    };
+    Some((root.0, from.to_string(), to.to_string()))
 }
 
 /// RENAME_X req: `from_root:u32 | to_root:u32 | from_len:u32 | from | to`.
 pub fn encode_rename_x_req(from_root: u32, from: &str, to_root: u32, to: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(12 + from.len() + to.len());
-    b.extend_from_slice(&from_root.to_le_bytes());
-    b.extend_from_slice(&to_root.to_le_bytes());
-    b.extend_from_slice(&(from.len() as u32).to_le_bytes());
-    b.extend_from_slice(from.as_bytes());
-    b.extend_from_slice(to.as_bytes());
-    b
+    req(Request::RenameX {
+        from_root: RootId(from_root),
+        to_root: RootId(to_root),
+        from,
+        to,
+    })
 }
 
 /// Returns `(from_root, from, to_root, to)`.
 pub fn decode_rename_x_req(p: &[u8]) -> Option<(u32, String, u32, String)> {
-    let mut r = Rd(p);
-    let from_root = r.u32()?;
-    let to_root = r.u32()?;
-    let from_len = r.u32()? as usize;
-    let from = core::str::from_utf8(r.take(from_len)?).ok()?.to_string();
-    let to = r.rest_str()?.to_string();
-    Some((from_root, from, to_root, to))
+    let Request::RenameX {
+        from_root,
+        to_root,
+        from,
+        to,
+    } = dreq(Opcode::RenameX, p)?
+    else {
+        return None;
+    };
+    Some((from_root.0, from.to_string(), to_root.0, to.to_string()))
 }
 
 /// SETATTR req: `fh:u64 | size:u64`
 pub fn encode_setattr_req(r: &SetattrReq) -> Vec<u8> {
-    let mut b = Vec::with_capacity(16);
-    b.extend_from_slice(&r.fh.to_le_bytes());
-    b.extend_from_slice(&r.size.to_le_bytes());
-    b
+    req(Request::SetAttr {
+        fh: r.fh,
+        size: r.size,
+    })
 }
 
 pub fn decode_setattr_req(p: &[u8]) -> Option<SetattrReq> {
-    let mut r = Rd(p);
-    let fh = r.u64()?;
-    let size = r.u64()?;
+    let Request::SetAttr { fh, size } = dreq(Opcode::SetAttr, p)? else {
+        return None;
+    };
     Some(SetattrReq { fh, size })
 }
 
 pub fn encode_close_req(fh: u64) -> Vec<u8> {
-    fh.to_le_bytes().to_vec()
+    req(Request::Close { fh })
 }
 
 pub fn decode_close_req(p: &[u8]) -> Option<u64> {
-    Rd(p).u64()
+    let Request::Close { fh } = dreq(Opcode::Close, p)? else {
+        return None;
+    };
+    Some(fh)
 }
 
 // ---------------------------------------------------------------------------
@@ -536,240 +433,171 @@ pub fn decode_close_req(p: &[u8]) -> Option<u64> {
 // flags or lengths); none of them can panic or over-allocate.
 // ---------------------------------------------------------------------------
 
-use aether_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
-use aether_registry::{Child, Node, Value};
-
-/// A request that is only a path (also `REG_KEY`, `REG_LOOKUP`, `REG_DELETE_KEY`).
+/// A request that is only a path (`REG_KEY`, `REG_LOOKUP`, `REG_DELETE_KEY`).
 pub fn encode_reg_path(path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(4 + path.len());
-    put_str(&mut b, path);
-    b
+    req(Request::RegKey { path })
 }
 
 pub fn decode_reg_path(b: &[u8]) -> Option<&str> {
-    let mut r = Rd(b);
-    let p = r.str()?;
-    r.done()?;
-    Some(p)
+    let Request::RegKey { path } = dreq(Opcode::RegKey, b)? else {
+        return None;
+    };
+    Some(path)
 }
 
 /// `REG_SET_VALUE` req: `path | name | ty:u32 | data_len:u32 | data`.
 pub fn encode_reg_set_value(path: &str, name: &str, ty: u32, data: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(16 + path.len() + name.len() + data.len());
-    put_str(&mut b, path);
-    put_str(&mut b, name);
-    b.extend_from_slice(&ty.to_le_bytes());
-    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    b.extend_from_slice(data);
-    b
+    req(Request::RegSetValue {
+        path,
+        name,
+        ty,
+        data,
+    })
 }
 
 /// Returns `(path, name, ty, data)`.
 pub fn decode_reg_set_value(b: &[u8]) -> Option<(&str, &str, u32, &[u8])> {
-    let mut r = Rd(b);
-    let path = r.str()?;
-    let name = r.str_max(MAX_VALUE_NAME)?;
-    let ty = r.u32()?;
-    let data = r.bytes(MAX_DATA)?;
-    r.done()?;
+    let Request::RegSetValue {
+        path,
+        name,
+        ty,
+        data,
+    } = dreq(Opcode::RegSetValue, b)?
+    else {
+        return None;
+    };
     Some((path, name, ty, data))
 }
 
 /// `REG_DELETE_VALUE` req: `path | name`.
 pub fn encode_reg_delete_value(path: &str, name: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + path.len() + name.len());
-    put_str(&mut b, path);
-    put_str(&mut b, name);
-    b
+    req(Request::RegDeleteValue { path, name })
 }
 
 pub fn decode_reg_delete_value(b: &[u8]) -> Option<(&str, &str)> {
-    let mut r = Rd(b);
-    let path = r.str()?;
-    let name = r.str_max(MAX_VALUE_NAME)?;
-    r.done()?;
+    let Request::RegDeleteValue { path, name } = dreq(Opcode::RegDeleteValue, b)? else {
+        return None;
+    };
     Some((path, name))
 }
 
 /// `REG_CREATE_KEY` req: `path | volatile:u8`.
 pub fn encode_reg_create_key(path: &str, volatile: bool) -> Vec<u8> {
-    let mut b = encode_reg_path(path);
-    b.push(volatile as u8);
-    b
+    req(Request::RegCreateKey { path, volatile })
 }
 
 pub fn decode_reg_create_key(b: &[u8]) -> Option<(&str, bool)> {
-    let mut r = Rd(b);
-    let path = r.str()?;
-    let v = r.bool()?;
-    r.done()?;
-    Some((path, v))
+    let Request::RegCreateKey { path, volatile } = dreq(Opcode::RegCreateKey, b)? else {
+        return None;
+    };
+    Some((path, volatile))
 }
 
 /// `REG_RENAME_KEY` req: `path | new_leaf`.
 pub fn encode_reg_rename_key(path: &str, new_leaf: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + path.len() + new_leaf.len());
-    put_str(&mut b, path);
-    put_str(&mut b, new_leaf);
-    b
+    req(Request::RegRenameKey { path, new_leaf })
 }
 
 pub fn decode_reg_rename_key(b: &[u8]) -> Option<(&str, &str)> {
-    let mut r = Rd(b);
-    let path = r.str()?;
-    let leaf = r.str_max(MAX_KEY_NAME)?;
-    r.done()?;
-    Some((path, leaf))
+    let Request::RegRenameKey { path, new_leaf } = dreq(Opcode::RegRenameKey, b)? else {
+        return None;
+    };
+    Some((path, new_leaf))
 }
 
 /// `REG_CHANGED` req: `path | subtree:u8 | since:u64`.
 pub fn encode_reg_changed(path: &str, subtree: bool, version: u64) -> Vec<u8> {
-    let mut b = encode_reg_path(path);
-    b.push(subtree as u8);
-    b.extend_from_slice(&version.to_le_bytes());
-    b
+    req(Request::RegChanged {
+        path,
+        subtree,
+        since: version,
+    })
 }
 
 /// Returns `(path, subtree, since)`.
 pub fn decode_reg_changed(b: &[u8]) -> Option<(&str, bool, u64)> {
-    let mut r = Rd(b);
-    let path = r.str()?;
-    let subtree = r.bool()?;
-    let since = r.u64()?;
-    r.done()?;
+    let Request::RegChanged {
+        path,
+        subtree,
+        since,
+    } = dreq(Opcode::RegChanged, b)?
+    else {
+        return None;
+    };
     Some((path, subtree, since))
 }
 
 /// `REG_CHANGED` reply: `version:u64 | changed:u8`.
 pub fn encode_reg_changed_reply(changed: bool, version: u64) -> Vec<u8> {
-    let mut b = version.to_le_bytes().to_vec();
-    b.push(changed as u8);
-    b
+    rep(Reply::RegChanged(ChangedReply { version, changed }))
 }
 
 /// Returns `(changed, version)`.
 pub fn decode_reg_changed_reply(b: &[u8]) -> Option<(bool, u64)> {
-    let mut r = Rd(b);
-    let version = r.u64()?;
-    let changed = r.bool()?;
-    r.done()?;
-    Some((changed, version))
+    let Reply::RegChanged(c) = drep(Opcode::RegChanged, b)? else {
+        return None;
+    };
+    Some((c.changed, c.version))
 }
 
 /// Reply of the mutating ops: just the overlay version after the change.
 pub fn encode_reg_version_reply(version: u64) -> Vec<u8> {
-    version.to_le_bytes().to_vec()
+    rep(Reply::RegVersion(version))
 }
 
 pub fn decode_reg_version_reply(b: &[u8]) -> Option<u64> {
-    let mut r = Rd(b);
-    let v = r.u64()?;
-    r.done()?;
+    let Reply::RegVersion(v) = drep(Opcode::RegSetValue, b)? else {
+        return None;
+    };
     Some(v)
 }
 
 /// `REG_LOOKUP` reply: `version:u64 | state:u8 | below:u8`. State is 0 absent,
 /// 1 present, 2 present-created, 3 tombstoned; `below` says the overlay has
-/// anything underneath the key.
+/// anything underneath the key. A state above 3 is not one and is sent as 3.
 pub fn encode_reg_lookup_reply(state: u8, below: bool, version: u64) -> Vec<u8> {
-    let mut b = version.to_le_bytes().to_vec();
-    b.push(state);
-    b.push(below as u8);
-    b
+    debug_assert!(state <= 3, "lookup state {state} out of range");
+    let state = match state {
+        0 => Lookup::Absent,
+        1 => Lookup::Present { created: false },
+        2 => Lookup::Present { created: true },
+        _ => Lookup::Tombstoned,
+    };
+    rep(Reply::RegLookup(LookupReply {
+        version,
+        state,
+        below,
+    }))
 }
 
 /// Returns `(state, below, version)`.
 pub fn decode_reg_lookup_reply(b: &[u8]) -> Option<(u8, bool, u64)> {
-    let mut r = Rd(b);
-    let version = r.u64()?;
-    let state = r.u8()?;
-    if state > 3 {
+    let Reply::RegLookup(l) = drep(Opcode::RegLookup, b)? else {
         return None;
-    }
-    let below = r.bool()?;
-    r.done()?;
-    Some((state, below, version))
+    };
+    let state = match l.state {
+        Lookup::Absent => 0,
+        Lookup::Present { created: false } => 1,
+        Lookup::Present { created: true } => 2,
+        Lookup::Tombstoned => 3,
+    };
+    Some((state, l.below, l.version))
 }
 
-/// `REG_KEY` reply: `version:u64 | has_node:u8 | node?`, where a node is
-/// `created:u8 | volatile:u8 | last_write:u64 | nvalues:u32 | values |
-/// ntombstones:u32 | names | nchildren:u32 | children`; a value is
-/// `name | ty:u32 | data_len:u32 | data`, a child `folded | spelling | state:u8`
-/// (0 present, 1 tombstone).
+/// `REG_KEY` reply: `version:u64 | has_node:u8 | node?` (see [`KeyReply`]).
 pub fn encode_reg_key_reply(node: Option<&Node>, version: u64) -> Vec<u8> {
-    let mut b = version.to_le_bytes().to_vec();
-    let Some(n) = node else {
-        b.push(0);
-        return b;
-    };
-    b.push(1);
-    b.push(n.created as u8);
-    b.push(n.volatile as u8);
-    b.extend_from_slice(&n.last_write.to_le_bytes());
-    b.extend_from_slice(&(n.values.len() as u32).to_le_bytes());
-    for v in &n.values {
-        put_str(&mut b, &v.name);
-        b.extend_from_slice(&v.ty.to_le_bytes());
-        b.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
-        b.extend_from_slice(&v.data);
-    }
-    b.extend_from_slice(&(n.value_tombstones.len() as u32).to_le_bytes());
-    for t in &n.value_tombstones {
-        put_str(&mut b, t);
-    }
-    b.extend_from_slice(&(n.children.len() as u32).to_le_bytes());
-    for (folded, (spelling, state)) in &n.children {
-        put_str(&mut b, folded);
-        put_str(&mut b, spelling);
-        b.push(match state {
-            Child::Present => 0,
-            Child::Tombstone => 1,
-        });
-    }
-    b
+    rep(Reply::RegKey(KeyReply {
+        version,
+        node: node.map(Cow::Borrowed),
+    }))
 }
 
 /// Returns `(node, version)`; the node is `None` for a "no node" reply.
 pub fn decode_reg_key_reply(b: &[u8]) -> Option<(Option<Node>, u64)> {
-    let mut r = Rd(b);
-    let version = r.u64()?;
-    if !r.bool()? {
-        r.done()?;
-        return Some((None, version));
-    }
-    let mut n = Node {
-        created: r.bool()?,
-        volatile: r.bool()?,
-        last_write: r.u64()?,
-        ..Node::default()
+    let Reply::RegKey(k) = drep(Opcode::RegKey, b)? else {
+        return None;
     };
-    // Counts are not trusted for allocation: every element takes at least
-    // 4 bytes, so a count beyond the remaining input fails on the way.
-    let count = r.u32()?;
-    for _ in 0..count {
-        let name = r.str_max(MAX_VALUE_NAME)?.to_string();
-        let ty = r.u32()?;
-        let data = r.bytes(MAX_DATA)?.to_vec();
-        n.values.push(Value { name, ty, data });
-    }
-    let count = r.u32()?;
-    for _ in 0..count {
-        n.value_tombstones
-            .push(r.str_max(MAX_VALUE_NAME)?.to_string());
-    }
-    let count = r.u32()?;
-    for _ in 0..count {
-        let folded = r.str_max(MAX_KEY_NAME)?.to_string();
-        let spelling = r.str_max(MAX_KEY_NAME)?.to_string();
-        let state = match r.u8()? {
-            0 => Child::Present,
-            1 => Child::Tombstone,
-            _ => return None,
-        };
-        n.children.insert(folded, (spelling, state));
-    }
-    r.done()?;
-    Some((Some(n), version))
+    Some((k.node.map(Cow::into_owned), k.version))
 }
 
 #[cfg(test)]

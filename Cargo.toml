@@ -81,6 +81,10 @@ aether-win = { path = "crates/aether-win" }
 tempfile = "3.27"
 serde_json = "1"
 windows-sys = "0.61"
+# Flag words of the wire protocol (aether-protocol: OpenFlags, RequestFlags).
+bitflags = "2"
+# Generative tests of the wire codecs (aether-protocol, its `testing` feature).
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 # Everything here unwinds so the library can catch panics at FFI boundaries
 # instead of killing its host process.

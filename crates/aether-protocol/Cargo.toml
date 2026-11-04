@@ -6,13 +6,23 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# proptest strategies for every request and reply (`any_request`,
+# `any_reply_for`), built from the protocol table, for other crates' tests.
+testing = ["dep:proptest"]
+
 [dependencies]
 aether-registry.workspace = true
+bitflags.workspace = true
+proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Golden vectors for the ring header live beside the codec vectors.
 # Dev-only: aether-ipc itself depends on this crate.
 aether-ipc.workspace = true
+# The crate's own tests use the `testing` strategies.
+aether-protocol = { path = ".", features = ["testing"] }
+proptest.workspace = true
 
 [lints]
 workspace = true

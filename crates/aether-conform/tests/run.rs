@@ -841,6 +841,30 @@ fn a_director_writing_every_bulk_reply_into_bank_zero_fails_on_other_slots() {
     );
 }
 
+/// wire.md 2.1 and 2.6: without `VFS_ARENA_OFFSET` the arena starts right
+/// after the last slot, and the shim checks every bulk reply against the
+/// bank there. A director that puts the arena elsewhere and does not say so,
+/// or says a wrong place, fails every bulk READ, in every kind of run.
+#[test]
+fn a_director_placing_its_arena_off_the_assumed_start_fails_its_bulk_reads() {
+    for how in ["arena-elsewhere", "arena-offset-wrong"] {
+        let (entries, all) = committed_with(how, "20");
+        let failing = failed(&entries);
+        assert!(failing.contains(&"concurrent"), "{how}: {all}");
+        assert!(
+            failing.contains(&"multi-handle-shared"),
+            "{how}: {failing:?}"
+        );
+        let shared = entry(&entries, "multi-handle-shared");
+        assert!(
+            shared.3.iter().any(|n| n.contains("wire.md 2.6")),
+            "{how}: {shared:?}"
+        );
+        let notes = limits_failing(how);
+        assert!(notes.iter().any(|n| n.contains("2.6")), "{how}: {notes:?}");
+    }
+}
+
 /// wire.md 2.5: a reply goes into the slot of the request it answers. A
 /// director that swaps the replies of two requests in flight together
 /// passes every scenario, whose steps go one at a time, and fails the

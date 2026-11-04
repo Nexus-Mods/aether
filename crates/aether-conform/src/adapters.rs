@@ -94,6 +94,14 @@ pub enum Break {
     /// Every bulk READ reply is written into bank 0, whatever slot it answers
     /// (wire.md 2.6: "Slot `s` owns bank `s % banks`").
     BankZero,
+    /// The arena is one bank past the end of the last slot and
+    /// `VFS_ARENA_OFFSET` is not set, so the shim, which then takes the arena
+    /// to start right after the last slot, finds every bulk reply in the wrong
+    /// bank (wire.md 2.1, 2.6).
+    ArenaElsewhere,
+    /// As [`Break::ArenaElsewhere`], but `VFS_ARENA_OFFSET` is set to the
+    /// end of the last slot, which is not where the arena is (wire.md 2.6).
+    ArenaOffsetWrong,
     /// Not a broken rule: handles are numbered down from `u64::MAX` (the
     /// reference's 1 is `u64::MAX`, its 2 is `u64::MAX - 1`), which wire.md
     /// 3.4.3 allows ("any u64 the director chooses"). A run must pass it,
@@ -389,6 +397,8 @@ impl Break {
             "per-slot-fh" => Some(Break::PerSlotFh),
             "slot-zero-only" => Some(Break::SlotZeroOnly),
             "bank-zero" => Some(Break::BankZero),
+            "arena-elsewhere" => Some(Break::ArenaElsewhere),
+            "arena-offset-wrong" => Some(Break::ArenaOffsetWrong),
             "downward-fh" => Some(Break::DownwardFh),
             "short-bulk" => Some(Break::ShortBulk),
             "truncate-readdir" => Some(Break::TruncateReaddir),
@@ -884,7 +894,12 @@ fn mount(
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
-    let arena_offset = aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
+    let after_slots = aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
+    let misplaced = matches!(
+        broken,
+        Some(Break::ArenaElsewhere | Break::ArenaOffsetWrong)
+    );
+    let arena_offset = after_slots + if misplaced { BANK } else { 0 };
     let arena_len = if arena { SLOTS as usize * BANK } else { 0 };
     let ring_bytes = (arena_offset + arena_len)
         .next_multiple_of(65536)
@@ -918,7 +933,15 @@ fn mount(
     env.insert(aether_env::RING_BYTES.into(), ring_bytes.to_string());
     env.insert(aether_env::RING_PAYLOAD_CAP.into(), PAYLOAD_CAP.to_string());
     if arena_len > 0 {
-        env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+        match broken {
+            Some(Break::ArenaElsewhere) => {}
+            Some(Break::ArenaOffsetWrong) => {
+                env.insert(aether_env::ARENA_OFFSET.into(), after_slots.to_string());
+            }
+            _ => {
+                env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+            }
+        }
         env.insert(aether_env::ARENA_LEN.into(), arena_len.to_string());
     }
     // Where the program would see each root. Nothing on the ring names

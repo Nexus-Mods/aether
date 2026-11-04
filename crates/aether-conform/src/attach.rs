@@ -225,9 +225,9 @@ impl Attached {
     }
 
     /// Whether `VFS_ARENA_OFFSET` named the arena's start. Without it the
-    /// start is assumed to be after the last slot (wire.md 2.1, 5.3), as the
-    /// shim assumes it; the bank a bulk reply lies in is checked only when
-    /// this is true.
+    /// start is right after the last slot (wire.md 2.1, 5.3), as the shim
+    /// takes it; the bank a bulk reply lies in is checked against that start
+    /// either way.
     pub fn arena_offset_given(&self) -> bool {
         self.arena_offset_given
     }

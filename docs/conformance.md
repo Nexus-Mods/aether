@@ -799,6 +799,13 @@ request at a time only uses slot 0. `swap-replies` passes every scenario,
 since a scenario's steps go one at a time. Each fails the concurrent
 clients.
 
+A bulk reply's bank is checked against the arena's start as the shim takes
+it (wire.md 2.1, 2.6): `VFS_ARENA_OFFSET`, or right after the last slot when
+it is not set. `--misbehave arena-elsewhere` (the arena one bank later, the
+variable not set) and `--misbehave arena-offset-wrong` (the variable set to
+the end of the last slot) fail every bulk READ, in the scenarios, the
+generated cases, the concurrent clients and the limits.
+
 ## Reading a report
 
 Every step is played even after one fails, so the report shows them all; a

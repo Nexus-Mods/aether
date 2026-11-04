@@ -1732,11 +1732,17 @@ impl Gen {
         match &to.node {
             None => Some((Want::Ok, "")),
             Some(_) if from.folded.starts_with(&format!("{}/", to.folded)) => None,
+            Some(t) if !t.dir && f.dir => {
+                Some((Want::Status(Status::IoError), "a directory onto a file"))
+            }
             Some(t) if !t.dir => Some((Want::Ok, "replaces a file")),
             Some(t) if self.has_children(root, &t.folded) => Some((
                 Want::Status(Status::IoError),
                 "onto a directory with something under it",
             )),
+            // A file onto an empty directory may replace it or be refused
+            // (3.4.7), and the steps after it would depend on which.
+            Some(_) if !f.dir => None,
             Some(_) => Some((Want::Ok, "replaces an empty directory")),
         }
     }
@@ -2564,6 +2570,27 @@ mod tests {
                         assert!(alts.contains(&Expect::Status(Status::IoError)), "{alts:?}");
                         seen += 1;
                     }
+                }
+            }
+        }
+        assert!(seen > 0);
+    }
+
+    /// A directory renamed onto a file is ST_IO_ERROR (wire.md 3.4.7).
+    #[test]
+    fn a_directory_onto_a_file_is_an_io_error() {
+        let mut seen = 0;
+        for s in crate::generate::cases(13, 256, 48).unwrap() {
+            for st in &s.steps {
+                let note = st.note.as_deref().unwrap_or("");
+                if note.ends_with("a directory onto a file") {
+                    assert_eq!(
+                        st.expect,
+                        Expect::Status(Status::IoError),
+                        "{:?}",
+                        st.request
+                    );
+                    seen += 1;
                 }
             }
         }

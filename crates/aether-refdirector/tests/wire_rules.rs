@@ -704,3 +704,23 @@ fn open_excl_on_a_directory_is_exists() {
     );
     assert!(d.get_attr(R0, "saves/dir").unwrap().is_dir);
 }
+
+/// 3.4.7: a directory renamed onto an existing file is Status::IoError, and
+/// nothing moves; a file onto an empty directory may replace it, as the
+/// reference does.
+#[test]
+fn a_directory_never_replaces_a_file() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("dir")
+        .with("dir/x", vec![1], ReadStyle::Whole)
+        .with("f.txt", b"f".to_vec(), ReadStyle::Whole)
+        .with_dir("empty");
+    assert_eq!(d.rename(R0, "dir", "F.TXT"), Err(Status::IoError));
+    assert_eq!(d.rename(R0, "empty", "f.txt"), Err(Status::IoError));
+    assert_eq!(d.contents("f.txt"), Some(b"f".to_vec()));
+    assert_eq!(d.contents("dir/x"), Some(vec![1]));
+    assert!(d.get_attr(R0, "empty").unwrap().is_dir);
+    assert_eq!(d.rename(R0, "f.txt", "empty"), Ok(()));
+    assert_eq!(d.contents("empty"), Some(b"f".to_vec()));
+}

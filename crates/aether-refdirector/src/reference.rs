@@ -708,7 +708,8 @@ impl Reference {
     /// says: the root at either end, or a target
     /// inside the source, is `Status::BadRequest`; a directory moves with
     /// everything under it; a non-empty directory at the target is
-    /// `Status::IoError`, and an empty one or a file is replaced. A `to`
+    /// `Status::IoError`, and an empty one or a file is replaced, but a
+    /// directory onto a file is `Status::IoError`. A `to`
     /// whose parent is missing, or a file, is `Status::NotFound`. Across
     /// roots (RENAME_X, which refuses a directory source before this) a
     /// directory at the target, the target root itself included, is
@@ -739,6 +740,10 @@ impl Reference {
             return Err(Status::ReadOnly);
         }
         g.parent_exists(&dirs, &files, &to_key)?;
+        // A directory never replaces a file (wire.md 3.4.7).
+        if !is_file && to_key != from && files.contains_key(&to_key) {
+            return Err(Status::IoError);
+        }
         // A root is a directory too, though `dirs` does not hold it: within a
         // root it was refused above, across roots it is `IsDir` here.
         if to_key != from && (is_dir_in(&dirs, &to_key) || is_root_key(&to_key)) {

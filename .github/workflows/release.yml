@@ -55,6 +55,12 @@ jobs:
         run: rustup toolchain install
       - name: Build aether-conform (release)
         run: cargo build --release -p aether-conform
+      # The built binary plays the scenarios against its own reference
+      # adapter before it is packaged
+      - name: Smoke-run aether-conform
+        timeout-minutes: 10
+        run: |
+          target/release/aether-conform run --director "target/release/aether-conform reference-adapter" --scenarios contract/scenarios
       - name: Package aether-conform-linux-x64.tar.gz
         run: |
           mkdir -p dist
@@ -101,6 +107,16 @@ jobs:
         run: |
           cargo build --release -p aether-conform
           if ($LASTEXITCODE) { throw 'cargo build of aether-conform failed' }
+      # The built binary plays the scenarios against its own reference
+      # adapter, over a ring file and a named section, before it is packaged
+      - name: Smoke-run aether-conform
+        timeout-minutes: 10
+        run: |
+          $exe = 'target\release\aether-conform.exe'
+          foreach ($ring in @('file', 'section')) {
+            & $exe run --director "$exe reference-adapter --ring $ring" --scenarios contract\scenarios
+            if ($LASTEXITCODE) { throw "aether-conform's smoke run over a $ring ring failed (exit $LASTEXITCODE)" }
+          }
       - name: Natives key
         id: key
         run: |

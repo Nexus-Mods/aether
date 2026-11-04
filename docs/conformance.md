@@ -385,9 +385,20 @@ arena is sent without it, as the shim would, and its note says so.
 
 ## Running it
 
-Every release has `aether-conform-windows-x64.zip` and `aether-conform-linux-x64.tar.gz`
-(unsigned) and the scenarios in `contract.zip`; in the examples below, `target/debug/aether-conform`
-is that binary and `contract/scenarios` the unpacked `scenarios` folder.
+Every release has `aether-conform-windows-x64.zip` and
+`aether-conform-linux-x64.tar.gz` (unsigned, each smoke-run against the
+reference before it is packaged) and the scenarios in `contract.zip`. The
+Linux binary is built on GitHub's `ubuntu-latest`, so it needs a glibc at
+least as new as that image's. With a release, unpack the binary and
+`contract.zip`'s `scenarios` folder side by side:
+
+```sh
+./aether-conform run --director "./aether-conform reference-adapter" --scenarios scenarios
+```
+
+From a source build, the binary is `target/debug/aether-conform` and the
+scenarios are in `contract/scenarios` (the default), as in the examples
+below:
 
 ```sh
 cargo build -p aether-conform

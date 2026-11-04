@@ -144,6 +144,9 @@ The shim refuses the ring (and so fails its load) unless all of these hold:
 3. `slot_stride == align8(32 + payload_cap)`.
 4. `48 + slot_count * slot_stride <= mapping length`.
 
+Both are worked without wrapping, on 32-bit clients too: a `payload_cap`
+within 32 bytes of `2^32` has no stride a u32 holds, and is refused.
+
 The mapping length the shim uses is `VFS_RING_BYTES` (section 5.3). Nothing
 else in the header is validated.
 

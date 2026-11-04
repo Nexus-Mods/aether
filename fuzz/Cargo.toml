@@ -58,6 +58,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ring_open"
+path = "fuzz_targets/ring_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dir_records"
 path = "fuzz_targets/dir_records.rs"
 test = false

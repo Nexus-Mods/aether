@@ -177,6 +177,7 @@ random_bytes!(
     request_decode,
     shim_cfg,
     ring_response,
+    ring_open,
     dir_records,
     shim_env
 );

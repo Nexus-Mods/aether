@@ -216,7 +216,7 @@ director got wrong or a build that does not build.
 
 ## Fuzzing
 
-`aether-fuzz` holds the bodies of six targets, and `fuzz/` is the cargo-fuzz
+`aether-fuzz` holds the bodies of seven targets, and `fuzz/` is the cargo-fuzz
 project that runs them under libFuzzer:
 
 | Target | Input | The body checks |
@@ -225,6 +225,7 @@ project that runs them under libFuzzer:
 | `request_decode` | a request of any opcode | the opcode is recognised, and re-encoding gives the same request |
 | `shim_cfg` | the shim's bootstrap config | what decodes re-encodes to the same bytes |
 | `ring_response` | a ring slot as a director might leave it | the client's reads of the slot return, never past the slot or the cap |
+| `ring_open` | a ring header and slots, in mappings of six sizes | a geometry is accepted only when it fits the mapping and its stride holds the payload cap, and what a client works out from it stays inside the mapping |
 | `dir_records` | a directory listing and a buffer size | the records written never exceed the buffer |
 | `shim_env` | the `VFS_*` variables | the parsing returns, and the root map the shim builds from it is built or refused |
 

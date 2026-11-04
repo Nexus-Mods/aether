@@ -28,11 +28,12 @@ use aether_protocol::{Opcode, ReadReply, Reply, Request, RootId};
 use aether_redirect::{RootMap, VolumeMap};
 
 /// The target names, as `fuzz/fuzz_targets/<name>.rs` and [`seeds`] use them.
-pub const TARGETS: [&str; 6] = [
+pub const TARGETS: [&str; 7] = [
     "reply_decode",
     "request_decode",
     "shim_cfg",
     "ring_response",
+    "ring_open",
     "dir_records",
     "shim_env",
 ];
@@ -207,6 +208,55 @@ pub fn ring_response(data: &[u8]) {
     // The owning form, and the state word, behave the same.
     let _ = ring::take_response(seg, &geom, slot, REQ_ID);
     let _ = ring::slot_state(seg, &geom, slot);
+}
+
+/// The segment sizes [`ring_open`] maps: none, too short for the header,
+/// the header alone, a few small slots, and two of a real ring's sizes.
+const RING_SEGS: [usize; 6] = [0, 47, 48, 96, 4096, 65536];
+
+/// A client attaching to a ring whose header the director wrote
+/// (`docs/wire.md` 2.2, 2.4): `size | mapping bytes`, where `size` picks one
+/// of [`RING_SEGS`] and the bytes, from offset 0, are the header (magic,
+/// version, geometry, worker hint, registry generation) and then the slots;
+/// what the input does not cover is zero.
+///
+/// `ring::open` must accept only a geometry that fits the mapping, with a
+/// stride that holds the payload capacity, whatever the numbers (on a
+/// 32-bit client too). What a client then works out from it stays inside
+/// the mapping: each slot's offset and the end of the last, the data gate
+/// the worker hint sizes, the registry generation, and a response taken
+/// from every slot.
+pub fn ring_open(data: &[u8]) {
+    const REQ_ID: u64 = 0x0000_0001_0000_0007;
+    let mut f = Fields(data);
+    let len = RING_SEGS[usize::from(f.u8()) % RING_SEGS.len()];
+    let bytes = f.rest();
+    let owned = OwnedSeg::new(len);
+    let seg = owned.seg();
+    assert!(seg.write_bytes(0, &bytes[..bytes.len().min(len)]));
+    let Ok(geom) = ring::open(seg) else {
+        return;
+    };
+    let stride = u64::from(geom.slot_stride);
+    assert_eq!(stride % 8, 0, "{geom:?}");
+    assert!(
+        stride >= SLOT_HEADER_SIZE as u64 + u64::from(geom.payload_cap),
+        "{geom:?}"
+    );
+    let end = RING_HEADER_SIZE as u64 + u64::from(geom.slot_count) * stride;
+    assert!(end <= len as u64, "{geom:?} in {len} bytes");
+    assert_eq!(geom.slot_off(geom.slot_count) as u64, end);
+    let gate = aether_ipc::DataGate::for_ring(seg, &geom);
+    assert!(gate.limit() >= 1);
+    let _ = ring::reg_generation(seg);
+    // Every slot, and the one past the last, which a client never asks for
+    // but whose bytes the mapping may still hold.
+    for slot in 0..=geom.slot_count.min(64) {
+        if let Ok(Some((_, out))) = ring::take_response(seg, &geom, slot, REQ_ID) {
+            assert!(out.len() <= geom.payload_cap as usize);
+        }
+        let _ = ring::slot_state(seg, &geom, slot);
+    }
 }
 
 /// A READDIR listing as the shim writes it into a caller's buffer. `data`
@@ -444,6 +494,15 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             out.push(("shim_cfg", bytes));
             continue;
         }
+        if name.starts_with("ring-header") {
+            // The header in each size of mapping.
+            for size in 0..RING_SEGS.len() as u8 {
+                let mut v = vec![size];
+                v.extend_from_slice(&bytes);
+                out.push(("ring_open", v));
+            }
+            continue;
+        }
         let Some((op, is_req)) = message_of(name) else {
             continue;
         };
@@ -481,6 +540,58 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         }
     }
     out.extend(env_seeds());
+    out.extend(ring_open_seeds());
+    out
+}
+
+/// Headers [`ring_open`] starts from beyond the golden one: rings as
+/// `ring::init` lays them out in each mapping, with a worker hint and a
+/// registry generation set and one slot completed, and headers whose
+/// `payload_cap` is within 32 bytes of `u32::MAX` with the stride 32-bit
+/// arithmetic would give it.
+fn ring_open_seeds() -> Vec<(&'static str, Vec<u8>)> {
+    use aether_ipc::layout::{RH_PAYLOAD_CAP, RH_SLOT_COUNT, RH_SLOT_STRIDE};
+    let mut out = Vec::new();
+    for (size, &len) in RING_SEGS.iter().enumerate() {
+        for (slots, cap) in [(1u32, 8u32), (2, 16), (4, 256), (8, 4096), (1, 65_000)] {
+            let owned = OwnedSeg::new(len);
+            let seg = owned.seg();
+            let Ok(geom) = ring::init(seg, slots, cap) else {
+                continue;
+            };
+            ring::set_worker_hint(seg, 4);
+            ring::publish_reg_generation(seg, 9);
+            let s = geom.slot_off(0);
+            seg.write_bytes(s + SH_ACK, &7u32.to_le_bytes());
+            seg.write_bytes(s + SH_PAYLOAD_LEN, &4u32.to_le_bytes());
+            seg.write_bytes(
+                s + SH_STATE,
+                &aether_ipc::layout::ST_COMPLETED.to_le_bytes(),
+            );
+            let mut v = vec![size as u8];
+            let mut mapping = vec![0u8; len];
+            let _ = seg.copy_to(0, &mut mapping);
+            // The header and slot 0's: past them the mapping is zero, as the
+            // input's end leaves it, and a short seed mutates quickly.
+            let used = geom.slot_off(geom.slot_count).min(s + SLOT_HEADER_SIZE + 4);
+            v.extend_from_slice(&mapping[..used]);
+            out.push(("ring_open", v));
+        }
+    }
+    let owned = OwnedSeg::new(RING_HEADER_SIZE);
+    let seg = owned.seg();
+    ring::init(seg, 0, 8).expect("an empty ring fits its header");
+    for cap in [u32::MAX, u32::MAX - 7, u32::MAX - 31] {
+        let wrapped = 32u32.wrapping_add(cap).wrapping_add(7) & !7;
+        seg.write_bytes(RH_SLOT_COUNT, &1u32.to_le_bytes());
+        seg.write_bytes(RH_SLOT_STRIDE, &wrapped.to_le_bytes());
+        seg.write_bytes(RH_PAYLOAD_CAP, &cap.to_le_bytes());
+        let mut v = vec![RING_SEGS.len() as u8 - 1];
+        let mut header = vec![0u8; RING_HEADER_SIZE];
+        let _ = seg.copy_to(0, &mut header);
+        v.extend_from_slice(&header);
+        out.push(("ring_open", v));
+    }
     out
 }
 
@@ -491,6 +602,7 @@ pub fn run(target: &str, data: &[u8]) {
         "request_decode" => request_decode(data),
         "shim_cfg" => shim_cfg(data),
         "ring_response" => ring_response(data),
+        "ring_open" => ring_open(data),
         "dir_records" => dir_records(data),
         "shim_env" => shim_env(data),
         other => panic!("no fuzz target named {other}"),

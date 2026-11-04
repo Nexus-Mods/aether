@@ -11,7 +11,7 @@
     ]}
   },
   "steps": [
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}, "note": "a parent made on the way to a created key is a plain presence (overlay.rs `ensure_chain`)"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}, "note": "a parent made on the way to a created key is a plain presence (wire.md 4.3, \"Making a path exist\")"},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Sub\\Deep"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Sub"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}},
     {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Nothing"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}},

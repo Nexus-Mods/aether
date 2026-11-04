@@ -20,7 +20,7 @@
     {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\ZETA", "volatile": false, "op": "reg-create-key"}, "expect": {"status": "exists"}},
     {"request": {"path": "\\Registry\\Machine\\Software\\Cabin", "volatile": false, "op": "reg-create-key"}, "expect": {"status": "exists"}, "note": "a mounted key"},
     {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Deep\\Er\\Still", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 5}}, "note": "parents are made on the way"},
-    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Deep"}, "expect": {"reply": {"version": 5, "state": "created", "below": true}}, "note": "a parent under a created key is created too (overlay.rs `ensure_chain`)"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cabin\\Deep"}, "expect": {"reply": {"version": 5, "state": "created", "below": true}}, "note": "a parent under a created key is created too (wire.md 4.3, \"Making a path exist\")"},
     {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Mid", "op": "reg-delete-key"}, "expect": {"reply": {"version": 6}}},
     {"request": {"path": "\\Registry\\Machine\\Software\\Cabin\\Mid", "volatile": true, "op": "reg-create-key"}, "expect": {"reply": {"version": 7}}, "note": "revived over its tombstone"},
     {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cabin\\Mid"}, "expect": {"reply": {"version": 7, "node": {"created": true, "volatile": true, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}},

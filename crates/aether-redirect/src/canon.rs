@@ -448,8 +448,8 @@ fn clamp_dotdot(remainder: &str) -> String {
 /// identical.
 ///
 /// Case is preserved: folding case is the caller's job (`RootMap` already
-/// folds for comparison), and `DiskProvider` needs the original case to open
-/// the real file on disk.
+/// folds for comparison), and a director that keeps files on disk needs the
+/// original case to open the real file.
 pub fn canonicalise(raw: &str, volumes: &VolumeMap) -> Result<String, PathError> {
     let no_stream = strip_stream_suffix(raw);
     let resolved = resolve_aliases_and_strip_prefixes(no_stream, volumes);
@@ -685,7 +685,7 @@ mod tests {
     }
 
     /// An ordinary drive-letter path (no namespace token anywhere) must
-    /// resolve exactly as before — the resolve-or-strip loop must never
+    /// resolve as a plain drive path does: the resolve-or-strip loop must never
     /// disturb the common case, only the spellings that carry a wrapper.
     #[test]
     fn globalroot_fallback_does_not_disturb_an_ordinary_path() {

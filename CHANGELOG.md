@@ -8,6 +8,15 @@ Aether's crates. Newest first.
 The wire is unchanged: the wire version (4), the golden vectors,
 `contract/env.json` and `contract/artifacts.json` are as in 1.0.0.
 
+### Fixed
+
+- `aether-registry`'s overlay, and with it the reference director, checks
+  the key-name length and depth limits on every registry write
+  (`docs/wire.md` 4.1, 4.3). REG_DELETE_VALUE and REG_DELETE_KEY created
+  keys at any depth and with any name length, and REG_RENAME_KEY did not
+  check its path's names or the depth of the keys it moves; each is now
+  `ST_BAD_REQUEST`. Scenario `registry-write-depth` checks it.
+
 ### Added
 
 - `aether-conform`, a tool that checks any director against the contract.
@@ -66,7 +75,9 @@ The wire is unchanged: the wire version (4), the golden vectors,
 
 ## 1.0.0
 
-The first release.
+The first release. The prerelease tag `v1.0.1-rc.1` is the same commit,
+made to check that a release whose natives are unchanged reuses 1.0.0's
+signed ones.
 
 - **The shim**, `aether_shim.dll` (x64) and `aether_shim32.dll` (x86): NT
   file and registry detours that answer every operation under a managed root

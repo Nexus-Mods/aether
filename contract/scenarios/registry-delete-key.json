@@ -1,6 +1,6 @@
 {
   "name": "registry-delete-key",
-  "description": "REG_DELETE_KEY tombstones the key and drops its subtree: the key and everything under it read as tombstoned, REG_KEY has no node, the parent lists the name as a tombstone child; deleting it again is ST_NOT_FOUND; the root `\\Registry` is ST_BAD_REQUEST (wire.md 4.3, overlay.rs `delete_key`).",
+  "description": "REG_DELETE_KEY tombstones the key and drops its subtree: the key and everything under it read as tombstoned, REG_KEY has no node, the parent lists the name as a tombstone child; deleting it again is ST_NOT_FOUND; the root `\\Registry` is ST_BAD_REQUEST (wire.md 4.3).",
   "tree": {
     "roots": [
       {"id": 0,

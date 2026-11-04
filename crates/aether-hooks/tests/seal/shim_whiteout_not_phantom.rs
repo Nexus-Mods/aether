@@ -20,8 +20,8 @@
 //! ## What this does *not* claim
 //!
 //! Only enumeration. A stale marker still does not hide its target from an
-//! `open` through the director: `OverlayProvider::hidden_by_whiteout` looks for
-//! its own `.wh.` spelling, and the shim has no per-open hook that could ask
+//! `open` through the director: a director's overlay looks for its own `.wh.`
+//! spelling, and the shim has no per-open hook that could ask
 //! without a `stat` on every read.
 
 use crate::fakedirector;
@@ -68,10 +68,9 @@ fn setup() -> std::path::PathBuf {
     let layer = overlay_layer_dir(&overlay, RootId::DEFAULT);
     std::fs::create_dir_all(layer.join("data")).unwrap();
 
-    // The marker physically present in the shared directory, the way an older
-    // shim's overlay wrote it. The director's write layer is a
-    // `DiskProvider` over exactly this directory, so it reads it back as a
-    // file — which is what the fake below reproduces.
+    // The marker physically present in the write layer's directory. A
+    // director that serves the layer from disk reads it back as a file,
+    // which is what the fake below reproduces.
     std::fs::write(
         layer
             .join("data")

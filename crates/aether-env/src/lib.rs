@@ -447,7 +447,7 @@ pub const ESCAPE_ACCESS: &str = "VFS_ESCAPE_ACCESS";
 /// all — not by the fixture itself. Set, `vector7_junction` opens
 /// `<this>\<target's own filename>` directly and skips its own `mklink /J`
 /// construction step entirely; unset, it falls back to constructing (and
-/// cleaning up) its own junction exactly as before, for a standalone
+/// cleaning up) its own junction, for a standalone
 /// (uninjected) reproduction where no such pre-existing junction is set up.
 ///
 /// Needed because `aether-redirect`'s `RootMap` volume/junction table is

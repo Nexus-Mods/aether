@@ -626,9 +626,8 @@ impl FuseClient {
             return self.payload_cap.saturating_sub(8) as usize;
         }
         let slots = self.geom.slot_count.max(1) as usize;
-        // Cap at 1 MiB per RTT — full bank (4–16 MiB) was used during the
-        // 0xC0000409 regression window; large copies + deep pipelines on the
-        // game thread (or long join windows) are not worth the risk yet.
+        // Cap at 1 MiB per round trip: large copies and deep pipelines on a
+        // game thread (or long join windows) are not worth the risk.
         (self.arena_len / slots).clamp(256 * 1024, 1024 * 1024)
     }
 
@@ -1393,7 +1392,7 @@ mod tests {
             "the named-section path is unchanged when no path is given"
         );
         // Neither set stays `None`, which `try_init_from_env` turns into
-        // `NotConfigured` exactly as before.
+        // `NotConfigured`.
         assert_eq!(ring_source(None, None), None);
         // An empty `VFS_RING_PATH` is absent, not a path. Believing it would
         // map `""` and fail with a confusing io error while a perfectly good

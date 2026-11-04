@@ -1,6 +1,6 @@
 {
   "name": "registry-rename-key",
-  "description": "REG_RENAME_KEY renames a key under its parent, taking its subtree and values; the old name is tombstoned, the new key is created in the overlay; a missing key is ST_NOT_FOUND, an existing target ST_EXISTS, a `new_leaf` of `.` or `..` ST_BAD_REQUEST (wire.md 4.3, overlay.rs `rename_key`). A change of case alone respells the key.",
+  "description": "REG_RENAME_KEY renames a key under its parent, taking its subtree and values; the old name is tombstoned, the new key is created in the overlay; a missing key is ST_NOT_FOUND, an existing target ST_EXISTS, a `new_leaf` of `.` or `..` ST_BAD_REQUEST (wire.md 4.3). A change of case alone respells the key.",
   "tree": {
     "roots": [
       {"id": 0,

@@ -1,6 +1,6 @@
 {
   "name": "cache-overwrite-same-size",
-  "description": "A file the writable provider holds, read, then overwritten with different bytes of the same length, then read through a new handle: the new bytes (wire.md 3.4.5). The shim's read cache keys a file's blocks by (root, folded path, size, `mount_gen`), so a director that called these read opens `immutable` with one `mount_gen` would break 3.4.3 (\"two immutable opens of one path with equal size and `mount_gen` must have identical content\"); aether-conform checks that rule across the steps (compare.rs, read-cache coherence).",
+  "description": "A file the writable provider holds, read, then overwritten with different bytes of the same length, then read through a new handle: the new bytes (wire.md 3.4.5). The shim's read cache keys a file's blocks by (root, folded path, size, `mount_gen`), so a director that called these read opens `immutable` with one `mount_gen` would break 3.4.3 (\"two immutable opens of one path with equal size and `mount_gen` must have identical content\"); aether-conform checks that rule across the steps (its read-cache coherence check, docs/conformance.md).",
   "tree": {
     "roots": [
       {"id": 0,

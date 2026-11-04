@@ -115,12 +115,11 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
 
     let read_only_dir = open_directory_for_write(&root.join("Data"), OPEN_EXISTING);
     let writable_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_EXISTING);
-    // `OPEN_ALWAYS` is the case the review flagged: it reaches the ring as
-    // `FILE_OPEN_IF` *carrying* `OpenFlags::CREATE`, so the provider graph is being
-    // asked to create. `OverlayProvider` refuses with `Status::IsDir` rather than
-    // letting a `DiskProvider` upper create a file named after the directory
-    // — and the downgrade has to turn that refusal back into the directory
-    // open the caller meant.
+    // `OPEN_ALWAYS` reaches the ring as `FILE_OPEN_IF` *carrying*
+    // `OpenFlags::CREATE`, so the provider graph is being asked to create. A
+    // director refuses with `Status::IsDir` (the fake below does) rather than
+    // create a file named after the directory, and the downgrade has to turn
+    // that refusal back into the directory open the caller meant.
     let open_always_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_ALWAYS);
     // …but `CREATE_ALWAYS` (`FILE_OVERWRITE_IF`) genuinely means "replace
     // whatever is here with a file", and NT refuses that against a directory.

@@ -289,8 +289,7 @@ const V14_WRITE_SUFFIX: &str = ".v14-child-write.txt";
 /// spelling (see `main`), before any of the fourteen vectors run. `None`
 /// when that baseline read itself failed (the "missing target" regression
 /// run this fixture is also exercised against) — every later `opened`
-/// result is then reported as-is, with no content check, exactly as before
-/// this check existed.
+/// result is then reported as-is, with no content check.
 ///
 /// A `OnceLock` rather than a parameter threaded through every vector
 /// function: every vector's own construction code stays exactly as
@@ -938,7 +937,7 @@ fn vector7_junction(abs: &str) -> Line {
     // exactly what a real mod manager's own junction looks like (already
     // there before the game process starts). Used only under a session;
     // unset for a standalone reproduction, which falls back to
-    // self-construction below exactly as before.
+    // self-construction below.
     if let Ok(link_dir_str) = std::env::var("VFS_ESCAPE_VECTOR7_LINK_DIR") {
         let spelling = format!(r"{link_dir_str}\{name}");
         let outcome = attempt("7", &spelling);

@@ -1,6 +1,6 @@
 {
   "name": "registry-values",
-  "description": "REG_SET_VALUE stores a value (name, REG_* type, raw bytes) and returns the new version; REG_KEY lists the values in insertion order with their types and data; setting an existing name replaces it in place (wire.md 4.3, overlay.rs). Binary data with zero bytes, an empty value and the default (empty) name are kept.",
+  "description": "REG_SET_VALUE stores a value (name, REG_* type, raw bytes) and returns the new version; REG_KEY lists the values in insertion order with their types and data; setting an existing name replaces it in place (wire.md 4.3). Binary data with zero bytes, an empty value and the default (empty) name are kept.",
   "tree": {
     "roots": [
       {"id": 0,

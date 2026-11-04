@@ -1,6 +1,6 @@
 {
   "name": "registry-delete-value",
-  "description": "REG_DELETE_VALUE removes a value and records the folded name as a value tombstone, which hides a real value of that name; setting it again clears the tombstone; deleting a name the overlay lacks still records the tombstone (wire.md 4.3, overlay.rs `delete_value`); deleting in a tombstoned key is ST_NOT_FOUND.",
+  "description": "REG_DELETE_VALUE removes a value and records the folded name as a value tombstone, which hides a real value of that name; setting it again clears the tombstone; deleting a name the overlay lacks still records the tombstone (wire.md 4.3); deleting in a tombstoned key is ST_NOT_FOUND.",
   "tree": {
     "roots": [
       {"id": 0,

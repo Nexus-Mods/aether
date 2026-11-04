@@ -5,7 +5,8 @@ use super::{
     open_synth, synth_path, TRAMP_FLUSH, TRAMP_LOCK, TRAMP_READ, TRAMP_UNLOCK, TRAMP_WRITE,
 };
 use crate::ntdef::{
-    STATUS_END_OF_FILE, STATUS_INVALID_HANDLE, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    STATUS_DISK_FULL, STATUS_END_OF_FILE, STATUS_INVALID_HANDLE, STATUS_SUCCESS,
+    STATUS_UNSUCCESSFUL,
 };
 use crate::synth_file::FileView;
 use core::ffi::c_void;
@@ -208,23 +209,36 @@ pub(super) unsafe fn write_hook_body(
                     crate::read_cache::invalidate(&f);
                 }
             }
-            let n = if want == 0 || buffer.is_null() {
-                0usize
+            // What landed, and the failure that stopped the rest: a write that
+            // fails part way still moved the position and size by what its
+            // earlier chunks wrote, and says so in `Information`
+            // (docs/wire.md 3.4.5).
+            let (n, failed) = if want == 0 || buffer.is_null() {
+                (0usize, None)
             } else {
                 // SAFETY: NtWriteFile contract — buffer is readable for `length` bytes.
                 let slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, want) };
-                match crate::director::global()
-                    .ok_or(aether_protocol::Status::IoError)
-                    .and_then(|c| c.write(fh, off, slice))
-                {
-                    Ok(n) => n,
-                    Err(_) => {
-                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0) };
-                        return STATUS_UNSUCCESSFUL;
-                    }
+                match crate::director::global() {
+                    None => (0, Some(STATUS_UNSUCCESSFUL)),
+                    Some(c) => match c.write(fh, off, slice) {
+                        Ok(n) => (n, None),
+                        Err(crate::director::WriteFailed { written, status }) => (
+                            written,
+                            Some(match status {
+                                aether_protocol::Status::NoSpace => STATUS_DISK_FULL,
+                                _ => STATUS_UNSUCCESSFUL,
+                            }),
+                        ),
+                    },
                 }
             };
+            if failed.is_some() && n == 0 {
+                // Nothing landed: nothing moves.
+                let st = failed.unwrap_or(STATUS_UNSUCCESSFUL);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, st, 0) };
+                return st;
+            }
             // Append-only always tracks position (every write moved EOF
             // forward regardless of what the caller passed); otherwise only
             // an implicit-offset write consumes the file pointer.
@@ -241,6 +255,11 @@ pub(super) unsafe fn write_hook_body(
             let end = off + n as u64;
             if end > size {
                 crate::synth_file::grow_size(handle as isize, end);
+            }
+            if let Some(st) = failed {
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, st, n) };
+                return st;
             }
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n) };

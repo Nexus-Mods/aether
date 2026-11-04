@@ -632,7 +632,12 @@ impl FuseClient {
 
     /// Write `data` at `offset` to a virtual write handle. Chunks to fit the ring
     /// payload (inline; bulk-arena writes are a later step).
-    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, Status> {
+    ///
+    /// `Ok` is what the director wrote, short when a chunk was written short.
+    /// A chunk that fails ends the write: [`WriteFailed`] carries what the
+    /// chunks before it wrote. A `written` past the chunk is a reply this
+    /// cannot use: that chunk counts as not written and fails `IoError`.
+    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, WriteFailed> {
         if data.is_empty() {
             return Ok(0);
         }
@@ -650,10 +655,19 @@ impl FuseClient {
                 offset: offset + written as u64,
                 data: piece,
             };
-            let n = self.call_data(&req, &mut payload, |r| match r {
-                Reply::Write(n) => Some(n as usize),
-                _ => None,
-            })?;
+            let n = self
+                .call_data(&req, &mut payload, |r| match r {
+                    Reply::Write(n) => Some(n as usize),
+                    _ => None,
+                })
+                .and_then(|n| {
+                    if n > piece.len() {
+                        Err(Status::IoError)
+                    } else {
+                        Ok(n)
+                    }
+                })
+                .map_err(|status| WriteFailed { written, status })?;
             written += n;
             if n < piece.len() {
                 break;
@@ -969,6 +983,14 @@ impl FuseClient {
         }
         Some((root, vpath))
     }
+}
+
+/// A [`FuseClient::write`] that failed part way: the bytes the chunks before
+/// the failing one wrote (from the start of the write), and why it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteFailed {
+    pub written: usize,
+    pub status: Status,
 }
 
 /// The status a failed call stands for, as the shim acts on it.

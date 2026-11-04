@@ -823,6 +823,13 @@ write layer and disk provider loop to the end, `provider/layer.clj` and
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
 
+A WRITE that fails ends the program's write: the shim reports what the
+chunks before it wrote (`IoStatus.Information`, and the position and size
+move by it) with `STATUS_DISK_FULL` for `ST_NO_SPACE` and
+`STATUS_UNSUCCESSFUL` for any other failure, and sends no further chunk. A
+`written` larger than the chunk's `len` is a reply the shim cannot use: that
+chunk counts as not written and the write fails `STATUS_UNSUCCESSFUL`.
+
 A WRITE on a directory handle the writable provider holds is `ST_IS_DIR`,
 whatever access the directory was opened with; SETATTR (3.4.6) on one is too
 (Cairn's writable providers and the reference). A directory no writable

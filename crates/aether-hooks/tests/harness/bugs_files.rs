@@ -744,7 +744,10 @@ fn a_later_chunk_failing_reports_what_landed() {
         },
         Fault::Status(Status::IoError),
     );
-    let (ok, _, err) = write(h, &data);
+    let (ok, put, err) = write(h, &data);
+    // KernelBase reports 0 written for an error status whatever
+    // IoStatus.Information holds: the count is NtWriteFile's (above).
+    assert_eq!(put, 0, "lpNumberOfBytesWritten");
     assert_eq!(served.faults.applied(third), 1);
     assert!(!ok);
     assert_eq!(err, ERROR_GEN_FAILURE);

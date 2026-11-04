@@ -123,6 +123,7 @@ version = "0.1.0"
 dependencies = [
  "aether-ipc",
  "aether-protocol",
+ "aether-registry",
 ]
 
 [[package]]

@@ -170,25 +170,32 @@ pub fn serve_one<N: Notifier, D: Director + ?Sized>(
 /// [`serve_one`] with its buffers in `scratch`.
 ///
 /// A reserved or unknown opcode is answered by [`Director::unknown`]; a
-/// payload that does not decode as its opcode's request, `Status::BadRequest`;
-/// a reply too large for the slot, `Status::ReplyTooLarge`. Every status but
-/// `Status::Ok` goes with an empty payload.
+/// payload that does not decode as its opcode's request, `Status::BadRequest`.
+/// Every status but `Status::Ok` goes with an empty payload.
+///
+/// A registry reply longer than `payload_cap - 8` is answered
+/// `Status::ReplyTooLarge` (`docs/wire.md` 4.3: required for REG_KEY, and
+/// applied to every registry reply as Cairn does). Any other reply longer
+/// than `payload_cap` is left to the ring, which answers it with its
+/// overflow status `i32::MIN` and no payload (2.5, step 3), as both
+/// directors do for an oversized READDIR listing (3.4.2).
+///
+/// Every slot taken is completed ([`RingServer::serve_one_into`]): a header
+/// claiming a payload past the slot is `Status::BadRequest`, and a director
+/// method that panics is `Status::IoError`.
 pub fn serve_one_with<N: Notifier, D: Director + ?Sized>(
     server: &RingServer<'_, N>,
     d: &mut D,
     scratch: &mut Scratch,
 ) -> Result<bool, IpcError> {
-    let cap = server.geom().payload_cap as usize;
+    let registry_cap = (server.geom().payload_cap as usize).saturating_sub(8);
     let Scratch {
         req,
         reply,
         listing,
     } = scratch;
     server.serve_one_into(req, reply, |view, out| {
-        let mut status = dispatch(d, view, listing, out);
-        if status == Status::Ok && out.len() > cap {
-            status = Status::ReplyTooLarge;
-        }
+        let status = dispatch(d, view, registry_cap, listing, out);
         if status != Status::Ok {
             out.clear();
         }
@@ -211,9 +218,11 @@ pub fn serve<N: Notifier, D: Director + ?Sized>(
 }
 
 /// The status for one request, its reply payload (on `Status::Ok`) in `out`.
+/// `registry_cap` is the longest registry reply sent (`payload_cap - 8`).
 fn dispatch<D: Director + ?Sized>(
     d: &mut D,
     view: &RequestView<'_>,
+    registry_cap: usize,
     listing: &mut Listing,
     out: &mut Vec<u8>,
 ) -> Status {
@@ -224,10 +233,27 @@ fn dispatch<D: Director + ?Sized>(
         return Status::BadRequest;
     };
     match answer(d, view.slot, req, listing, out) {
+        Ok(()) if is_registry(op) && out.len() > registry_cap => Status::ReplyTooLarge,
         Ok(()) => Status::Ok,
         Err(Status::Ok) => Status::IoError,
         Err(s) => s,
     }
+}
+
+/// The registry opcodes (`docs/wire.md` section 4), whose replies have the
+/// `payload_cap - 8` limit.
+fn is_registry(op: Opcode) -> bool {
+    matches!(
+        op,
+        Opcode::RegLookup
+            | Opcode::RegKey
+            | Opcode::RegSetValue
+            | Opcode::RegDeleteValue
+            | Opcode::RegCreateKey
+            | Opcode::RegDeleteKey
+            | Opcode::RegRenameKey
+            | Opcode::RegChanged
+    )
 }
 
 /// Asks `d` for `req`'s answer and encodes it into `out` as the reply

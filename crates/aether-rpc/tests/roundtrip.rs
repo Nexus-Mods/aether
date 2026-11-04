@@ -9,7 +9,9 @@ use aether_protocol::{
     AttrResp, ChangedReply, DirEntries, DirEntry, KeyReply, Lookup, LookupReply, OpenFlags,
     OpenResp, ReadReply, Reply, Request, RequestFlags, RootId, Status,
 };
+use aether_registry::Node;
 use aether_rpc::{serve, CallError, Client, Director, Listing};
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -21,6 +23,7 @@ const CAP: u32 = 4096;
 #[derive(Default)]
 struct Echo {
     text: String,
+    node: Node,
 }
 
 impl Echo {
@@ -44,6 +47,9 @@ fn missing(path: &str) -> Result<(), Status> {
 impl Director for Echo {
     fn get_attr(&mut self, root: RootId, path: &str) -> Result<AttrResp, Status> {
         missing(path)?;
+        if path == "panic" {
+            panic!("the director failed");
+        }
         Ok(AttrResp {
             found: true,
             is_dir: path.ends_with('/'),
@@ -53,6 +59,17 @@ impl Director for Echo {
     }
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
         missing(path)?;
+        // `wide...`: the name three more times, for a listing too large.
+        if path.starts_with("wide") {
+            for _ in 0..3 {
+                out.push(DirEntry {
+                    name: path,
+                    is_dir: false,
+                    size: 0,
+                    mtime: 0,
+                });
+            }
+        }
         out.push(DirEntry {
             name: path,
             is_dir: false,
@@ -139,6 +156,14 @@ impl Director for Echo {
         })
     }
     fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
+        // `big:N`: a node with one value tombstone of N bytes.
+        if let Some(n) = path.strip_prefix("big:") {
+            self.node.value_tombstones = vec!["x".repeat(n.parse().unwrap())];
+            return Ok(KeyReply {
+                version: 1,
+                node: Some(Cow::Borrowed(&self.node)),
+            });
+        }
         Ok(KeyReply {
             version: path.len() as u64,
             node: None,
@@ -203,11 +228,21 @@ fn with_director<D: Director + Send, R>(d: D, f: impl FnOnce(&Client<'_, SpinNot
             let mut d = d;
             serve(&server, &mut d, &stop)
         });
+        // Stops the server however `f` ends, so a failed assertion fails the
+        // test instead of leaving the scope waiting on the server.
+        struct Stop<'s>(&'s AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
         let ring = RingClient::new(owned.seg(), SpinNotifier)
             .unwrap()
             .with_deadline(Duration::from_secs(10));
-        let out = f(&Client::new(ring));
-        stop.store(true, Ordering::Release);
+        let out = {
+            let _stop = Stop(&stop);
+            f(&Client::new(ring))
+        };
         served.join().unwrap().unwrap();
         out
     })
@@ -510,20 +545,131 @@ fn an_error_status_reaches_the_client_with_an_empty_payload() {
     });
 }
 
+/// The ring's overflow status (`docs/wire.md` 2.5, step 3).
+const OVERFLOW: i32 = i32::MIN;
+
 #[test]
-fn a_reply_larger_than_the_slot_is_reply_too_large() {
+fn a_file_reply_larger_than_the_slot_is_the_overflow_status() {
     with_director(Echo::default(), |client| {
         let mut scratch = Vec::new();
         let path = "x".repeat(CAP as usize / 2);
-        let req = Request::StoredNames {
+        let names = Request::StoredNames {
             root: R1,
             skip: 3,
             path: &path,
         };
+        // READDIR: what wire.md 3.4.2 says both directors answer.
+        let wide = format!("wide{path}");
+        let listing = Request::ReadDir {
+            root: R1,
+            path: &wide,
+        };
+        for req in [names, listing] {
+            assert_eq!(
+                client.call(&req, &mut scratch),
+                Err(CallError::UnknownStatus(OVERFLOW))
+            );
+            let mut payload = Vec::new();
+            req.encode(&mut payload);
+            assert_eq!(
+                raw(client, req.opcode() as u32, &payload),
+                (OVERFLOW, Vec::new())
+            );
+        }
+    });
+}
+
+/// The encoded length of the REG_KEY reply `Echo` gives for `big:n`.
+fn reg_key_reply_len(n: usize) -> usize {
+    let node = Node {
+        value_tombstones: vec!["x".repeat(n)],
+        ..Node::default()
+    };
+    let mut out = Vec::new();
+    Reply::RegKey(KeyReply {
+        version: 1,
+        node: Some(Cow::Borrowed(&node)),
+    })
+    .encode(&mut out);
+    out.len()
+}
+
+#[test]
+fn a_reg_key_reply_longer_than_the_slot_less_8_is_reply_too_large() {
+    let cap = CAP as usize;
+    let base = reg_key_reply_len(0);
+    with_director(Echo::default(), |client| {
+        let mut scratch = Vec::new();
+        // `payload_cap - 8` fits; one byte more, up to the slot's whole
+        // payload and past it, is ReplyTooLarge (wire.md 4.3), never the
+        // ring's overflow.
+        for (len, want) in [
+            (cap - 8, None),
+            (cap - 7, Some(Status::ReplyTooLarge)),
+            (cap, Some(Status::ReplyTooLarge)),
+            (cap + 1, Some(Status::ReplyTooLarge)),
+        ] {
+            let n = len - base;
+            assert_eq!(reg_key_reply_len(n), len);
+            let path = format!("big:{n}");
+            let got = client.call(&Request::RegKey { path: &path }, &mut scratch);
+            match want {
+                None => assert!(
+                    matches!(got, Ok(Reply::RegKey(_))),
+                    "{len}: {:?}",
+                    got.err()
+                ),
+                Some(s) => assert_eq!(got, Err(CallError::Status(s)), "{len}"),
+            }
+        }
+    });
+}
+
+#[test]
+fn a_request_whose_length_is_past_the_slot_is_answered_bad_request() {
+    with_director(Echo::default(), |client| {
+        let seg = client.ring().seg();
+        let geom = client.ring().geom();
+        // Published by hand, with a header claiming more than the slot holds.
+        let slot = ring::claim_free(seg, &geom).unwrap();
+        let req_id = ring::publish_request(seg, &geom, slot, 1, 0, b"\x01\0\0\0a").unwrap();
+        seg.write_bytes(
+            geom.slot_off(slot) + aether_ipc::layout::SH_PAYLOAD_LEN,
+            &(CAP + 1).to_le_bytes(),
+        );
+        let began = std::time::Instant::now();
+        let answer = loop {
+            if let Some(r) = ring::take_response(seg, &geom, slot, req_id).unwrap() {
+                break r;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "slot never completed"
+            );
+            std::hint::spin_loop();
+        };
+        ring::free_slot(seg, &geom, slot).unwrap();
+        assert_eq!(answer, (Status::BadRequest.code(), Vec::new()));
+        // And the server is still serving.
+        let req = Request::Heartbeat {};
+        assert_eq!(client.call(&req, &mut Vec::new()), Ok(Reply::Empty));
+    });
+}
+
+#[test]
+fn a_director_that_panics_is_answered_io_error_and_serving_goes_on() {
+    with_director(Echo::default(), |client| {
+        let mut scratch = Vec::new();
+        let req = Request::GetAttr {
+            root: R1,
+            path: "panic",
+        };
         assert_eq!(
             client.call(&req, &mut scratch),
-            Err(CallError::Status(Status::ReplyTooLarge))
+            Err(CallError::Status(Status::IoError))
         );
+        let req = Request::Heartbeat {};
+        assert_eq!(client.call(&req, &mut scratch), Ok(Reply::Empty));
     });
 }
 

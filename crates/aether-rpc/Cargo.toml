@@ -10,5 +10,9 @@ publish.workspace = true
 aether-ipc.workspace = true
 aether-protocol.workspace = true
 
+[dev-dependencies]
+# The registry node a REG_KEY reply carries, for the tests' large replies.
+aether-registry.workspace = true
+
 [lints]
 workspace = true

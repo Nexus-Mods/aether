@@ -243,28 +243,55 @@ pub fn server_take_from(seg: &SharedSeg, geom: &Geom, start: u32) -> Option<u32>
 /// Read (opcode, flags, req_id, payload) from a PROCESSING slot.
 pub fn read_request(seg: &SharedSeg, geom: &Geom, slot: u32) -> Option<(u32, u32, u64, Vec<u8>)> {
     let mut payload = Vec::new();
-    let (opcode, flags, req_id) = read_request_into(seg, geom, slot, &mut payload)?;
-    Some((opcode, flags, req_id, payload))
+    let head = read_request_into(seg, geom, slot, &mut payload)?;
+    if !head.fits(geom) {
+        return None;
+    }
+    Some((head.opcode, head.flags, head.req_id, payload))
+}
+
+/// A request's slot header, as [`read_request_into`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestHeader {
+    pub opcode: u32,
+    pub flags: u32,
+    pub req_id: u64,
+    /// As the client wrote it: it may claim more than the slot holds.
+    pub payload_len: u32,
+}
+
+impl RequestHeader {
+    /// The payload length is within the ring's `payload_cap`, so the payload
+    /// was read.
+    pub fn fits(&self, geom: &Geom) -> bool {
+        self.payload_len <= geom.payload_cap
+    }
 }
 
 /// [`read_request`], copying the payload into `out` (cleared first), which
-/// grows only when its capacity is short. Returns `(opcode, flags, req_id)`.
+/// grows only when its capacity is short. A header whose payload length is
+/// past `payload_cap` is still returned, with `out` empty, so the director
+/// can answer it (`docs/wire.md` 2.5: every taken slot is completed). `None`
+/// only when the header lies outside the segment.
 pub fn read_request_into(
     seg: &SharedSeg,
     geom: &Geom,
     slot: u32,
     out: &mut Vec<u8>,
-) -> Option<(u32, u32, u64)> {
+) -> Option<RequestHeader> {
     let base = geom.slot_off(slot);
-    let opcode = seg.read_u32(base + SH_OPCODE)?;
-    let flags = seg.read_u32(base + SH_FLAGS)?;
-    let req_id = seg.read_u64(base + SH_REQ_ID)?;
-    let len = seg.read_u32(base + SH_PAYLOAD_LEN)? as usize;
-    if len > geom.payload_cap as usize {
-        return None;
+    let head = RequestHeader {
+        opcode: seg.read_u32(base + SH_OPCODE)?,
+        flags: seg.read_u32(base + SH_FLAGS)?,
+        req_id: seg.read_u64(base + SH_REQ_ID)?,
+        payload_len: seg.read_u32(base + SH_PAYLOAD_LEN)?,
+    };
+    if head.fits(geom) {
+        copy_into(seg, geom.payload_off(slot), head.payload_len as usize, out)?;
+    } else {
+        out.clear();
     }
-    copy_into(seg, geom.payload_off(slot), len, out)?;
-    Some((opcode, flags, req_id))
+    Some(head)
 }
 
 /// Replace `out` with the `len` bytes at `off`, reusing its capacity.

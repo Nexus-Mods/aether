@@ -461,6 +461,12 @@ impl<'a, N: Notifier> RingServer<'a, N> {
     /// copied into `req` and lent to `handler`, which writes the reply payload
     /// into `reply` (cleared first) and returns the status. Both buffers grow
     /// only when their capacity is short.
+    ///
+    /// Every slot it takes is completed (`docs/wire.md` 2.5), unlike
+    /// [`Self::serve_one`]: a request whose header claims a payload longer
+    /// than `payload_cap` is answered `ST_BAD_REQUEST` without calling
+    /// `handler`, and a `handler` that panics is answered `ST_IO_ERROR`. Both
+    /// with an empty payload, and both count as handled (`Ok(true)`).
     pub fn serve_one_into(
         &self,
         req: &mut Vec<u8>,
@@ -470,18 +476,33 @@ impl<'a, N: Notifier> RingServer<'a, N> {
         let Some(slot) = self.take_slot() else {
             return Ok(false);
         };
-        let (opcode, flags, req_id) = ring::read_request_into(self.seg, &self.geom, slot, req)
-            .ok_or(IpcError::BadResponse)?;
-        let view = RequestView {
-            slot,
-            opcode,
-            flags,
-            req_id,
-            payload: req,
-        };
+        // `None` only for a header outside the segment, which a validated
+        // geometry rules out; there is no slot there to complete.
+        let head =
+            ring::read_request_into(self.seg, &self.geom, slot, req).ok_or(IpcError::Layout)?;
         reply.clear();
-        let status = handler(&view, reply);
-        ring::server_complete(self.seg, &self.geom, slot, req_id, status, reply)?;
+        let status = if !head.fits(&self.geom) {
+            aether_protocol::Status::BadRequest.code()
+        } else {
+            let view = RequestView {
+                slot,
+                opcode: head.opcode,
+                flags: head.flags,
+                req_id: head.req_id,
+                payload: req,
+            };
+            // The handler's state may be torn by the panic; the slot must be
+            // answered regardless, and the panic hook has already reported it.
+            let run = std::panic::AssertUnwindSafe(|| handler(&view, &mut *reply));
+            match std::panic::catch_unwind(run) {
+                Ok(status) => status,
+                Err(_) => {
+                    reply.clear();
+                    aether_protocol::Status::IoError.code()
+                }
+            }
+        };
+        ring::server_complete(self.seg, &self.geom, slot, head.req_id, status, reply)?;
         self.notifier.notify_client(slot);
         Ok(true)
     }
@@ -638,5 +659,54 @@ mod tests {
         assert!(!server
             .serve_one_into(&mut req, &mut reply, |_, _| unreachable!())
             .unwrap());
+    }
+
+    /// Publishes a request on a fresh ring, then makes its header claim
+    /// `payload_len`. Returns the segment, geometry, slot and req_id.
+    fn published_with_len(owned: &OwnedSeg, payload_len: u32) -> (Geom, u32, u64) {
+        let seg = owned.seg();
+        let geom = init(seg, 2, 128).unwrap();
+        let slot = ring::claim_free(seg, &geom).unwrap();
+        let req_id = ring::publish_request(seg, &geom, slot, OP_GETATTR, 0, b"ping").unwrap();
+        seg.write_bytes(
+            geom.slot_off(slot) + crate::layout::SH_PAYLOAD_LEN,
+            &payload_len.to_le_bytes(),
+        );
+        (geom, slot, req_id)
+    }
+
+    #[test]
+    fn serve_one_into_answers_a_payload_longer_than_the_slot_bad_request() {
+        let owned = OwnedSeg::new(4096);
+        let (geom, slot, req_id) = published_with_len(&owned, 129);
+        let seg = owned.seg();
+        let server = RingServer::new(seg, SpinNotifier).unwrap();
+        let handled = server
+            .serve_one_into(&mut Vec::new(), &mut Vec::new(), |_, _| unreachable!())
+            .unwrap();
+        assert!(handled);
+        let (status, resp) = ring::take_response(seg, &geom, slot, req_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((status, resp.len()), (aether_protocol::ST_BAD_REQUEST, 0));
+    }
+
+    #[test]
+    fn serve_one_into_answers_a_panicking_handler_io_error() {
+        let owned = OwnedSeg::new(4096);
+        let (geom, slot, req_id) = published_with_len(&owned, 4);
+        let seg = owned.seg();
+        let server = RingServer::new(seg, SpinNotifier).unwrap();
+        let handled = server
+            .serve_one_into(&mut Vec::new(), &mut Vec::new(), |_, out| {
+                out.extend_from_slice(b"half a reply");
+                panic!("handler failed");
+            })
+            .unwrap();
+        assert!(handled);
+        let (status, resp) = ring::take_response(seg, &geom, slot, req_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((status, resp.len()), (aether_protocol::ST_IO_ERROR, 0));
     }
 }

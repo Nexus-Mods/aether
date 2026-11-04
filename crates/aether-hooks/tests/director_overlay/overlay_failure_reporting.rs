@@ -43,7 +43,17 @@ fn a_director_failure_on_a_write_fails_closed_even_with_disk_fallthrough_on() {
     // The opt-out that un-seals under-root misses. A failure must stay sealed regardless.
     std::env::set_var(aether_env::ALLOW_DISK_FALLTHROUGH, "1");
 
-    fakedirector::install(&root, Fake::new().failing_writes_under("data/"), 0);
+    // A writable mount elsewhere on the root makes the control's create a
+    // genuine miss (`ST_NOT_FOUND`: nothing writable covers that path) rather
+    // than a root with no writable provider, which is `ST_READ_ONLY`
+    // (docs/wire.md 3.4.3) and would not fall through.
+    fakedirector::install(
+        &root,
+        Fake::new()
+            .failing_writes_under("data/")
+            .writable_under("saves/"),
+        0,
+    );
     let hooks = install().expect("install");
 
     let failed = root.join("Data").join("mod.esp");

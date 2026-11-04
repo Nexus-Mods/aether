@@ -25,8 +25,8 @@ fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
     // this test pass for the wrong reason.
     std::fs::create_dir_all(root.join("data")).unwrap();
 
-    // A graph with no writable mount at all: every create under the root is
-    // refused with `ST_NOT_FOUND`.
+    // A graph with no writable mount at all: every write open under the root
+    // is refused with `ST_READ_ONLY` (docs/wire.md 3.4.3).
     fakedirector::install(&root, fakedirector::Fake::new(), 0);
 
     let hooks = install().expect("install");
@@ -49,10 +49,13 @@ fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
          both an escape and a silent data loss"
     );
     let err = result.expect_err("a write under a managed root that no provider serves must fail");
+    // `ST_READ_ONLY` on a write is `STATUS_ACCESS_DENIED`
+    // (`hook/file_open.rs`, `try_fuse_create`), which Win32 reports as
+    // ERROR_ACCESS_DENIED.
     assert_eq!(
         err.raw_os_error(),
-        Some(3), // ERROR_PATH_NOT_FOUND
-        "expected ERROR_PATH_NOT_FOUND from the refused create, got {err:?}"
+        Some(5), // ERROR_ACCESS_DENIED
+        "expected ERROR_ACCESS_DENIED from the refused create, got {err:?}"
     );
 
     let _ = std::fs::remove_dir_all(&base);

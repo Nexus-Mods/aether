@@ -291,6 +291,14 @@ impl Graph {
         root == 0 || self.roots.contains(&root)
     }
 
+    /// Whether any writable provider is mounted on `root` (an empty prefix
+    /// covers every root).
+    fn root_writable(&self, root: u32) -> bool {
+        self.writable
+            .iter()
+            .any(|p| p.is_empty() || Self::root_of(p) == Some(root))
+    }
+
     /// The table key for a request's path: `BadRequest` for a path that
     /// leaves its root, `NotFound` for a root not served.
     fn resolve(&self, root: RootId, path: &str) -> Result<String, Status> {
@@ -465,8 +473,10 @@ impl Reference {
     /// create inside it is honoured, and writes to files inside it stick.
     /// Outside every declared prefix the graph is read-only: a served file
     /// answers `Status::ReadOnly` to a write open and an unserved one
-    /// `Status::NotFound` to a create. With no prefix declared (the default)
-    /// the whole graph is read-only. An empty prefix covers every root.
+    /// `Status::NotFound` to a create, except on a root with no writable
+    /// prefix at all, where every write open is `Status::ReadOnly`
+    /// (`docs/wire.md` 3.4.3). With no prefix declared (the default) the
+    /// whole graph is read-only. An empty prefix covers every root.
     pub fn writable_under(mut self, prefix: &str) -> Reference {
         self.note_root(prefix);
         self.building().writable.push(fold(prefix));
@@ -643,15 +653,10 @@ impl Director for Reference {
         let exists = files.contains_key(&vpath);
         if write {
             // The access check first (a read-only mount refuses the write
-            // whether or not the file is there), then the disposition bits.
-            // A missing path outside every writable prefix is NotFound even
-            // on a root with no writable provider, where wire.md 3.4.3 says
-            // ReadOnly: the shim's tests rely on NotFound there
-            // (`seal/write_seal_no_overlay.rs`,
-            // `director_overlay/overlay_failure_reporting.rs`), so it waits
-            // for a ruling.
+            // whether or not the file is there, and so does a root with no
+            // writable provider, wire.md 3.4.3), then the disposition bits.
             if !g.is_writable(&vpath) {
-                return Err(if exists {
+                return Err(if exists || !g.root_writable(root.0) {
                     Status::ReadOnly
                 } else {
                     Status::NotFound

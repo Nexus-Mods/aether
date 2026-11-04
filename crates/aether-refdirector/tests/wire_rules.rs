@@ -122,20 +122,32 @@ fn names_match_by_the_wires_fold() {
     d.close(fh).unwrap();
 }
 
-/// Held back: wire.md 3.4.3 says OPEN_WRITE on a root with no writable
-/// provider is ST_READ_ONLY, but the shim's tests rely on ST_NOT_FOUND for a
-/// create there (`seal/write_seal_no_overlay.rs` expects
-/// ERROR_PATH_NOT_FOUND; `director_overlay/overlay_failure_reporting.rs`'s
-/// fall-through control needs a miss). An existing file is ST_READ_ONLY
-/// either way.
+/// 3.4.3: OPEN_WRITE on a root with no writable provider is ST_READ_ONLY,
+/// whether or not the path exists; a missing path on a root that has one,
+/// but not over this path, stays ST_NOT_FOUND.
 #[test]
-fn a_create_on_a_root_with_no_writable_provider_stays_not_found() {
-    let mut d = Reference::new().with("a", vec![1], ReadStyle::Whole);
+fn a_write_open_on_a_root_with_no_writable_provider_is_read_only() {
+    let mut d = Reference::new()
+        .with("a", vec![1], ReadStyle::Whole)
+        .with(&key(1, "b"), vec![1], ReadStyle::Whole)
+        .writable_under(&key(1, "saves/"));
     assert_eq!(d.open(R0, RW, "a").map(|_| ()), Err(Status::ReadOnly));
     assert_eq!(
         d.open(R0, RW | OpenFlags::CREATE, "new").map(|_| ()),
+        Err(Status::ReadOnly)
+    );
+    assert_eq!(
+        d.open(R0, RW | OpenFlags::CREATE | OpenFlags::EXCL, "a")
+            .map(|_| ()),
+        Err(Status::ReadOnly)
+    );
+    let r1 = RootId(1);
+    assert_eq!(d.open(r1, RW, "b").map(|_| ()), Err(Status::ReadOnly));
+    assert_eq!(
+        d.open(r1, RW | OpenFlags::CREATE, "new").map(|_| ()),
         Err(Status::NotFound)
     );
+    assert!(d.open(r1, RW | OpenFlags::CREATE, "saves/new").is_ok());
 }
 
 /// 3.4.3: on an OPEN_APPEND handle the director ignores WRITE offsets.

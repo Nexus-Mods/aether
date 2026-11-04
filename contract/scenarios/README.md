@@ -74,11 +74,20 @@ root writable as a whole, `"."`.
 `{"size": N, "seed": S}` is N bytes generated from S: start with the 32-bit
 `x = 0x9E3779B9 ^ low32(S) ^ high32(S)`, and for each position `i` from 0,
 set `x = x * 1664525 + 1013904223` (mod 2^32) and emit the byte `(x >> 24) ^
-(i & 0xFF)`.
+(i & 0xFF)` (so `{"size": 100, "seed": S}` is the first 100 bytes of any
+longer fill of S). In a step (WRITE's `data`, a value's `data`, READ's reply
+`data`, not a tree's `contents`) two more forms are allowed: `{"zeros": N}`,
+N zero bytes, and `{"concat": [..]}`, the bytes of each element (any of
+these forms) in order, so a file grown and spliced can be written down
+(`{"concat": [{"size": 65536, "seed": 3}, "TAIL", {"zeros": 4460}]}`).
 
 **Requests.** `op` and every request field of that opcode in
 `protocol.json`, padding aside; nothing else, except READ's optional
 `slot_flags` (`["read_bulk"]`). `flags` is a list of `open_flags` names.
+A handle (`fh` of READ, WRITE, SETATTR, CLOSE) is a scenario number, paired
+with the director's (below), or `{"literal": n}`, sent as `n` itself and
+never paired: how a scenario sends a number no director issues (`fh` 0,
+wire.md 3.4.3, 3.4.10).
 File paths (`path`, `from`, `to` of file opcodes) must be canonical: `/`
 between components, none empty, `.` or `..`, no `\`, and `"."` for the root.
 wire.md 3.2 says other syntax is director-defined ("a client must not rely
@@ -128,7 +137,7 @@ text quoted from the section named; there are no others.
 |---|---|---|
 | OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number: the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. Never 0 (3.4.3: the shim keeps 0 for a directory it made). | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles" |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; where a director starts it is its own |
-| OPEN `immutable` | Not compared, except that it must be clear on a write open and on a directory; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory" |
+| OPEN `immutable` | Not compared, except that it must be clear on a write open, on a directory and on a file under a `writable` entry; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory"; "never set it for a file a writable provider holds" |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared (but it must be below 2^40, the year 36812, as seconds are: 3.2, "`mtime` is seconds since the Unix epoch"), and not checked for changed or unchanged after a write either: the time is the director's. A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first. | 3.4.4: the client "must accept either whatever flag it sent" |
@@ -137,7 +146,38 @@ text quoted from the section named; there are no others.
 | REG_KEY `last_write` | Not compared. | 4.3: a FILETIME, which the overlay stamps with the director's clock |
 
 A `one_of` is the only way a scenario allows several answers, and it cites
-its section in `wire`.
+its section in `wire`. These are the choices wire.md gives, and a scenario
+that sends one of these requests accepts every answer listed (and puts no
+step after it whose answer depends on the choice, unless both leave the same
+state):
+
+| Request | Answers | wire.md |
+|---|---|---|
+| READDIR of a missing directory; of a file | `not-found` or an empty listing; `not-a-directory`, `not-found` or an empty listing | 3.4.2 |
+| A path below a file, any opcode but GETATTR | `not-found` or `not-a-directory` (GETATTR: found = 0, or `not-found`) | 3.5 |
+| A create (OPEN, MKDIR, a RENAME or RENAME_X `to`) under a file | `not-found` or `not-a-directory` | 3.4.3, 3.4.7, 3.4.9, 3.4.13 |
+| A write open of a directory without `excl` | `is-dir` or `io-error` | 3.4.3 |
+| A read open with `trunc` or `create` | the bit ignored, or `bad-request` | 3.4.3 |
+| A file renamed onto an empty directory | `ok` (replaced) or `io-error` | 3.4.7 |
+| RENAME_X onto a directory | `is-dir` or `io-error` | 3.4.13 |
+| READ, WRITE, SETATTR through a handle whose file was deleted or replaced | the kept file's bytes (shared by its open handles, reached by no name), `io-error` or `not-found` | 3.4.8 |
+| A WRITE or SETATTR to a size that cannot exist | `no-space` or `bad-request` | 3.4.5, 3.4.6 |
+| WRITE or SETATTR through a handle opened without `write`, on a file a writable provider holds | honoured, or `read-only` | 3.4.5 |
+| MKDIR of an existing directory no writable provider serves | `exists` or `read-only` | 3.4.9 |
+| STORED_NAMES with `skip` at or past the number of components | an empty reply or `bad-request` | 3.4.12 |
+| A request naming a named stream (`x.sav:s`) | `not-found`, `bad-request`, or the stream a director holds | 3.2 |
+| A create of a name a director's store would make one with another (`ας` beside `ασ`) | created, or `exists` | 3.2 |
+
+An error answer must carry no payload (wire.md 3.1: "A director answers
+every error with an empty payload"); one that does fails its step whatever
+the expectation. An OK answer must have the shape wire.md gives its reply,
+beyond what the shim's lenient decoders read (3.2: "The file-op decoders
+ignore trailing bytes"), or it fails its step whatever the expectation:
+GETATTR 18 bytes, OPEN 24, WRITE 8, an inline READ `8 + n` and a bulk one
+16, each with its zero bytes zero (3.4.1, 3.4.3 to 3.4.5); a READDIR reply
+ending with its last entry (3.4.2); nothing for the opcodes whose reply is
+the status only; and REG_KEY's children sorted and unique by `folded` (4.3,
+which the shim's map of them would not show).
 
 ## Checks across steps
 
@@ -154,3 +194,43 @@ To play scenarios against a director, see `docs/conformance.md`. A generated
 case that fails (`aether-conform run --generate`) is written in this format
 too, with the reference's answers as its expectations, so it replays as any
 other scenario.
+
+## Index
+
+Every scenario file, by what it is about. Each file's `description` says
+what it checks and cites wire.md.
+
+| About | Scenarios |
+|---|---|
+| HEARTBEAT, GETATTR | `heartbeat`, `getattr-files`, `getattr-missing`, `root-dot`, `root-dot-readonly` |
+| READDIR | `readdir-listing`, `readdir-case`, `readdir-roots-and-changes`, `readdir-unknown-root`, `paths-through-files` |
+| OPEN | `open-read`, `open-flags-zero`, `open-errors`, `open-write-existing-readonly-path`, `open-dirs-and-parents` |
+| READ | `read-inline`, `read-eof`, `read-bulk`, `read-bulk-threshold`, `read-offset-extremes` |
+| Handles | `handles-unique`, `handles-bad`, `handles-closed`, `handles-dir`, `handles-fh-zero`, `handles-two-on-one-file`, `handles-deleted-file`, `handles-deleted-file-shared`, `handles-follow-rename` |
+| Writing and reading back | `write-create`, `write-overwrite`, `write-append`, `write-trunc`, `write-setattr`, `write-setattr-size`, `write-growth`, `write-only-read`, `write-read-handle`, `write-offset-huge`, `write-case-spelling`, `write-excl-fold`, `write-then-read`, `append-tracks-end`, `regrow-after-truncate`, `truncate-then-read`, `extend-then-read-gap`, `bulk-read-sees-writes` |
+| The read cache | `cache-immutable-readonly`, `cache-overwrite-same-size`, `cache-content-change-same-size` |
+| RENAME | `rename-file`, `rename-dir`, `rename-replace`, `rename-respell`, `rename-refused`, `rename-root`, `rename-unknown-root`, `rename-onto-full-dir`, `rename-case-fold-source`, `rename-edges`, `write-rename-read`, `rename-dir-open-child`, `rename-dir-case-only` |
+| RENAME_X | `rename-x-file`, `rename-x-directory`, `rename-x-edges`, `rename-x-errors`, `rename-x-same-root`, `rename-x-read-both` |
+| MKDIR and DELETE | `mkdir-create`, `mkdir-errors`, `mkdir-existing`, `mkdir-existing-readonly`, `mkdir-spelling`, `mkdir-child-rename-parent`, `delete-file`, `delete-dir`, `delete-errors`, `delete-root`, `delete-dir-after-open-child`, `delete-and-excl-edges`, `type-change-same-name` |
+| Names and spellings | `case-fold-ascii`, `case-fold-collide`, `case-fold-unicode`, `case-fold-created`, `names-non-bmp`, `names-stream`, `names-stream-writable`, `stored-names-spelling`, `stored-names-unknown`, `stored-names-after-changes`, `stored-names-edges`, `spelling-after-delete-recreate`, `respell-parent-components`, `escape-paths` |
+| Roots | `roots-isolated`, `roots-unknown`, `roots-mutations-isolated`, `readonly-root-refuses-changes` |
+| STAGE_EXEC | `stage-exec`, `stage-exec-after-write` |
+| Registry | `registry-none`, `registry-lookup`, `registry-case`, `registry-bad-path`, `registry-values`, `registry-value-order`, `registry-delete-value`, `registry-create-key`, `registry-delete-key`, `registry-delete-unknown-key`, `registry-rename-key`, `registry-changed`, `registry-current-user`, `registry-limits`, `registry-key-too-large`, `registry-write-depth`, `registry-reads-and-limits`, `registry-refused-writes-keep-version`, `registry-key-lifecycle`, `registry-under-tombstone`, `registry-rename-changed-recreate` |
+| Several clients | `multi-handle-shared`, `multi-handles-unique`, `multi-write-visible`, `multi-registry-gen`, `multi-registry-overlay` |
+
+The interactions a director is most likely to get wrong each have a scenario
+of their own, to be read as the contract's example of them; generated cases
+(`--generate`) play them too, in random orders:
+
+| Interaction | Scenario |
+|---|---|
+| Write, then read | `write-then-read` |
+| Write, rename, read under the new name and miss under the old | `write-rename-read` |
+| Truncate, then read | `truncate-then-read` |
+| Extend past the end, then read the gap | `extend-then-read-gap` |
+| Two handles on one file | `handles-two-on-one-file` |
+| Delete with a handle open, then create again | `handles-deleted-file`, `handles-deleted-file-shared`, `delete-dir-after-open-child` |
+| Rename a directory, then open a child by the old and the new path | `rename-dir-open-child` |
+| A case-only rename, then READDIR and STORED_NAMES | `rename-dir-case-only` |
+| RENAME_X across roots, then read in both | `rename-x-read-both` |
+| A registry key created, given values, renamed, looked up under both names, deleted with values and subkeys | `registry-key-lifecycle` |

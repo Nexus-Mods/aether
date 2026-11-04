@@ -1,0 +1,26 @@
+{
+  "name": "write-offset-huge",
+  "description": "A WRITE whose end would pass u64::MAX, or the largest file the director holds, and a SETATTR beyond it, are ST_NO_SPACE or ST_BAD_REQUEST, with the file unchanged (wire.md 3.4.5, 3.4.6); a zero-length WRITE changes nothing wherever its offset (3.4.5); a READ at any offset answers min(len, size - offset) bytes, with no wrap (3.4.4).",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/x", "contents": "abc"}], "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/x"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 18446744073709551615, "data": "Z"}, "expect": {"one_of": [{"status": "no-space"}, {"status": "bad-request"}], "wire": "3.4.5"}},
+    {"request": {"op": "write", "fh": 1, "offset": 18446744073709551614, "data": "YZ"}, "expect": {"one_of": [{"status": "no-space"}, {"status": "bad-request"}], "wire": "3.4.5"}},
+    {"request": {"op": "setattr", "fh": 1, "size": 18446744073709551615}, "expect": {"one_of": [{"status": "no-space"}, {"status": "bad-request"}], "wire": "3.4.6"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/x"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16}, "expect": {"reply": {"data": "abc"}}},
+    {"request": {"op": "write", "fh": 1, "offset": 1000, "data": ""}, "expect": {"reply": {"written": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 18446744073709551615, "data": ""}, "expect": {"reply": {"written": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/x"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 18446744073709551615, "len": 16}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 9223372036854775808, "len": 16}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 4294967296, "len": 1}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "read", "fh": 1, "offset": 1, "len": 4294967295}, "expect": {"reply": {"data": "bc"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 3, "len": 4294967295}, "expect": {"reply": {"data": ""}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+  ]
+}

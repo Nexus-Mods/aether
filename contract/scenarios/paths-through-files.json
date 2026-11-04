@@ -1,0 +1,18 @@
+{
+  "name": "paths-through-files",
+  "description": "A path with a file as a component is a missing path: GETATTR found = 0, and ST_NOT_FOUND (or ST_NOT_A_DIRECTORY) from every other opcode (wire.md 3.5). READDIR of a missing directory is ST_NOT_FOUND or an empty listing, and of a file ST_NOT_A_DIRECTORY, ST_NOT_FOUND or an empty listing (3.4.2).",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "data/a.esp", "contents": "abc"}], "dirs": ["data/d"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "readdir", "root": 0, "path": "data/none"}, "expect": {"one_of": [{"status": "not-found"}, {"reply": {"entries": []}}], "wire": "3.4.2"}, "note": "a missing directory"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/a.esp"}, "expect": {"one_of": [{"status": "not-a-directory"}, {"status": "not-found"}, {"reply": {"entries": []}}], "wire": "3.4.2"}, "note": "a file"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/a.esp/x"}, "expect": {"one_of": [{"status": "not-a-directory"}, {"status": "not-found"}, {"reply": {"entries": []}}], "wire": "3.4.2"}, "note": "below a file"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/a.esp/x"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp/x"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.5"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/a.esp/x"}, "expect": {"one_of": [{"reply": {"names": "data/a.esp/x"}}, {"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.5, 3.4.12"}, "note": "the components as stored and sent, or a refusal"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "a.esp", "is_dir": false, "size": 3, "mtime": 0}, {"name": "d", "is_dir": true, "size": 0, "mtime": 0}]}}}
+  ]
+}

@@ -454,28 +454,45 @@ fn committed_against(how: &str) -> Vec<(String, bool, Vec<String>)> {
         .collect()
 }
 
-/// wire.md 3.4.3: a director that calls a writable file's read opens
-/// immutable under one `mount_gen`, and lets it be overwritten at the same
-/// size, fails the read-cache check, and only that.
+/// wire.md 3.4.3: `immutable` is never set for a file a writable provider
+/// holds. A director that calls a writable file's read opens immutable
+/// fails the direct check on every such OPEN and, where the file then
+/// changes at its size, the read-cache check; both cite 3.4.3, and the
+/// scenarios with no such OPEN pass.
 #[test]
 fn a_director_marking_writable_files_immutable_fails_the_read_cache_check() {
     let results = committed_against("stale-immutable");
-    let (_, passed, notes) = results
-        .iter()
-        .find(|(n, ..)| n == "cache-overwrite-same-size")
-        .expect("the scenario ran");
-    assert!(!passed, "{results:?}");
-    assert!(!notes.is_empty(), "{results:?}");
-    for n in notes {
-        assert!(n.contains("wire.md 3.4.3"), "{n}");
-        assert!(n.contains("stale bytes"), "{n}");
-    }
     let failed: Vec<&str> = results
         .iter()
         .filter(|(_, p, _)| !p)
         .map(|(n, ..)| n.as_str())
         .collect();
-    assert_eq!(failed, ["cache-overwrite-same-size"], "{results:?}");
+    for name in [
+        "cache-overwrite-same-size",
+        "cache-content-change-same-size",
+        "write-then-read",
+    ] {
+        assert!(failed.contains(&name), "{name}: {results:?}");
+    }
+    for name in [
+        "cache-immutable-readonly",
+        "read-offset-extremes",
+        "heartbeat",
+    ] {
+        assert!(!failed.contains(&name), "{name}: {results:?}");
+    }
+    let notes: Vec<&String> = results.iter().flat_map(|(_, _, n)| n).collect();
+    assert!(
+        notes.iter().all(|n| n.contains("wire.md 3.4.3")),
+        "{notes:?}"
+    );
+    assert!(notes.iter().any(|n| n.contains("stale bytes")), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("a file a writable provider holds")),
+        "{notes:?}"
+    );
 }
 
 /// wire.md 4.5: a director that never moves `reg_gen` after a write fails
@@ -501,7 +518,7 @@ fn a_director_that_never_moves_reg_gen_fails_the_registry_write_scenarios() {
     for (name, passed, notes) in &results {
         if !passed {
             assert!(
-                name.starts_with("registry-") || name == "multi-registry-gen",
+                name.starts_with("registry-") || name.starts_with("multi-registry-"),
                 "{name}: {notes:?}"
             );
             assert!(
@@ -622,7 +639,7 @@ fn concurrent_clients_pass_against_the_reference_on_a_file_ring() {
     );
     assert_eq!(code, Some(0), "{entries:?}\n{all}");
     assert!(entries.iter().all(|e| e.1), "{entries:?}");
-    assert_eq!(entries.len(), 5, "{entries:?}");
+    assert_eq!(entries.len(), 6, "{entries:?}");
     assert!(
         summary.contains("8 of 8 slots and 8 banks used"),
         "{summary}"
@@ -725,11 +742,13 @@ fn a_director_numbering_handles_per_slot_fails_only_with_several_clients() {
         unique.3.iter().any(|n| n.contains("wire.md 3.4.3")),
         "{unique:?}"
     );
+    // A step of a client's case, or a meeting of the clients (its error).
     let concurrent = entry(&entries, "concurrent");
     assert!(
         concurrent
             .3
             .iter()
+            .chain(&concurrent.2)
             .any(|n| n.contains("wire.md 2.8.1") || n.contains("wire.md 3.4.3")),
         "{concurrent:?}"
     );
@@ -758,6 +777,7 @@ fn a_director_serving_only_slot_zero_fails_every_second_client() {
             "multi-handle-shared",
             "multi-handles-unique",
             "multi-registry-gen",
+            "multi-registry-overlay",
             "multi-write-visible",
             "concurrent"
         ],
@@ -831,8 +851,9 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
     assert_eq!(failed(&entries), ["concurrent"], "{all}");
     // Failed for a reply in the wrong slot, not a timeout. Which mismatch
     // shows first depends on which two requests were swapped: another
-    // client's answer, a status meant for another request, or a payload of
-    // another opcode's shape that does not decode.
+    // client's answer, a status meant for another request, a payload of
+    // another opcode's shape that does not decode, or a meeting whose two
+    // requests got each other's answers.
     let concurrent = entry(&entries, "concurrent");
     let error = concurrent.2.as_deref().unwrap_or("");
     assert!(!error.contains("no answer within"), "{concurrent:?}");
@@ -842,6 +863,7 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
             || s.starts_with("none of the allowed")
             || s.contains("does not decode")
             || s.contains(" got Got(")
+            || s.contains("meeting:")
     };
     assert!(
         mismatch(error) || concurrent.3.iter().any(|n| mismatch(n)),
@@ -1270,7 +1292,11 @@ fn a_staged_copy_must_hold_the_served_bytes() {
     let stage = entry(&entries, "stage-exec");
     assert!(stage.1, "{stage:?}");
     let (failed, notes) = failing_notes("stage-wrong-bytes");
-    assert_eq!(failed, ["stage-exec"], "{notes:?}");
+    assert_eq!(
+        failed,
+        ["stage-exec-after-write", "stage-exec"],
+        "{notes:?}"
+    );
     assert!(
         notes.iter().any(|n| n.contains("wire.md 3.4.14")),
         "{notes:?}"
@@ -1279,11 +1305,22 @@ fn a_staged_copy_must_hold_the_served_bytes() {
 
 /// wire.md 3.4.4: a handle serves READ whatever access it was opened with.
 /// A director refusing READ through a write-only handle fails
-/// `write-only-read`, and only that.
+/// `write-only-read` and the scenarios that read back through a handle
+/// opened for writing alone, and only those.
 #[test]
 fn a_director_refusing_reads_through_write_only_handles_fails() {
-    let (failed, _) = failing_notes("write-only-unreadable");
-    assert_eq!(failed, ["write-only-read"]);
+    let (mut failed, _) = failing_notes("write-only-unreadable");
+    failed.sort();
+    assert_eq!(
+        failed,
+        [
+            "handles-deleted-file",
+            "handles-follow-rename",
+            "truncate-then-read",
+            "write-only-read",
+            "write-then-read"
+        ]
+    );
 }
 
 /// wire.md 3.4.5, 3.4.6: what a file grows by reads as zeros.
@@ -1296,13 +1333,339 @@ fn a_director_filling_growth_with_garbage_fails() {
 /// wire.md 3.2: a stream the director does not hold is not its base file.
 #[test]
 fn a_director_serving_a_stream_as_its_base_file_fails() {
-    let (failed, _) = failing_notes("stream-base");
-    assert_eq!(failed, ["names-stream"]);
+    let (mut failed, _) = failing_notes("stream-base");
+    failed.sort();
+    assert_eq!(failed, ["names-stream", "names-stream-writable"]);
 }
 
 /// wire.md 4.2: the current user's hives are keys like any other.
 #[test]
 fn a_director_refusing_the_user_hives_fails() {
     let (failed, _) = failing_notes("machine-only-registry");
-    assert_eq!(failed, ["registry-current-user"]);
+    assert_eq!(
+        failed,
+        ["registry-current-user", "registry-reads-and-limits"]
+    );
+}
+
+/// The suite must fail `how` on the scenario `name`: a defect every
+/// director could have, which only that scenario's steps show.
+fn caught_by(how: &str, name: &str) -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let (code, entries, _, all) =
+        run_json(&format!("test-adapter --misbehave {how}"), &dir, "20", &[]);
+    let failed: Vec<&Entry> = entries.iter().filter(|e| !e.1).collect();
+    assert!(
+        code == Some(1) && failed.iter().any(|e| e.0 == name),
+        "{how}: {name} passed; failed {:?}\n{all}",
+        failed.iter().map(|e| &e.0).collect::<Vec<_>>()
+    );
+    failed.iter().flat_map(|e| e.3.clone()).collect()
+}
+
+/// wire.md 4.3: REG_DELETE_KEY of a key the overlay has no record of
+/// tombstones it, which hides the real key. A director answering it
+/// ST_NOT_FOUND fails.
+#[test]
+fn a_director_that_cannot_delete_an_unrecorded_key_fails() {
+    caught_by("delete-unrecorded-not-found", "registry-delete-unknown-key");
+}
+
+/// wire.md 3.4.4: every handle of a file reads it as it is now. A director
+/// whose handles read a snapshot taken at their OPEN fails.
+#[test]
+fn a_director_reading_snapshots_per_handle_fails() {
+    caught_by("snapshot-reads", "handles-two-on-one-file");
+}
+
+/// wire.md 3.4.1: a size is the file's length now, SETATTRs through handles
+/// still open included. A director applying SETATTR at CLOSE fails.
+#[test]
+fn a_director_applying_setattr_at_close_fails() {
+    caught_by("setattr-at-close", "handles-two-on-one-file");
+}
+
+/// wire.md 3.1: a director answers every error with an empty payload. One
+/// that sends bytes with an error fails, citing 3.1.
+#[test]
+fn a_director_sending_a_payload_with_an_error_fails() {
+    let notes = caught_by("error-payload", "open-errors");
+    assert!(notes.iter().any(|n| n.contains("wire.md 3.1")), "{notes:?}");
+}
+
+/// wire.md 3.4.3: an append WRITE lands at the file's end as it is when it
+/// is served. An append handle keeping an end of its own fails.
+#[test]
+fn an_append_handle_with_an_end_of_its_own_fails() {
+    caught_by("append-own-end", "append-tracks-end");
+}
+
+/// wire.md 3.4.5, 3.4.6: the bytes a truncation cut read as zeros when a
+/// WRITE grows the file again. A director that shows them again fails.
+#[test]
+fn a_director_showing_cut_bytes_again_fails() {
+    caught_by("truncate-keeps-bytes", "regrow-after-truncate");
+}
+
+/// wire.md 4.3: a refused registry write leaves the version alone. A
+/// director that moves it fails.
+#[test]
+fn a_director_moving_the_version_on_a_refused_write_fails() {
+    caught_by(
+        "refused-write-bumps",
+        "registry-refused-writes-keep-version",
+    );
+}
+
+/// wire.md 3.4.7: a directory moves with everything under it. A director
+/// that leaves its children under the old name, to come back when the name
+/// is made again, fails.
+#[test]
+fn a_director_leaving_children_under_a_renamed_directory_fails() {
+    caught_by("rename-dir-ghosts", "mkdir-child-rename-parent");
+}
+
+/// wire.md 3.4.1, 3.4.4: a size and the bytes are the file's now, WRITEs
+/// through handles still open included. A director keeping each handle's
+/// WRITEs until its CLOSE fails.
+#[test]
+fn a_director_applying_writes_at_close_fails() {
+    caught_by("write-at-close", "write-then-read");
+}
+
+/// wire.md 3.4.7: a renamed file is gone from its old name. A director
+/// whose lookups still find the old name fails.
+#[test]
+fn a_director_still_finding_a_renamed_files_old_name_fails() {
+    caught_by("rename-keeps-old-name", "write-rename-read");
+}
+
+/// wire.md 3.4.5, 3.4.6, 3.4.4: a truncation is seen by every handle, and
+/// the bytes it cut read as zeros when the file grows again. Directors
+/// whose handles read snapshots, or that show cut bytes again, fail.
+#[test]
+fn a_director_mishandling_a_truncation_fails() {
+    caught_by("snapshot-reads", "truncate-then-read");
+    caught_by("truncate-keeps-bytes", "truncate-then-read");
+}
+
+/// wire.md 3.4.5, 3.4.6: the gap a file grows by reads as zeros.
+#[test]
+fn a_director_filling_a_gap_with_garbage_fails_the_gap_scenario() {
+    caught_by("growth-garbage", "extend-then-read-gap");
+}
+
+/// wire.md 3.4.4: a bulk READ reads the file as it is now. A director
+/// answering a bulk READ from a cache that writes do not clear fails.
+#[test]
+fn a_director_serving_stale_bulk_reads_fails() {
+    caught_by("bulk-cache", "bulk-read-sees-writes");
+}
+
+/// wire.md 3.4.7: a renamed directory's children follow it, and its handles
+/// too; the old name made again is empty. A director whose handles act on
+/// a path, or that leaves the children under the old name, fails.
+#[test]
+fn a_director_losing_a_renamed_directorys_children_fails() {
+    caught_by("handles-by-path", "rename-dir-open-child");
+    caught_by("rename-dir-ghosts", "rename-dir-open-child");
+}
+
+/// wire.md 3.4.7, 3.4.12: a case-only rename respells the directory for
+/// every path below it. A director whose children keep the old spelling
+/// fails.
+#[test]
+fn a_director_keeping_children_in_a_directorys_old_spelling_fails() {
+    caught_by("case-rename-stale-children", "rename-dir-case-only");
+}
+
+/// wire.md 3.4.13: RENAME_X copies the file as it is. A director copying
+/// the bytes it mounted fails.
+#[test]
+fn a_director_moving_a_files_mounted_bytes_across_roots_fails() {
+    caught_by("rename-x-from-mount", "rename-x-read-both");
+}
+
+/// wire.md 4.3: a deleted key's values and subkeys are dropped. A director
+/// that brings them back when the key is made again fails.
+#[test]
+fn a_director_reviving_a_deleted_keys_values_fails() {
+    caught_by("delete-keeps-subtree", "registry-key-lifecycle");
+}
+
+/// wire.md 4.3: a key renamed away is changed. A director that says
+/// otherwise fails.
+#[test]
+fn a_director_calling_a_renamed_key_unchanged_fails() {
+    caught_by("rename-unchanged", "registry-rename-changed-recreate");
+}
+
+/// wire.md 4.3: REG_SET_VALUE under a tombstone revives the chain. A
+/// director refusing it ST_NOT_FOUND fails.
+#[test]
+fn a_director_refusing_a_set_under_a_tombstone_fails() {
+    caught_by("set-under-tombstone-not-found", "registry-under-tombstone");
+}
+
+/// wire.md 4.1: limits count UTF-16 units. A director counting a value
+/// name in UTF-8 bytes fails.
+#[test]
+fn a_director_counting_value_names_in_bytes_fails() {
+    caught_by("value-name-bytes", "registry-reads-and-limits");
+}
+
+/// wire.md 4.3: a value set again keeps its place and stored name. A
+/// director that appends it anew fails.
+#[test]
+fn a_director_moving_a_value_set_again_fails() {
+    caught_by("set-value-appends", "registry-value-order");
+}
+
+/// wire.md 2.8.1, 4.5: two processes share one overlay, and each sees the
+/// generation move. A director that never moves it fails the two clients.
+#[test]
+fn a_director_with_a_frozen_generation_fails_the_two_clients() {
+    caught_by("frozen-reg-gen", "multi-registry-overlay");
+}
+
+/// wire.md 3.4.3, 3.4.10: fh 0 is never a handle, and CLOSE(0) is
+/// ST_BAD_FH. A director answering it ST_OK fails, through the literal
+/// handle form.
+#[test]
+fn a_director_accepting_fh_0_fails() {
+    caught_by("fh-zero-ok", "handles-fh-zero");
+}
+
+/// wire.md 3.4.4: no wrap at any offset.
+#[test]
+fn a_director_wrapping_read_offsets_fails_the_extremes() {
+    caught_by("read-offset-wraps", "read-offset-extremes");
+}
+
+/// wire.md 3.2: a name created again takes the new spelling. A director
+/// that keeps the deleted name's spelling fails.
+#[test]
+fn a_director_keeping_a_deleted_names_spelling_fails() {
+    caught_by("spelling-outlives-delete", "spelling-after-delete-recreate");
+}
+
+/// wire.md 3.2, 3.4.13: a creating request's parents keep their stored
+/// spelling.
+#[test]
+fn a_director_respelling_parents_fails_the_parent_scenario() {
+    caught_by("parent-respelled", "respell-parent-components");
+}
+
+/// wire.md 3.4.3: a file a writable provider holds is never immutable. A
+/// director that says it is fails every same-size change.
+#[test]
+fn a_director_marking_writable_files_immutable_fails_each_same_size_change() {
+    let notes = caught_by("stale-immutable", "cache-content-change-same-size");
+    assert!(
+        notes.iter().all(|n| n.contains("wire.md 3.4.3")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.2: a request addresses its own root. A director deleting a
+/// path in every root fails.
+#[test]
+fn a_director_deleting_in_every_root_fails() {
+    caught_by("delete-ignores-root", "roots-mutations-isolated");
+}
+
+/// wire.md 3.2, 3.4.1: the root `.` is a directory. A director that does
+/// not find it fails both root scenarios.
+#[test]
+fn a_director_not_finding_the_root_fails() {
+    caught_by("root-not-found", "root-dot");
+    caught_by("root-not-found", "root-dot-readonly");
+}
+
+/// wire.md 3.4.8: a directory holding an empty directory is not empty. A
+/// director deleting it fails.
+#[test]
+fn a_director_deleting_a_directory_of_directories_fails() {
+    caught_by("delete-dir-ignores-empty-dirs", "delete-and-excl-edges");
+}
+
+/// wire.md 3.4.1: GETATTR answers the kind a path has now. A director
+/// whose answer outlives a DELETE fails.
+#[test]
+fn a_director_remembering_a_paths_kind_fails() {
+    caught_by("stale-kind", "type-change-same-name");
+}
+
+/// wire.md 3.4.8: a file with open handles is deleted like any other. A
+/// director leaving it pending until CLOSE fails.
+#[test]
+fn a_director_leaving_a_delete_pending_fails() {
+    caught_by("delete-pending-until-close", "delete-dir-after-open-child");
+}
+
+/// wire.md 3.4.14: a staged image holds the bytes as they are, writes in
+/// the session included. A stager copying the mounted bytes fails.
+#[cfg(windows)]
+#[test]
+fn a_stager_copying_the_mounted_bytes_fails() {
+    let notes = caught_by("stage-mount-bytes", "stage-exec-after-write");
+    assert!(
+        notes.iter().any(|n| n.contains("wire.md 3.4.14")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.4.1: a GETATTR reply is 18 bytes. One with bytes after them
+/// fails, though the shim's lenient decoder would read it.
+#[test]
+fn a_director_sending_trailing_reply_bytes_fails() {
+    let notes = caught_by("reply-trailing", "getattr-files");
+    assert!(
+        notes.iter().any(|n| n.contains("wire.md 3.4.1: 18 bytes")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 4.3: REG_KEY children are sorted by `folded`. A director
+/// sending them in another order fails, though the shim's map would hide
+/// it.
+#[test]
+fn a_director_sending_unsorted_key_children_fails() {
+    let notes = caught_by("unsorted-children", "registry-create-key");
+    assert!(
+        notes.iter().any(|n| n.contains("sorted by `folded`")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.4.8: a director may keep a deleted or replaced file for its
+/// open handles, one file to all of them. One that does passes the
+/// committed suite and the generated cases.
+#[test]
+fn a_director_keeping_deleted_files_for_their_handles_passes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let failures = aether_testkit::tempdir().unwrap();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave keep-deleted",
+        &dir,
+        "20",
+        &[
+            "--generate",
+            "--cases",
+            "512",
+            "--seed",
+            "1",
+            "--failures",
+            failures.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// wire.md 3.4.8, 3.4.4: a kept file is one file to all its handles. A
+/// director keeping a copy per handle fails.
+#[test]
+fn a_director_keeping_a_copy_per_gone_handle_fails() {
+    caught_by("gone-handles-private", "handles-deleted-file-shared");
 }

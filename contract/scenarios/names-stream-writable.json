@@ -1,0 +1,25 @@
+{
+  "name": "names-stream-writable",
+  "description": "A named stream on a path a writable provider holds (wire.md 3.2): a director either holds streams, never listing them and never changing the base file through them, or treats every request naming one as a name it does not have (ST_NOT_FOUND or ST_BAD_REQUEST). It never stores `x.sav:stream` as an entry: READDIR lists the base file alone, at its own size.",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/x.sav", "contents": "data"}], "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "trunc"], "path": "saves/x.sav:stream"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}, {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}], "wire": "3.2"}, "note": "refused, or a handle on a stream the director holds"},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "stream bytes"}, "expect": {"one_of": [{"reply": {"written": 12}}, {"status": "bad-fh"}], "wire": "3.2"}, "note": "only a director that gave fh 1 has it"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"one_of": [{"status": "ok"}, {"status": "bad-fh"}], "wire": "3.2"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/x.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "x.sav", "is_dir": false, "size": 4, "mtime": 0}]}}, "note": "never `x.sav:stream`"},
+    {"request": {"op": "delete", "root": 0, "path": "saves/x.sav:zone.identifier"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}, {"status": "ok"}], "wire": "3.2"}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/x.sav:s", "to": "saves/y.sav"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.2"}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/x.sav", "to": "saves/z.sav:s"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.2"}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/x.sav:s"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.2"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "saves/x.sav:s"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}, {"reply": {"names": "saves/x.sav:s"}}], "wire": "3.2, 3.4.12"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "x.sav", "is_dir": false, "size": 4, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/x.sav"}, "expect": {"reply": {"fh": 2, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": "data"}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

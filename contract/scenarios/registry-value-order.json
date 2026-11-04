@@ -1,0 +1,13 @@
+{
+  "name": "registry-value-order",
+  "description": "Values keep their order and spelling (wire.md 4.3: REG_SET_VALUE \"replaces the value of that folded name (keeping its stored name) or appends it\"): a value set again under another case stays where it was with its own name; deleted, it leaves a value tombstone; set again, it goes after the others and the tombstone goes.",
+  "tree": {"roots": [{"id": 0, "files": [{"path": "a.txt", "contents": "a"}]}], "registry": {"keys": [{"path": "\\Registry\\Machine\\Software\\Conform", "values": [{"name": "A", "ty": 4, "data": {"hex": "01000000"}}, {"name": "b", "ty": 4, "data": {"hex": "02000000"}}]}]}},
+  "steps": [
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Conform", "name": "a", "ty": 4, "data": {"hex": "03000000"}}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "A", "ty": 4, "data": {"hex": "03000000"}}, {"name": "b", "ty": 4, "data": {"hex": "02000000"}}], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Conform", "name": "A"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 5, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "b", "ty": 4, "data": {"hex": "02000000"}}], "value_tombstones": ["a"], "children": []}}}},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Conform", "name": "a", "ty": 4, "data": {"hex": "04000000"}}, "expect": {"reply": {"version": 6}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Conform"}, "expect": {"reply": {"version": 6, "node": {"created": true, "volatile": false, "last_write": 0, "values": [{"name": "b", "ty": 4, "data": {"hex": "02000000"}}, {"name": "a", "ty": 4, "data": {"hex": "04000000"}}], "value_tombstones": [], "children": []}}}}
+  ]
+}

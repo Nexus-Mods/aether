@@ -1,0 +1,30 @@
+{
+  "name": "rename-edges",
+  "description": "RENAME's edges (wire.md 3.4.7): a `to` that is an ancestor of `from` is a directory with something under it, ST_IO_ERROR; a `to` equal to `from` in the same spelling is ST_OK and changes nothing; a missing `from` is ST_NOT_FOUND whatever `to` is; a directory onto a file is ST_IO_ERROR; a `to` whose parent is missing is ST_NOT_FOUND; a rename between two writable entries of one root moves the file; a file onto an empty directory may replace it or be refused. Nothing moves on a refusal.",
+  "tree": {
+    "roots": [
+      {"id": 0, "files": [{"path": "saves/dir/sub/x.txt", "contents": "x"}, {"path": "saves/f.txt", "contents": "f"}], "dirs": ["saves/empty"], "writable": ["saves", "w2"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir/sub", "to": "saves/dir"}, "expect": {"status": "io-error"}, "note": "onto an ancestor of `from`"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/sub/x.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/f.txt", "to": "saves/f.txt"}, "expect": {"status": "ok"}, "note": "the same name, the same spelling"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/f.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir", "to": "saves/dir"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/sub/x.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "dir", "is_dir": true, "size": 0, "mtime": 0}, {"name": "empty", "is_dir": true, "size": 0, "mtime": 0}, {"name": "f.txt", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/missing", "to": "saves/dir"}, "expect": {"status": "not-found"}, "note": "a missing `from` onto a full directory"},
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir", "to": "saves/f.txt"}, "expect": {"status": "io-error"}, "note": "a directory onto a file"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/f.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/sub/x.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir/sub", "to": "saves/missing/sub"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.4.7"}, "note": "`to`'s parent is missing"},
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir/sub", "to": "saves/f.txt/sub"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.4.7"}, "note": "`to`'s parent is a file"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/missing"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/sub/x.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir/sub/x.txt", "to": "w2/g.txt"}, "expect": {"status": "ok"}, "note": "between two writable entries of one root"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/sub/x.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "w2/g.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/f.txt", "to": "saves/empty"}, "expect": {"one_of": [{"status": "ok"}, {"status": "io-error"}], "wire": "3.4.7"}, "note": "a file onto an empty directory; the last step, since what follows would depend on it"}
+  ]
+}

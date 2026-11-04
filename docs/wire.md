@@ -323,6 +323,23 @@ in a request says which process sent it, so:
 - `reg_gen` in the shared header is how one process's registry write
   invalidates every other process's cache (section 4.5).
 
+Each request takes effect atomically with respect to every other on the
+ring, from any client:
+
+- of concurrent `OPEN_EXCL` creates of one missing name, or REG_CREATE_KEYs
+  of one missing key, exactly one succeeds;
+- concurrent WRITEs to disjoint ranges all land;
+- each append WRITE lands whole at an end;
+- a request concurrent with a RENAME or DELETE sees the state before it or
+  the state after it, never a mixture;
+- of a create (`OPEN_CREATE`) and a MKDIR of one missing name, at most one
+  succeeds, and the name is then one entry of one kind; a create under a
+  directory concurrent with a RENAME of that directory lands under one of
+  its two names, or is refused as a create under a missing parent.
+
+The reference serves each file request under one lock over its tree, and
+each registry request under one lock over its overlay.
+
 ### 2.9 Windows backing: a named section and two events
 
 | Object | Director creates with | Shim opens with | Named by |
@@ -432,10 +449,15 @@ requests (READ, WRITE, SETATTR, CLOSE) carry no root: the handle implies it.
   write OPEN, MKDIR, RENAME targets), which keeps the caller's spelling so
   that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
-  The reference holds no named streams: to it, `file.esp:stream` is a name
-  it does not have (GETATTR `found = 0`, OPEN `ST_NOT_FOUND`), and a
-  director that holds no stream of that name must never answer it with the
-  base file's attributes or bytes.
+  A director that holds no stream of that name must never answer it with
+  the base file's attributes or bytes. A director either holds named
+  streams, never listing them in READDIR and never changing the base file's
+  size or bytes through them, or treats every request naming one as a name
+  it does not have: GETATTR `found = 0`; OPEN (creating or not), MKDIR,
+  DELETE, RENAME at either end, RENAME_X at either end and STORED_NAMES
+  `ST_NOT_FOUND` or `ST_BAD_REQUEST`. It never stores a name containing `:`
+  as an entry. The reference holds no named streams and answers
+  `ST_NOT_FOUND` to every such request (GETATTR `found = 0`).
 
 A director must look paths up case-insensitively under the same fold, and must
 treat a path that would leave its root (`..` above the root) as an error.
@@ -486,6 +508,15 @@ same result. There is no locale, no context and no normalisation:
   write OPEN, MKDIR, a RENAME's target) carries the caller's spelling, and
   STORED_NAMES and READDIR answer with stored spellings. The fold is for
   matching only.
+- A request that creates a name stores the spelling of the component it
+  creates; the components above it keep their stored spelling, however the
+  request spells them.
+- A director whose store would treat as one name two names whose folds
+  differ (NTFS's uppercase table puts `ς` and `σ` together, which the fold
+  keeps apart) may refuse the create of the second with `ST_EXISTS`,
+  creating nothing; it never serves the two as one file. Names whose folds
+  are equal are one name whatever the store does (NTFS keeps `ß` and `ẞ`
+  apart, which the fold puts together).
 - Fold `Registry`, `Machine`, `User` and every key and value name the same way
   (section 4).
 
@@ -514,7 +545,8 @@ truncation, bad UTF-8 and out-of-range values.
 **Timestamps.** `mtime` is seconds since the Unix epoch, signed; 0 or less
 means "no time" and the shim substitutes 2024-01-01T00:00:00Z. Which time a
 director reports for a path, if any, is the director's to choose: the shim
-checks no time it is sent.
+checks no time it is sent. A director should report one `mtime` for a path
+in GETATTR and in READDIR until the path changes. The reference reports 0 everywhere.
 
 ### 3.3 Opcode table
 
@@ -638,7 +670,12 @@ A director may send the entries in any order. `size` is copied into both
 directories included; send 0 for a directory (as the golden vector does).
 
 The whole listing is one reply and must fit `payload_cap`. Unknown root:
-`ST_NOT_FOUND`. An oversized listing is answered with the overflow status
+`ST_NOT_FOUND`. A missing directory may be answered `ST_NOT_FOUND` or with
+an empty listing; a file `ST_NOT_A_DIRECTORY`, `ST_NOT_FOUND` or an empty
+listing. (The shim lists only through a directory handle it opened, and
+shows `ST_NOT_FOUND` as an empty listing, so each answer gives the program
+an empty or a failed listing.) The reference answers both with an empty
+listing. An oversized listing is answered with the overflow status
 `i32::MIN` (section 2.5, step 3).
 
 #### 3.4.3 OPEN (3)
@@ -660,7 +697,7 @@ Open flags:
 | 2 | 4 | `OPEN_CREATE` | create if absent |
 | 3 | 8 | `OPEN_EXCL` | fail with `ST_EXISTS` if present |
 | 4 | 16 | `OPEN_TRUNC` | truncate on open |
-| 5 | 32 | `OPEN_APPEND` | writes go to end of file; the director ignores WRITE offsets |
+| 5 | 32 | `OPEN_APPEND` | each WRITE lands at the file's end as it is when the WRITE is served, after every other handle's WRITEs and SETATTRs; the director ignores WRITE offsets |
 
 `oflags == 0` is read as `OPEN_READ`. The shim sends `OPEN_READ` for a read
 open, with a folded path; and for a write open `OPEN_WRITE` plus the create
@@ -668,6 +705,11 @@ bits for the NT disposition: `FILE_SUPERSEDE`/`FILE_OVERWRITE_IF` =
 `CREATE|TRUNC`, `FILE_CREATE` = `CREATE|EXCL`, `FILE_OPEN_IF` = `CREATE`,
 `FILE_OVERWRITE` = `TRUNC`, `FILE_OPEN` = none. The shim never sends
 `OPEN_APPEND`.
+
+`OPEN_TRUNC` or `OPEN_APPEND` without `OPEN_WRITE`, and `OPEN_CREATE`
+without `OPEN_WRITE`, are never sent by the shim. A director may ignore
+these bits on a read open, or answer `ST_BAD_REQUEST`. The reference ignores
+them: a read open with `OPEN_CREATE` of a missing name is `ST_NOT_FOUND`.
 
 Reply, 24 bytes:
 
@@ -680,13 +722,16 @@ Reply, 24 bytes:
 | 18 | 2 | — | zero |
 | 20 | 4 | u32 | `mount_gen` |
 
-- `fh` is any u64 the director chooses, unique among open handles. The
-  reference starts at 1 and counts up. A director must never issue 0: the
-  shim keeps 0 for a directory it created with MKDIR, which it holds no
-  director handle for, and sends `CLOSE(0)` when the program closes it.
+- `fh` is any u64 the director chooses except 0, unique among open handles.
+  The reference starts at 1 and counts up. A shim may send `CLOSE(0)` when a
+  program closes a directory it created with MKDIR, which holds no director
+  handle, so a director never issues 0.
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
   read cache caches small reads only through read-only, immutable handles.
-  Never set it for a write open or a directory.
+  Never set it for a write open or a directory. Since every handle of a file
+  reads the file as it is now (3.4.4), a handle on a file any request can
+  change cannot be immutable: never set it for a file a writable provider
+  holds.
 - `mount_gen`: a generation the director bumps whenever a root's content is
   replaced. The cache keys a file's blocks by (root, folded path, size,
   `mount_gen`), so two immutable opens of one path with equal size and
@@ -696,6 +741,17 @@ Reply, 24 bytes:
 - Errors: unknown root `ST_NOT_FOUND`; `OPEN_WRITE` on a root with no writable
   provider `ST_READ_ONLY`; `OPEN_EXCL` on an existing path `ST_EXISTS`;
   missing path without `OPEN_CREATE` `ST_NOT_FOUND`.
+- A write open of an existing path no writable provider serves is
+  `ST_READ_ONLY`, `OPEN_EXCL` or not. Where a writable provider serves it,
+  `OPEN_EXCL` on an existing path, a directory included, is `ST_EXISTS`,
+  checked before the kind of entry at the path. Any other write open of a
+  directory is `ST_IS_DIR`; a director may answer `ST_IO_ERROR` instead. The
+  reference answers `ST_IS_DIR` with `OPEN_CREATE` and `ST_IO_ERROR`
+  without it.
+- A create (`OPEN_CREATE` of a missing name) whose parent is missing is
+  `ST_NOT_FOUND`; one whose parent is a file is `ST_NOT_FOUND` or
+  `ST_NOT_A_DIRECTORY`. Nothing is created. The reference answers
+  `ST_NOT_FOUND` for both.
 
 #### 3.4.4 READ (5)
 
@@ -739,6 +795,12 @@ stops there. Errors: unknown `fh` `ST_BAD_FH`; a directory handle
 
 So a READ comes back whole, `n = min(len, size - offset)`, whenever its form
 can hold that many bytes; a shorter answer is a truncated file to the shim.
+That holds at any offset, with no wrap: a READ at or past the end answers 0
+bytes, whatever its `offset` and `len`.
+
+Every handle of a file reads the file as it is now. A WRITE or SETATTR
+through any handle, or a truncating OPEN, by any client, is seen by the next
+READ through every other handle of that file, as NTFS shows it.
 A director that gives an arena (`VFS_ARENA_LEN`) must answer a READ that sets
 `FLAG_READ_BULK` of more than `payload_cap - 8` bytes in bulk: an inline
 reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
@@ -765,7 +827,18 @@ fails it: on `ST_OK`, `written` is `len`.
 
 A WRITE past the end of the file grows it, and the bytes between the old end
 and the WRITE's offset read as zeros, as NTFS fills them. The same holds for
-SETATTR (3.4.6).
+SETATTR (3.4.6). A WRITE of `len = 0` is `ST_OK` with `written = 0` and
+changes nothing, wherever its offset.
+
+A WRITE whose end would pass `u64::MAX`, or the largest file the director
+can hold, is `ST_NO_SPACE` or `ST_BAD_REQUEST`; the file is unchanged and
+the slot is completed. The reference holds files of up to 64 MiB and
+answers `ST_NO_SPACE`.
+
+Through a handle opened without `OPEN_WRITE` a director may honour a WRITE
+or SETATTR, or answer `ST_READ_ONLY`; on a file no writable provider holds
+it is `ST_READ_ONLY`, and the file does not change. The reference honours
+both on a file a writable provider holds. (The shim never sends either.)
 
 Reply, 8 bytes: `written:u32 | zero:u32`. The shim reads only the first 4
 bytes.
@@ -779,7 +852,9 @@ A directory no writable provider holds may answer `ST_READ_ONLY` instead.
 Request, 16 bytes: `fh:u64 | size:u64`. Sets the file's length (truncate or
 extend) on an open handle; there is no path-keyed form. Reply: status only.
 Unknown `fh` `ST_BAD_FH`. An extension reads as zeros, bytes a truncation cut
-off included when the file grows again.
+off included when the file grows again. A SETATTR to a size beyond the
+largest file the director can hold is `ST_NO_SPACE` or `ST_BAD_REQUEST`, and
+the file is unchanged.
 
 #### 3.4.7 RENAME (8)
 
@@ -804,8 +879,33 @@ directory moves with everything under it. A file or an empty directory at
 inside `from`, is `ST_BAD_REQUEST` (as the reference director answers) or
 `ST_IO_ERROR` (as an overlay answers that never moves a directory only its
 lower layer holds, the root included), and nothing moves. A missing `from` is
-`ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`. A
-file with open handles is renamed like any other.
+`ST_NOT_FOUND` whatever `to` is, the root at either end aside; either end
+outside every writable provider `ST_READ_ONLY`.
+
+- **Kinds.** A directory onto an existing file is `ST_IO_ERROR`, and nothing
+  moves. A file onto an empty directory may replace it (`ST_OK`) or be
+  refused with `ST_IO_ERROR`; the reference replaces it.
+- **The same name.** A `to` equal to `from`, in the same spelling, is
+  `ST_OK` and nothing changes.
+- **An ancestor.** A `to` that is an ancestor of `from`, other than the
+  root, is a directory with something under it: `ST_IO_ERROR`.
+- **A missing parent.** A `to` whose parent is missing is `ST_NOT_FOUND`;
+  one whose parent is a file is `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`.
+  Nothing moves. The reference answers `ST_NOT_FOUND` for both.
+
+The reference checks in this order: the root at an end or a `to` inside
+`from`, then a missing `from`, then a read-only end, then `to`'s parent,
+then what is at `to`.
+
+A file with open handles is renamed like any other. Its handles follow it:
+a READ, WRITE or SETATTR through one acts on the file under its new name,
+and so for a file under a renamed directory. After a RENAME_X a handle on
+the moved file may follow it to `to_root` or answer as 3.4.8 says for a
+deleted file; it never acts on a file later created at the old name. (The
+shim renames through `FileRenameInformation` on the program's own handle
+and goes on using that handle: a save writes, renames into place, then
+truncates, flushes or writes through the same handle.) A file replaced by
+the rename is, to its own handles, a deleted file (3.4.8).
 
 #### 3.4.8 DELETE (9)
 
@@ -819,8 +919,18 @@ is `ST_BAD_REQUEST` (as the reference director answers) or `ST_IO_ERROR`,
 and is never deleted. A missing path is `ST_NOT_FOUND`; a path outside every
 writable provider `ST_READ_ONLY`. A file with open handles is deleted like
 any other: a director that keeps files on disk should open them with
-`FILE_SHARE_DELETE`, so the delete or rename of an open file succeeds. What a
-handle reads after its file was deleted or renamed is the director's.
+`FILE_SHARE_DELETE`, so the delete or rename of an open file succeeds.
+
+After its file is deleted, or replaced by a RENAME or RENAME_X onto its
+name, a handle's READ, WRITE and SETATTR may fail with `ST_IO_ERROR` or
+`ST_NOT_FOUND`, or the director may keep the file for its open handles, as
+NTFS keeps a file deleted with `FILE_SHARE_DELETE`. A kept file is still
+one file to all of them: it starts with its last bytes, and a WRITE or
+SETATTR through one of its handles is seen by a READ through any other
+(3.4.4), but by nothing that reaches it through a name, since it has none.
+A handle never reads or changes a file created at, or moved to, that name
+later, and its CLOSE is `ST_OK`. The reference fails them: READ
+`ST_IO_ERROR`, WRITE and SETATTR `ST_NOT_FOUND`.
 
 #### 3.4.9 MKDIR (10)
 
@@ -838,6 +948,12 @@ that exists only in a read-only layer beneath it, see below):
   `FILE_CREATE` only `ST_EXISTS` reports the name collision.
 - An existing file: `ST_IO_ERROR` where a writable provider serves the path,
   `ST_EXISTS` where none does. The reference director answers the same.
+
+An existing directory no writable provider serves, the root included, is
+`ST_EXISTS` or `ST_READ_ONLY`; the reference answers `ST_EXISTS`. A MKDIR
+whose parent is missing is `ST_NOT_FOUND`; one whose parent is a file is
+`ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`. Nothing is created. The reference
+answers `ST_NOT_FOUND` for both.
 
 **Names only in a read-only lower.** A director may serve a writable root as
 an overlay: a writable upper over a read-only lower. For a name that exists
@@ -858,7 +974,9 @@ The reference director has no layers, so it never gives these answers.
 
 #### 3.4.10 CLOSE (11)
 
-Request, 8 bytes: `fh:u64`. Reply: status only. Unknown `fh` `ST_BAD_FH`.
+Request, 8 bytes: `fh:u64`. Reply: status only. Unknown `fh` `ST_BAD_FH`;
+`CLOSE(0)` is `ST_BAD_FH` (3.4.3: 0 is never a handle), which the shim
+ignores.
 
 #### 3.4.11 HEARTBEAT (13)
 
@@ -887,6 +1005,14 @@ An empty reply payload is one empty name (the shim splits the reply on
 every `/`). The shim never asks for zero names: when it already knows every
 component it sends no request.
 
+A reply that names the components gives every component the director has in
+its stored spelling, even when later components are unknown: an echo of a
+known component as sent defeats `GetFinalPathNameByHandle`. A `skip` equal
+to or greater than the number of components, which the shim never sends,
+may be answered with an empty reply or `ST_BAD_REQUEST`; the reference
+answers an empty reply. STORED_NAMES of `"."` names the root itself: the
+reply is `.`, one name.
+
 #### 3.4.13 RENAME_X (23)
 
 Request:
@@ -904,6 +1030,14 @@ there) and removed from `from_root`; a directory is refused with
 `ST_CROSS_ROOT`, which the shim reports as `STATUS_NOT_SAME_DEVICE`. Equal
 roots behave as RENAME. Reply: status only.
 
+A directory at `to`, the target root included, is `ST_IS_DIR` or
+`ST_IO_ERROR`; the reference answers `ST_IS_DIR`. Either end outside every
+writable provider is `ST_READ_ONLY`. On any refusal both roots are
+unchanged. The file at `to` takes the caller's spelling, as RENAME's does,
+and the components above it keep theirs (3.2). A `to` whose parent is
+missing, or is a file, is answered as RENAME answers it (3.4.7). Handles on
+the moved file are as 3.4.7 says.
+
 #### 3.4.14 STAGE_EXEC (24)
 
 Request: path request (the image the program is starting). Reply: the real,
@@ -911,7 +1045,9 @@ on-disk Windows path to start it from, UTF-8, the whole payload. The director
 puts the program on real disk first (a child's image is opened by the kernel
 before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
 a director with a stager may answer `ST_NOT_FOUND` for a file it does not
-stage.
+stage. With a stager, a directory, a missing path or a file it does not
+stage is `ST_NOT_FOUND`. A staged image holds the file's bytes as they are
+when STAGE_EXEC is served, writes in the session included.
 
 How the shim uses it: only when `VFS_ROOT_BACKINGS` names at least one
 backing (otherwise the child starts as it would without the VFS). Then, for
@@ -944,6 +1080,14 @@ elsewhere) the image path is left as it was.
 
 Values 0 to -11 are fixed by the shim, which matches statuses by number. New
 statuses take the next free negative number.
+
+A path with a file as a component is a missing path: GETATTR `found = 0`,
+and `ST_NOT_FOUND` from every other opcode (READDIR may answer it as 3.4.2
+answers a missing directory). A director may answer
+`ST_NOT_A_DIRECTORY` instead from every opcode but GETATTR. The reference
+answers `ST_NOT_FOUND`. (The shim maps `ST_NOT_FOUND` to
+`OBJECT_NAME_NOT_FOUND` and `ST_NOT_A_DIRECTORY` on an open to
+`STATUS_UNSUCCESSFUL`.)
 
 The `ST_*` names are this document's names for the wire values. In
 `contract/protocol.json` each has its lowercase, hyphenated name
@@ -1015,6 +1159,10 @@ all eight `ST_NOT_SUPPORTED`.
 | Value name | 16 383 UTF-16 units | value names |
 | Value data | 1 048 576 bytes (`1 << 20`) | value data |
 | Write depth | 512 components below `\Registry` | keys a write may create or move |
+
+The write depth limits writes only: a read (REG_LOOKUP, REG_KEY,
+REG_CHANGED) deeper than it answers as for any key the overlay does not
+hold.
 
 The shim never sends a registry request larger than `payload_cap`: it refuses
 it locally with `ST_BAD_REQUEST`. For a write that becomes
@@ -1123,8 +1271,9 @@ is dropped. Its semantics:
   parent.
 - **REG_LOOKUP.** A node is present (`created` decides state 1 or 2); a key
   with no node that is tombstoned itself, or lies below a tombstoned
-  ancestor, is state 3; anything else is absent. `below` is whether a node or
-  a tombstone lies strictly under the path; it is 0 for a tombstoned key.
+  ancestor, is state 3; anything else is absent, at any depth (4.1). `below`
+  is whether a node or a tombstone lies strictly under the path; it is 0 for
+  a tombstoned key.
 - **REG_KEY.** The node at the path, or none (`has_node = 0`).
 - **Limits.** Every write but REG_RENAME_KEY checks, in this order, before
   anything else: the path is a valid key path (4.2); every key-name component
@@ -1158,7 +1307,9 @@ is dropped. Its semantics:
   component of the path is at most 255 units; the path is not `\Registry`
   (each `ST_BAD_REQUEST`). The key must have a node in the overlay (`ST_NOT_FOUND` otherwise). Another
   node at the new name is `ST_EXISTS`, unless the new name differs only in
-  case. Every key it moves is created at its own depth under the new name, so
+  case. A `new_leaf` that folds to the key's own leaf, in the same spelling
+  or another, renames it in place. Every key it moves is created at its own
+  depth under the new name, so
   a moved key deeper than 512 components is `ST_BAD_REQUEST`. The key and its
   subtree move to the new name under the same parent, every moved key
   `created` (the new name has no real counterpart), tombstones below it
@@ -1184,7 +1335,7 @@ registry. Its status becomes the NT status the caller gets:
 | Director status | NT status |
 |---|---|
 | `ST_BAD_REQUEST` | `STATUS_INVALID_PARAMETER` |
-| `ST_NOT_FOUND` (the key is tombstoned) | `STATUS_KEY_DELETED` |
+| `ST_NOT_FOUND` (REG_DELETE_VALUE or REG_DELETE_KEY of a tombstoned key, REG_RENAME_KEY of a key with no node) | `STATUS_KEY_DELETED` |
 | `ST_EXISTS` (rename, create) | `STATUS_CANNOT_DELETE` |
 | anything else | `STATUS_UNSUCCESSFUL` |
 
@@ -1196,6 +1347,10 @@ and anything else `STATUS_UNSUCCESSFUL`.
 
 A write reply that is not exactly 8 bytes counts as a failed write
 (`ST_IO_ERROR`).
+
+The shim treats a key with no node below a `created` key as nonexistent, so
+an absent REG_LOOKUP there hides the real key. For any other absent key it
+checks the key's ancestors itself.
 
 ### 4.5 Registry generation (`reg_gen`)
 

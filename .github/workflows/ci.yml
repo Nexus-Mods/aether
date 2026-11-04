@@ -77,7 +77,7 @@ jobs:
       # seed is the run's id, so a failure replays with --seed; the shrunk
       # case (or failing round) is uploaded.
       - name: Director conformance (reference, file ring and section)
-        # About a minute measured (docs/conformance.md); generous headroom.
+        # A few minutes measured (docs/conformance.md); generous headroom.
         timeout-minutes: 15
         shell: bash
         run: |
@@ -151,7 +151,7 @@ jobs:
       # reference director over a ring file. The seed is the run's id; the
       # shrunk case (or failing round) is uploaded.
       - name: Director conformance (reference, file ring)
-        # About a minute measured (docs/conformance.md); generous headroom.
+        # About two minutes measured (docs/conformance.md); generous headroom.
         timeout-minutes: 15
         run: |
           cargo build -p aether-conform

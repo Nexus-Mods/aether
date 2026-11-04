@@ -90,9 +90,16 @@ fn with_server<R>(f: impl FnOnce(&OwnedSeg) -> R) -> R {
             let server = RingServer::new(owned.seg(), SpinNotifier).unwrap();
             serve(&server, &mut floor(), &stop).unwrap();
         });
-        let r = f(&owned);
-        stop.store(true, Ordering::Release);
-        r
+        // Stops the server however `f` ends, so a panic fails the bench
+        // instead of hanging the scope.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let _stop = Stop(&stop);
+        f(&owned)
     })
 }
 

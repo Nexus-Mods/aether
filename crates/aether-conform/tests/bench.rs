@@ -250,7 +250,9 @@ fn a_baseline_from_another_machine_is_refused() {
     let (dir, r) = every_kind_report();
     let mut other = r.clone();
     other["machine"]["cpu"] = json!("another CPU");
-    let base = write_json(dir.path().parent().unwrap(), "other-machine.json", &other);
+    // Not among the workloads: every `.json` there is one.
+    let baselines = aether_testkit::tempdir().unwrap();
+    let base = write_json(baselines.path(), "other-machine.json", &other);
     let (o, _) = bench(
         dir.path(),
         &reference(),
@@ -264,7 +266,6 @@ fn a_baseline_from_another_machine_is_refused() {
     let e = aether_conform::bench::compare(&r, &moved).unwrap_err();
     assert!(e.contains("geometry"), "{e}");
     assert!(aether_conform::bench::compare(&r, &r).is_ok());
-    let _ = std::fs::remove_file(base);
 }
 
 /// However much slower a run is than its baseline, it exits 0; only
@@ -274,7 +275,8 @@ fn fail_over_is_the_only_way_to_a_non_zero_exit() {
     let (dir, r) = every_kind_report();
     // A baseline whose p50s were a thousandth of these: every opcode rose.
     let fast = scaled(&r, 0.001);
-    let base = write_json(dir.path().parent().unwrap(), "fast-baseline.json", &fast);
+    let baselines = aether_testkit::tempdir().unwrap();
+    let base = write_json(baselines.path(), "fast-baseline.json", &fast);
     let c = aether_conform::bench::compare(&r, &fast).unwrap();
     assert!(c.worst_rise_pct > 1000.0, "{}", c.worst_rise_pct);
     let (o, _) = bench(
@@ -293,7 +295,6 @@ fn fail_over_is_the_only_way_to_a_non_zero_exit() {
     assert!(text(&o).contains("over 50%"), "{}", text(&o));
     let (o, _) = bench(dir.path(), &reference(), &["--fail-over", "50"]);
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
-    let _ = std::fs::remove_file(base);
 }
 
 fn null_adapter_round_trip(args: &str) -> Value {

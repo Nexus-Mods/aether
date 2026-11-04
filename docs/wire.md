@@ -1170,9 +1170,12 @@ A reply can be one the shim cannot use: a status that says the request
 failed, a status no table names, the ring's overflow status, an `ST_OK`
 payload that does not decode, a bulk READ reply whose data is not where
 section 2.6 puts it, or no reply within the shim's deadline (section 2.5,
-"Deadlines"). In every case the shim answers the program's call itself,
-never with bytes taken from the bad reply, and goes on serving: the next
-call goes to the director as before. A reply that arrives after its
+"Deadlines"). A reply the shim refuses gives the program none of its data:
+the shim answers the call itself, and goes on serving, so the next call
+goes to the director as before. The shim accepts two kinds of reply that
+are not exactly their form: bytes after a file reply's fields (section
+3.2), and a WRITE reply cut short after its first word (3.4.5). The table
+shows them as success. A reply that arrives after its
 deadline lands in a slot the shim has given up, and answers nothing.
 
 The table gives what the program gets for each kind of bad reply, by the
@@ -1261,8 +1264,10 @@ The calls, each the first of its kind on a handle or name:
   `ST_EXISTS` is asked about again, as 4.4 says).
 
 A reply that comes too late or too large does not undo what the director
-did: a rename, delete or write it carried out is still done, though the
-program was told the call failed.
+did: any change it carried out (a rename, a delete, a write, a new size, a
+registry write) is still done, though the program was told the call
+failed. Creating a directory is the exception, as its call above says: the
+shim finds the directory and answers `OBJECT_NAME_COLLISION`.
 
 | Operation | `ST_NOT_FOUND` | `ST_EXISTS` | `ST_READ_ONLY` | `ST_IS_DIR` | `ST_NO_SPACE` | `ST_BAD_REQUEST` | `ST_CROSS_ROOT` | any other status | overflow | truncated | trailing bytes | garbage | bulk reply out of place | no reply in time | the call after a late reply |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|

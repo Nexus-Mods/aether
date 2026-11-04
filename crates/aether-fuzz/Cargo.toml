@@ -1,0 +1,20 @@
+[package]
+name = "aether-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The bodies of the decoder fuzz targets, replayed on stable Rust in every CI run; fuzz/ runs them under cargo-fuzz."
+
+[dependencies]
+aether-casefold.workspace = true
+aether-ipc.workspace = true
+aether-ntlayout.workspace = true
+aether-protocol.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

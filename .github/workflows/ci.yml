@@ -131,7 +131,7 @@ jobs:
         -p aether-ipc -p aether-protocol -p aether-casefold -p aether-pe
         -p aether-env -p aether-registry -p aether-testkit
         -p aether-ntlayout -p aether-redirect -p aether-filering
-        -p aether-rpc -p aether-refdirector -p aether-conform
+        -p aether-rpc -p aether-refdirector -p aether-conform -p aether-fuzz
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain (rust-toolchain.toml)
@@ -141,6 +141,14 @@ jobs:
           save-if: ${{ env.SAVE_LARGE_CACHES == 'true' }}
       - name: Format (cargo fmt --check)
         run: cargo fmt --all --check
+      # fuzz/ is outside the workspace (nightly, libfuzzer), so --all does not
+      # see it. Its targets are checked on the stable toolchain here, so they
+      # cannot rot between the weekly runs (fuzz.yml); the bodies they call run
+      # in the test step below (aether-fuzz's replay).
+      - name: Format and check the fuzz targets
+        run: |
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
+          cargo check --locked --manifest-path fuzz/Cargo.toml
       - name: Clippy (Linux crates, all targets, warnings are errors)
         run: cargo clippy $LINUX_CRATES --all-targets -- -D warnings
       - name: Portable crates (compile and test on Linux)

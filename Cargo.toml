@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# cargo-fuzz's crate: nightly, its own lockfile (fuzz/Cargo.toml).
+exclude = ["fuzz"]
 members = [
   # The case fold every name crosses the ring in, shared by file paths
   # (aether-redirect) and registry keys (aether-registry). No dependencies.
@@ -28,6 +30,9 @@ members = [
   # The conformance tool: scenarios (JSON) and the rules a director's replies
   # are compared with the reference's by. Portable.
   "crates/aether-conform",
+  # The fuzz targets' bodies, replayed on stable in every CI run; fuzz/ (outside the
+  # workspace) runs them under cargo-fuzz.
+  "crates/aether-fuzz",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.

@@ -9,7 +9,7 @@
 # contract/artifacts.json (the names the four are staged under), read from
 # the working tree, except the crates no native is built from: the fixtures'
 # (crates/*fixture*) and those named in $excluded below (the test kit, the
-# conformance harness, the reference director, the file ring), so a change
+# conformance harness, the reference director, the file ring, the fuzz bodies), so a change
 # there changes no native. bin/natives-key.tests.ps1 checks, with cargo tree,
 # that neither native's dependency tree (x64 and i686) contains any of them.
 # They are
@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 
 # crates no native depends on (bin/natives-key.tests.ps1 checks it), besides
 # the fixtures' crates/*fixture*
-$excluded = @('crates/aether-testkit', 'crates/aether-conform', 'crates/aether-refdirector', 'crates/aether-filering')
+$excluded = @('crates/aether-testkit', 'crates/aether-conform', 'crates/aether-refdirector', 'crates/aether-filering', 'crates/aether-fuzz')
 if ($ListExcluded) { $excluded; exit 0 }
 
 $root = Split-Path -Parent $PSScriptRoot

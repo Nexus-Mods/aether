@@ -1,0 +1,65 @@
+# cargo-fuzz's crate: the engine runs the bodies in aether-fuzz.
+#
+# Why this is outside the workspace (its own [workspace], root `exclude`): it
+# needs a nightly compiler (fuzz/rust-toolchain.toml) and libfuzzer-sys, and
+# neither belongs in the workspace's lockfile or build.
+#
+# Why cargo-fuzz runs on Linux only, weekly and by hand (.github/workflows/fuzz.yml):
+# it needs nightly, and its sanitizer support on x86_64-pc-windows-msvc is not
+# something to build CI on. The decoders are portable, so Linux covers them,
+# and the Windows-only code that handles their output is covered by the shim
+# tests that run on Windows. What does run on every push, on both OSes, is
+# aether-fuzz's replay of the same bodies on stable: the seeds, every crash
+# kept under fuzz/regressions/, and random bytes.
+[package]
+name = "aether-fuzz-targets"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+aether-fuzz = { path = "../crates/aether-fuzz" }
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "reply_decode"
+path = "fuzz_targets/reply_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request_decode"
+path = "fuzz_targets/request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shim_cfg"
+path = "fuzz_targets/shim_cfg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ring_response"
+path = "fuzz_targets/ring_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dir_records"
+path = "fuzz_targets/dir_records.rs"
+test = false
+doc = false
+bench = false

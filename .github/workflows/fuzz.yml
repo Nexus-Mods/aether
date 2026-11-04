@@ -1,0 +1,72 @@
+# cargo-fuzz over the decoders the shim runs on director output (fuzz/,
+# aether-fuzz): weekly, and by hand. Never part of ci.yml, which replays the
+# same bodies on stable on every push (aether-fuzz's tests) and checks that the
+# targets build. Linux only: cargo-fuzz needs nightly, and its sanitizers on
+# x86_64-pc-windows-msvc are not something to build CI on; see fuzz/Cargo.toml.
+name: fuzz
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to run each target
+        default: '300'
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml's pinned toolchain, for cargo install and the
+      # seed writer
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      # fuzz/rust-toolchain.toml's dated nightly, which cargo-fuzz builds with
+      - name: Nightly toolchain (fuzz/rust-toolchain.toml)
+        working-directory: fuzz
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+      # The golden vectors, framed for each target, then the crashes kept
+      # under fuzz/regressions/, as the starting corpus.
+      - name: Seed the corpus
+        run: |
+          cargo run -p aether-fuzz --example write-seeds -- fuzz/corpus
+          for dir in fuzz/regressions/*/; do
+            [ -d "$dir" ] || continue
+            mkdir -p "fuzz/corpus/$(basename "$dir")"
+            cp -r "$dir". "fuzz/corpus/$(basename "$dir")/"
+          done
+      - name: Run every target
+        working-directory: fuzz
+        shell: bash
+        run: |
+          seconds="${{ github.event.inputs.seconds || '300' }}"
+          failed=0
+          for target in reply_decode request_decode shim_cfg ring_response dir_records; do
+            echo "::group::$target"
+            cargo fuzz run "$target" -- -max_total_time="$seconds" || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+      # A crash is kept as the input that made it; copy it to
+      # fuzz/regressions/<target>/ with the fix (fuzz/regressions/README.md).
+      - name: Crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

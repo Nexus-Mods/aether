@@ -68,6 +68,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-fuzz"
+version = "0.1.0"
+dependencies = [
+ "aether-casefold",
+ "aether-ipc",
+ "aether-ntlayout",
+ "aether-protocol",
+ "proptest",
+]
+
+[[package]]
 name = "aether-hooks"
 version = "0.1.0"
 dependencies = [

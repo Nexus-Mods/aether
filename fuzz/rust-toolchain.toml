@@ -1,0 +1,7 @@
+# A dated nightly, not "nightly": cargo-fuzz needs sanitizer flags only
+# nightly has, and an unpinned nightly would break the weekly run (and make a
+# crash unreproducible) whenever a day's nightly changed. Bump it on purpose,
+# when a run on the new one is green.
+[toolchain]
+channel = "nightly-2026-10-28"
+profile = "minimal"

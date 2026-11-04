@@ -579,17 +579,22 @@ Which time a director reports for a path, if any, is the director's to choose:
 the shim checks no time it is sent.
 
 A file's time is the same in every query that reports it. A directory listing
-and a query by path report the `mtime` its READDIR or GETATTR reply carried.
-A query by handle (the basic, network-open, all-information and stat classes,
-which `GetFileTime` and `GetFileInformationByHandle` reach) has no time from
-OPEN, so once any GETATTR or READDIR reply has carried an `mtime` above 0, the
-handle's first time query sends one GETATTR for its path. The handle keeps
-that answer until a WRITE that lands bytes or a SETATTR through it, after
-which its next time query asks again. Until a reply has carried a time, a
-query by handle reports the substitute and sends nothing, so a director that
-sends no times is never asked for one. A by-handle query made before the first
-time-carrying reply reports the substitute even when the director has a time
-for that file.
+and a query by path (the attribute queries and the query by name, every class
+that carries times) report the `mtime` its READDIR or GETATTR reply carried,
+or the substitute when that is 0 or less. A query by handle (the basic,
+network-open, all-information and stat classes, which `GetFileTime` and
+`GetFileInformationByHandle` reach) has no time from OPEN, so the handle's
+first time query sends one GETATTR for its path and reports its `mtime` the
+same way. The handle keeps that answer until a WRITE that lands bytes or a
+SETATTR through it, after which its next time query asks again.
+
+The shim learns from these answers whether the director sends times. Once any
+GETATTR or READDIR reply has carried an `mtime` above 0, every handle asks as
+above. If a handle's first time query in a process comes before any reply has
+carried a time and its GETATTR carries none, the shim takes it that the
+director sends no times: later handle time queries report the substitute and
+send nothing, until a GETATTR or READDIR reply carries a time. A director that
+sends no times so pays at most one GETATTR per process for them.
 
 ### 3.3 Opcode table
 

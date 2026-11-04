@@ -150,13 +150,17 @@ pub(super) unsafe fn qibn_hook_body(
                     buf,
                     st.is_dir,
                     st.size,
-                    time_or(st.mtime, 0),
+                    time_or(st.mtime, SYNTH_FILETIME),
                 ) else {
                     crate::hookstats::note_stat(&path, &format!("byname{class_raw}-UNSUP"));
                     let mut probe = [0u8; 512];
                     refusal = Some(
                         if aether_ntlayout::by_name_info(
-                            class_raw, &mut probe, st.is_dir, st.size, 0,
+                            class_raw,
+                            &mut probe,
+                            st.is_dir,
+                            st.size,
+                            SYNTH_FILETIME,
                         )
                         .is_some()
                         {

@@ -666,3 +666,23 @@ pub(crate) fn nt_enum_records(dir: *mut c_void) -> Vec<DirRecord> {
     }
     out
 }
+
+/// `NtQueryInformationByName` of an absolute path into a 128-byte buffer:
+/// its status and the buffer, or `None` when the export is absent.
+pub(crate) fn nt_query_by_name_abs(path: &str, class: u32) -> Option<(i32, [u8; 128])> {
+    let p = ntdll_proc("NtQueryInformationByName")?;
+    let f: NtQueryInformationByNameFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    let mut buf = [0u8; 128];
+    let mut iosb = [0u8; 16];
+    let st = unsafe {
+        f(
+            &n.oa,
+            iosb.as_mut_ptr() as *mut c_void,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+            class,
+        )
+    };
+    Some((st, buf))
+}

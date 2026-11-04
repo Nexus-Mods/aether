@@ -313,13 +313,23 @@ fn handle_times(h: HANDLE) -> [i64; 3] {
 }
 
 /// The last-write time each query by path reports for `p`:
-/// `NtQueryFullAttributesFile`, `GetFileAttributesExW`.
-fn path_times(p: &Path) -> [i64; 2] {
-    let (st, full) = ntapi::nt_query_full_attributes_abs(&p.display().to_string());
+/// `NtQueryFullAttributesFile`, `GetFileAttributesExW`, and
+/// `NtQueryInformationByName` of `FileNetworkOpenInformation` (34) and
+/// `FileStatInformation` (68). One GETATTR each.
+fn path_times(p: &Path) -> [i64; 4] {
+    let s = p.display().to_string();
+    let (st, full) = ntapi::nt_query_full_attributes_abs(&s);
     assert!(st >= 0, "NtQueryFullAttributesFile: {st:#x}");
+    let by_name = |class: u32, at: usize| {
+        let (st, buf) = ntapi::nt_query_by_name_abs(&s, class).expect("NtQueryInformationByName");
+        assert!(st >= 0, "NtQueryInformationByName({class}): {st:#x}");
+        i64::from_le_bytes(buf[at..at + 8].try_into().unwrap())
+    };
     [
         full.last_write_time,
         ticks(attributes_ex(p).ftLastWriteTime),
+        by_name(34, 16),
+        by_name(68, 24),
     ]
 }
 
@@ -357,10 +367,10 @@ fn a_nonzero_mtime_agrees_across_basic_info_directory_records_and_full_attribute
 
     assert_eq!(listed_time(&data, "c.esp"), want, "the listing");
     let mark = served.recorder.mark();
-    assert_eq!(path_times(&path), [want; 2], "by path");
+    assert_eq!(path_times(&path), [want; 4], "by path");
     assert_eq!(
         ops(served, mark),
-        [Some(Opcode::GetAttr); 2],
+        [Some(Opcode::GetAttr); 4],
         "one GETATTR each, as before"
     );
 
@@ -393,16 +403,26 @@ fn a_nonzero_mtime_agrees_across_basic_info_directory_records_and_full_attribute
     close(h);
 }
 
-/// A director that sends no time: every query keeps the placeholder, and a
-/// handle's time queries send nothing.
+/// A director that sends no time: every query reports the placeholder. A
+/// listing and queries by path carrying no time settle nothing, so the
+/// first handle time query in the process asks once; its answer (no time)
+/// settles it, and no later handle time query asks, on that handle or
+/// another, after a write too.
 #[test]
-fn a_director_that_sends_no_time_gets_the_placeholder_and_no_getattr() {
+fn a_director_that_sends_no_time_is_asked_once_per_process() {
     isolate!();
     let (root, served) = serve(fake());
     let data = root.join("data");
     let path = data.join("c.esp");
     assert_eq!(listed_time(&data, "c.esp"), PLACEHOLDER);
-    assert_eq!(path_times(&path), [PLACEHOLDER; 2]);
+    assert_eq!(path_times(&path), [PLACEHOLDER; 4]);
+
+    let h = open_read(&path);
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(h), [PLACEHOLDER; 3]);
+    assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)], "the first asks");
+    close(h);
+
     let h = open_with(
         &root.join("saves").join("s.ess"),
         GENERIC_READ | GENERIC_WRITE,
@@ -412,30 +432,65 @@ fn a_director_that_sends_no_time_gets_the_placeholder_and_no_getattr() {
     for _ in 0..2 {
         assert_eq!(handle_times(h), [PLACEHOLDER; 3]);
     }
-    assert_eq!(ops(served, mark), []);
+    assert_eq!(ops(served, mark), [], "settled: no time is sent");
     close(h);
 }
 
-/// The limit of the rule above: the shim knows a director sends times only
-/// once a GETATTR or READDIR reply has carried one. A handle asked for its
-/// times before then reports the placeholder without asking; once a time
-/// has been seen, its next query asks.
+/// A handle's time query before anything else in the process asks, and the
+/// time it gets turns per-handle fetching on: it agrees with the listing
+/// and the queries by path that come after it, and another handle asks too.
 #[test]
-fn a_handle_asked_before_any_time_was_seen_gets_the_placeholder() {
+fn a_first_handle_time_query_that_finds_a_time_turns_fetching_on() {
     isolate!();
     const MTIME: i64 = 1_700_000_000;
     let want = MTIME * 10_000_000 + 116_444_736_000_000_000;
-    let (root, served) = serve(fake().with_mtime("data/c.esp", MTIME));
-    let path = root.join("data").join("c.esp");
+    let (root, served) = serve(
+        fake()
+            .with_mtime("data/c.esp", MTIME)
+            .with_mtime("data/d.esp", MTIME + 1),
+    );
+    let data = root.join("data");
+    let path = data.join("c.esp");
     let h = open_read(&path);
-    let mark = served.recorder.mark();
-    assert_eq!(handle_times(h), [PLACEHOLDER; 3]);
-    assert_eq!(ops(served, mark), []);
-    assert_eq!(path_times(&path), [want; 2]);
     let mark = served.recorder.mark();
     assert_eq!(handle_times(h), [want; 3]);
     assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)]);
+    assert_eq!(path_times(&path), [want; 4]);
+    assert_eq!(listed_time(&data, "c.esp"), want);
     close(h);
+
+    let d = open_read(&data.join("d.esp"));
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(d), [want + 10_000_000; 3]);
+    assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)]);
+    close(d);
+}
+
+/// A time seen after a handle's query settled "no time" turns fetching on
+/// again: a director whose first file had none but whose others do.
+#[test]
+fn a_time_seen_after_none_was_settled_turns_fetching_on_again() {
+    isolate!();
+    const MTIME: i64 = 1_700_000_000;
+    let want = MTIME * 10_000_000 + 116_444_736_000_000_000;
+    let (root, served) = serve(fake().with_mtime("data/d.esp", MTIME));
+    let data = root.join("data");
+    let c = open_read(&data.join("c.esp"));
+    assert_eq!(handle_times(c), [PLACEHOLDER; 3], "c.esp has no time");
+    close(c);
+    let d = open_read(&data.join("d.esp"));
+    let mark = served.recorder.mark();
+    assert_eq!(handle_times(d), [PLACEHOLDER; 3], "settled: not asked");
+    assert_eq!(ops(served, mark), []);
+    assert_eq!(listed_time(&data, "d.esp"), want);
+    let mark = served.recorder.mark();
+    assert_eq!(
+        handle_times(d),
+        [want; 3],
+        "the listing's time turned it on"
+    );
+    assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)]);
+    close(d);
 }
 
 #[test]

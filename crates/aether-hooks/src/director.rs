@@ -224,6 +224,12 @@ const PIPELINE_DEPTH_STREAM: usize = 8;
 const NAME_TTL_MS: u64 = 2_000;
 /// How many spellings are remembered.
 const NAME_CACHE_ENTRIES: usize = 8_192;
+/// [`FuseClient::sends_times`]: nothing known yet.
+const TIMES_UNKNOWN: u8 = 0;
+/// [`FuseClient::sends_times`]: a reply carried a time.
+const TIMES_SENT: u8 = 1;
+/// [`FuseClient::sends_times`]: a handle's first time query found none.
+const TIMES_NONE: u8 = 2;
 /// A read at least this long gets [`PIPELINE_DEPTH_STREAM`].
 const STREAM_BYTES: usize = 4 * 1024 * 1024;
 /// The smallest bulk READ this client sends: the bank each slot must have
@@ -368,11 +374,12 @@ pub struct FuseClient {
     names: std::sync::Mutex<aether_redirect::finalname::NameCache>,
     /// What the cache's clock counts from.
     started: std::time::Instant,
-    /// Whether a GETATTR or READDIR reply has carried a time (an `mtime`
-    /// above 0): only then does a handle's time query ask GETATTR, so a
-    /// director that sends no time is asked nothing for one
-    /// ([`FuseClient::sends_times`]).
-    times_seen: std::sync::atomic::AtomicBool,
+    /// What this client knows of whether the director sends times
+    /// ([`FuseClient::sends_times`]): [`TIMES_UNKNOWN`], [`TIMES_SENT`] once a
+    /// GETATTR or READDIR reply has carried an `mtime` above 0, or
+    /// [`TIMES_NONE`] once a handle's first time query found none
+    /// ([`FuseClient::settle_times`]).
+    times: std::sync::atomic::AtomicU8,
     /// The arena's length, or 0 when the ring has none this client uses
     /// ([`arena_rule`]).
     arena_len: usize,
@@ -517,7 +524,7 @@ impl FuseClient {
                 NAME_CACHE_ENTRIES,
             )),
             started: std::time::Instant::now(),
-            times_seen: std::sync::atomic::AtomicBool::new(false),
+            times: std::sync::atomic::AtomicU8::new(TIMES_UNKNOWN),
             arena_len,
             inline_chunk,
             server_ev,
@@ -645,16 +652,35 @@ impl FuseClient {
     /// Remember that the director sends times, once a reply carries one.
     fn saw_time(&self, mtime: i64) {
         use std::sync::atomic::Ordering::Relaxed;
-        if mtime > 0 && !self.times_seen.load(Relaxed) {
-            self.times_seen.store(true, Relaxed);
+        if mtime > 0 && self.times.load(Relaxed) != TIMES_SENT {
+            self.times.store(TIMES_SENT, Relaxed);
         }
     }
 
-    /// Whether a GETATTR or READDIR reply has carried a time: a handle's
-    /// time query asks GETATTR only then (`docs/wire.md` 3.2,
-    /// "Timestamps").
-    pub fn sends_times(&self) -> bool {
-        self.times_seen.load(std::sync::atomic::Ordering::Relaxed)
+    /// Whether the director sends times (`docs/wire.md` 3.2, "Timestamps"):
+    /// `Some(true)` once a GETATTR or READDIR reply carried one, `Some(false)`
+    /// once a handle's first time query found none before any had, `None`
+    /// while neither. A handle's time query asks GETATTR unless it is
+    /// `Some(false)`.
+    pub fn sends_times(&self) -> Option<bool> {
+        match self.times.load(std::sync::atomic::Ordering::Relaxed) {
+            TIMES_SENT => Some(true),
+            TIMES_NONE => Some(false),
+            _ => None,
+        }
+    }
+
+    /// A handle's time query got `mtime` from GETATTR: a time turns
+    /// per-handle fetching on ([`Self::saw_time`] already did), and none,
+    /// while nothing is known, says this director sends no times, so later
+    /// handle time queries stop asking. A time seen later turns it on again.
+    pub fn settle_times(&self, mtime: i64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if mtime <= 0 {
+            let _ = self
+                .times
+                .compare_exchange(TIMES_UNKNOWN, TIMES_NONE, Relaxed, Relaxed);
+        }
     }
 
     /// The directory's listing, each entry made into a `T` by `each` while

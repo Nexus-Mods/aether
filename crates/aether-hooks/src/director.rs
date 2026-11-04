@@ -207,6 +207,31 @@ const NAME_TTL_MS: u64 = 2_000;
 const NAME_CACHE_ENTRIES: usize = 8_192;
 /// A read at least this long gets [`PIPELINE_DEPTH_STREAM`].
 const STREAM_BYTES: usize = 4 * 1024 * 1024;
+/// The smallest bulk READ this client sends: the bank each slot must have
+/// (`docs/wire.md` 2.6).
+const MIN_BULK_CHUNK: usize = 256 * 1024;
+
+/// The arena this client uses and the most one inline READ asks for, given
+/// the arena the ring states, its slot count and its payload cap.
+///
+/// `docs/wire.md` 2.6: each bank must hold the shim's bulk chunk, so
+/// `arena_len >= 256 KiB x slot_count`. A director answers a bulk READ with
+/// at most a bank and the shim reads a short answer as end of file, so a
+/// smaller arena would cut every large file at its first chunk. Such a ring
+/// is used without its arena, and its inline READs stay below
+/// [`BULK_THRESHOLD`]: a director with an arena answers an unflagged READ of
+/// 64 KiB or more in bulk (wire.md 3.4.4), from the same small bank, so only
+/// a smaller one comes back whole from every director. A ring that meets
+/// the rule, or states no arena, is used as before.
+fn arena_rule(arena_len: usize, slot_count: u32, payload_cap: u32) -> (usize, usize) {
+    let inline = payload_cap.saturating_sub(8) as usize;
+    let needed = MIN_BULK_CHUNK.saturating_mul(slot_count.max(1) as usize);
+    if arena_len == 0 || arena_len >= needed {
+        (arena_len, inline)
+    } else {
+        (0, inline.min(BULK_THRESHOLD as usize - 1))
+    }
+}
 /// How long a wait for a response may yield the processor before it sleeps.
 ///
 /// A read served from the local store is back within this (its 1 MiB chunks
@@ -324,7 +349,11 @@ pub struct FuseClient {
     names: std::sync::Mutex<aether_redirect::finalname::NameCache>,
     /// What the cache's clock counts from.
     started: std::time::Instant,
+    /// The arena's length, or 0 when the ring has none this client uses
+    /// ([`arena_rule`]).
     arena_len: usize,
+    /// Most bytes one inline READ asks for ([`arena_rule`]).
+    inline_chunk: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
     /// the ring still works, just with the old timer-tick latency — and null
     /// *by design* for a [`RingSource::File`] ring, where the director is a
@@ -421,6 +450,7 @@ impl FuseClient {
         // Sized from the worker count the director published in the ring
         // header (a ring that names none is taken to have the default four).
         let gate = DataGate::for_ring(mapping.seg(), &geom);
+        let (arena_len, inline_chunk) = arena_rule(arena_len, geom.slot_count, payload_cap);
 
         // The staged launch directory is a second spelling of root 0, not a
         // root of its own: a staged game resolves `Data\` relative to its own
@@ -464,6 +494,7 @@ impl FuseClient {
             )),
             started: std::time::Instant::now(),
             arena_len,
+            inline_chunk,
             server_ev,
             gate,
             deadline: aether_ipc::RESPONSE_DEADLINE,
@@ -696,7 +727,7 @@ impl FuseClient {
         // Cap at 1 MiB per RTT — full bank (4–16 MiB) was used during the
         // 0xC0000409 regression window; large copies + deep pipelines on the
         // game thread (or long join windows) are not worth the risk yet.
-        (self.arena_len / slots).clamp(256 * 1024, 1024 * 1024)
+        (self.arena_len / slots).clamp(MIN_BULK_CHUNK, 1024 * 1024)
     }
 
     /// Read into `buf` (game NtReadFile buffer or CreateSection destination).
@@ -719,7 +750,7 @@ impl FuseClient {
                 usize::MAX
             },
             bulk_chunk: self.bulk_bank_bytes(),
-            inline_chunk: self.payload_cap.saturating_sub(8) as usize,
+            inline_chunk: self.inline_chunk,
             depth: PIPELINE_DEPTH,
             depth_stream: PIPELINE_DEPTH_STREAM,
             stream_bytes: STREAM_BYTES,
@@ -1136,6 +1167,21 @@ pub fn normalize_path_for_root(p: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn an_arena_below_wire_md_2_6_s_rule_is_not_used() {
+        const K: usize = 1024;
+        // Meets the rule, or states none: used as given.
+        assert_eq!(arena_rule(8 * 256 * K, 8, 4096), (8 * 256 * K, 4088));
+        assert_eq!(
+            arena_rule(32 * 1024 * K, 32, 1 << 20),
+            (32 * 1024 * K, (1 << 20) - 8)
+        );
+        assert_eq!(arena_rule(0, 8, 1 << 20), (0, (1 << 20) - 8));
+        // One byte short: no arena, and inline READs below the bulk threshold.
+        assert_eq!(arena_rule(8 * 256 * K - 1, 8, 4096), (0, 4088));
+        assert_eq!(arena_rule(8 * 128 * K, 8, 1 << 20), (0, 65_535));
+    }
 
     /// The unified predicate, exercised the way `FuseClient::vpath_under_root`
     /// exercises it (`RootMap::resolve` then join), without needing a live

@@ -293,7 +293,10 @@ Sizing rules a director must meet, from what the shim sends:
   `min(len, bank_size)` bytes, and the shim reads a short answer as end of
   file. So **each bank must be at least the shim's chunk**: with
   `bank_size = arena_len / slot_count`, that means
-  `arena_len >= 256 KiB * slot_count`.
+  `arena_len >= 256 KiB * slot_count`. The shim uses a ring whose
+  `VFS_ARENA_LEN` is smaller as if it had no arena, except that its inline
+  READs stay below 65 536 bytes so that no director answers them in bulk
+  (`arena_rule` in `crates/aether-hooks/src/director.rs`).
 - Every arena byte must lie inside the first `VFS_RING_BYTES` bytes of the
   mapping: the shim bounds-checks the copy and fails the read with
   `ST_IO_ERROR` otherwise.

@@ -1,4 +1,4 @@
-//! Large reads through the shim (gap items S3, S7, B2): one `NtReadFile` of
+//! Large reads through the shim (wire.md 2.6, 2.8, 3.4.4): one `NtReadFile` of
 //! a megabyte and more, a director that answers a bulk READ inline, an arena
 //! too small for the shim's chunk, and reads of 4 MiB and over, which take
 //! the deep pipeline, with other threads at work beside them.
@@ -8,8 +8,8 @@
 //! - wire.md 3.4.4: a director answers a READ that sets `FLAG_READ_BULK` in
 //!   bulk when it has an arena, and `n < len` is end of file. A director
 //!   that answers such a READ inline breaks that, and the shim takes its
-//!   short answer as the end of the file (pinned here, not changed;
-//!   conformance C1 checks directors for it).
+//!   short answer as the end of the file (pinned here; `aether-conform`
+//!   checks directors for it).
 //! - wire.md 2.6: each bank must hold the shim's bulk chunk, so
 //!   `arena_len >= 256 KiB x slot_count`. A ring whose arena is smaller is
 //!   used as if it had none: the shim sends inline READs that any director
@@ -20,8 +20,7 @@ use crate::fakedirector::{self, pattern, Fake, Fault, Match, Options, ReadStyle,
 use crate::ntapi;
 use aether_protocol::{Opcode, Request, RequestFlags};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_GEN_FAILURE, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
 };
@@ -231,11 +230,11 @@ fn one_read_of_1_mib_returns_1_mib_in_one_call() {
     );
 }
 
-/// B2, the inline half, pinned. wire.md 3.4.4: a director with an arena
+/// Pinned, wire.md 3.4.4: a director with an arena
 /// answers a READ that sets `FLAG_READ_BULK` in bulk, and `n < len` is end
 /// of file. This director answers the shim's 1 MiB bulk chunk inline, which
 /// holds at most `payload_cap - 8` bytes, so the shim reads the file as
-/// ending there. The director is outside the contract (conformance C1
+/// ending there. The director is outside the contract (`aether-conform`
 /// catches it); the shim does not guess past a short answer.
 #[test]
 fn an_inline_only_director_truncates_a_bulk_read_as_the_contract_says() {
@@ -259,7 +258,7 @@ fn an_inline_only_director_truncates_a_bulk_read_as_the_contract_says() {
 
 // ---- an arena below wire.md 2.6's rule -----------------------------------
 
-/// B2, the bank half: an arena of `SLOTS x 128 KiB` has banks smaller than
+/// An arena of `SLOTS x 128 KiB` has banks smaller than
 /// the shim's 256 KiB chunk (wire.md 2.6), so a bulk READ would come back
 /// short and end the file. The shim uses the ring as if it had no arena.
 fn an_arena_below_the_rule_is_not_used_at(payload_cap: u32) {
@@ -389,7 +388,7 @@ fn a_5_mib_read_pipelines(opts: Options, depth: usize) {
     assert!(reads.iter().all(|&(f, _, _)| is_bulk(f)), "{reads:?}");
 }
 
-/// S7: a read of at least 4 MiB has `PIPELINE_DEPTH_STREAM` (8) READs in
+/// A read of at least 4 MiB has `PIPELINE_DEPTH_STREAM` (8) READs in
 /// flight, when the data gate allows that many from one call. The gate
 /// gives one call at most half its permits and keeps a quarter for others
 /// (`aether_ipc::DataGate`), so 8 needs a limit of 15 or more: 24 workers on
@@ -424,97 +423,114 @@ fn a_5_mib_read_at_16_workers_is_6_deep() {
     );
 }
 
-/// S7: two threads stream 5 MiB each, one through `NtReadFile` and one
-/// through `NtCreateSection`, against a director whose every READ takes
-/// 20 ms, while a third asks for a file's attributes in a loop. The data
-/// gate keeps a director worker free of reads (wire.md 2.8), so every
-/// GETATTR is answered within the client's 300 ms deadline.
+/// Four threads stream 5 MiB each, two through `NtReadFile` and two through
+/// `NtCreateSection`, and the director holds every READ until the test lets
+/// it go. The data gate keeps a director worker free of reads (wire.md 2.8):
+/// on the default ring (four workers, eight slots) at most three READs are
+/// ever held, and a GETATTR from another thread is answered while they still
+/// are, before any READ's reply.
+///
+/// Nothing here is timed. A shim whose gate let reads take the fourth worker
+/// fails one of two ways: the fourth READ is held (checked first), or the
+/// GETATTR waits for a worker, which only a READ's reply frees, so a READ
+/// is recorded before it.
 #[test]
 fn a_stream_read_does_not_starve_another_thread_s_getattr() {
     isolate!();
-    const A: &str = "data/a.bin";
-    const B: &str = "data/b.bin";
+    const STREAMED: [&str; 2] = ["data/a.bin", "data/b.bin"];
+    const SECTIONED: [&str; 2] = ["data/c.bin", "data/d.bin"];
     const SMALL: &str = "data/small.txt";
-    let deadline = Duration::from_millis(300);
+    // `aether_ipc::concurrent::data_limit` of the default ring: four
+    // workers, one kept back.
+    const LIMIT: u32 = 3;
     let size = 5 * MIB;
     let want = pattern(size);
+    let mut fake = Fake::new().with(SMALL, b"small".to_vec(), ReadStyle::Whole);
+    for f in STREAMED.iter().chain(&SECTIONED) {
+        fake = fake.with(f, want.clone(), ReadStyle::Whole);
+    }
     let (root, served) = serve(
-        Fake::new()
-            .with(A, want.clone(), ReadStyle::Whole)
-            .with(B, want.clone(), ReadStyle::Whole)
-            .with(SMALL, b"small".to_vec(), ReadStyle::Whole),
+        fake,
         Options {
             ring: RingKind::SectionWithWake,
-            deadline: Some(deadline),
             ..Options::default()
         },
     );
-    let slow = served.faults.arm(
+    let held = served.faults.arm(
         Match {
             op: Some(Opcode::Read),
             ..Match::default()
         },
-        Fault::Delay(Duration::from_millis(20)),
+        Fault::Delay(aether_refdirector::harness::MAX_DELAY),
     );
-    let reads_done = std::sync::Arc::new(AtomicUsize::new(0));
-    let (a, b) = (root.join(A), root.join(B));
-    let streamed = {
-        let done = reads_done.clone();
-        std::thread::spawn(move || {
-            let r = read_once(&a, size);
-            done.fetch_add(1, Ordering::SeqCst);
-            r
+    let streamed: Vec<_> = STREAMED
+        .iter()
+        .map(|f| {
+            let p = root.join(f);
+            std::thread::spawn(move || read_once(&p, size))
         })
-    };
-    let sectioned = {
-        let done = reads_done.clone();
-        std::thread::spawn(move || {
-            let r = mapped(&b, size);
-            done.fetch_add(1, Ordering::SeqCst);
-            r
+        .collect();
+    let sectioned: Vec<_> = SECTIONED
+        .iter()
+        .map(|f| {
+            let p = root.join(f);
+            std::thread::spawn(move || mapped(&p, size))
         })
-    };
+        .collect();
 
+    assert!(
+        served.faults.wait_applied(held, LIMIT, WAIT),
+        "the streams never held {LIMIT} READs (held {})",
+        served.faults.applied(held)
+    );
+    // A bound on a thing that must not happen: in the right shim it always
+    // runs out, so a loaded machine cannot fail it.
+    assert!(
+        !served
+            .faults
+            .wait_applied(held, LIMIT + 1, Duration::from_secs(1)),
+        "a READ took the last director worker"
+    );
     let small = wide(&root.join(SMALL));
     let mark = served.recorder.mark();
-    let mut calls = 0u32;
-    let mut slowest = Duration::ZERO;
-    while reads_done.load(Ordering::SeqCst) < 2 {
-        let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { core::mem::zeroed() };
-        let t = Instant::now();
-        // SAFETY: a NUL-terminated name and a buffer of the standard class.
-        let ok = unsafe {
-            GetFileAttributesExW(
-                small.as_ptr(),
-                GetFileExInfoStandard,
-                &mut data as *mut _ as *mut _,
-            )
-        };
-        let took = t.elapsed();
-        assert_ne!(ok, 0, "GetFileAttributesExW failed: {}", last_error());
-        assert_eq!(data.nFileSizeLow, 5, "the served file's size");
-        slowest = slowest.max(took);
-        calls += 1;
-    }
-    let (st, got) = streamed.join().expect("NtReadFile thread");
-    assert!(st >= 0, "NtReadFile: {st:#x}");
-    assert!(got == want, "NtReadFile: the bytes differ from the file's");
+    let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { core::mem::zeroed() };
+    // SAFETY: a NUL-terminated name and a buffer of the standard class.
+    let ok = unsafe {
+        GetFileAttributesExW(
+            small.as_ptr(),
+            GetFileExInfoStandard,
+            &mut data as *mut _ as *mut _,
+        )
+    };
+    assert_ne!(ok, 0, "GetFileAttributesExW failed: {}", last_error());
+    assert_eq!(data.nFileSizeLow, 5, "the served file's size");
+    let ops = served.recorder.ops_since(mark);
+    let getattr = ops.iter().position(|o| *o == Some(Opcode::GetAttr));
     assert!(
-        sectioned
+        getattr.is_some(),
+        "the GETATTR did not cross the ring: {ops:?}"
+    );
+    assert!(
+        !ops[..getattr.unwrap()].contains(&Some(Opcode::Read)),
+        "the GETATTR waited for a READ's reply: {ops:?}"
+    );
+    assert_eq!(
+        served.faults.applied(held),
+        LIMIT,
+        "the READs were not held throughout"
+    );
+
+    served.faults.clear();
+    for t in streamed {
+        let (st, got) = t.join().expect("NtReadFile thread");
+        assert!(st >= 0, "NtReadFile: {st:#x}");
+        assert!(got == want, "NtReadFile: the bytes differ from the file's");
+    }
+    for t in sectioned {
+        let got = t
             .join()
             .expect("section thread")
-            .expect("CreateFileMappingW")
-            == want,
-        "the section differs from the file"
-    );
-    assert!(served.faults.applied(slow) > 0, "no READ was slowed");
-    assert!(calls > 0, "no GETATTR ran beside the reads");
-    assert!(
-        served.recorder.count_since(mark, Opcode::GetAttr) >= calls as usize,
-        "a GETATTR did not cross the ring"
-    );
-    assert!(
-        slowest < deadline,
-        "a GETATTR took {slowest:?} beside two stream reads"
-    );
+            .expect("CreateFileMappingW");
+        assert!(got == want, "the section differs from the file");
+    }
 }

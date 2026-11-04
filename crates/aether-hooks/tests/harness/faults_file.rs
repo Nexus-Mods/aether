@@ -45,7 +45,7 @@ use aether_refdirector::harness::{BulkLie, Mark, Recorded, MAX_DELAY};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestError, TestRng, TestRunner};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -366,8 +366,9 @@ pub(crate) struct Subject {
     pub(crate) served: &'static Served,
     pub(crate) ctx: &'static Ctx,
     pub(crate) call: Call,
-    /// How long a call may take before it is called hung.
-    pub(crate) watchdog: Duration,
+    /// How long a call may take before it is called hung, in milliseconds
+    /// ([`Subject::set_watchdog`]).
+    watchdog_ms: AtomicU64,
     /// The ring's `payload_cap`.
     pub(crate) payload_cap: usize,
     /// The director's replies, put behind the chain by the setup.
@@ -396,7 +397,7 @@ impl Subject {
             served,
             ctx,
             call,
-            watchdog,
+            watchdog_ms: AtomicU64::new(watchdog.as_millis() as u64),
             payload_cap: fakedirector::PAYLOAD_CAP as usize,
             director,
             ops: OnceLock::new(),
@@ -414,6 +415,18 @@ impl Subject {
         }
         s.ops.set(lens).expect("measured once");
         s
+    }
+
+    /// How long a call may take before it is called hung.
+    pub(crate) fn watchdog(&self) -> Duration {
+        Duration::from_millis(self.watchdog_ms.load(Ordering::Relaxed))
+    }
+
+    /// The watchdog of the calls from now on: a case that must hang sets a
+    /// short one, and the cases after it set the usual one back.
+    pub(crate) fn set_watchdog(&self, d: Duration) {
+        self.watchdog_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// The reply lengths of `op`'s faulted opcode in one unfaulted call.
@@ -442,19 +455,19 @@ impl Subject {
         std::thread::spawn(move || {
             let _ = tx.send(call(ctx, op, i));
         });
-        if let Ok(seen) = rx.recv_timeout(self.watchdog) {
+        let watchdog = self.watchdog();
+        if let Ok(seen) = rx.recv_timeout(watchdog) {
             return Ok(seen);
         }
         self.served.faults.clear();
         match rx.recv_timeout(MAX_DELAY) {
             Ok(seen) => Err(format!(
-                "the call hung past {:?}; it returned {seen:?} once the faults were let go",
-                self.watchdog
+                "the call hung past {watchdog:?}; it returned {seen:?} once the faults were let go"
             )),
             Err(_) => {
                 eprintln!(
                     "{op:?} hung past {:?} and did not return once every fault was let go",
-                    self.watchdog + MAX_DELAY
+                    watchdog + MAX_DELAY
                 );
                 std::process::exit(101);
             }
@@ -973,13 +986,15 @@ fn every_cut_of_a_child_start_reply_is_the_table_s() {
 
 /// A call held past its watchdog is let go before the next case: the case
 /// fails, and the case after it meets a director with no fault armed and
-/// no reply held. A watchdog shorter than the client's deadline makes a
-/// reply held past the deadline a hang.
+/// no reply held. A watchdog shorter than the client's deadline, for the
+/// hanging case only, makes a reply held past the deadline a hang; the
+/// unfaulted calls around it have the usual watchdog.
 #[test]
 fn a_hang_is_let_go_before_the_next_case() {
     isolate!();
     let op = Op::Call(HookedOp::GetAttr);
-    let s = file_subject(0, DEADLINE / 3, &[op]);
+    let s = file_subject(0, WATCHDOG, &[op]);
+    s.set_watchdog(DEADLINE / 3);
     let hung = run_case(
         s,
         &[Step {
@@ -989,6 +1004,7 @@ fn a_hang_is_let_go_before_the_next_case() {
     );
     assert!(hung.as_ref().is_err_and(|e| e.contains("hung")), "{hung:?}");
     assert_eq!(s.served.recorder.in_flight(), 0, "no reply is held");
+    s.set_watchdog(WATCHDOG);
     let next = run_case(
         s,
         &[

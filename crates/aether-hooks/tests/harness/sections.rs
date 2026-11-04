@@ -1,15 +1,16 @@
-//! Sections over director files (S6), with the reference behind the ring:
+//! Sections over director files (wire.md 3.4.4), with the reference behind
+//! the ring:
 //! a data section filled whole at `CreateFileMappingW`, one filled on demand
 //! (above `EAGER_MAX`, here lowered to [`EAGER_MAX`] through
 //! `aether_hooks::set_eager_section_max` so no test needs a 256 MiB file),
 //! and an image section of a served PE.
 //!
-//! The gap hunt's suspected bugs:
+//! What they hold the shim to:
 //!
-//! - B1: a demand-paged section keeps reading through its file's director
+//! - A demand-paged section keeps reading through its file's director
 //!   handle after the program closed the file. CLOSE goes when the last of
 //!   file handle, section and views goes, once (wire.md 3.4.10).
-//! - B9: a fill that fails, or comes back short of what the file holds there
+//! - A fill that fails, or comes back short of what the file holds there
 //!   (wire.md 3.4.4: `n < len` is the end of the file, so short before the
 //!   size the OPEN gave is a failure), is never committed as zeros. Eager:
 //!   the section fails. Demand-paged: the READ is tried again, then the
@@ -674,9 +675,16 @@ fn a_second_thread_never_reads_a_chunk_before_its_fill_is_done() {
     // A second thread reads another page of the same chunk while the fill
     // is held: it must wait for the fill, never see what is there before.
     let (tx, rx) = std::sync::mpsc::channel();
+    let (touching_tx, touching) = std::sync::mpsc::channel();
     let second = std::thread::spawn(move || {
+        let _ = touching_tx.send(());
         let _ = tx.send(bytes(v as *const u8, TOUCH + 2 * PAGE, PAGE));
     });
+    // The fill stays held until the second thread is about to touch, and
+    // for a while after, so its touch meets the fill in progress.
+    touching
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the second thread never started");
     let early = rx.recv_timeout(Duration::from_millis(500));
     served.faults.release();
     let got = match early {

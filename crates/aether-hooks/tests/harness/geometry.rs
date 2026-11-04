@@ -1,4 +1,4 @@
-//! Every ring geometry and transport a director may choose (gap item S10):
+//! Every ring geometry and transport a director may choose (wire.md 2.7):
 //! the 1 MiB payload cap a production director uses, banks of 1 and 4 MiB, rings
 //! of one and two slots, a worker hint below, above and equal to what the
 //! ring can serve, the director's wake event, and the file ring that Wine
@@ -19,6 +19,7 @@ use crate::fakedirector::{
     self, pattern, Fake, Fault, Match, Options, ReadStyle, RingKind, Served,
 };
 use aether_protocol::Opcode;
+use aether_refdirector::harness::MAX_DELAY;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -129,7 +130,7 @@ fn concurrent(served: &Served, root: &Path, slots: u32, hint: u32) {
             path_prefix: Some("data/big.bin".into()),
             ..Match::default()
         },
-        Fault::Delay(Duration::from_secs(10)),
+        Fault::Delay(MAX_DELAY),
     );
     let readers: Vec<_> = (0..limit + 2)
         .map(|_| {
@@ -153,7 +154,9 @@ fn concurrent(served: &Served, root: &Path, slots: u32, hint: u32) {
             let listed = std::fs::read_dir(data.join("list")).map(|d| d.count());
             let _ = tx.send((small, listed));
         });
-        match rx.recv_timeout(WAIT) {
+        // Under the holds' own limit, so a getattr that waited behind them
+        // fails here rather than after they ran out.
+        match rx.recv_timeout(MAX_DELAY / 2) {
             Ok((small, listed)) => {
                 assert_eq!(small.ok(), Some(1000), "getattr while reads are held");
                 assert!(listed.is_ok_and(|n| n > 0), "listing while reads are held");
@@ -167,7 +170,12 @@ fn concurrent(served: &Served, root: &Path, slots: u32, hint: u32) {
     // Every READ that reached the director is still held: more than `limit`
     // means the shim sent more data requests than it may.
     let holding = served.faults.applied(held);
+    let let_go = served.recorder.count_since(mark, Opcode::Read);
     release();
+    assert_eq!(
+        let_go, 0,
+        "a held READ ran out its {MAX_DELAY:?} before the count, so the count says nothing"
+    );
     assert_eq!(holding, limit, "READs held at once");
     for r in readers {
         assert!(r.join().unwrap(), "a concurrent read returned wrong bytes");

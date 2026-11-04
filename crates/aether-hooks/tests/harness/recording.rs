@@ -1,7 +1,7 @@
 //! What crosses the ring, request by request, as the recorder saw it: an
 //! open, read and close; a stat of a missing file; a path outside every root
 //! (nothing); the client's deadline set through `install_global`; and an
-//! attach whose HEARTBEAT is refused or late (gap hunt S15), after which
+//! attach whose HEARTBEAT is refused or late (wire.md 3.4.11), after which
 //! the hooks pass through.
 #![allow(unsafe_code)] // Win32 calls
 
@@ -173,6 +173,13 @@ fn a_path_outside_the_root_sends_nothing() {
     );
 }
 
+/// How long the deadline tests hold a reply: as long as a delay can.
+const HOLD: Duration = aether_refdirector::harness::MAX_DELAY;
+/// A call that gave up at its 300 ms deadline is back by this, on any
+/// runner, and one that waited for the reply is not: it is well under
+/// [`HOLD`].
+const GAVE_UP_BY: Duration = Duration::from_secs(3);
+
 #[test]
 fn install_global_s_deadline_is_the_client_s() {
     isolate!();
@@ -187,9 +194,7 @@ fn install_global_s_deadline_is_the_client_s() {
     );
     assert!(served.attach.is_ok(), "{:?}", served.attach);
     let _hooks = aether_hooks::install().expect("install");
-    let slow = served
-        .faults
-        .arm(on(Opcode::GetAttr), Fault::Delay(Duration::from_secs(2)));
+    let slow = served.faults.arm(on(Opcode::GetAttr), Fault::Delay(HOLD));
     let mark = served.recorder.mark();
 
     let t = Instant::now();
@@ -200,7 +205,7 @@ fn install_global_s_deadline_is_the_client_s() {
     served.faults.release();
 
     assert!(!ok, "a GETATTR past the deadline fails the call");
-    assert!(took < Duration::from_secs(1), "gave up after {took:?}");
+    assert!(took < GAVE_UP_BY, "gave up after {took:?}");
     assert!(served.recorder.wait_for(mark, 1, Duration::from_secs(10)));
     assert_eq!(served.recorder.count_since(mark, Opcode::GetAttr), 1);
 }
@@ -250,7 +255,7 @@ fn a_heartbeat_past_the_deadline_fails_the_attach_within_it() {
         fake(),
         Options {
             deadline: Some(ms(300)),
-            attach_faults: vec![(on(Opcode::Heartbeat), Fault::Delay(Duration::from_secs(2)))],
+            attach_faults: vec![(on(Opcode::Heartbeat), Fault::Delay(HOLD))],
             ..Options::default()
         },
     );
@@ -265,7 +270,7 @@ fn a_heartbeat_past_the_deadline_fails_the_attach_within_it() {
         "{:?}",
         served.attach
     );
-    assert!(took < Duration::from_secs(1), "gave up after {took:?}");
+    assert!(took < GAVE_UP_BY, "gave up after {took:?}");
     assert!(aether_hooks::director::global().is_none());
 }
 

@@ -96,10 +96,12 @@ fn a_handle_value_issued_again_names_the_new_file() {
     let stale = format!(r"\??\{}", root.join("data").join("a.esp").display());
     // Windows issues a closed handle's value again to the next handle as a
     // rule, not a promise: another thread may take it first. So the case is
-    // tried until the value comes back.
-    let named = (0..20)
-        .find_map(|_| reissued_name(&file, &stale))
-        .expect("a closed handle's value was never issued again");
+    // tried until the value comes back, and a run where it never does says
+    // nothing about the shim.
+    let Some(named) = (0..20).find_map(|_| reissued_name(&file, &stale)) else {
+        eprintln!("SKIP: Windows never issued the closed handle's value again");
+        return;
+    };
     assert!(
         named.to_ascii_lowercase().ends_with(r"\real-b.txt"),
         "the handle is named {named}, not as the new file"

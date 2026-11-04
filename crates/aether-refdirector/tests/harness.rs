@@ -591,14 +591,17 @@ fn several_serve_threads_hold_requests_in_flight_at_once() {
 fn a_delay_past_the_deadline_is_waited_out_on_the_recorder() {
     // The pattern for a fault case past the client's deadline: the call
     // times out, the test waits for the recorder to show the late reply
-    // sent, and the next call is answered.
+    // sent, and the next call is answered. Only the faulted call has the
+    // short deadline: the next one goes through the patient client, on the
+    // same ring and slots, so a serve thread that waits for a processor
+    // cannot fail it.
     served(small(), |c, rig| {
         let impatient = Client::new(
             RingClient::new(c.ring().seg(), SpinNotifier)
                 .unwrap()
                 .with_deadline(Duration::from_millis(100)),
         );
-        rig.faults.arm(
+        let late = rig.faults.arm(
             Match {
                 times: Some(1),
                 ..on(Opcode::GetAttr)
@@ -613,7 +616,13 @@ fn a_delay_past_the_deadline_is_waited_out_on_the_recorder() {
         // The late reply went to an abandoned slot; wait for it, not for
         // a guessed time.
         assert!(rig.recorder.wait_for(m, 1, Duration::from_secs(10)));
-        assert!(getattr(&impatient, "data/a.esp").is_ok());
+        assert!(getattr(c, "data/a.esp").is_ok());
+        assert_eq!(
+            rig.recorder.ops_since(m),
+            [Some(Opcode::GetAttr); 2],
+            "the late reply, then the next call's"
+        );
+        assert_eq!(rig.faults.applied(late), 1, "the next call was held too");
     });
 }
 

@@ -635,7 +635,8 @@ impl Reference {
     /// everything under it; a non-empty directory at the target is
     /// `Status::IoError`, and an empty one or a file is replaced. Across
     /// roots (RENAME_X, which refuses a directory source before this) a
-    /// directory at the target is `Status::IsDir` and a file is replaced.
+    /// directory at the target, the target root itself included, is
+    /// `Status::IsDir` and a file is replaced.
     fn move_entry(
         &self,
         from: String,
@@ -661,7 +662,9 @@ impl Reference {
         if !g.is_writable(&from) || !g.is_writable(&to_key) {
             return Err(Status::ReadOnly);
         }
-        if to_key != from && dirs.contains_key(&to_key) {
+        // A root is a directory too, though `dirs` does not hold it: within a
+        // root it was refused above, across roots it is `IsDir` here.
+        if to_key != from && (is_dir_in(&dirs, &to_key) || is_root_key(&to_key)) {
             if across {
                 return Err(Status::IsDir);
             }

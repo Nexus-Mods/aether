@@ -375,6 +375,13 @@ fn rename_x_moves_a_file_between_roots_and_refuses_a_directory() {
     );
     assert_eq!(d.rename_x(R0, r1, ".", "sub"), Err(Status::CrossRoot));
     assert!(d.get_attr(R0, "saves/sub").unwrap().is_dir);
+    // Onto the target root itself, a directory: Status::IsDir, and the file
+    // stays where it was.
+    let o = d.open(R0, RW | OpenFlags::CREATE, "keep.sav").unwrap();
+    d.close(o.fh).unwrap();
+    assert_eq!(d.rename_x(R0, r1, "keep.sav", "."), Err(Status::IsDir));
+    assert_eq!(d.rename_x(R0, r1, "keep.sav", ""), Err(Status::IsDir));
+    assert_eq!(d.contents("keep.sav"), Some(Vec::new()));
     // A missing source is Status::NotFound.
     assert_eq!(d.rename_x(R0, r1, "absent", "b"), Err(Status::NotFound));
     // Equal roots: a RENAME.

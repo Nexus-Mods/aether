@@ -821,8 +821,10 @@ Request (`Request::Rename`):
 
 Reply: status only.
 
-`to` is stored with the caller's spelling (section 3.2), so a rename that
-changes only the case respells the name. A file or a directory moves; a
+For a name the writable provider holds (for names that exist only in a
+read-only layer beneath it, see "Names only in a read-only lower" after
+3.4.9): `to` is stored with the caller's spelling (section 3.2), so a rename
+that changes only the case respells the name. A file or a directory moves; a
 directory moves with everything under it. A file or an empty directory at
 `to` is replaced; a directory at `to` with anything under it is
 `ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
@@ -834,8 +836,10 @@ end outside every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
 
 Request: path request. Reply: status only. Unknown root `ST_NOT_FOUND`.
 
-A file, or a directory with nothing under it, is deleted. A directory with
-anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
+For a name the writable provider holds (for names that exist only in a
+read-only layer beneath it, see "Names only in a read-only lower" after
+3.4.9): a file, or a directory with nothing under it, is deleted. A directory
+with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
 is `ST_BAD_REQUEST`. A missing path is `ST_NOT_FOUND`; a path outside every
 writable provider `ST_READ_ONLY`. (Cairn's writable layer,
 `provider/layer.clj`, `delete!`; the reference director.)
@@ -846,7 +850,8 @@ Request (`Request::Mkdir`): `root:u32 | mode:u32 | vpath utf8…`. The shim
 sends `mode = 0o755` (493); both directors ignore it. Reply: status only.
 
 The directory is stored with the caller's spelling (section 3.2). On an
-existing path the directors differ:
+existing path the writable provider holds, the directors differ (for a path
+that exists only in a read-only layer beneath it, see below):
 
 - An existing directory: a director may answer `ST_OK` or `ST_EXISTS`, and a
   client must accept either. Cairn's writable providers answer `ST_OK`
@@ -858,6 +863,24 @@ existing path the directors differ:
 - An existing file: `ST_IO_ERROR` where a writable provider serves the path
   (Cairn's writable providers), `ST_EXISTS` where none does (Cairn's
   read-only providers). The reference director answers the same.
+
+**Names only in a read-only lower.** A director may serve a writable root as
+an overlay: a writable upper over a read-only lower, as Cairn serves every
+writable root (`provider/compose.clj`, the `Overlay` provider). For a name
+that exists only in the lower, not in the upper, such a director may answer
+DELETE, RENAME and MKDIR as Cairn's overlay does, where the rules above
+(written for names the writable provider holds) say otherwise:
+
+- DELETE of a lower-only name, a directory with children included, hides it
+  (a whiteout in the upper) and answers `ST_OK`.
+- RENAME of a lower-only directory to another name is `ST_IO_ERROR` (lower
+  directories do not move). A lower-only file is copied up and renamed.
+- RENAME of a lower-only name to another case of itself answers `ST_OK`
+  without respelling it: the name keeps the lower's spelling.
+- MKDIR over a lower-only file creates the directory in the upper and
+  answers `ST_OK`; the directory then hides the file.
+
+The reference director has no layers, so it never gives these answers.
 
 #### 3.4.10 CLOSE (11)
 

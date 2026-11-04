@@ -101,7 +101,12 @@ its stdout, never two requests at once.
   a launcher (a `.cmd` file, a shell script, `clojure`) that starts the real
   director. On Windows the adapter runs in a Job Object that kills its
   members when closed; on Unix it leads a process group, which is sent
-  `SIGKILL`. A process that leaves the group (`setsid`) is not followed.
+  `SIGKILL` while the adapter is still unreaped, so the number cannot
+  belong to another group yet. Where there is no `/proc` (not Linux), an
+  adapter that exits by itself is reaped before its group could be
+  signalled, and what it left running survives. A process that leaves the
+  group (`setsid`) is not followed. A failed group kill is said on stderr
+  and in the run's error.
 - Anything the adapter writes on stderr is kept; its last lines are shown
   when something goes wrong.
 

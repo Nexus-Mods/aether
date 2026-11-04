@@ -69,7 +69,6 @@ impl std::error::Error for AdapterError {}
 
 /// A running adapter.
 pub struct Adapter {
-    child: Child,
     /// The child and every process it starts, killed together.
     tree: ProcessTree,
     stdin: Option<ChildStdin>,
@@ -129,8 +128,8 @@ impl Adapter {
                 t.push_back(line);
             }
         });
+        let tree = tree.holding(child);
         Ok(Adapter {
-            child,
             tree,
             stdin,
             lines,
@@ -189,7 +188,7 @@ impl Adapter {
         self.stdin = None;
         let deadline = std::time::Instant::now() + self.timeout;
         while std::time::Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
+            if self.tree.exited().is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -197,9 +196,14 @@ impl Adapter {
         // Drop kills the tree.
     }
 
-    /// Kills the adapter and every process it started.
-    fn kill(&mut self) {
-        self.tree.kill(&mut self.child);
+    /// Kills the adapter and every process it started. A tree that could
+    /// not be killed is said on stderr and returned.
+    fn kill(&mut self) -> Option<String> {
+        let failed = self.tree.kill().err();
+        if let Some(e) = &failed {
+            eprintln!("aether-conform: {e}");
+        }
+        failed
     }
 
     fn ask(&mut self, request: &Value) -> Result<Value, AdapterError> {
@@ -221,8 +225,11 @@ impl Adapter {
             }
             Err(RecvTimeoutError::Timeout) => {
                 let secs = self.timeout.as_secs_f64();
-                self.kill();
-                return Err(self.error(format!("no answer within {secs} s to {request}")));
+                let mut what = format!("no answer within {secs} s to {request}");
+                if let Some(e) = self.kill() {
+                    what.push_str(&format!("; and {e}"));
+                }
+                return Err(self.error(what));
             }
         };
         match serde_json::from_str::<Value>(&line) {
@@ -238,7 +245,7 @@ impl Adapter {
         // A crashed child closes its pipes just before the OS reaps it.
         let mut status = None;
         for _ in 0..50 {
-            if let Ok(Some(s)) = self.child.try_wait() {
+            if let Some(s) = self.tree.exited() {
                 status = Some(s);
                 break;
             }
@@ -268,7 +275,7 @@ impl Adapter {
 impl Drop for Adapter {
     fn drop(&mut self) {
         // Even an adapter that exited may have left processes behind.
-        self.kill();
+        let _ = self.kill();
     }
 }
 
@@ -279,11 +286,26 @@ impl Drop for Adapter {
 /// assigned before it runs, so every process it starts is in the job. On
 /// Unix the adapter leads a new process group, and the group is sent
 /// `SIGKILL`. A process that leaves the group (`setsid`) is not followed.
+///
+/// A process group's number is free for reuse once its last member is
+/// reaped, so on Unix the group is killed while the leader is still
+/// unreaped: alive, or a zombie. On Linux [`ProcessTree::exited`] sees the
+/// zombie in `/proc` and kills the group before reaping it. Where there is
+/// no `/proc` it has to reap to learn of the exit, and then the group is
+/// not signalled at all, since its number may already be another's: the
+/// processes an adapter left behind after exiting by itself survive there.
 struct ProcessTree {
+    child: Option<Child>,
+    /// The leader's exit, once reaped.
+    status: Option<std::process::ExitStatus>,
     #[cfg(windows)]
     job: aether_win::KillOnCloseJob,
     #[cfg(unix)]
     group: u32,
+    /// Whether the group has been sent SIGKILL (or must not be, being
+    /// possibly reused).
+    #[cfg(unix)]
+    group_done: bool,
 }
 
 impl ProcessTree {
@@ -291,41 +313,127 @@ impl ProcessTree {
     fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
         let job = aether_win::KillOnCloseJob::new()?;
         let child = job.spawn(cmd)?;
-        Ok((child, ProcessTree { job }))
+        let tree = ProcessTree {
+            child: None,
+            status: None,
+            job,
+        };
+        Ok((child, tree))
     }
 
     #[cfg(unix)]
     fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
         use std::os::unix::process::CommandExt;
         let child = cmd.process_group(0).spawn()?;
-        let group = child.id();
-        Ok((child, ProcessTree { group }))
+        let tree = ProcessTree {
+            child: None,
+            status: None,
+            group: child.id(),
+            group_done: false,
+        };
+        Ok((child, tree))
     }
 
     #[cfg(not(any(windows, unix)))]
     fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
-        Ok((cmd.spawn()?, ProcessTree {}))
+        let tree = ProcessTree {
+            child: None,
+            status: None,
+        };
+        Ok((cmd.spawn()?, tree))
     }
 
-    /// Kills every process in the tree, and reaps `child`.
-    fn kill(&mut self, child: &mut Child) {
+    /// The tree, owning its leader.
+    fn holding(mut self, child: Child) -> ProcessTree {
+        self.child = Some(child);
+        self
+    }
+
+    /// The leader's exit status, if it has exited; on Unix the group is
+    /// killed before the leader is reaped (see the type's doc).
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        if self.status.is_some() {
+            return self.status;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pid = self.group;
+            let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    stat.rsplit_once(')')
+                        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+                })
+                .unwrap_or(false);
+            if !zombie {
+                return None;
+            }
+            if let Err(e) = self.kill_group() {
+                eprintln!("aether-conform: {e}");
+            }
+        }
+        let child = self.child.as_mut()?;
+        if let Ok(Some(s)) = child.try_wait() {
+            self.status = Some(s);
+            #[cfg(unix)]
+            {
+                // Reaped: the group's number may be another's from now on.
+                self.group_done = true;
+            }
+        }
+        self.status
+    }
+
+    /// Sends SIGKILL to the group, once, while its leader is unreaped.
+    #[cfg(unix)]
+    fn kill_group(&mut self) -> Result<(), String> {
+        if self.group_done {
+            return Ok(());
+        }
+        self.group_done = true;
+        // There is no libc here (the crate forbids unsafe), so kill(1)
+        // sends it.
+        let group = format!("-{}", self.group);
+        match Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(format!(
+                "killing the adapter's process group with `kill -KILL -- {group}` failed ({}): {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => Err(format!(
+                "cannot run `kill -KILL -- {group}` to kill the adapter's process group: {e}; \
+                 processes it started may still be running"
+            )),
+        }
+    }
+
+    /// Kills every process in the tree, and reaps the leader.
+    fn kill(&mut self) -> Result<(), String> {
         #[cfg(windows)]
         self.job.terminate();
         #[cfg(unix)]
-        {
-            // The group outlives its leader while any member is alive. There
-            // is no libc here (the crate forbids unsafe), so kill(1) sends it.
-            let _ = Command::new("kill")
-                .args(["-KILL", "--", &format!("-{}", self.group)])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        let group = if self.status.is_none() {
+            self.kill_group()
+        } else {
+            Ok(())
+        };
+        #[cfg(not(unix))]
+        let group = Ok(());
+        if self.status.is_none() {
+            if let Some(child) = self.child.as_mut() {
+                if let Ok(None) = child.try_wait() {
+                    let _ = child.kill();
+                }
+                self.status = child.wait().ok();
+            }
         }
-        if let Ok(None) = child.try_wait() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
+        group
     }
 }
 

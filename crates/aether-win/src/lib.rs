@@ -5,11 +5,13 @@
 //! `job` and `volumes`.
 
 mod event_notifier;
+#[cfg(windows)]
 mod job;
 mod mapping;
 mod volumes;
 
 pub use event_notifier::EventNotifier;
+#[cfg(windows)]
 pub use job::{KillOnCloseJob, WakeEvent};
 pub use mapping::SharedMapping;
 pub use volumes::{

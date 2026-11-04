@@ -291,17 +291,19 @@ fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
         .collect()
 }
 
-/// `director.rs`, `stage_root_from_env`: the launch image's directory. The
-/// shim takes it with a Windows `Path::parent`, which this reproduces on
-/// every OS for the absolute paths a director gives (`C:\dir\game.exe`
-/// gives `C:\dir`, `C:\game.exe` gives `C:\`).
+/// `director.rs`, `stage_root_from_env`: the launch image's directory,
+/// which the shim takes with a Windows `Path::parent`. This reproduces that
+/// for the forms a director gives: `C:\dir\game.exe` gives `C:\dir`,
+/// `C:\game.exe` gives `C:\`, a drive-less rooted `\game.exe` or
+/// `/game.exe` gives `\` (which the shim then refuses as an empty root),
+/// and a bare `game.exe` gives nothing (the shim's empty parent, skipped).
 fn stage_root(image: &str) -> Option<String> {
     let cut = image.rfind(['\\', '/'])?;
     let mut dir = image[..cut].to_string();
     if dir.is_empty() {
-        return None;
-    }
-    if dir.len() == 2 && dir.ends_with(':') {
+        // The separator is the root itself.
+        dir.push('\\');
+    } else if dir.len() == 2 && dir.ends_with(':') {
         dir.push('\\');
     }
     Some(normalize_path_for_root(&dir))
@@ -393,6 +395,15 @@ mod tests {
             env(&[
                 (aether_env::VIRTUAL_DIR, r"C:\game"),
                 (aether_env::VIRTUAL_ROOTS, r"1=/"),
+            ]),
+            env(&[
+                (aether_env::VIRTUAL_DIR, r"C:\game"),
+                // A drive-less rooted image's directory is `\`, an empty root.
+                (aether_env::LAUNCH_IMAGE, r"\game.exe"),
+            ]),
+            env(&[
+                (aether_env::VIRTUAL_DIR, r"C:\game"),
+                (aether_env::LAUNCH_IMAGE, "/game.exe"),
             ]),
             env(&[
                 (aether_env::VIRTUAL_DIR, r"C:\game"),

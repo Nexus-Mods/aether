@@ -289,7 +289,9 @@ them): a client knows only its own handles, and a director may issue any
 u64 (3.4.3), so any number one client sent for a handle it does not have
 could be another client's live handle, which would answer it, or which a
 CLOSE would close. Such a step expects `ST_BAD_FH` and changes nothing, so
-the other steps' answers stay the same.
+the other steps' answers stay the same. An OPEN that may answer a handle or
+an error (a `one_of` with both) ends its client's case: the later steps were
+made after the reference's choice, and the director may choose the other.
 Then the sweep, which gives every slot and bank work:
 
 - an OPEN of each sweep file, each claimed from its own slot, so every slot

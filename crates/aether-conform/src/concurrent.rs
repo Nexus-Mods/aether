@@ -229,16 +229,29 @@ fn confine(input: &mut CaseInput) {
 /// wire.md 3.4.3 lets a director issue "any u64", so whatever number one
 /// client picks may be another client's live handle, which would answer it
 /// (and a CLOSE would close it). The sequential cases send these steps; here
-/// they are left out. A handle counts as open from an OPEN that may succeed
-/// (a `one_of` with a reply among its answers) to a CLOSE that does. A step
-/// left out is one whose expectation is `ST_BAD_FH`, which changes nothing,
-/// so the answers of the steps kept are the same.
+/// they are left out. A handle counts as open from an OPEN that issues it
+/// to a CLOSE that may succeed. A step left out is one whose expectation is
+/// `ST_BAD_FH`, which changes nothing, so the answers of the steps kept are
+/// the same.
+///
+/// An OPEN that may answer a handle or an error (a `one_of` with both) is
+/// the case's last step: which one the director chooses decides whether the
+/// later steps have a handle to send, and what the tree then holds (a create
+/// open), while the case's later expectations are the reference's, made
+/// after its own choice.
 fn without_stand_ins(steps: &[Step]) -> Vec<&Step> {
     fn opened(e: &Expect) -> Vec<u64> {
         match e {
             Expect::Reply(OwnedReply::Open(o)) => vec![o.fh],
             Expect::OneOf(alts) => alts.iter().flat_map(opened).collect(),
             _ => Vec::new(),
+        }
+    }
+    fn may_fail(e: &Expect) -> bool {
+        match e {
+            Expect::Reply(OwnedReply::Open(_)) => false,
+            Expect::OneOf(alts) => alts.iter().any(may_fail),
+            _ => true,
         }
     }
     fn may_succeed(e: &Expect) -> bool {
@@ -261,7 +274,14 @@ fn without_stand_ins(steps: &[Step]) -> Vec<&Step> {
             O::Close { fh } if may_succeed(&st.expect) => {
                 open.remove(fh);
             }
-            O::Open { .. } => open.extend(opened(&st.expect)),
+            O::Open { .. } => {
+                let fhs = opened(&st.expect);
+                if !fhs.is_empty() && may_fail(&st.expect) {
+                    kept.push(st);
+                    break;
+                }
+                open.extend(fhs);
+            }
             _ => {}
         }
         kept.push(st);
@@ -1026,6 +1046,68 @@ mod tests {
                 fh: 4 + 2 * FH_STRIDE
             }
         );
+    }
+
+    use aether_protocol::Status;
+
+    fn step(request: OwnedRequest, expect: Expect) -> Step {
+        Step {
+            request,
+            expect,
+            cite: None,
+            note: None,
+            client: 0,
+        }
+    }
+
+    /// An OPEN that may answer a handle or an error: the director's choice
+    /// decides whether later steps have a handle to send, and what the
+    /// tree holds, so the client's case stops after it. A definite OPEN, a
+    /// use after CLOSE and a never-issued number are handled as before.
+    #[test]
+    fn a_case_stops_after_an_open_that_may_fail() {
+        let open = |path: &str| OwnedRequest::Open {
+            root: RootId(0),
+            flags: OpenFlags::READ,
+            path: path.into(),
+        };
+        let opened = |fh| {
+            Expect::Reply(OwnedReply::Open(aether_protocol::OpenResp {
+                fh,
+                ..Default::default()
+            }))
+        };
+        let read = |fh| OwnedRequest::Read {
+            slot_flags: RequestFlags::empty(),
+            fh,
+            offset: 0,
+            len: 4,
+        };
+        let data = Expect::Reply(OwnedReply::Read(b"abcd".to_vec()));
+        let ok = Expect::Reply(OwnedReply::Empty);
+        let steps = vec![
+            step(open("a"), opened(1)),
+            step(read(1), data.clone()),
+            step(read(9), Expect::Status(Status::BadFh)),
+            step(OwnedRequest::Close { fh: 1 }, ok.clone()),
+            step(read(1), Expect::Status(Status::BadFh)),
+            step(
+                open("b"),
+                Expect::OneOf(vec![opened(2), Expect::Status(Status::NotFound)]),
+            ),
+            step(read(2), data.clone()),
+            step(OwnedRequest::Heartbeat, ok.clone()),
+        ];
+        let kept: Vec<&Step> = without_stand_ins(&steps);
+        let want: Vec<&Step> = [0, 1, 3, 5].iter().map(|&i| &steps[i]).collect();
+        assert_eq!(kept, want);
+
+        // A one_of of handles alone is definite enough: each is a handle.
+        let steps = vec![
+            step(open("c"), Expect::OneOf(vec![opened(3), opened(4)])),
+            step(read(3), data),
+        ];
+        assert_eq!(without_stand_ins(&steps).len(), 2);
     }
 
     /// Generated cases, confined and moved under their clients, answer the

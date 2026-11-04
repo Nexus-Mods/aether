@@ -426,3 +426,76 @@ caught_by_the_generator! {
     // 4.3: REG_DELETE_KEY of a key no layer holds, in every registry case.
     an_unknown_key_is_tombstoned: "delete-unrecorded-not-found", 8, 2, "reg-delete-key";
 }
+
+/// A concurrent run of `rounds` rounds of 4 clients against the reference
+/// adapter breaking `rule`: it fails in the clients' meeting, and the error
+/// says which (wire.md 2.8.1).
+fn a_meeting_catches(rule: &str, rounds: u32, what: &str) {
+    let tmp = aether_testkit::tempdir().unwrap();
+    let scenarios = heartbeat_only(tmp.path());
+    let report = tmp.path().join("report.json");
+    let o = conform(&[
+        "run",
+        "--director",
+        &director(&format!(" --break {rule}")),
+        "--scenarios",
+        scenarios.to_str().unwrap(),
+        "--concurrent",
+        "4",
+        "--concurrent-cases",
+        &rounds.to_string(),
+        "--seed",
+        "7",
+        "--failures",
+        tmp.path().join("failures").to_str().unwrap(),
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    let v = json_report(&o, &report);
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{rule}: {v:#}
+{}",
+        stderr(&o)
+    );
+    let c = scenario(&v, "concurrent");
+    let error = c["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("meeting") && error.contains(what) && error.contains("wire.md 2.8.1"),
+        "{rule}: {c:#}"
+    );
+}
+
+#[test]
+fn concurrent_exclusive_creates_meet_and_one_wins() {
+    a_meeting_catches("racy-excl", 4, "OPEN_EXCL creates");
+}
+
+#[test]
+fn concurrent_key_creates_meet_and_one_wins() {
+    a_meeting_catches("racy-reg-create", 4, "REG_CREATE_KEYs");
+}
+
+#[test]
+fn concurrent_appends_land_whole() {
+    a_meeting_catches("torn-append", 4, "appending");
+}
+
+#[test]
+fn concurrent_disjoint_writes_all_land() {
+    a_meeting_catches("lost-update", 4, "disjoint ranges");
+}
+
+#[test]
+fn a_rename_is_never_seen_half_done() {
+    // A lookup in flight with the RENAME falls in its middle only when the
+    // threads interleave so, so the rounds are many.
+    a_meeting_catches(
+        "rename-in-steps",
+        32,
+        "neither the state before nor the state after",
+    );
+}

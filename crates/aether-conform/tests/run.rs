@@ -725,11 +725,13 @@ fn a_director_numbering_handles_per_slot_fails_only_with_several_clients() {
         unique.3.iter().any(|n| n.contains("wire.md 3.4.3")),
         "{unique:?}"
     );
+    // A step of a client's case, or a meeting of the clients (its error).
     let concurrent = entry(&entries, "concurrent");
     assert!(
         concurrent
             .3
             .iter()
+            .chain(&concurrent.2)
             .any(|n| n.contains("wire.md 2.8.1") || n.contains("wire.md 3.4.3")),
         "{concurrent:?}"
     );

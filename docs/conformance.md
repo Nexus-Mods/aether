@@ -297,7 +297,9 @@ given) and have at most `--steps` operations per client.
 **A round.** Each client `k` gets a generated case ("Generated cases" below)
 limited to one root with a writable provider and no registry layer. The
 overlay's version is one counter for the whole session, so one client's
-registry writes would change another's answers. The case's tree and paths
+registry writes would change another's answers; the case's last step, its
+probe of the registry layer it lacks, is left out, since the combined tree
+has a layer for the meetings (below). The case's tree and paths
 move under the directory `c<k>` of root 0: a STORED_NAMES `skip` goes up by
 one, and expected handle numbers move into a range of their own. The
 clients' subtrees are disjoint, so each client's answers are its own case's
@@ -330,6 +332,22 @@ Then the sweep, which gives every slot and bank work:
   limit, each wave in flight together.
 
 Each answer must have its own file's size or bytes.
+
+Before the sweep, the clients meet: requests on one name, file or key, in
+flight together, each from a slot of its own (data requests below the data
+limit), whose outcome wire.md 2.8.1 makes predictable, since each request
+takes effect atomically. Each meeting is in the writable directory `meet/`
+of root 0, or below a key of the registry layer the combined tree has for
+them (the cases' own trees have none), with names of the round's own:
+
+| Meeting | What must hold (2.8.1) |
+|---|---|
+| `OPEN` with `write`, `create`, `excl` of one new name | exactly one handle, the rest `ST_EXISTS` |
+| MKDIR of one name | each `ST_OK` or `ST_EXISTS`, at least one `ST_OK`, and a directory there after |
+| REG_CREATE_KEY of one key | exactly one `ST_OK`, the rest `ST_EXISTS` |
+| WRITEs to disjoint, unaligned ranges of one file, each through a handle of its own | every one `written` whole, and the file read back inline and in bulk holds them all |
+| append WRITEs of records, each tagged with its client and number, in waves | the file is the records' total length, and every record is whole |
+| RENAME, then DELETE, of a file with a GETATTR, an OPEN and a READDIR of its names | each lookup the file whole or not there, and the listing never both names or neither |
 
 **What fails a round**, besides a step whose answer is not its client's
 expectation:

@@ -20,7 +20,19 @@
 //! predicts them exactly; the round is checked against an in-process
 //! reference serving the combined tree before it is played, and a case that
 //! answers otherwise there is a generator error. Root 0 also holds one file
-//! per slot under `sweep/`, of distinct sizes and bytes.
+//! per slot under `sweep/`, of distinct sizes and bytes, and the writable
+//! directory `meet/`; the combined tree has a registry layer with one key,
+//! for the meetings (the cases' own probe of an absent layer is left out).
+//!
+//! **Meetings.** After the clients, requests on one name, file or key, in
+//! flight together each from a slot of its own ([`meet`]), whose outcome
+//! wire.md 2.8.1 makes predictable since each request takes effect
+//! atomically: of OPEN_EXCL creates of one name, or REG_CREATE_KEYs of one
+//! key, exactly one succeeds; MKDIRs of one name are each `ST_OK` or
+//! `ST_EXISTS` and leave a directory; WRITEs to disjoint ranges all land;
+//! append WRITEs each land whole at an end; and a GETATTR, OPEN or READDIR
+//! in flight with a RENAME or DELETE sees the state before it or after it,
+//! never a mixture.
 //!
 //! **Playing it.** The combined tree is mounted through the adapter. The
 //! clients, one thread each with its own mapping of the ring
@@ -29,7 +41,8 @@
 //! ([`RegGen`]), send their steps one at a time, each claiming from the next
 //! slot of a cursor the clients share, with their data requests (READ,
 //! WRITE, SETATTR, write OPENs) held below the data limit, as the shim holds
-//! them (2.8: `data_limit(worker_hint, slot_count)`). Then the sweep, from
+//! them (2.8: `data_limit(worker_hint, slot_count)`). Then the meetings and
+//! the sweep, from
 //! one client: an OPEN of each sweep file claimed from its own slot, so
 //! every slot carries a request; a GETATTR in every slot at once; and bulk
 //! READs of each file from its own slot, in waves of the data limit, each
@@ -59,8 +72,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use aether_protocol::Status;
 use aether_protocol::{OpenFlags, RequestFlags, RootId};
-use aether_refdirector::tree::{fill, Contents, File, Root, Tree};
+use aether_refdirector::tree::{fill, Contents, File, RegKey, Registry, Root, Tree};
 use proptest::strategy::{Strategy, ValueTree};
 
 use crate::adapter::{Adapter, Env};
@@ -289,9 +303,25 @@ fn without_stand_ins(steps: &[Step]) -> Vec<&Step> {
     kept
 }
 
+fn is_registry(req: &OwnedRequest) -> bool {
+    use OwnedRequest as O;
+    matches!(
+        req,
+        O::RegLookup { .. }
+            | O::RegKey { .. }
+            | O::RegSetValue { .. }
+            | O::RegDeleteValue { .. }
+            | O::RegCreateKey { .. }
+            | O::RegDeleteKey { .. }
+            | O::RegRenameKey { .. }
+            | O::RegChanged { .. }
+    )
+}
+
 /// One round: the combined scenario (its steps marked with their clients)
 /// and each client's steps with their places in it.
 struct Round {
+    number: u32,
     scenario: Scenario,
     clients: Vec<Vec<(usize, Step)>>,
 }
@@ -335,6 +365,8 @@ fn combine(cases: &[Scenario], slots: u32) -> Result<Tree, String> {
         root.writable
             .extend(r.writable.iter().map(|w| moved(&p, w)));
     }
+    root.dirs.push(MEET_DIR.into());
+    root.writable.push(MEET_DIR.into());
     root.files.extend((0..slots).map(|n| File {
         path: sweep_path(n),
         contents: Contents::Fill {
@@ -345,7 +377,13 @@ fn combine(cases: &[Scenario], slots: u32) -> Result<Tree, String> {
     }));
     let tree = Tree {
         roots: vec![root],
-        registry: None,
+        registry: Some(Registry {
+            keys: vec![RegKey {
+                path: MEET_KEY.into(),
+                volatile: false,
+                values: Vec::new(),
+            }],
+        }),
     };
     tree.validate()
         .map_err(|e| format!("an invalid combined tree: {e}"))?;
@@ -378,7 +416,12 @@ fn round(
     for (k, s) in cases.iter().enumerate() {
         let (p, off) = (prefix(k), FH_STRIDE * (k as u64 + 1));
         let mut mine = Vec::new();
-        for st in without_stand_ins(&s.steps) {
+        // Not the case's probe of a registry layer it does not have: the
+        // combined tree has one, for the meetings.
+        for st in without_stand_ins(&s.steps)
+            .into_iter()
+            .filter(|st| !is_registry(&st.request))
+        {
             let step = Step {
                 request: relocate(&st.request, &p, off),
                 expect: relocate_expect(&st.expect, off),
@@ -403,7 +446,11 @@ fn round(
         tree,
         steps,
     };
-    let round = Round { scenario, clients };
+    let round = Round {
+        number: r,
+        scenario,
+        clients,
+    };
     check_round(&round).map_err(GenerateError::Generator)?;
     Ok(round)
 }
@@ -742,6 +789,12 @@ fn play(env: &Env, timeout: Duration, round: &Round, slots: u32) -> Played {
     // After the clients, so what they find is reported first; a ring that
     // stopped answering them is not swept.
     if played.error.is_none() {
+        let n = round.clients.len();
+        if let Err(e) = meet(&ring, round.number, n, limit, &mut played.coverage) {
+            played.error = Some(format!("meeting: {e}"));
+        }
+    }
+    if played.error.is_none() {
         if let Err(e) = sweep(&ring, slots, limit, &mut played.coverage) {
             played.error = Some(format!("sweep: {e}"));
         }
@@ -1000,6 +1053,442 @@ fn client(
         });
     }
     (out, None)
+}
+
+// ---------------------------------------------------------------------------
+// Meetings: requests of several clients on one name, file or key at once.
+
+/// The writable directory of root 0 the meetings are held in, and the key
+/// below which they create keys.
+const MEET_DIR: &str = "meet";
+const MEET_KEY: &str = r"\Registry\Machine\Software\Conform";
+/// Records each append meeting's client writes, and their length.
+const RECORDS: usize = 3;
+const RECORD_LEN: usize = 37;
+
+/// One meeting's requests, in flight together, each from a slot of its own:
+/// the outcomes, with the coverage noted. A reply that is not an answer
+/// (wire.md 2.5) fails the meeting.
+fn together(
+    ring: &Attached,
+    reqs: &[OwnedRequest],
+    cov: &mut Coverage,
+) -> Result<Vec<Result<OwnedReply, Status>>, String> {
+    let batch: Vec<(u32, &OwnedRequest)> = reqs
+        .iter()
+        .enumerate()
+        .map(|(n, r)| (n as u32, r))
+        .collect();
+    let mut out = Vec::new();
+    for (o, req) in call_batch(ring, &batch)?.into_iter().zip(reqs) {
+        cov.note(&o);
+        match o.answer {
+            Answer::Got(g) => out.push(g),
+            Answer::Bad(why) => return Err(format!("{req:?}: {why}")),
+        }
+    }
+    Ok(out)
+}
+
+/// One request, alone.
+fn alone(
+    ring: &Attached,
+    req: &OwnedRequest,
+    cov: &mut Coverage,
+) -> Result<Result<OwnedReply, Status>, String> {
+    Ok(together(ring, std::slice::from_ref(req), cov)?.remove(0))
+}
+
+/// An OPEN's handle, or why there is none.
+fn opened(req: &OwnedRequest, got: &Result<OwnedReply, Status>) -> Result<u64, String> {
+    match got {
+        Ok(OwnedReply::Open(o)) => Ok(o.fh),
+        other => Err(format!("{req:?} got {}", render_got(other))),
+    }
+}
+
+/// The whole of a file through handle `fh` of `size` bytes, read inline in
+/// pieces the ring's slot holds, and (with an arena) in bulk too: each must
+/// be `want`.
+fn read_back(
+    ring: &Attached,
+    fh: u64,
+    want: &[u8],
+    what: &str,
+    cov: &mut Coverage,
+) -> Result<(), String> {
+    let inline = ring.geom().payload_cap.saturating_sub(8) as usize;
+    let mut got = Vec::new();
+    while got.len() < want.len() + 1 {
+        let req = OwnedRequest::Read {
+            slot_flags: RequestFlags::empty(),
+            fh,
+            offset: got.len() as u64,
+            len: inline.min(4096) as u32,
+        };
+        match alone(ring, &req, cov)? {
+            Ok(OwnedReply::Read(d)) if d.is_empty() => break,
+            Ok(OwnedReply::Read(d)) => got.extend(d),
+            other => return Err(format!("{what}: {req:?} got {}", render_got(&other))),
+        }
+    }
+    if got != want {
+        return Err(format!(
+            "{what}: read back inline, {} bytes, not the {} expected{}",
+            got.len(),
+            want.len(),
+            first_difference(&got, want)
+        ));
+    }
+    if ring.arena_len() > 0 {
+        let req = OwnedRequest::Read {
+            slot_flags: RequestFlags::READ_BULK,
+            fh,
+            offset: 0,
+            len: want.len() as u32 + 1,
+        };
+        match alone(ring, &req, cov)? {
+            Ok(OwnedReply::Read(d)) if d == want => {}
+            other => {
+                return Err(format!(
+                    "{what}: read back in bulk, got {}",
+                    render_got(&other)
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn first_difference(a: &[u8], b: &[u8]) -> String {
+    match a.iter().zip(b).position(|(x, y)| x != y) {
+        Some(i) => format!(" (first difference at byte {i})"),
+        None => String::new(),
+    }
+}
+
+/// The record client `k` appends `j`th: its numbers, then a fill of its
+/// own.
+fn record(k: usize, j: usize) -> Vec<u8> {
+    let mut r = fill(RECORD_LEN, 7000 + (k * RECORDS + j) as u64);
+    r[0] = k as u8;
+    r[1] = j as u8;
+    r
+}
+
+/// The meetings of round `r`, `n` clients at each, at most `limit` data
+/// requests in flight (wire.md 2.8), each checked as wire.md 2.8.1 says
+/// requests in flight together take effect: atomically.
+fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Result<(), String> {
+    let data = n.min(limit.max(1) as usize).max(1);
+    let path = |what: &str| format!("{MEET_DIR}/{what}{r}");
+    let fails = |what: &str, why: String| Err(format!("{what} (wire.md 2.8.1): {why}"));
+
+    // OPEN_EXCL creates of one name: exactly one succeeds, the rest find it.
+    let excl = OwnedRequest::Open {
+        root: RootId(0),
+        flags: OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCL,
+        path: path("excl"),
+    };
+    let got = together(ring, &vec![excl.clone(); data.max(2)], cov)?;
+    let won: Vec<u64> = got
+        .iter()
+        .filter_map(|g| match g {
+            Ok(OwnedReply::Open(o)) => Some(o.fh),
+            _ => None,
+        })
+        .collect();
+    let lost = got.iter().filter(|g| **g == Err(Status::Exists)).count();
+    for fh in &won {
+        let _ = alone(ring, &OwnedRequest::Close { fh: *fh }, cov)?;
+    }
+    if won.len() != 1 || lost != got.len() - 1 {
+        return fails(
+            &format!(
+                "{} OPEN_EXCL creates of {} at once",
+                got.len(),
+                path("excl")
+            ),
+            format!(
+                "{} succeeded and {lost} were ST_EXISTS, not one and the rest: {}",
+                won.len(),
+                got.iter().map(render_got).collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+
+    // MKDIRs of one name: each ST_OK or ST_EXISTS, one directory after.
+    let mkdir = OwnedRequest::Mkdir {
+        root: RootId(0),
+        mode: 0o755,
+        path: path("dir"),
+    };
+    let got = together(ring, &vec![mkdir; n.max(2)], cov)?;
+    let ok = got.iter().filter(|g| **g == Ok(OwnedReply::Empty)).count();
+    let exists = got.iter().filter(|g| **g == Err(Status::Exists)).count();
+    let attr = OwnedRequest::GetAttr {
+        root: RootId(0),
+        path: path("dir"),
+    };
+    let after = alone(ring, &attr, cov)?;
+    let dir = matches!(&after, Ok(OwnedReply::GetAttr(a)) if a.found && a.is_dir);
+    if ok == 0 || ok + exists != got.len() || !dir {
+        return fails(
+            &format!("{} MKDIRs of {} at once", got.len(), path("dir")),
+            format!(
+                "{ok} ST_OK and {exists} ST_EXISTS of {}, then GETATTR {}",
+                got.len(),
+                render_got(&after)
+            ),
+        );
+    }
+
+    // REG_CREATE_KEYs of one key: exactly one succeeds.
+    let key = format!("{MEET_KEY}\\Meet{r}");
+    let create = OwnedRequest::RegCreateKey {
+        path: key.clone(),
+        volatile: false,
+    };
+    let got = together(ring, &vec![create; n.max(2)], cov)?;
+    let ok = got
+        .iter()
+        .filter(|g| matches!(g, Ok(OwnedReply::RegVersion(_))))
+        .count();
+    let exists = got.iter().filter(|g| **g == Err(Status::Exists)).count();
+    if ok != 1 || exists != got.len() - 1 {
+        return fails(
+            &format!("{} REG_CREATE_KEYs of {key} at once", got.len()),
+            format!(
+                "{ok} succeeded and {exists} were ST_EXISTS: {}",
+                got.iter().map(render_got).collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+
+    // WRITEs to disjoint, unaligned ranges of one file, each through a
+    // handle of its own: all land.
+    let file = path("disjoint");
+    let open = |flags: OpenFlags| OwnedRequest::Open {
+        root: RootId(0),
+        flags,
+        path: file.clone(),
+    };
+    let create = open(OpenFlags::WRITE | OpenFlags::CREATE);
+    let first = opened(&create, &alone(ring, &create, cov)?)?;
+    let mut fhs = vec![first];
+    for _ in 1..data {
+        let o = open(OpenFlags::WRITE | OpenFlags::READ);
+        fhs.push(opened(&o, &alone(ring, &o, cov)?)?);
+    }
+    let (skew, len) = (3 + (r as usize % 5), 1000 + 13 * (r as usize % 7));
+    let parts: Vec<Vec<u8>> = (0..data)
+        .map(|k| fill(len, 5000 + (r as usize * 8 + k) as u64))
+        .collect();
+    let writes: Vec<OwnedRequest> = (0..data)
+        .map(|k| OwnedRequest::Write {
+            fh: fhs[k],
+            offset: (skew + k * len) as u64,
+            data: parts[k].clone(),
+        })
+        .collect();
+    for (k, g) in together(ring, &writes, cov)?.iter().enumerate() {
+        if *g != Ok(OwnedReply::Write(len as u32)) {
+            return fails(
+                &format!("WRITE {k} of {data} to {file} at once"),
+                format!("got {}", render_got(g)),
+            );
+        }
+    }
+    let mut want = vec![0u8; skew];
+    for p in &parts {
+        want.extend(p);
+    }
+    read_back(
+        ring,
+        fhs[0],
+        &want,
+        &format!("{data} WRITEs to disjoint ranges of {file} at once (wire.md 2.8.1)"),
+        cov,
+    )?;
+    for fh in fhs {
+        let _ = alone(ring, &OwnedRequest::Close { fh }, cov)?;
+    }
+
+    // Append WRITEs, each a record of its own: each lands whole at an end.
+    let file = path("append");
+    let appender = |create: bool| OwnedRequest::Open {
+        root: RootId(0),
+        flags: if create {
+            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND
+        } else {
+            OpenFlags::WRITE | OpenFlags::READ | OpenFlags::APPEND
+        },
+        path: file.clone(),
+    };
+    let mut fhs = Vec::new();
+    for k in 0..data {
+        let o = appender(k == 0);
+        fhs.push(opened(&o, &alone(ring, &o, cov)?)?);
+    }
+    for j in 0..RECORDS {
+        let writes: Vec<OwnedRequest> = (0..data)
+            .map(|k| OwnedRequest::Write {
+                fh: fhs[k],
+                offset: 0,
+                data: record(k, j),
+            })
+            .collect();
+        for (k, g) in together(ring, &writes, cov)?.iter().enumerate() {
+            if *g != Ok(OwnedReply::Write(RECORD_LEN as u32)) {
+                return fails(
+                    &format!("append WRITE {k} of {data} to {file} at once"),
+                    format!("got {}", render_got(g)),
+                );
+            }
+        }
+    }
+    let size = data * RECORDS * RECORD_LEN;
+    let read = OwnedRequest::Read {
+        slot_flags: RequestFlags::empty(),
+        fh: fhs[0],
+        offset: 0,
+        len: (size + 1) as u32,
+    };
+    let body = match alone(ring, &read, cov)? {
+        Ok(OwnedReply::Read(d)) => d,
+        other => return fails(&format!("READ of {file}"), render_got(&other)),
+    };
+    let mut seen: Vec<Vec<u8>> = body.chunks(RECORD_LEN).map(<[u8]>::to_vec).collect();
+    let mut all: Vec<Vec<u8>> = (0..data)
+        .flat_map(|k| (0..RECORDS).map(move |j| record(k, j)))
+        .collect();
+    seen.sort();
+    all.sort();
+    if body.len() != size || seen != all {
+        return fails(
+            &format!("{data} clients appending {RECORDS} records each to {file} at once"),
+            if body.len() != size {
+                format!("the file is {} bytes, not {size}", body.len())
+            } else {
+                "a record is not whole, or not where an end was".into()
+            },
+        );
+    }
+    for fh in fhs {
+        let _ = alone(ring, &OwnedRequest::Close { fh }, cov)?;
+    }
+
+    // A RENAME, and a DELETE, with lookups of both names in flight: each
+    // lookup sees the state before or the state after, and a listing never
+    // shows both names or neither.
+    let (a, b) = (path("from"), path("to"));
+    let bytes = fill(100 + r as usize, 9000 + u64::from(r));
+    let mk = OwnedRequest::Open {
+        root: RootId(0),
+        flags: OpenFlags::WRITE | OpenFlags::CREATE,
+        path: a.clone(),
+    };
+    let fh = opened(&mk, &alone(ring, &mk, cov)?)?;
+    let w = OwnedRequest::Write {
+        fh,
+        offset: 0,
+        data: bytes.clone(),
+    };
+    alone(ring, &w, cov)?.map_err(|s| format!("{w:?}: {s:?}"))?;
+    alone(ring, &OwnedRequest::Close { fh }, cov)?.map_err(|s| format!("CLOSE: {s:?}"))?;
+    let size = bytes.len() as u64;
+    let lookups = |name: &str| {
+        vec![
+            OwnedRequest::GetAttr {
+                root: RootId(0),
+                path: name.to_string(),
+            },
+            OwnedRequest::Open {
+                root: RootId(0),
+                flags: OpenFlags::READ,
+                path: name.to_string(),
+            },
+        ]
+    };
+    for deleting in [false, true] {
+        let change = if deleting {
+            OwnedRequest::Delete {
+                root: RootId(0),
+                path: b.clone(),
+            }
+        } else {
+            OwnedRequest::Rename {
+                root: RootId(0),
+                from: a.clone(),
+                to: b.clone(),
+            }
+        };
+        let mut reqs = vec![change.clone()];
+        let watched: Vec<&str> = if deleting { vec![&b] } else { vec![&a, &b] };
+        for name in &watched {
+            reqs.extend(lookups(name));
+        }
+        reqs.push(OwnedRequest::ReadDir {
+            root: RootId(0),
+            path: MEET_DIR.into(),
+        });
+        let got = together(ring, &reqs, cov)?;
+        if got[0] != Ok(OwnedReply::Empty) {
+            return fails(&format!("{change:?}"), render_got(&got[0]));
+        }
+        let mut i = 1;
+        for name in &watched {
+            for g in &got[i..i + 2] {
+                let present = match g {
+                    Ok(OwnedReply::GetAttr(x)) if !x.found => false,
+                    Ok(OwnedReply::GetAttr(x)) if x.size == size && !x.is_dir => true,
+                    Err(Status::NotFound) => false,
+                    Ok(OwnedReply::Open(o)) if o.size == size && !o.is_dir => {
+                        let _ = alone(ring, &OwnedRequest::Close { fh: o.fh }, cov)?;
+                        true
+                    }
+                    other => {
+                        return fails(
+                            &format!("a lookup of {name} in flight with {change:?}"),
+                            format!("got {}", render_got(other)),
+                        )
+                    }
+                };
+                let _ = present;
+            }
+            i += 2;
+        }
+        if let Ok(OwnedReply::ReadDir(entries)) = &got[i] {
+            let has = |p: &str| {
+                let leaf = p.rsplit('/').next().unwrap_or(p);
+                entries.iter().any(|e| e.name == leaf)
+            };
+            let mixed = if deleting {
+                has(&a)
+            } else {
+                has(&a) == has(&b)
+            };
+            if mixed {
+                return fails(
+                    &format!("READDIR of {MEET_DIR} in flight with {change:?}"),
+                    format!(
+                        "it lists {}, neither the state before nor the state after",
+                        entries
+                            .iter()
+                            .map(|e| e.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                );
+            }
+        } else {
+            return fails(
+                &format!("READDIR of {MEET_DIR} in flight with {change:?}"),
+                render_got(&got[i]),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

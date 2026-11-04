@@ -274,18 +274,20 @@ Sizing rules a director must meet, from what the shim sends:
 ### 2.7 Default geometry
 
 A director may choose any geometry that meets sections 2.4 and 2.6; the shim
-reads it from the header and the environment. These are the usual defaults:
+reads it from the header and the environment. The table is one consistent
+geometry: the payload cap, arena and worker count are the defaults of
+Aether's Rust ring code, and the slot count is an example:
 
 | Quantity | Formula | Default |
 |---|---|---:|
-| `slot_count` | — | 32 |
+| `slot_count` | — (example) | 32 |
 | `payload_cap` | — | 1 048 576 |
 | `slot_stride` | `align8(32 + payload_cap)` | 1 048 608 |
 | ring bytes = `arena_offset` | `48 + slot_count * slot_stride` | 33 555 504 |
 | `arena_len` | — | 33 554 432 (32 MiB) |
 | `bank_size` | `max(arena_len / slot_count, 4096)` | 1 048 576 |
 | map size (`VFS_RING_BYTES`) | `max(round_up(ring + arena, 65536), 2 MiB)` | 67 174 400 |
-| workers | clamped to `1..=slot_count` | 4 |
+| workers | `worker_hint`; the shim caps it at `slot_count` (2.8) | 4 |
 
 ### 2.8 Client concurrency and `worker_hint`
 
@@ -453,9 +455,10 @@ same result. There is no locale, no context and no normalisation:
   fold works one character at a time.
 - Composed and decomposed forms stay different names: `é` (U+00E9) and `e`
   plus U+0301 do not fold to the same string.
-- The mapping is the one of the Unicode version the release was built with:
-  the Unicode version of the Rust standard library of the toolchain the
-  release pins.
+- The mapping is Unicode 17.0.0's. This is the full lowercase mapping, not
+  case folding (`CaseFolding.txt`) and not the simple one-character mapping:
+  `İ` folds to two characters, and `ẞ` (U+1E9E) to `ß`, not `ss`. A change
+  of Unicode version is a change of the fold (below).
 
 **Two properties it does not have:**
 
@@ -518,7 +521,9 @@ checks no time it is sent.
 Opcode numbers are never renumbered. The table is also published as data,
 `contract/protocol.json`: every opcode with its request and reply fields in
 wire order (padding included, as `pad` entries), strictness, the statuses and
-the flag bits. It is the machine-readable form of the layouts below, for
+the flag bits. It is generated from the same table the Rust code encodes and
+decodes with, and Aether's tests check the two equal. It is the
+machine-readable form of the layouts below, for
 building a director's tables in another language.
 
 The file defines its own field types, so it can be read without this
@@ -813,7 +818,7 @@ with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
 is `ST_BAD_REQUEST` (as the reference director answers) or `ST_IO_ERROR`,
 and is never deleted. A missing path is `ST_NOT_FOUND`; a path outside every
 writable provider `ST_READ_ONLY`. A file with open handles is deleted like
-any other: a director that keeps files on disk opens them with
+any other: a director that keeps files on disk should open them with
 `FILE_SHARE_DELETE`, so the delete or rename of an open file succeeds. What a
 handle reads after its file was deleted or renamed is the director's.
 
@@ -1009,7 +1014,7 @@ all eight `ST_NOT_SUPPORTED`.
 | Key name | 255 UTF-16 units | a key name component; `new_leaf`; child names in a REG_KEY reply |
 | Value name | 16 383 UTF-16 units | value names |
 | Value data | 1 048 576 bytes (`1 << 20`) | value data |
-| Write depth | 512 components below `\Registry` | keys a write may create |
+| Write depth | 512 components below `\Registry` | keys a write may create or move |
 
 The shim never sends a registry request larger than `payload_cap`: it refuses
 it locally with `ST_BAD_REQUEST`. For a write that becomes
@@ -1121,27 +1126,44 @@ is dropped. Its semantics:
   ancestor, is state 3; anything else is absent. `below` is whether a node or
   a tombstone lies strictly under the path; it is 0 for a tombstoned key.
 - **REG_KEY.** The node at the path, or none (`has_node = 0`).
-- **REG_SET_VALUE.** Makes the path exist, drops a value tombstone of that name, replaces the value of that
-  folded name (keeping its stored name) or appends it, and sets `last_write`.
-- **REG_DELETE_VALUE.** `ST_NOT_FOUND` if the key is tombstoned (itself or
-  under a tombstoned ancestor). Otherwise makes the path exist, removes the
-  value of that name and records a value tombstone, which also hides a real
-  value of that name.
+- **Limits.** Every write but REG_RENAME_KEY checks, in this order, before
+  anything else: the path is a valid key path (4.2); every key-name component
+  of the path is at most 255 UTF-16 units; the path is at most 512
+  components below `\Registry`; then the write's own limits below. Any of them failing is
+  `ST_BAD_REQUEST` and changes nothing. No write limits how many keys,
+  values or children a node holds.
+- **`last_write`.** A write stamps the director's clock (a FILETIME) on: every
+  node that making a path exist creates; a node whose child list it changes;
+  the key of REG_SET_VALUE and REG_DELETE_VALUE; the parent of REG_DELETE_KEY;
+  and the moved key and its parent of REG_RENAME_KEY. Nothing else changes
+  it.
+- **REG_SET_VALUE.** Also checks the value name (at most 16 383 units) and the
+  data (at most 1 048 576 bytes). Makes the path exist, drops a value
+  tombstone of that name, and replaces the value of that folded name
+  (keeping its stored name) or appends it.
+- **REG_DELETE_VALUE.** Also checks the value name. `ST_NOT_FOUND` if the key
+  is tombstoned (itself or under a tombstoned ancestor). Otherwise makes the
+  path exist, removes the value of that name and records a value tombstone,
+  which also hides a real value of that name.
 - **REG_CREATE_KEY.** `ST_EXISTS` if the overlay already holds a node there.
   Otherwise makes the path exist, the key itself `created` (it then needs no
   real counterpart, and none shows through), with the request's `volatile`.
-- **REG_DELETE_KEY.** `ST_BAD_REQUEST` for `\Registry` itself; `ST_NOT_FOUND`
-  if the key is already tombstoned. Otherwise makes the parent exist, drops
-  the key's node and everything below it, tombstones the key and lists it as
-  a tombstone child of its parent.
-- **REG_RENAME_KEY.** `new_leaf` must be non-empty, hold no `\` and fit the
-  key name limit (`ST_BAD_REQUEST`). The key must have a node in the overlay
-  (`ST_NOT_FOUND` otherwise). Another node at the new name is `ST_EXISTS`,
-  unless the new name differs only in case. The key and its subtree move to
-  the new name under the same parent, every moved key `created` (the new
-  name has no real counterpart), tombstones below it moving with it; the old
-  name is tombstoned in the parent (not for a change of case only), and the
-  new name is listed as present.
+- **REG_DELETE_KEY.** `ST_BAD_REQUEST` for `\Registry` itself;
+  `ST_NOT_FOUND` if the key is tombstoned (itself or under a tombstoned
+  ancestor). Otherwise makes the parent exist, drops the key's node and
+  everything below it, tombstones the key and lists it as a tombstone child
+  of its parent.
+- **REG_RENAME_KEY.** Checks, in this order: the path is valid; `new_leaf`
+  is non-empty, holds no `\` and is at most 255 units; every key-name
+  component of the path is at most 255 units; the path is not `\Registry`
+  (each `ST_BAD_REQUEST`). The key must have a node in the overlay (`ST_NOT_FOUND` otherwise). Another
+  node at the new name is `ST_EXISTS`, unless the new name differs only in
+  case. Every key it moves is created at its own depth under the new name, so
+  a moved key deeper than 512 components is `ST_BAD_REQUEST`. The key and its
+  subtree move to the new name under the same parent, every moved key
+  `created` (the new name has no real counterpart), tombstones below it
+  moving with it; the old name is tombstoned in the parent (not for a change
+  of case only), and the new name is listed as present.
 - **REG_CHANGED.** For a key with a node: whether its own values, existence
   or child list changed at a version after `since` (with `subtree` 1, or
   anything below it did). For a key with no node: whether it, or any
@@ -1331,8 +1353,8 @@ file and its siblings by the corresponding host path.
 loaded by full path, but the loader finds its imports through the target's
 DLL search path. The release natives are built with the C runtime linked in
 statically, so they need no C runtime DLL; a build without it does, and a
-director that launches one puts the folder that holds the natives first on
-the target's `PATH`.
+director that launches one must put the folder that holds the natives first
+on the target's `PATH`.
 
 The injector adds to the target's environment: `VFS_SHIM_CONFIG`,
 `VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG = <ready>.child-refused`,
@@ -1412,7 +1434,7 @@ tool that starts processes under the shim itself may wait on them.
 **Aether's release version** is semver; releases are tags `v<semver>`. It is
 separate from the **wire version**, which is the ring header's `version`
 field, now 4, also published as `wire_version` in `contract/artifacts.json`
-and `contract/protocol.json`. `shim.cfg` has its own version, 2.
+and `contract/protocol.json` (Aether's tests check both against the code). `shim.cfg` has its own version, 2.
 
 Rules:
 
@@ -1448,7 +1470,8 @@ they are fixed. Where this document says directors may differ, conformance
 accepts each answer it names.
 
 `contract/protocol.json` is the machine-readable form of the protocol table
-(3.3): a director in another language builds its opcode, status and field
+(3.3), and is normative for the layouts as the golden vectors are for the
+bytes: a director in another language builds its opcode, status and field
 tables from it instead of from the prose.
 
 The executable part of the contract is the golden vectors, `vectors.txt` in

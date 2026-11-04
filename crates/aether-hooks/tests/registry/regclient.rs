@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use aether_hooks::regclient::{self, RegClient};
 use aether_protocol::{
-    OP_REG_KEY, OP_REG_LOOKUP, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR,
-    ST_NOT_SUPPORTED, ST_REPLY_TOO_LARGE,
+    Opcode, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR, ST_NOT_SUPPORTED, ST_REPLY_TOO_LARGE,
 };
 use aether_registry::{Child, Lookup};
 use fakedirector::Fake;
@@ -135,12 +134,20 @@ fn a_write_by_another_process_invalidates_every_cache() {
     assert_eq!(a.lookup(&k), Ok((Lookup::Absent, false)));
     assert_eq!(a.key(&k), Ok(None));
     assert_eq!(a.key(&k), Ok(None));
-    assert_eq!(reqs(OP_REG_LOOKUP), 1, "the second lookup was a cache hit");
-    assert_eq!(reqs(OP_REG_KEY), 1, "the second key read was a cache hit");
+    assert_eq!(
+        reqs(Opcode::RegLookup),
+        1,
+        "the second lookup was a cache hit"
+    );
+    assert_eq!(
+        reqs(Opcode::RegKey),
+        1,
+        "the second key read was a cache hit"
+    );
     // The other process caches its own answers.
     assert_eq!(b.key(&k), Ok(None));
     assert_eq!(b.key(&k), Ok(None));
-    assert_eq!(reqs(OP_REG_KEY), 2);
+    assert_eq!(reqs(Opcode::RegKey), 2);
 
     // B writes; A's next read asks again and sees it.
     b.set_value(&k, "Fov", REG_DWORD, &90u32.to_le_bytes())
@@ -151,11 +158,11 @@ fn a_write_by_another_process_invalidates_every_cache() {
         a.lookup(&k),
         Ok((Lookup::Present { created: false }, false))
     );
-    assert_eq!(reqs(OP_REG_KEY), 3);
-    assert_eq!(reqs(OP_REG_LOOKUP), 2);
+    assert_eq!(reqs(Opcode::RegKey), 3);
+    assert_eq!(reqs(Opcode::RegLookup), 2);
     // ... and caches the new answer.
     a.key(&k).unwrap();
-    assert_eq!(reqs(OP_REG_KEY), 3);
+    assert_eq!(reqs(Opcode::RegKey), 3);
 
     // And the other way round: A writes, B's cached answer is not used.
     assert_eq!(b.key(&k).unwrap().unwrap().values.len(), 1);
@@ -260,8 +267,12 @@ fn a_request_too_large_for_the_ring_is_refused_unsent() {
     let over = vec![0x22u8; fits.len() + 1];
 
     assert_eq!(regclient::set_value(&k, "v", 3, &over), Err(ST_BAD_REQUEST));
-    assert_eq!(f.fake.tally.reg(OP_REG_SET_VALUE, &k), 0, "never submitted");
+    assert_eq!(
+        f.fake.tally.reg(Opcode::RegSetValue, &k),
+        0,
+        "never submitted"
+    );
 
     regclient::set_value(&k, "v", 3, &fits).unwrap();
-    assert_eq!(f.fake.tally.reg(OP_REG_SET_VALUE, &k), 1);
+    assert_eq!(f.fake.tally.reg(Opcode::RegSetValue, &k), 1);
 }

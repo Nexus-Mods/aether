@@ -22,6 +22,9 @@ members = [
   # The ring's typed ends: a Client (the shim's) and a Director trait with serve
   # (every Rust-side server's), over aether-protocol's table.
   "crates/aether-rpc",
+  # The reference director (an in-memory provider graph and registry overlay, the
+  # shim tests' server and the conformance oracle) and a null director.
+  "crates/aether-refdirector",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.
@@ -78,6 +81,7 @@ aether-ntlayout = { path = "crates/aether-ntlayout" }
 aether-pe = { path = "crates/aether-pe" }
 aether-protocol = { path = "crates/aether-protocol" }
 aether-redirect = { path = "crates/aether-redirect" }
+aether-refdirector = { path = "crates/aether-refdirector" }
 aether-registry = { path = "crates/aether-registry" }
 aether-rpc = { path = "crates/aether-rpc" }
 aether-testkit = { path = "crates/aether-testkit" }

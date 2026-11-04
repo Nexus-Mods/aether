@@ -35,6 +35,9 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# The director the shim's tests serve (`tests/fakedirector`), and its serve loop.
+aether-refdirector.workspace = true
+aether-rpc.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

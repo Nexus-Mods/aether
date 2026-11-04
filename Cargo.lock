@@ -55,7 +55,9 @@ dependencies = [
  "aether-pe",
  "aether-protocol",
  "aether-redirect",
+ "aether-refdirector",
  "aether-registry",
+ "aether-rpc",
  "aether-win",
  "retour",
  "windows-sys 0.61.2",
@@ -109,6 +111,16 @@ dependencies = [
  "aether-casefold",
  "aether-protocol",
  "aether-win",
+]
+
+[[package]]
+name = "aether-refdirector"
+version = "0.1.0"
+dependencies = [
+ "aether-ipc",
+ "aether-protocol",
+ "aether-registry",
+ "aether-rpc",
 ]
 
 [[package]]

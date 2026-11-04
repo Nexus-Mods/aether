@@ -889,10 +889,11 @@ that exists only in a read-only layer beneath it, see below):
 - An existing directory: a director may answer `ST_OK` or `ST_EXISTS`, and a
   client must accept either. Cairn's writable providers answer `ST_OK`
   (`provider/layer.clj` and `provider/disk.clj`, `mkdir!`), its read-only ones
-  and the reference director `ST_EXISTS`. The shim, on any failure, asks
-  GETATTR whether a directory is there, so either answer gives the program
-  the same result for `FILE_OPEN_IF`; for `FILE_CREATE` only `ST_EXISTS` reports the
-  name collision.
+  and the reference director `ST_EXISTS`. For `FILE_CREATE` and `FILE_OPEN_IF`
+  the shim asks GETATTR before MKDIR, and sends no MKDIR when a directory is
+  there: `FILE_CREATE` reports the name collision and `FILE_OPEN_IF` opens it
+  (`FILE_OPENED`). After any failed MKDIR it asks GETATTR again. So either
+  answer gives the program the same result.
 - An existing file: `ST_IO_ERROR` where a writable provider serves the path
   (Cairn's writable providers), `ST_EXISTS` where none does (Cairn's
   read-only providers). The reference director answers the same.

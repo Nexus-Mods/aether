@@ -374,6 +374,13 @@ fn a_write_to_an_alternate_data_stream_leaves_the_file_s_own_bytes_alone() {
         written.is_err(),
         "a write to a stream the director does not hold must fail"
     );
+    // The shim carries the suffix to the director, which refused it: the
+    // refusal is the director's, not a shim that keeps streams to itself.
+    let opens = fake.tally.wire_opens();
+    assert!(
+        opens.iter().any(|(_, p)| p == "data/streamed.esp:probe"),
+        "the stream write never reached the director under its own vpath: {opens:?}"
+    );
     assert_eq!(
         fake.contents("data/streamed.esp:probe"),
         None,

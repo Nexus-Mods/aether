@@ -11,11 +11,16 @@
 //! Both implement [`aether_rpc::Director`]; serve them with
 //! [`aether_rpc::serve_with_arena`] (bulk READ needs the arena) or
 //! [`aether_rpc::serve`]. Neither depends on an OS.
+//!
+//! [`tree`] is the tree a conformance scenario mounts and
+//! [`Reference::from_tree`] the reference serving it; with the `scenario`
+//! feature a [`tree::Tree`] deserialises from a scenario file.
 
 #![forbid(unsafe_code)]
 
 mod null;
 mod reference;
+pub mod tree;
 
 pub use null::Null;
 pub use reference::{key, pattern, ReadStyle, Reference, Tally, BULK_THRESHOLD, MAX_FILE_LEN};

@@ -25,6 +25,9 @@ members = [
   # The reference director (an in-memory provider graph and registry overlay, the
   # shim tests' server and the conformance oracle) and a null director.
   "crates/aether-refdirector",
+  # The conformance tool: scenarios (JSON) and the rules a director's replies
+  # are compared with the reference's by. Portable.
+  "crates/aether-conform",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.
@@ -72,6 +75,7 @@ unimplemented = "warn"
 [workspace.dependencies]
 # Internal crates.
 aether-casefold = { path = "crates/aether-casefold" }
+aether-conform = { path = "crates/aether-conform" }
 aether-env = { path = "crates/aether-env" }
 aether-filering = { path = "crates/aether-filering" }
 aether-hooks = { path = "crates/aether-hooks" }
@@ -91,6 +95,8 @@ aether-win = { path = "crates/aether-win" }
 # `features` / `optional` on top.
 tempfile = "3.27"
 memmap2 = "0.9"
+# Scenario files (aether-conform; aether-refdirector's `scenario` feature).
+serde = "1"
 serde_json = "1"
 windows-sys = "0.61"
 # Flag words of the wire protocol (aether-protocol: OpenFlags, RequestFlags).

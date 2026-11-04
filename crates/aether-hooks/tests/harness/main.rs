@@ -38,6 +38,8 @@ mod caches_registry;
 mod child_start;
 mod costs;
 mod fault_table;
+mod faults_file;
+mod faults_registry;
 mod fileops;
 mod geometry;
 mod handles_outside;

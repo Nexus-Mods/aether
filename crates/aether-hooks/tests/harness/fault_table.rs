@@ -154,16 +154,16 @@ impl HookedOp {
     /// How many of the operation's requests one call's fault answers:
     /// one, but every STORED_NAMES of the call for a final name, which a
     /// program's one query may ask twice (once for the length).
-    fn times(self) -> Option<u32> {
+    pub(crate) fn times(self) -> Option<u32> {
         (self != HookedOp::StoredNames).then_some(1)
     }
 
-    fn reads(self) -> bool {
+    pub(crate) fn reads(self) -> bool {
         self.opcode() == Opcode::Read
     }
 
     /// Whether the faulted request's OK reply carries nothing.
-    fn empty_reply(self) -> bool {
+    pub(crate) fn empty_reply(self) -> bool {
         matches!(
             self.opcode(),
             Opcode::Heartbeat | Opcode::SetAttr | Opcode::Rename | Opcode::Delete | Opcode::Mkdir
@@ -571,27 +571,27 @@ fn the_wire_document_s_fault_table_is_the_test_s() {
 // ---- running a row -------------------------------------------------------
 
 /// The client's deadline in these tests.
-const DEADLINE: Duration = Duration::from_millis(300);
+pub(crate) const DEADLINE: Duration = Duration::from_millis(300);
 
 /// How long a delayed reply is held: well past the deadline, released as
 /// soon as the call has given up.
-const HELD: Duration = Duration::from_secs(5);
+pub(crate) const HELD: Duration = Duration::from_secs(5);
 
 /// How long a call may take before the row calls it hung.
 const WATCHDOG: Duration = Duration::from_secs(8);
 
 /// What one call saw: the table's kind of answer, or a description of an
 /// answer that is wrong (success with the wrong bytes, say).
-type Seen = Result<Expect, String>;
+pub(crate) type Seen = Result<Expect, String>;
 
 /// Everything a row's calls need, shared with the threads they run on.
-struct Ctx {
+pub(crate) struct Ctx {
     /// The virtual root on disk.
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     /// A registry key handle opened through the hooks (`HKCU\<key>`).
-    key: usize,
+    pub(crate) key: usize,
     /// The real image under the root, for `StageExec`.
-    image: PathBuf,
+    pub(crate) image: PathBuf,
 }
 
 /// How a row's call is made: on fresh names `i`.
@@ -696,13 +696,19 @@ const DATA_LEN: usize = 256 * 1024;
 /// The size of `save/big.bin`, mapped.
 const BIG_LEN: usize = 1024 * 1024;
 /// What one WRITE carries at the default `payload_cap` (4096 - 24).
-const CHUNK: usize = 4072;
+pub(crate) const CHUNK: usize = 4072;
 /// How many fresh names a row may use.
 const NAMES: usize = 128;
 
 /// The file rows' director: a read-only `ro/` and `Names/`, a writable
 /// `save/`.
 fn file_director() -> Fake {
+    file_director_named(NAMES)
+}
+
+/// [`file_director`] with `names` names under `Names/`, one for each final
+/// name a test asks for (an answered one is remembered).
+pub(crate) fn file_director_named(names: usize) -> Fake {
     let mut fake = Fake::new()
         .with_dir("ro")
         .with("ro/a.txt", b"hello".to_vec(), ReadStyle::Whole)
@@ -710,7 +716,7 @@ fn file_director() -> Fake {
         .with("save/big.bin", pattern(BIG_LEN), ReadStyle::Whole)
         .with("save/ow.bin", b"open me".to_vec(), ReadStyle::Whole)
         .writable_under("save/");
-    for i in 0..NAMES {
+    for i in 0..names {
         fake = fake.with(
             &format!("Names/N{i}/File.txt"),
             b"x".to_vec(),
@@ -721,13 +727,20 @@ fn file_director() -> Fake {
 }
 
 fn file_row(op: HookedOp) {
+    let (served, ctx) = file_setup(file_director());
+    run_row(served, ctx, op, file_call, true);
+}
+
+/// `fake` served at the client deadline [`DEADLINE`] and the hooks
+/// installed: what [`file_call`] needs.
+pub(crate) fn file_setup(fake: Fake) -> (&'static Served, &'static Ctx) {
     let dir = aether_testkit::tempdir().expect("temp folder");
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
     std::mem::forget(dir);
     let served = fakedirector::install_with(
         &root,
-        file_director(),
+        fake,
         Options {
             deadline: Some(DEADLINE),
             ..Options::default()
@@ -739,7 +752,7 @@ fn file_row(op: HookedOp) {
         key: 0,
         image: PathBuf::new(),
     }));
-    run_row(served, ctx, op, file_call, true);
+    (served, ctx)
 }
 
 fn p(ctx: &Ctx, rel: &str) -> String {
@@ -863,7 +876,7 @@ fn nt_create(path: &str, access: u32, disposition: u32, options: u32) -> (i32, *
 }
 
 /// A new file in `save/` open for writing (and deleting): the handle.
-fn new_file(ctx: &Ctx, rel: &str) -> Result<*mut c_void, String> {
+pub(crate) fn new_file(ctx: &Ctx, rel: &str) -> Result<*mut c_void, String> {
     let (st, h) = nt_create(
         &p(ctx, rel),
         FILE_READ_DATA | FILE_WRITE_DATA | DELETE,
@@ -876,12 +889,12 @@ fn new_file(ctx: &Ctx, rel: &str) -> Result<*mut c_void, String> {
     Ok(h)
 }
 
-fn close(h: *mut c_void) {
+pub(crate) fn close(h: *mut c_void) {
     crate::ntapi::close(h);
 }
 
 /// `NtWriteFile` of `data` at offset 0: the status and `Information`.
-fn nt_write(h: *mut c_void, data: &[u8]) -> (i32, usize) {
+pub(crate) fn nt_write(h: *mut c_void, data: &[u8]) -> (i32, usize) {
     let mut iosb = IoStatusBlock {
         status: 0,
         information: usize::MAX,
@@ -1071,11 +1084,11 @@ fn an_arena_away_from_the_ring_serves_every_bulk_read() {
 }
 
 /// An NT status as what a call saw.
-fn status(st: i32) -> Seen {
+pub(crate) fn status(st: i32) -> Seen {
     Ok(Expect::Nt(st))
 }
 
-fn file_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
+pub(crate) fn file_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
     match op {
         HookedOp::OpenRead => {
             let (st, h) = nt_open_abs(&p(ctx, "ro/a.txt"), FILE_READ_DATA);
@@ -1278,7 +1291,7 @@ fn section_fill(ctx: &Ctx) -> Seen {
 
 fn stored_name(ctx: &Ctx, i: usize) -> Seen {
     use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
-    assert!(i < NAMES, "the director holds {NAMES} names");
+    // A name `i` the director does not hold fails the open below.
     let (st, h) = nt_open_abs(&p(ctx, &format!("names/n{i}/file.txt")), FILE_READ_DATA);
     if st != 0 {
         return Err(format!("open: {st:#x}"));
@@ -1377,7 +1390,7 @@ const IMAGE: &str = "aether-probe.exe";
 /// killed (the shim the hooks inject is this test executable, which never
 /// says it is ready, so its start ends `ERROR_PROCESS_ABORTED`): either is
 /// a start; any other error is the refusal.
-fn stage_call(ctx: &'static Ctx, _op: HookedOp, _i: usize) -> Seen {
+pub(crate) fn stage_call(ctx: &'static Ctx, _op: HookedOp, _i: usize) -> Seen {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_PROCESS_ABORTED};
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
@@ -1426,7 +1439,7 @@ fn stage_call(ctx: &'static Ctx, _op: HookedOp, _i: usize) -> Seen {
 
 /// `aether-probe.exe` as cargo built it. `None` prints SKIP, or panics
 /// under `VFS_TEST_REQUIRE_ALL=1`.
-fn probe() -> Option<PathBuf> {
+pub(crate) fn probe() -> Option<PathBuf> {
     let exe = std::env::current_exe().expect("current exe");
     let deps = exe.parent().expect("test exe folder");
     let profile = if deps.file_name().is_some_and(|n| n == "deps") {
@@ -1452,6 +1465,19 @@ fn probe() -> Option<PathBuf> {
 fn row_start_a_child() {
     isolate!();
     let Some(probe) = probe() else { return };
+    let (served, ctx) = stage_setup(&probe);
+    // A start takes the ready wait: the unfaulted call is made once, at the
+    // end, and after the late reply.
+    run_row(served, ctx, HookedOp::StageExec, stage_call, false);
+}
+
+/// How long a child's start waits for its shim to say it is ready
+/// ([`stage_setup`]'s `READY_TIMEOUT_SECS`); a start that succeeds takes it.
+pub(crate) const READY_WAIT: Duration = Duration::from_secs(1);
+
+/// The image `probe` served under the root and staged, at the client
+/// deadline [`DEADLINE`], the hooks installed: what [`stage_call`] needs.
+pub(crate) fn stage_setup(probe: &Path) -> (&'static Served, &'static Ctx) {
     let dir = aether_testkit::tempdir().expect("temp folder");
     let base = dir.path().to_path_buf();
     std::mem::forget(dir);
@@ -1461,14 +1487,17 @@ fn row_start_a_child() {
     }
     // A real copy at the path under the root: a start the shim let the
     // kernel make from what is really there would succeed.
-    std::fs::copy(&probe, root.join(IMAGE)).unwrap();
+    std::fs::copy(probe, root.join(IMAGE)).unwrap();
     let staged = stage.join(IMAGE);
-    std::fs::copy(&probe, &staged).unwrap();
+    std::fs::copy(probe, &staged).unwrap();
     std::env::set_var(
         aether_env::ROOT_BACKINGS,
         format!("0={}", backing.display()),
     );
-    std::env::set_var(aether_env::READY_TIMEOUT_SECS, "1");
+    std::env::set_var(
+        aether_env::READY_TIMEOUT_SECS,
+        READY_WAIT.as_secs().to_string(),
+    );
     std::env::set_var(aether_env::CHILD_REFUSED_LOG, base.join("refused.log"));
     let fake = Fake::new()
         .with(IMAGE, b"MZ served".to_vec(), ReadStyle::Whole)
@@ -1487,9 +1516,7 @@ fn row_start_a_child() {
         root,
         key: 0,
     }));
-    // A start takes the ready wait: the unfaulted call is made once, at the
-    // end, and after the late reply.
-    run_row(served, ctx, HookedOp::StageExec, stage_call, false);
+    (served, ctx)
 }
 
 // ---- registry ------------------------------------------------------------
@@ -1498,7 +1525,7 @@ fn row_start_a_child() {
 /// `v = 1`, and `v = 2` in the overlay.
 static KEY: crate::reg::Base = crate::reg::Base::new(r"Software\AetherFaultTable");
 
-fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
+pub(crate) fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
     let k = ctx.key as isize;
     match op {
         HookedOp::RegRead => {
@@ -1536,6 +1563,14 @@ fn reg_call(ctx: &'static Ctx, op: HookedOp, i: usize) -> Seen {
 }
 
 fn registry_row(op: HookedOp) {
+    let (served, ctx) = registry_setup();
+    run_row(served, ctx, op, reg_call, true);
+}
+
+/// This process's scratch key, real `v = 1` and overlay `v = 2`, served at
+/// the client deadline [`DEADLINE`] with nothing cached, the hooks installed
+/// and the key open through them: what [`reg_call`] needs.
+pub(crate) fn registry_setup() -> (&'static Served, &'static Ctx) {
     use windows_sys::Win32::System::Registry::{
         RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_DWORD,
     };
@@ -1597,7 +1632,7 @@ fn registry_row(op: HookedOp) {
         key: k as usize,
         image: PathBuf::new(),
     }));
-    run_row(served, ctx, op, reg_call, true);
+    (served, ctx)
 }
 
 #[test]

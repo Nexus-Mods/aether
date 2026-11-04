@@ -114,6 +114,17 @@ pub fn lookup(path: &str) -> Result<(Lookup, bool), Status> {
     }
 }
 
+/// [`lookup`], asked of the director even when an answer is cached (and kept in its place).
+/// For the lookup after a key create answered `ST_EXISTS` (`docs/wire.md` 4.4): that answer
+/// says the key was made since the one cached, which a director whose generation did not move
+/// leaves in place.
+pub fn lookup_fresh(path: &str) -> Result<(Lookup, bool), Status> {
+    match global() {
+        Some(c) => c.lookup_fresh(path),
+        None => read_failed(Status::NotSupported),
+    }
+}
+
 /// `REG_KEY` through [`global`]: the key's overlay node, if it has one. Cached.
 pub fn key(path: &str) -> Result<Option<Node>, Status> {
     match global() {
@@ -245,18 +256,29 @@ impl<'a> RegClient<'a> {
     }
 
     pub fn lookup(&self, path: &str) -> Result<(Lookup, bool), Status> {
-        self.cached(
-            path,
+        self.cached(path, |c| &mut c.lookups, || self.fetch_lookup(path))
+    }
+
+    /// [`RegClient::lookup`] asked of the director even when an answer is cached; the answer
+    /// is kept in place of the cached one.
+    pub fn lookup_fresh(&self, path: &str) -> Result<(Lookup, bool), Status> {
+        let generation = self.fc.reg_generation();
+        self.fetched(
+            generation,
+            fold(path),
             |c| &mut c.lookups,
-            || {
-                // A lookup state outside the table does not decode: a read failure, so the
-                // caller serves the real key rather than a guess.
-                self.read(&Request::RegLookup { path }, |r| match r {
-                    Reply::RegLookup(l) => Some((l.state, l.below)),
-                    _ => None,
-                })
-            },
+            || self.fetch_lookup(path),
         )
+    }
+
+    /// One `REG_LOOKUP` round trip.
+    fn fetch_lookup(&self, path: &str) -> Result<(Lookup, bool), Status> {
+        // A lookup state outside the table does not decode: a read failure, so the caller
+        // serves the real key rather than a guess.
+        self.read(&Request::RegLookup { path }, |r| match r {
+            Reply::RegLookup(l) => Some((l.state, l.below)),
+            _ => None,
+        })
     }
 
     pub fn key(&self, path: &str) -> Result<Option<Node>, Status> {
@@ -407,6 +429,18 @@ impl<'a> RegClient<'a> {
                 }
             }
         }
+        self.fetched(generation, k, map, fetch)
+    }
+
+    /// `fetch`'s answer, kept in `map` under `generation` (read before asking; 0 keeps
+    /// nothing), replacing what was there.
+    fn fetched<T: Clone>(
+        &self,
+        generation: u64,
+        k: String,
+        map: fn(&mut Cache) -> &mut HashMap<String, T>,
+        fetch: impl FnOnce() -> Result<T, Status>,
+    ) -> Result<T, Status> {
         let v = match fetch() {
             Ok(v) => v,
             Err(st) => return read_failed(st),

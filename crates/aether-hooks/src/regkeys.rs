@@ -1166,8 +1166,10 @@ impl Key<'_> {
         let volatile = options & REG_OPTION_VOLATILE != 0;
         match crate::regclient::create_key(&self.canonical, volatile) {
             Ok(()) => self.synthetic(None, REG_CREATED_NEW_KEY),
-            // Another thread or process created it first: it exists now.
-            Err(Status::Exists) => match crate::regclient::lookup(&self.canonical) {
+            // Another thread or process created it first: it exists now. Asked afresh, as
+            // wire.md 4.4 says: the lookup cached above said absent, and a director that
+            // answered `ST_EXISTS` without moving the generation leaves that answer in place.
+            Err(Status::Exists) => match crate::regclient::lookup_fresh(&self.canonical) {
                 Ok((Lookup::Present { created }, _)) => self
                     .virtual_open(Some(created))
                     .unwrap_or_else(Outcome::fail),

@@ -218,8 +218,8 @@ fn unlock(sub: &str) {
 
 /// A test file's scratch key under `HKCU\Software`: `<name>-<pid>`, so two test processes
 /// that run at once (two `cargo test` runs on one machine, each test in a process of its own)
-/// never share a real key. A fixed name let one process's [`Base::reset`] delete and remake the
-/// keys another was in the middle of reading (a changed last-write time, a key that vanished).
+/// never share a real key: one process's [`Base::reset`] never deletes and remakes the keys
+/// another is reading.
 ///
 /// Declare it as `static BASE: reg::Base = reg::Base::new(r"Software\AetherVfsFooTest");`; it
 /// is a `&str` (`Deref`) and formats as the full subkey (`format!(r"{BASE}\{rel}")`).
@@ -237,7 +237,7 @@ impl Base {
     }
 
     /// Delete this process's key (panicking if it is still there), then delete what earlier test
-    /// processes left under the same name (a key whose process is no longer running). `locked`
+    /// processes left under the same name (a key whose process has exited). `locked`
     /// names the subkeys (relative to the base) a test gives a restrictive DACL: Wine's server
     /// keeps a key's DACL for as long as it runs, so locked keys survive a delete until they are
     /// unlocked.

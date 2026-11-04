@@ -181,7 +181,7 @@ fn an_answer_in_flight_while_the_generation_moves_is_not_used_after_it() {
     );
     assert_eq!(ops(s, m), [Some(Opcode::RegKey)]);
 
-    // It was kept under the generation read before asking, which no longer holds.
+    // It was kept under the generation read before asking, which the header has moved past.
     let m = s.recorder.mark();
     assert_eq!(regclient::key(&k), Ok(None));
     assert_eq!(ops(s, m), [Some(Opcode::RegKey)], "the next read crosses");
@@ -277,7 +277,7 @@ fn the_cache_starts_over_past_its_bound() {
 }
 
 /// S16: a director that moves the generation only after it has replied to a write leaves
-/// every other process serving its old answers until it does. wire.md 4.5 requires the move
+/// every other process serving stale answers until it does. wire.md 4.5 requires the move
 /// before the reply for this reason; conformance C9 checks directors make it.
 #[test]
 fn a_director_that_bumps_after_replying_leaves_a_second_client_stale() {

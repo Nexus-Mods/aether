@@ -34,6 +34,7 @@ fn every_file_op_is_ok_and_minimal() {
     let at = ReadSlot {
         slot: 0,
         arena: None,
+        inline_cap: usize::MAX,
     };
     assert_eq!(
         d.read(at, RequestFlags::READ_BULK, 1, 0, 100),

@@ -1,0 +1,14 @@
+{
+  "name": "stage-exec",
+  "description": "STAGE_EXEC answers ST_NOT_SUPPORTED when the director stages nothing; a director with a stager may answer ST_NOT_FOUND for a file it does not stage, else it answers the real path to start the image from (wire.md 3.4.14); the reply's path is not compared (it is wherever the director staged it). An unknown root is not asked.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "bin/game.exe", "contents": "MZ"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "stage-exec", "root": 0, "path": "bin/game.exe"}, "expect": {"one_of": [{"status": "not-supported"}, {"status": "not-found"}, {"reply": {"path": "staged"}}], "wire": "3.4.14"}},
+    {"request": {"op": "getattr", "root": 0, "path": "bin/game.exe"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}, "note": "staging leaves the mounted file as it was"}
+  ]
+}

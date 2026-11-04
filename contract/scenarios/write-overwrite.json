@@ -1,0 +1,21 @@
+{
+  "name": "write-overwrite",
+  "description": "A write at an offset replaces those bytes and leaves the rest (wire.md 3.4.5: `offset`); a file mounted under a writable prefix may be written; a write that reaches past the end extends the file.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/s.sav", "contents": "abcdefgh"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/s.sav"}, "expect": {"reply": {"fh": 1, "size": 8, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 2, "data": "XY"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "write", "fh": 1, "offset": 7, "data": "ZZ"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/s.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 9, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/s.sav"}, "expect": {"reply": {"fh": 2, "size": 9, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": "abXYefgZZ"}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

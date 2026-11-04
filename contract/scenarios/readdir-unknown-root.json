@@ -1,0 +1,15 @@
+{
+  "name": "readdir-unknown-root",
+  "description": "READDIR of a root the director does not serve is ST_NOT_FOUND (wire.md 3.4.2: \"Unknown root: `ST_NOT_FOUND`\").",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "readdir", "root": 4, "path": "."}, "expect": {"status": "not-found"}},
+    {"request": {"op": "readdir", "root": 4, "path": "data"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "readdir", "root": 0, "path": "."}, "expect": {"reply": {"entries": [{"name": "a.txt", "is_dir": false, "size": 1, "mtime": 0}]}}}
+  ]
+}

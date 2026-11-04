@@ -1,0 +1,29 @@
+{
+  "name": "rename-replace",
+  "description": "A file or an empty directory at `to` is replaced (wire.md 3.4.7): a file onto a file; a directory onto an empty directory.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/a.txt", "contents": "AAA"},
+        {"path": "saves/b.txt", "contents": "BBBB"},
+        {"path": "saves/foo.txt", "contents": "foo"},
+        {"path": "data/ro.txt", "contents": "ro"},
+        {"path": "saves/dir/one.txt", "contents": "1"},
+        {"path": "saves/dir/sub/two.txt", "contents": "22"},
+        {"path": "saves/full/x.txt", "contents": "x"}
+      ],
+       "dirs": ["saves/empty", "saves/empty2"],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 0, "from": "saves/a.txt", "to": "saves/b.txt"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/b.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}, "note": "the renamed file's, not the old b's"},
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir", "to": "saves/empty2"}, "expect": {"status": "ok"}, "note": "a directory onto an empty directory"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/empty2/one.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/empty2/sub/two.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}}
+  ]
+}

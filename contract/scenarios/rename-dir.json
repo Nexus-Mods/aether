@@ -1,0 +1,32 @@
+{
+  "name": "rename-dir",
+  "description": "A directory moves with everything under it (wire.md 3.4.7: \"a directory moves with everything under it\").",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/a.txt", "contents": "AAA"},
+        {"path": "saves/b.txt", "contents": "BBBB"},
+        {"path": "saves/foo.txt", "contents": "foo"},
+        {"path": "data/ro.txt", "contents": "ro"},
+        {"path": "saves/dir/one.txt", "contents": "1"},
+        {"path": "saves/dir/sub/two.txt", "contents": "22"},
+        {"path": "saves/full/x.txt", "contents": "x"}
+      ],
+       "dirs": ["saves/empty", "saves/empty2"],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 0, "from": "saves/dir", "to": "saves/Moved"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/one.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/dir/sub/two.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/moved/one.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/moved/sub/two.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves/moved"}, "expect": {"reply": {"entries": [{"name": "one.txt", "is_dir": false, "size": 1, "mtime": 0}, {"name": "sub", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "saves/moved/sub/two.txt"}, "expect": {"reply": {"names": "Moved/sub/two.txt"}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/moved/sub/two.txt"}, "expect": {"reply": {"fh": 1, "size": 2, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 8}, "expect": {"reply": {"data": "22"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+  ]
+}

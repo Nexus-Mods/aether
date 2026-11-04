@@ -1,0 +1,48 @@
+[package]
+name = "aether-conform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-casefold.workspace = true
+# The handshake variables an adapter answers a mount with.
+aether-env.workspace = true
+# A file ring, on every OS.
+aether-filering.workspace = true
+aether-ipc.workspace = true
+aether-protocol.workspace = true
+# RootMap::with_roots: the shim's own check of the roots a mount declares.
+aether-redirect.workspace = true
+# The tree a scenario mounts, and the reference it is compared with.
+aether-refdirector = { workspace = true, features = ["scenario"] }
+# The registry node a REG_KEY reply carries.
+aether-registry.workspace = true
+# Generated cases and their shrinking (`run --generate`).
+proptest.workspace = true
+# The typed client a run plays steps through, and the serve loop the
+# reference adapter answers with.
+aether-rpc.workspace = true
+serde_json.workspace = true
+
+# A named section and its events, on Windows.
+[target.'cfg(windows)'.dependencies]
+aether-win.workspace = true
+# `job`: the kill-on-close job an adapter runs in, resuming a process
+# created suspended in it, and the director's wake event.
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+aether-testkit.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

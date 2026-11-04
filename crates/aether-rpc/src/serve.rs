@@ -92,14 +92,18 @@ pub trait Director {
     }
 }
 
-/// Where a READ came in: its ring slot and the server's bulk arena, if it
-/// has one. A director that answers in bulk fills the slot's bank
-/// ([`DataArena::fill_bank`] with `slot`) and replies with the offset it
-/// gives.
+/// Where a READ came in: its ring slot, the server's bulk arena, if it has
+/// one, and the most data an inline reply holds. A director that answers in
+/// bulk fills the slot's bank ([`DataArena::fill_bank`] with `slot`) and
+/// replies with the offset it gives; one that answers inline answers at most
+/// `inline_cap` bytes (`docs/wire.md` 3.4.4: `n <= min(len, payload_cap -
+/// 8)`).
 #[derive(Clone, Copy)]
 pub struct ReadSlot<'s> {
     pub slot: u32,
     pub arena: Option<&'s DataArena<'s>>,
+    /// `payload_cap - 8`: an inline reply is `8 + n` bytes.
+    pub inline_cap: usize,
 }
 
 /// A READDIR reply being built: [`Director::read_dir`] pushes entries, and
@@ -220,6 +224,8 @@ pub fn serve_one_with_arena<N: Notifier, D: Director + ?Sized>(
     d: &mut D,
     scratch: &mut Scratch,
 ) -> Result<bool, IpcError> {
+    // An inline READ reply and a registry reply both hold `payload_cap - 8`
+    // bytes (wire.md 3.4.4, 4.3).
     let registry_cap = (server.geom().payload_cap as usize).saturating_sub(8);
     let Scratch {
         req,
@@ -278,6 +284,7 @@ fn dispatch<D: Director + ?Sized>(
     let at = ReadSlot {
         slot: view.slot,
         arena,
+        inline_cap: registry_cap,
     };
     match answer(d, at, req, listing, out) {
         Ok(()) if is_registry(op) && out.len() > registry_cap => Status::ReplyTooLarge,

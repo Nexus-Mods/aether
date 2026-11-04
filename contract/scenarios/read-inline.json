@@ -1,0 +1,20 @@
+{
+  "name": "read-inline",
+  "description": "READ answers with the bytes at the offset, at most len (wire.md 3.4.4); a read reaching the end returns fewer than len. Inline replies: no read_bulk flag, len below 64 KiB.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "0123456789"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 1, "size": 10, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 10}, "expect": {"reply": {"data": "0123456789"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 4}, "expect": {"reply": {"data": "0123"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 4, "len": 3}, "expect": {"reply": {"data": "456"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 8, "len": 100}, "expect": {"reply": {"data": "89"}}, "note": "n < len: end of file"},
+    {"request": {"op": "read", "fh": 1, "offset": 9, "len": 1}, "expect": {"reply": {"data": "9"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 0}, "expect": {"reply": {"data": ""}}, "note": "a read of length 0"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+  ]
+}

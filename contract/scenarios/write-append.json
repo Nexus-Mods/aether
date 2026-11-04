@@ -1,0 +1,27 @@
+{
+  "name": "write-append",
+  "description": "Writes through an OPEN_APPEND handle go to the end of the file and the director ignores WRITE offsets (wire.md 3.4.3: \"writes go to end of file; the director ignores WRITE offsets\", 3.4.5: \"ignored on an `OPEN_APPEND` handle\").",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/log.txt", "contents": "start:"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "append"], "path": "saves/log.txt"}, "expect": {"reply": {"fh": 1, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "A"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "write", "fh": 1, "offset": 100, "data": "BC"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "write", "fh": 1, "offset": 1, "data": "D"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/log.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 10, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/log.txt"}, "expect": {"reply": {"fh": 2, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 32}, "expect": {"reply": {"data": "start:ABCD"}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "append"], "path": "saves/fresh.txt"}, "expect": {"reply": {"fh": 3, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "append to a file this open creates"},
+    {"request": {"op": "write", "fh": 3, "offset": 5, "data": "xy"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "write", "fh": 3, "offset": 0, "data": "z"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/fresh.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}}
+  ]
+}

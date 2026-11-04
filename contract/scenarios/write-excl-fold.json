@@ -1,0 +1,19 @@
+{
+  "name": "write-excl-fold",
+  "description": "OPEN_EXCL fails with ST_EXISTS on an existing path (wire.md 3.4.3), and \"existing\" is decided by the fold (3.2: two names are the same entry exactly when their folds are equal): a differently cased spelling of a present name exists.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/Present.txt", "contents": "p"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/present.TXT"}, "expect": {"status": "exists"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/PRESENT.txt"}, "expect": {"status": "exists"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/Other.txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "saves/OTHER.TXT"}, "expect": {"status": "exists"}, "note": "created a moment ago, in other case"},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "Other.txt", "is_dir": false, "size": 0, "mtime": 0}, {"name": "Present.txt", "is_dir": false, "size": 1, "mtime": 0}]}}}
+  ]
+}

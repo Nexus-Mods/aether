@@ -1,0 +1,26 @@
+{
+  "name": "cache-immutable-readonly",
+  "description": "Two read opens of one file a read-only provider holds, at once and after a close, read inline and in bulk: every read of the same range returns the same bytes (wire.md 3.4.3: `immutable` means \"the handle's bytes cannot change while it is open\", and \"two immutable opens of one path with equal size and `mount_gen` must have identical content\"). A director may call these opens `immutable` (the reference does) or not; `immutable` and `mount_gen` are not compared, and aether-conform checks the cache rule across the steps for whichever opens set it.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "Data/Master.esm", "contents": {"size": 5000, "seed": 9}}
+       ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/master.esm"}, "expect": {"reply": {"fh": 1, "size": 5000, "is_dir": false, "immutable": true, "mount_gen": 0}}, "note": "a read open, folded, as the shim sends it (3.2)"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/master.esm"}, "expect": {"reply": {"fh": 2, "size": 5000, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 5000}, "expect": {"reply": {"data": {"size": 5000, "seed": 9}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 5000}, "expect": {"reply": {"data": {"size": 5000, "seed": 9}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 5000, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 5000, "seed": 9}}}, "note": "bulk or inline (3.4.4), the same bytes"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/master.esm"}, "expect": {"reply": {"fh": 3, "size": 5000, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 5000, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 5000, "seed": 9}}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 5000}, "expect": {"reply": {"data": {"size": 5000, "seed": 9}}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

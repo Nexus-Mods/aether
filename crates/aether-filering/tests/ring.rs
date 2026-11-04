@@ -59,7 +59,7 @@ fn open_refuses_a_missing_or_empty_file() {
 }
 
 #[test]
-fn create_truncates_and_sizes_an_existing_file() {
+fn create_replaces_and_sizes_an_existing_file() {
     let dir = aether_testkit::tempdir().unwrap();
     let path = dir.path().join("ring.bin");
     std::fs::write(&path, vec![0xFFu8; 1 << 20]).unwrap();
@@ -67,6 +67,40 @@ fn create_truncates_and_sizes_an_existing_file() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 64 * 1024);
     // zero-filled, so a fresh ring initialises cleanly
     ring::init(r.seg(), 2, 256).unwrap();
+}
+
+/// wire.md 2.10: a director replaces the ring file rather than truncating it
+/// in place, so a reader that still maps the old one keeps its pages (and is
+/// not faulted) while a new session gets a fresh file.
+#[test]
+fn a_second_create_leaves_a_live_mapping_of_the_old_file_readable() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let path = dir.path().join("ring.bin");
+    let first = FileRing::create(&path, 64 * 1024).unwrap();
+    let geom = ring::init(first.seg(), 2, 256).unwrap();
+    let stale = FileRing::open(&path).unwrap();
+    assert_eq!(ring::open(stale.seg()).unwrap(), geom);
+
+    let second = FileRing::create(&path, 32 * 1024).unwrap();
+    assert_eq!(second.len(), 32 * 1024);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 32 * 1024);
+    // The old mappings still see the old, initialised ring, whole.
+    assert_eq!(first.len(), 64 * 1024);
+    assert_eq!(ring::open(stale.seg()).unwrap(), geom);
+    // Every page of it, the last one too: a truncated file would fault here.
+    let end = stale.len() - 8;
+    assert!(stale.seg().write_bytes(end, b"stillmap"));
+    assert_eq!(
+        stale.seg().read_bytes(end, 8).as_deref(),
+        Some(&b"stillmap"[..])
+    );
+    assert_eq!(
+        first.seg().read_bytes(end, 8).as_deref(),
+        Some(&b"stillmap"[..])
+    );
+    // The new file is fresh: zero-filled, not the old ring.
+    assert!(ring::open(second.seg()).is_err());
+    ring::init(second.seg(), 2, 256).unwrap();
 }
 
 #[test]

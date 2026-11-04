@@ -1,0 +1,18 @@
+{
+  "name": "readdir-case",
+  "description": "READDIR finds the directory under the fold, in any case (wire.md 3.2), and answers with stored spellings, not the case of the request.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "Data/Textures/Sky.DDS", "contents": "s"},
+        {"path": "Data/ReadMe.txt", "contents": "rr"}
+      ]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Textures", "is_dir": true, "size": 0, "mtime": 0}, {"name": "ReadMe.txt", "is_dir": false, "size": 2, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "DATA/TEXTURES"}, "expect": {"reply": {"entries": [{"name": "Sky.DDS", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "dAtA"}, "expect": {"reply": {"entries": [{"name": "Textures", "is_dir": true, "size": 0, "mtime": 0}, {"name": "ReadMe.txt", "is_dir": false, "size": 2, "mtime": 0}]}}}
+  ]
+}

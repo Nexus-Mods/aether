@@ -18,7 +18,8 @@ Conventions used throughout:
 - `u8`/`u32`/`u64` are unsigned, `i32`/`i64` two's-complement signed.
 - `utf8…` means "the rest of the payload, as UTF-8, no length, no
   terminator". `str` means `len:u32 | utf8[len]` (no terminator).
-- Where prose and code disagree, the code is normative (section 8).
+- For the bytes, the code and the golden vectors are normative; for what a
+  director must answer, this document is (section 8).
 
 The three crates that define the wire are `aether-ipc` (shared memory, ring,
 arena), `aether-protocol` (opcodes, statuses, payload codecs, `shim.cfg`) and
@@ -385,10 +386,11 @@ A page-file section has no identity outside one Windows (or Wine) session, so a
 native Linux director and a shim under Wine share a file:
 
 - The director creates the file, grows it to at least the map size before
-  mapping it (an `mmap` past end of file faults on touch), never shrinks an
-  existing file, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`. The Rust
-  `FileRing::create` reuses an existing file grow-only; Cairn deletes and
-  recreates it (`ring/backing.clj`) so a stale reader keeps the old inode.
+  mapping it (an `mmap` past end of file faults on touch), never truncates an
+  existing file in place, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`.
+  An existing file is removed and a new one created in its place, so a stale
+  reader keeps the old file's pages: the Rust `FileRing::create` and Cairn
+  (`ring/backing.clj`) both do this.
 - The shim opens `VFS_RING_PATH` with `CreateFileW(FILE_GENERIC_READ |
   FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)`, refuses
   a file shorter than `VFS_RING_BYTES`, and maps it with an unnamed
@@ -482,6 +484,10 @@ STAGE_EXEC:
   name (a write OPEN, MKDIR, RENAME targets), which keeps the caller's
   spelling so that the name is stored as created.
 - A named stream suffix (`file.esp:stream`) is carried through, folded.
+  Neither Cairn's read-only sources nor the reference holds named streams:
+  to both, `file.esp:stream` is a name they do not have (GETATTR `found =
+  0`, OPEN `ST_NOT_FOUND`), and a director that holds no stream of that
+  name must never answer it with the base file's attributes or bytes.
 
 A director must look paths up case-insensitively under the same fold, and must
 treat a path that would leave its root (`..` above the root) as an error.
@@ -564,6 +570,8 @@ and out-of-range values.
 **Timestamps.** `mtime` is seconds since the Unix epoch, signed; 0 or less
 means "no time" and the shim substitutes 2024-01-01T00:00:00Z
 (`crates/aether-ntlayout/src/dirinfo.rs`, `filetime_of`, `SYNTH_FILETIME`).
+Which time a director reports for a path, if any, is the director's to choose:
+the shim checks no time it is sent.
 
 ### 3.3 Opcode table
 
@@ -658,6 +666,13 @@ directors). The shim treats `ST_NOT_FOUND` the same as `found = 0`; any other
 non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
 (`crates/aether-hooks/src/hook/file_attr.rs`).
 
+The `size` of a directory is 0, as in a READDIR entry (3.4.2). A file's
+`size` is its length now, WRITEs and SETATTRs through handles still open
+included (Cairn and the reference: Cairn's write layer reports the live
+length, `provider/layer.clj`, `stat-of`; its disk provider reads the file's
+attributes, `provider/disk.clj`, `attrs`). The same holds for READDIR entries
+and OPEN replies.
+
 #### 3.4.2 READDIR (2)
 
 Request: path request (the directory; `"."` for the root). Reply
@@ -683,6 +698,7 @@ over it is `EnumState`, `crates/aether-hooks/src/hook/dirquery.rs`), apart from
 dropping old `<name>.__vfs_wh__` whiteout markers. It adds no `.` or `..`
 entries, so a director should not include them either; it does not sort or
 otherwise interpret the order, so the program sees entries in the order sent.
+A director may send the entries in any order.
 `size` is copied into both `EndOfFile` and `AllocationSize` of the NT
 directory record for every entry, directories included
 (`crates/aether-ntlayout/src/dirinfo.rs`, `write_dir_info`); send 0 for a
@@ -733,7 +749,10 @@ Reply (`Reply::Open`), 24 bytes:
 | 20 | 4 | u32 | `mount_gen` |
 
 - `fh` is any u64 the director chooses, unique among open handles. Both
-  directors start at 1 and count up.
+  directors start at 1 and count up. Neither issues 0, and a director must
+  not: the shim keeps 0 for a directory it created with MKDIR, which it holds
+  no director handle for, and sends `CLOSE(0)` when the program closes it
+  (`crates/aether-hooks/src/hook/file_open.rs`, `try_fuse_mkdir`).
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
   read cache (`crates/aether-ipc/src/readcache/mod.rs`) caches small reads only
   through read-only, immutable handles. Never set it for a write open or a
@@ -743,6 +762,7 @@ Reply (`Reply::Open`), 24 bytes:
   `mount_gen`), so two immutable opens of one path with equal size and
   `mount_gen` must have identical content. The old Rust director (removed)
   started at 1 and bumped on every mount/unmount; Cairn always sends 1.
+- The `size` of a directory is 0, as in GETATTR (3.4.1).
 - Errors: unknown root `ST_NOT_FOUND`; `OPEN_WRITE` on a root with no writable
   provider `ST_READ_ONLY`; `OPEN_EXCL` on an existing path `ST_EXISTS`;
   missing path without `OPEN_CREATE` `ST_NOT_FOUND`.
@@ -777,10 +797,29 @@ Bulk reply (`ReadReply::Bulk`), 16 bytes, `n <= min(len, bank_size)`:
 | 4 | 4 | — | zero |
 | 8 | 8 | u64 | `arena_offset`: mapping offset of the data (the slot's bank) |
 
+A handle serves READ whatever access it was opened with: the shim's write
+opens send `OPEN_WRITE` and the create bits but never `OPEN_READ`
+(`FuseClient::open_write`), and a program reads its save back through the
+handle that wrote it. Cairn opens every file it serves for reading
+(`provider/disk.clj`, `options`; its write layer's handles read whatever
+their access), and the reference does not look at the access.
+
 The client tells the forms apart by bit 31 of the first word
 (`ReadReply`'s decoder), so it must accept either whatever flag it sent. `n <
 len` means end of file; the shim stops there. Errors: unknown `fh`
 `ST_BAD_FH`; a directory handle `ST_IS_DIR`.
+
+So a READ comes back whole, `n = min(len, size - offset)`, whenever its form
+can hold that many bytes; a shorter answer is a truncated file to the shim
+(Cairn and the reference: Cairn's `read-into` is "short only at end of file",
+`provider.clj`). Both answer a READ that sets `FLAG_READ_BULK` in bulk when
+they have an arena, so a director that gives an arena (`VFS_ARENA_LEN`) must
+answer such a READ of more than `payload_cap - 8` bytes in bulk: an inline
+reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
+remainders of 64 KiB up to it, with the flag, and inline READs of at most
+65 535 bytes, or of at most `payload_cap - 8` with no arena
+(`aether_ipc::read_fragmented`); its read cache fetches runs of up to 16
+blocks of 64 KiB the same way.
 
 #### 3.4.5 WRITE (6)
 
@@ -796,16 +835,34 @@ Request (`Request::Write`):
 
 A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`. The
 shim sends at most `VFS_RING_PAYLOAD_CAP - 24` bytes per WRITE and repeats
-until done or a short write.
+until done or a short write. A director writes every byte of a WRITE or
+fails it: on `ST_OK`, `written` is `len` (Cairn and the reference: Cairn's
+write layer and disk provider loop to the end, `provider/layer.clj` and
+`provider/disk.clj`, `write-from`).
+
+A WRITE past the end of the file grows it, and the bytes between the old end
+and the WRITE's offset read as zeros, as NTFS fills them (Cairn's write layer
+reads a grown block it holds no data for as zeros, `provider/layer.clj`,
+`read-into`; its disk provider's file system fills the gap; the reference
+fills it with zeros). The same holds for SETATTR (3.4.6).
 
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
+
+A WRITE on a directory handle the writable provider holds is `ST_IS_DIR`,
+whatever access the directory was opened with; SETATTR (3.4.6) on one is too
+(Cairn's writable providers and the reference). A directory no writable
+provider holds may answer `ST_READ_ONLY` instead, as Cairn's read-only tree
+does (`source/tree.clj`, `DirHandle`).
 
 #### 3.4.6 SETATTR (7)
 
 Request (`Request::SetAttr`), 16 bytes: `fh:u64 | size:u64`. Sets the file's
 length (truncate or extend) on an open handle; there is no path-keyed form.
-Reply: status only. Unknown `fh` `ST_BAD_FH`.
+Reply: status only. Unknown `fh` `ST_BAD_FH`. An extension reads as zeros,
+bytes a truncation cut off included when the file grows again (Cairn's
+write layer zeroes them, `provider/layer.clj`, `truncate!`; its disk provider
+truncates the file; the reference resizes with zeros).
 
 #### 3.4.7 RENAME (8)
 
@@ -820,14 +877,78 @@ Request (`Request::Rename`):
 
 Reply: status only.
 
+For a name the writable provider holds (for names that exist only in a
+read-only layer beneath it, see "Names only in a read-only lower" after
+3.4.9): `to` is stored with the caller's spelling (section 3.2), so a rename
+that changes only the case respells the name. A file or a directory moves; a
+directory moves with everything under it. A file or an empty directory at
+`to` is replaced; a directory at `to` with anything under it is
+`ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
+inside `from`, is `ST_BAD_REQUEST` from a writable layer provider and the
+reference director, `ST_IO_ERROR` from Cairn's overlay (`provider/compose.clj`,
+`rename!`, which never moves a directory that only its lower layer holds, as
+it holds the root). A missing `from` is
+`ST_NOT_FOUND`; either end outside every writable provider `ST_READ_ONLY`.
+(Cairn's writable layer, `provider/layer.clj`, `rename!`; the reference
+director.) A file with open handles is renamed like any other.
+
 #### 3.4.8 DELETE (9)
 
 Request: path request. Reply: status only. Unknown root `ST_NOT_FOUND`.
+
+For a name the writable provider holds (for names that exist only in a
+read-only layer beneath it, see "Names only in a read-only lower" after
+3.4.9): a file, or a directory with nothing under it, is deleted. A directory
+with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
+is `ST_BAD_REQUEST` (a writable layer provider, the reference director) or
+`ST_IO_ERROR`, and is never deleted. Cairn's overlay answers `ST_OK` today and
+hides the root behind a whiteout (`provider/compose.clj`, `delete!`): a bug,
+which conformance reports. A missing path is `ST_NOT_FOUND`; a path outside
+every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
+`provider/layer.clj`, `delete!`; the reference director.) A file with open
+handles is deleted like any other: Cairn's write layer drops its data at the
+last close (`release!`), and its disk provider's files are opened with
+`FILE_SHARE_DELETE` (Java NIO's default share mode), so the delete or rename
+of an open file succeeds there too. What a handle reads after its file was
+deleted or renamed is the director's.
 
 #### 3.4.9 MKDIR (10)
 
 Request (`Request::Mkdir`): `root:u32 | mode:u32 | vpath utf8…`. The shim
 sends `mode = 0o755` (493); both directors ignore it. Reply: status only.
+
+The directory is stored with the caller's spelling (section 3.2). On an
+existing path the writable provider holds, the directors differ (for a path
+that exists only in a read-only layer beneath it, see below):
+
+- An existing directory: a director may answer `ST_OK` or `ST_EXISTS`, and a
+  client must accept either. Cairn's writable providers answer `ST_OK`
+  (`provider/layer.clj` and `provider/disk.clj`, `mkdir!`), its read-only ones
+  and the reference director `ST_EXISTS`. The shim, on any failure, asks
+  GETATTR whether a directory is there, so either answer gives the program
+  the same result for `FILE_OPEN_IF`; for `FILE_CREATE` only `ST_EXISTS` reports the
+  name collision.
+- An existing file: `ST_IO_ERROR` where a writable provider serves the path
+  (Cairn's writable providers), `ST_EXISTS` where none does (Cairn's
+  read-only providers). The reference director answers the same.
+
+**Names only in a read-only lower.** A director may serve a writable root as
+an overlay: a writable upper over a read-only lower, as Cairn serves every
+writable root (`provider/compose.clj`, the `Overlay` provider). For a name
+that exists only in the lower, not in the upper, such a director may answer
+DELETE, RENAME and MKDIR as Cairn's overlay does, where the rules above
+(written for names the writable provider holds) say otherwise:
+
+- DELETE of a lower-only name, a directory with children included, hides it
+  (a whiteout in the upper) and answers `ST_OK`.
+- RENAME of a lower-only directory to another name is `ST_IO_ERROR` (lower
+  directories do not move). A lower-only file is copied up and renamed.
+- RENAME of a lower-only name to another case of itself answers `ST_OK`
+  without respelling it: the name keeps the lower's spelling.
+- MKDIR over a lower-only file creates the directory in the upper and
+  answers `ST_OK`; the directory then hides the file.
+
+The reference director has no layers, so it never gives these answers.
 
 #### 3.4.10 CLOSE (11)
 
@@ -886,9 +1007,13 @@ status only.
 Request: path request (the image the program is starting). Reply: the real,
 on-disk Windows path to start it from, UTF-8, the whole payload. The director
 puts the program on real disk first (a child's image is opened by the kernel
-before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing.
+before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
+a director with a stager may answer `ST_NOT_FOUND` for a file it does not
+stage (Cairn, `ring.clj`, `op-stage-exec`).
 
-How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): for each
+How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): only
+when `VFS_ROOT_BACKINGS` names at least one backing (`plan` returns early
+otherwise, and the child starts as it would without the VFS). Then, for each
 candidate image path that routes under a root it first sends GETATTR, and
 sends STAGE_EXEC only for the first candidate that is a file (`found`, not
 `is_dir`). On success the child is started from the returned path. If no
@@ -1029,6 +1154,11 @@ included) (`crates/aether-hooks/src/regwrite.rs`).
 
 Every reply starts with `version:u64`, the overlay's version after (or at) the
 operation.
+The number a director's overlay starts from when it mounts a layer is the
+director's (part of the persisted layer, `Overlay::set_version`), so two
+directors serving one layer may number its versions apart by a constant, and a
+REG_CHANGED `since` is in the numbering of the director it is sent to; how the
+version moves from one operation to the next is the overlay's (below).
 
 | # | Op | Request | Reply |
 |---:|---|---|---|
@@ -1396,9 +1526,16 @@ Rules:
 
 ## 8. Conformance
 
-Until a director conformance harness exists, **the code is normative**: where
-this document and `crates/aether-ipc`, `crates/aether-protocol` or the shim
-disagree, the code is right and this document is wrong.
+**For the bytes** (layouts, codecs, the handshake), the code in
+`crates/aether-ipc`, `crates/aether-protocol` and `crates/aether-env` and the
+golden vectors below are normative: where this document disagrees with them,
+this document is wrong.
+
+**For what a director must answer**, this document is normative.
+`contract/scenarios/` and `aether-conform` (`docs/conformance.md`) check it,
+and the reference director (`crates/aether-refdirector`) follows it; where
+they disagree with this text, they are fixed. Where this document says
+directors may differ, conformance accepts each answer it names.
 
 `contract/protocol.json` is the machine-readable form of the protocol table
 (3.3): a director in another language builds its opcode, status and field

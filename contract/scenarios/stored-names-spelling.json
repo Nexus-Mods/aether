@@ -1,0 +1,21 @@
+{
+  "name": "stored-names-spelling",
+  "description": "STORED_NAMES answers the stored spelling of each component of the path from index `skip` on, joined by `/`, exactly components - skip names (wire.md 3.4.12); the request is folded, the answer is not.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "Data/Textures/Sky.DDS", "contents": "s"},
+        {"path": "Data/ReadMe.txt", "contents": "r"}
+      ]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/textures/sky.dds"}, "expect": {"reply": {"names": "Data/Textures/Sky.DDS"}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "data/textures/sky.dds"}, "expect": {"reply": {"names": "Textures/Sky.DDS"}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 2, "path": "data/textures/sky.dds"}, "expect": {"reply": {"names": "Sky.DDS"}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data"}, "expect": {"reply": {"names": "Data"}}, "note": "one component"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/readme.txt"}, "expect": {"reply": {"names": "Data/ReadMe.txt"}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "DATA/TEXTURES/SKY.DDS"}, "expect": {"reply": {"names": "Textures/Sky.DDS"}}, "note": "a request in other case still finds the entries"}
+  ]
+}

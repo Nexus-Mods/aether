@@ -1,0 +1,25 @@
+{
+  "name": "case-fold-ascii",
+  "description": "A director looks paths up case-insensitively under the fold (wire.md 3.2: \"must look paths up case-insensitively under the same fold\"): GETATTR, OPEN, READDIR, STORED_NAMES find a mounted name in any case, and report its stored spelling.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "Data/Skyrim.ESM", "contents": "esm"},
+        {"path": "Data/Textures/Sky Box.DDS", "contents": "dds"}
+      ]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "getattr", "root": 0, "path": "data/skyrim.esm"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "DATA/SKYRIM.ESM"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "Data/Skyrim.ESM"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "dAtA/sKyRiM.eSm"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "DATA/skyrim.ESM"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 8}, "expect": {"reply": {"data": "esm"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/textures/sky box.dds"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}, "note": "a space is an ordinary character"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/skyrim.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "not the same name"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/skyrim.esm"}, "expect": {"reply": {"names": "Data/Skyrim.ESM"}}}
+  ]
+}

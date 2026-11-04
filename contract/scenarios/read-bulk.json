@@ -1,0 +1,25 @@
+{
+  "name": "read-bulk",
+  "description": "READ with FLAG_READ_BULK in the slot flags (wire.md 3.6, 3.4.4): the director may answer in bulk or inline, and the client must accept either (3.4.4); the data is the same. Short, offset and end-of-file reads through the flag.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "a.txt", "contents": "0123456789"},
+        {"path": "big.bin", "contents": {"size": 20000, "seed": 7}}
+      ]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "a.txt"}, "expect": {"reply": {"fh": 1, "size": 10, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 10, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": "0123456789"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 3, "len": 4, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": "3456"}}},
+    {"request": {"op": "read", "fh": 1, "offset": 7, "len": 50, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": "789"}}, "note": "end of file"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 5}, "expect": {"reply": {"data": "01234"}}, "note": "back to the plain request"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "big.bin"}, "expect": {"reply": {"fh": 2, "size": 20000, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 20000, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 20000, "seed": 7}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 20000}, "expect": {"reply": {"data": {"size": 20000, "seed": 7}}}, "note": "the same without the flag"},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

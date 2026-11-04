@@ -1,0 +1,24 @@
+{
+  "name": "rename-unknown-root",
+  "description": "RENAME in a root the director does not serve is an error: ST_NOT_FOUND (Cairn) or ST_BAD_REQUEST (the old Rust director), wire.md 3.5.1's table; a new director should answer ST_NOT_FOUND.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/a.txt", "contents": "AAA"},
+        {"path": "saves/b.txt", "contents": "BBBB"},
+        {"path": "saves/foo.txt", "contents": "foo"},
+        {"path": "data/ro.txt", "contents": "ro"},
+        {"path": "saves/dir/one.txt", "contents": "1"},
+        {"path": "saves/dir/sub/two.txt", "contents": "22"},
+        {"path": "saves/full/x.txt", "contents": "x"}
+      ],
+       "dirs": ["saves/empty", "saves/empty2"],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 5, "from": "saves/a.txt", "to": "saves/z.txt"}, "expect": {"one_of": [{"status": "not-found"}, {"status": "bad-request"}], "wire": "3.5.1"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}}
+  ]
+}

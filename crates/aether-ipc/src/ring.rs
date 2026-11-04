@@ -208,6 +208,41 @@ pub fn publish_written(
     Ok(req_id)
 }
 
+/// Publish a CLAIMED slot whose header says `claimed` payload bytes, which
+/// may be more than `payload_cap`, with whatever the payload region holds.
+/// Returns the req_id.
+///
+/// No client sends this: it is for a conformance tool checking that a
+/// director completes such a slot with `ST_BAD_REQUEST` and no payload rather
+/// than leaving it `PROCESSING` (`docs/wire.md` 2.5: "A slot whose
+/// `payload_len > payload_cap` MUST be completed with `ST_BAD_REQUEST`").
+/// Everything else is as [`publish_written`] does it.
+pub fn publish_claiming(
+    seg: &SharedSeg,
+    geom: &Geom,
+    slot: u32,
+    opcode: u32,
+    flags: u32,
+    claimed: u32,
+) -> Result<u64, IpcError> {
+    let base = geom.slot_off(slot);
+    let req_id = seg
+        .atomic_u64(RH_REQ_SEQ)
+        .ok_or(IpcError::Layout)?
+        .fetch_add(1, Ordering::Relaxed);
+    seg.write_u32(base + SH_OPCODE, opcode);
+    seg.write_u32(base + SH_FLAGS, flags);
+    seg.write_u32(base + SH_PAYLOAD_LEN, claimed);
+    seg.write_u64(base + SH_REQ_ID, req_id);
+    state(seg, geom, slot)
+        .ok_or(IpcError::Layout)?
+        .store(ST_SUBMITTED, Ordering::Release);
+    seg.atomic_u32(RH_SUBMIT_SEQ)
+        .ok_or(IpcError::Layout)?
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(req_id)
+}
+
 /// Server: claim a SUBMITTED slot → PROCESSING. Returns the slot index.
 pub fn server_take(seg: &SharedSeg, geom: &Geom) -> Option<u32> {
     server_take_from(seg, geom, 0)
@@ -536,6 +571,26 @@ mod tests {
             Err(IpcError::Layout),
             "a ring stamped with the previous wire version must be refused, not misparsed"
         );
+    }
+
+    /// A header that claims more than the slot holds reaches the server as
+    /// it was written, so a director's answer to it can be checked.
+    #[test]
+    fn publish_claiming_states_the_length_it_is_given() {
+        let (owned, geom) = ring(2, 64);
+        let seg = owned.seg();
+        let slot = claim_free(seg, &geom).unwrap();
+        let req_id = publish_claiming(seg, &geom, slot, Opcode::GetAttr as u32, 3, 65).unwrap();
+        let taken = server_take(seg, &geom).unwrap();
+        assert_eq!(taken, slot);
+        let mut buf = Vec::new();
+        let head = read_request_into(seg, &geom, taken, &mut buf).unwrap();
+        assert_eq!(
+            (head.opcode, head.flags, head.req_id),
+            (Opcode::GetAttr as u32, 3, req_id)
+        );
+        assert!(!head.fits(&geom), "65 bytes do not fit a 64-byte slot");
+        assert!(buf.is_empty());
     }
 
     #[test]

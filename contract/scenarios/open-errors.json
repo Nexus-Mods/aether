@@ -1,0 +1,23 @@
+{
+  "name": "open-errors",
+  "description": "OPEN errors (wire.md 3.4.3, 3.5): unknown root ST_NOT_FOUND; a missing path without OPEN_CREATE ST_NOT_FOUND, for a read open and for a write open on a writable path; OPEN_WRITE on a root with no writable provider ST_READ_ONLY, whether or not the file exists; OPEN_EXCL on an existing path ST_EXISTS.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "data/a.esp", "contents": "abc"}]},
+      {"id": 2,
+       "files": [{"path": "w/keep.txt", "contents": "k"}],
+       "writable": ["w"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/missing.esp"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "open", "root": 7, "flags": ["read"], "path": "data/a.esp"}, "expect": {"status": "not-found"}, "note": "root 7 is not served"},
+    {"request": {"op": "open", "root": 2, "flags": ["write"], "path": "w/missing.txt"}, "expect": {"status": "not-found"}, "note": "write without create, on a writable path, of a missing file"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "data/new.txt"}, "expect": {"status": "read-only"}, "note": "a root with no writable provider, creating"},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "data/a.esp"}, "expect": {"status": "read-only"}, "note": "a root with no writable provider, existing file"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "newer.txt"}, "expect": {"status": "read-only"}, "note": "the root has no writable provider: read-only rather than a create"},
+    {"request": {"op": "open", "root": 2, "flags": ["write", "create", "excl"], "path": "w/keep.txt"}, "expect": {"status": "exists"}},
+    {"request": {"op": "open", "root": 2, "flags": ["write", "create", "excl"], "path": "w/fresh.txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}}
+  ]
+}

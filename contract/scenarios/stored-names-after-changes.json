@@ -1,0 +1,26 @@
+{
+  "name": "stored-names-after-changes",
+  "description": "STORED_NAMES follows the spelling a name was created with, through create, MKDIR, RENAME and RENAME_X (wire.md 3.2: \"STORED_NAMES and READDIR answer with stored spellings\").",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/old.txt", "contents": "o"}],
+       "writable": ["."]},
+      {"id": 1,
+       "files": [],
+       "dirs": ["Other"],
+       "writable": ["."]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/NewFile.Sav"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "saves/newfile.sav"}, "expect": {"reply": {"names": "saves/NewFile.Sav"}}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/Sub Dir"}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "saves/sub dir"}, "expect": {"reply": {"names": "Sub Dir"}}},
+    {"request": {"op": "rename", "root": 0, "from": "saves/old.txt", "to": "saves/Sub Dir/Moved.TXT"}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "saves/sub dir/moved.txt"}, "expect": {"reply": {"names": "saves/Sub Dir/Moved.TXT"}}},
+    {"request": {"op": "rename-x", "from_root": 0, "to_root": 1, "from": "saves/NewFile.Sav", "to": "Other/Place.Dat"}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 1, "skip": 0, "path": "other/place.dat"}, "expect": {"reply": {"names": "Other/Place.Dat"}}}
+  ]
+}

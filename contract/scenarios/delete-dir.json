@@ -1,0 +1,26 @@
+{
+  "name": "delete-dir",
+  "description": "DELETE removes a directory with nothing under it; a directory with anything under it is ST_IO_ERROR and nothing is deleted (wire.md 3.4.8).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/full/x.txt", "contents": "x"},
+        {"path": "saves/nest/deeper/y.txt", "contents": "y"}
+      ],
+       "dirs": ["saves/empty"],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "delete", "root": 0, "path": "saves/empty"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/empty"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/full"}, "expect": {"status": "io-error"}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/nest"}, "expect": {"status": "io-error"}, "note": "holds a directory"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/full/x.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/nest/deeper/y.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/full/x.txt"}, "expect": {"status": "ok"}},
+    {"request": {"op": "delete", "root": 0, "path": "saves/full"}, "expect": {"status": "ok"}, "note": "now empty"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/full"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}}
+  ]
+}

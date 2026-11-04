@@ -21,6 +21,7 @@ fn inline_slot() -> ReadSlot<'static> {
     ReadSlot {
         slot: 0,
         arena: None,
+        inline_cap: usize::MAX,
     }
 }
 
@@ -129,6 +130,33 @@ fn read_dir_lists_immediate_children_sorted_whiteouts_included() {
     assert_eq!(listing(&mut d, R0, "missing"), vec![]);
 }
 
+/// wire.md 3.4.3: `immutable` on a read open of a file a read-only provider
+/// holds, whose bytes nothing changes; never on a write open, a directory,
+/// or a file under a writable prefix.
+#[test]
+fn only_a_read_open_of_a_read_only_file_is_immutable() {
+    let mut d = Reference::new()
+        .with("data/a.esp", b"abc".to_vec(), ReadStyle::Whole)
+        .with("saves/s.sav", b"s".to_vec(), ReadStyle::Whole)
+        .with_dir("data/sub")
+        .writable_under("saves/");
+    let imm = |d: &mut Reference, flags, path| d.open(R0, flags, path).unwrap().immutable;
+    assert!(imm(&mut d, OpenFlags::READ, "data/a.esp"));
+    assert!(!imm(&mut d, OpenFlags::READ, "data/sub"));
+    assert!(!imm(&mut d, OpenFlags::READ, "saves/s.sav"));
+    assert!(!imm(&mut d, OpenFlags::WRITE, "saves/s.sav"));
+    assert!(!imm(
+        &mut d,
+        OpenFlags::WRITE | OpenFlags::CREATE,
+        "saves/new.sav"
+    ));
+    // Nor can the read handle change the read-only file.
+    let fh = d.open(R0, OpenFlags::READ, "data/a.esp").unwrap().fh;
+    assert_eq!(d.write(fh, 0, b"x"), Err(Status::ReadOnly));
+    assert_eq!(d.set_attr(fh, 0), Err(Status::ReadOnly));
+    assert_eq!(d.contents("data/a.esp"), Some(b"abc".to_vec()));
+}
+
 #[test]
 fn open_for_read_issues_handles_and_records_the_wire_spelling() {
     let mut d = Reference::new()
@@ -141,6 +169,7 @@ fn open_for_read_issues_handles_and_records_the_wire_spelling() {
             fh: 1,
             size: 10,
             is_dir: false,
+            immutable: true,
             ..Default::default()
         }
     );
@@ -282,6 +311,7 @@ fn a_bulk_read_fills_the_slots_bank_and_answers_its_offset() {
     let at = |slot| ReadSlot {
         slot,
         arena: Some(&arena),
+        inline_cap: usize::MAX,
     };
 
     // Asked for in the slot flags.
@@ -331,6 +361,45 @@ fn a_bulk_read_fills_the_slots_bank_and_answers_its_offset() {
 
     assert_eq!(d.tally.reads("big"), 4);
     assert_eq!(d.tally.bulk_reads("big"), 2);
+}
+
+/// wire.md 3.4.4: an inline reply holds `n <= min(len, payload_cap - 8)`
+/// bytes, so a READ longer than that is answered with that many, flag or no
+/// flag, when there is no arena; with one, the bulk answer is not capped.
+#[test]
+fn an_inline_read_answers_at_most_what_the_reply_holds() {
+    let bytes = pattern(5000);
+    let mut d = Reference::new().with("f", bytes.clone(), ReadStyle::Whole);
+    let fh = open_read(&mut d, "f").fh;
+    let capped = ReadSlot {
+        slot: 0,
+        arena: None,
+        inline_cap: 1000,
+    };
+    for flags in [RequestFlags::empty(), RequestFlags::READ_BULK] {
+        let r = d.read(capped, flags, fh, 10, 4000).unwrap();
+        assert_eq!(r, ReadReply::Inline(&bytes[10..1010]), "{flags:?}");
+    }
+    // Shorter than the cap: the READ's own length, or the end of the file.
+    let r = d
+        .read(capped, RequestFlags::empty(), fh, 4500, 999)
+        .unwrap();
+    assert_eq!(r, ReadReply::Inline(&bytes[4500..]));
+
+    let owned = arena_seg();
+    let arena = DataArena::new(owned.seg(), 4096, 2 * 256 * 1024, 2);
+    let bulk = ReadSlot {
+        arena: Some(&arena),
+        ..capped
+    };
+    let r = d.read(bulk, RequestFlags::READ_BULK, fh, 0, 4000).unwrap();
+    assert_eq!(
+        r,
+        ReadReply::Bulk {
+            len: 4000,
+            arena_offset: 4096
+        }
+    );
 }
 
 #[test]
@@ -415,11 +484,13 @@ fn close_releases_the_handle_and_refuses_an_unknown_one() {
 }
 
 #[test]
-fn the_ops_it_does_not_serve_are_not_supported() {
+fn only_stage_exec_is_not_supported() {
     let mut d = Reference::new();
-    assert_eq!(d.mkdir(R0, 0o755, "dir"), Err(Status::NotSupported));
-    assert_eq!(d.stored_names(R0, 0, "a"), Err(Status::NotSupported));
-    assert_eq!(d.rename_x(R0, R0, "a", "b"), Err(Status::NotSupported));
+    // An empty, read-only graph answers the rest as wire.md has them
+    // (tests/wire_rules.rs covers each).
+    assert_eq!(d.mkdir(R0, 0o755, "dir"), Err(Status::ReadOnly));
+    assert_eq!(d.stored_names(R0, 0, "a"), Ok("a"));
+    assert_eq!(d.rename_x(R0, R0, "a", "b"), Err(Status::NotFound));
     assert_eq!(d.stage_exec(R0, "a.exe"), Err(Status::NotSupported));
     // wire.md 3.4.14: a director that stages nothing says so first.
     assert_eq!(

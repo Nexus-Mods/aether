@@ -1,0 +1,29 @@
+{
+  "name": "registry-create-key",
+  "description": "REG_CREATE_KEY makes a key in the overlay (state created), with its `volatile` flag, and the parent lists it as a child (folded name, stored spelling, present), children sorted by folded name in byte order; creating a key the overlay holds is ST_EXISTS (wire.md 4.3, 3.5); creating over a tombstone revives it as created.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Cairn"}
+    ]}
+  },
+  "steps": [
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Zeta", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 2}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\alpha", "volatile": true, "op": "reg-create-key"}, "expect": {"reply": {"version": 3}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Mid", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\alpha"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": true, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\Zeta"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 4, "node": {"created": true, "volatile": false, "last_write": 0, "values": [], "value_tombstones": [], "children": [{"folded": "alpha", "spelling": "alpha", "state": "present"}, {"folded": "mid", "spelling": "Mid", "state": "present"}, {"folded": "zeta", "spelling": "Zeta", "state": "present"}]}}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\ZETA", "volatile": false, "op": "reg-create-key"}, "expect": {"status": "exists"}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn", "volatile": false, "op": "reg-create-key"}, "expect": {"status": "exists"}, "note": "a mounted key"},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Deep\\Er\\Still", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 5}}, "note": "parents are made on the way"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Deep"}, "expect": {"reply": {"version": 5, "state": "created", "below": true}}, "note": "a parent under a created key is created too (overlay.rs `ensure_chain`)"},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Mid", "op": "reg-delete-key"}, "expect": {"reply": {"version": 6}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Mid", "volatile": true, "op": "reg-create-key"}, "expect": {"reply": {"version": 7}}, "note": "revived over its tombstone"},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn\\Mid"}, "expect": {"reply": {"version": 7, "node": {"created": true, "volatile": true, "last_write": 0, "values": [], "value_tombstones": [], "children": []}}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Mid"}, "expect": {"reply": {"version": 7, "state": "created", "below": false}}}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "mkdir-existing",
+  "description": "MKDIR of an existing directory is ST_OK or ST_EXISTS and a client must accept either (wire.md 3.4.9); of an existing file under a writable provider it is ST_IO_ERROR (3.4.9). Neither changes what is there.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/file.txt", "contents": "keep"},
+        {"path": "saves/d/inner.txt", "contents": "i"}
+      ],
+       "dirs": ["saves/e"],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/d"}, "expect": {"one_of": [{"status": "ok"}, {"status": "exists"}], "wire": "3.4.9"}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/e"}, "expect": {"one_of": [{"status": "ok"}, {"status": "exists"}], "wire": "3.4.9"}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/D"}, "expect": {"one_of": [{"status": "ok"}, {"status": "exists"}], "wire": "3.4.9"}, "note": "the fold of an existing directory"},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "saves/file.txt"}, "expect": {"status": "io-error"}, "note": "an existing file under a writable provider"},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/file.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/d/inner.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "file.txt", "is_dir": false, "size": 4, "mtime": 0}, {"name": "d", "is_dir": true, "size": 0, "mtime": 0}, {"name": "e", "is_dir": true, "size": 0, "mtime": 0}]}}}
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "readdir-listing",
+  "description": "READDIR lists the immediate children of a directory: stored spelling, is_dir, size for a file and 0 for a directory (wire.md 3.4.2: \"send 0 for a directory\"), no `.` or `..`, none of the grandchildren; the root is `.`. Entries are compared as a set, the order being the director's (3.4.2).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "Readme.TXT", "contents": "hello"},
+        {"path": "data/a.esp", "contents": "abc"},
+        {"path": "data/B.bsa", "contents": {"size": 100, "seed": 1}},
+        {"path": "data/Textures/sky.dds", "contents": "s"},
+        {"path": "data/Meshes/m.nif", "contents": "m"}
+      ],
+       "dirs": ["data/Empty"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "readdir", "root": 0, "path": "."}, "expect": {"reply": {"entries": [{"name": "Readme.TXT", "is_dir": false, "size": 5, "mtime": 0}, {"name": "data", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "a.esp", "is_dir": false, "size": 3, "mtime": 0}, {"name": "B.bsa", "is_dir": false, "size": 100, "mtime": 0}, {"name": "Textures", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Meshes", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Empty", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data/Empty"}, "expect": {"reply": {"entries": []}}, "note": "an empty directory"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/Textures"}, "expect": {"reply": {"entries": [{"name": "sky.dds", "is_dir": false, "size": 1, "mtime": 0}]}}}
+  ]
+}

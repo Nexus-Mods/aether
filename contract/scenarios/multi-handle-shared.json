@@ -1,0 +1,31 @@
+{
+  "name": "multi-handle-shared",
+  "description": "Handles are ring-global (wire.md 2.8.1: \"any process may present any handle\"; 3.4.3): a handle client 0 opens is read, written and closed by client 1, a separate process attached to the same ring, and the other way round; once one process closes it, it is closed for every process (3.5: bad-fh). Client 1 claims slot 1, so its bulk READ comes back in bank 1 (2.6).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "data/a.esp", "contents": "shared bytes"},
+        {"path": "data/big.bsa", "contents": {"size": 200000, "seed": 7}},
+        {"path": "saves/s.txt", "contents": "0123456789"}
+       ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"}, "expect": {"reply": {"fh": 1, "size": 12, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"client": 1, "request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "shared bytes"}}, "note": "client 0's handle, presented by client 1"},
+    {"client": 1, "request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 4}, "expect": {"status": "bad-fh"}, "note": "closed by another process"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/big.bsa"}, "expect": {"reply": {"fh": 2, "size": 200000, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"client": 1, "request": {"op": "read", "fh": 2, "offset": 0, "len": 65536, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 65536, "seed": 7}}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": {"hex": "435cae932ed6bbdc630c529065b21cd1"}}}},
+    {"client": 1, "request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"client": 1, "request": {"op": "open", "root": 0, "flags": ["read", "write"], "path": "saves/s.txt"}, "expect": {"reply": {"fh": 3, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 3, "offset": 10, "data": "AB"}, "expect": {"reply": {"written": 2}}, "note": "client 1's handle, written by client 0"},
+    {"client": 1, "request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"reply": {"data": "0123456789AB"}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"client": 1, "request": {"op": "write", "fh": 3, "offset": 0, "data": "x"}, "expect": {"status": "bad-fh"}},
+    {"client": 1, "request": {"op": "getattr", "root": 0, "path": "saves/s.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 12, "mtime": 0}}}
+  ]
+}

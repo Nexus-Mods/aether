@@ -1,0 +1,27 @@
+{
+  "name": "registry-lookup",
+  "description": "REG_LOOKUP states (wire.md 4.3): absent when the overlay says nothing (state 0), present and created in the overlay (2), present overlaying a real key (1), tombstoned (3); `below` is set when the overlay has anything strictly under the key. The mounted keys are overlay-created.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ],
+    "registry": {"keys": [
+      {"path": "\\Registry\\Machine\\Software\\Cairn\\Sub\\Deep", "values": [{"name": "v", "ty": 4, "data": {"hex": "07000000"}}]}
+    ]}
+  },
+  "steps": [
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}, "note": "a parent made on the way to a created key is a plain presence (overlay.rs `ensure_chain`)"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub\\Deep"}, "expect": {"reply": {"version": 2, "state": "created", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub"}, "expect": {"reply": {"version": 2, "state": "present", "below": true}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Nothing"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Elsewhere"}, "expect": {"reply": {"version": 2, "state": "absent", "below": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Real", "name": "x", "ty": 1, "data": {"hex": "6100"}, "op": "reg-set-value"}, "expect": {"reply": {"version": 3}}, "note": "a value written into a key the overlay lacks makes it a plain presence over the real key"},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Real"}, "expect": {"reply": {"version": 3, "state": "present", "below": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Made", "volatile": false, "op": "reg-create-key"}, "expect": {"reply": {"version": 4}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Made"}, "expect": {"reply": {"version": 4, "state": "created", "below": false}}},
+    {"request": {"path": "\\Registry\\Machine\\Software\\Cairn\\Sub", "op": "reg-delete-key"}, "expect": {"reply": {"version": 5}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}},
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn\\Sub\\Deep"}, "expect": {"reply": {"version": 5, "state": "tombstoned", "below": false}}, "note": "below a tombstoned ancestor"}
+  ]
+}

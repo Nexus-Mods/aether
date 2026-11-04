@@ -14,6 +14,12 @@ aether-protocol.workspace = true
 # The registry overlay the registry opcodes are answered from.
 aether-registry.workspace = true
 aether-rpc.workspace = true
+# `Tree` deserialises from a scenario file with the `scenario` feature.
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[features]
+# `Deserialize` for `tree::Tree`, for aether-conform's scenario loader.
+scenario = ["dep:serde"]
 
 [lints]
 workspace = true

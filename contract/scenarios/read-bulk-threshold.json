@@ -1,0 +1,18 @@
+{
+  "name": "read-bulk-threshold",
+  "description": "A READ of 64 KiB or more (BULK_THRESHOLD, wire.md 3.4.4: \"`len >= 65536`\") may be answered in bulk; whichever form comes, the data is the same. A file of 70000 bytes read whole, without and with the flag, and its tail.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "big.bin", "contents": {"size": 70000, "seed": 3}}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "big.bin"}, "expect": {"reply": {"fh": 1, "size": 70000, "is_dir": false, "immutable": true, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 70000}, "expect": {"reply": {"data": {"size": 70000, "seed": 3}}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 70000, "slot_flags": ["read_bulk"]}, "expect": {"reply": {"data": {"size": 70000, "seed": 3}}}},
+    {"request": {"op": "read", "fh": 1, "offset": 69990, "len": 70000}, "expect": {"reply": {"data": {"hex": "f4c24ecaff1c2f2b446d"}}}, "note": "the last 10 bytes: end of file with a request over the threshold"},
+    {"request": {"op": "read", "fh": 1, "offset": 70000, "len": 65536}, "expect": {"reply": {"data": ""}}, "note": "at the end, over the threshold"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+  ]
+}

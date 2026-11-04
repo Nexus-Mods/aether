@@ -14,6 +14,7 @@ fn inline_slot() -> ReadSlot<'static> {
     ReadSlot {
         slot: 0,
         arena: None,
+        inline_cap: usize::MAX,
     }
 }
 
@@ -211,4 +212,303 @@ fn a_write_or_length_past_what_it_holds_is_no_space() {
         .read(inline_slot(), RequestFlags::empty(), fh, 0, 10)
         .unwrap();
     assert_eq!(r, ReadReply::Inline(b"ke"));
+}
+
+fn names(d: &mut Reference, root: RootId, path: &str) -> Vec<(String, bool)> {
+    let mut l = Listing::default();
+    d.read_dir(root, path, &mut l).expect("listing");
+    l.iter().map(|e| (e.name.to_string(), e.is_dir)).collect()
+}
+
+fn read_inline(d: &mut Reference, fh: u64, offset: u64, len: u32) -> Result<Vec<u8>, Status> {
+    match d.read(inline_slot(), RequestFlags::empty(), fh, offset, len)? {
+        ReadReply::Inline(b) => Ok(b.to_vec()),
+        r => panic!("expected an inline reply, got {r:?}"),
+    }
+}
+
+/// 3.4.9: MKDIR creates a directory; 3.2: it keeps the caller's spelling,
+/// which READDIR then answers with, and GETATTR finds it by its fold.
+#[test]
+fn mkdir_creates_a_directory_listed_as_spelled() {
+    let mut d = Reference::new().writable_under("");
+    assert_eq!(d.mkdir(R0, 0o755, "Data"), Ok(()));
+    assert_eq!(d.mkdir(R0, 0o755, "data/Textures"), Ok(()));
+    let attr = d.get_attr(R0, "data").unwrap();
+    assert!(attr.found && attr.is_dir);
+    assert!(d.get_attr(R0, "DATA/textures").unwrap().is_dir);
+    assert_eq!(names(&mut d, R0, "."), vec![("Data".to_string(), true)]);
+    assert_eq!(
+        names(&mut d, R0, "data"),
+        vec![("Textures".to_string(), true)]
+    );
+    assert_eq!(d.stored_names(R0, 0, "data/textures"), Ok("Data/Textures"));
+    // A directory handle opens on it, as on any directory.
+    let o = d.open(R0, OpenFlags::READ, "data/textures").unwrap();
+    assert!(o.is_dir);
+    d.close(o.fh).unwrap();
+}
+
+/// wire.md 3.4.9: an existing directory is Status::Exists (a director may
+/// answer OK; the reference does not), an existing file Status::IoError where
+/// a writable provider serves it and Status::Exists where none does. Outside
+/// every writable prefix MKDIR refuses as a write open does (3.4.3), and a
+/// broken provider's prefix is Status::IoError.
+#[test]
+fn mkdir_on_an_existing_path_is_exists_and_refuses_as_a_write_open_does() {
+    let mut d = Reference::new().writable_under("").with_dir("data").with(
+        "data/a.esp",
+        vec![1],
+        ReadStyle::Whole,
+    );
+    assert_eq!(d.mkdir(R0, 0o755, "Data"), Err(Status::Exists));
+    assert_eq!(d.mkdir(R0, 0o755, "data/A.ESP"), Err(Status::IoError));
+    assert_eq!(d.mkdir(R0, 0o755, "."), Err(Status::Exists));
+    assert_eq!(names(&mut d, R0, "."), vec![("data".to_string(), true)]);
+
+    let mut ro = Reference::new()
+        .with("a", vec![1], ReadStyle::Whole)
+        .writable_under(&key(1, "saves/"))
+        .failing_writes_under(&key(2, "broken/"));
+    assert_eq!(ro.mkdir(R0, 0o755, "new"), Err(Status::ReadOnly));
+    assert_eq!(ro.mkdir(R0, 0o755, "a"), Err(Status::Exists));
+    assert_eq!(
+        ro.mkdir(RootId(1), 0o755, "elsewhere"),
+        Err(Status::NotFound)
+    );
+    assert_eq!(ro.mkdir(RootId(1), 0o755, "saves/Slot1"), Ok(()));
+    assert_eq!(ro.mkdir(RootId(2), 0o755, "broken/x"), Err(Status::IoError));
+    assert!(!ro.get_attr(R0, "new").unwrap().found);
+}
+
+/// 3.4.12: the stored spelling of each component from `skip` on, joined by
+/// `/`; a component the director has no entry for comes back as sent (the
+/// SHOULD), so the reply always has `components - skip` names.
+#[test]
+fn stored_names_answer_stored_spellings_from_skip_on() {
+    let mut d = Reference::new().writable_under("").with_dir("Data").with(
+        "Data/Meshes/Armor.NIF",
+        vec![1],
+        ReadStyle::Whole,
+    );
+    let p = "data/meshes/armor.nif";
+    assert_eq!(d.stored_names(R0, 0, p), Ok("Data/Meshes/Armor.NIF"));
+    assert_eq!(d.stored_names(R0, 1, p), Ok("Meshes/Armor.NIF"));
+    assert_eq!(d.stored_names(R0, 2, p), Ok("Armor.NIF"));
+    assert_eq!(d.stored_names(R0, 0, "data"), Ok("Data"));
+    assert_eq!(
+        d.stored_names(R0, 0, "data/absent/x.esp"),
+        Ok("Data/absent/x.esp")
+    );
+    // A name created through the ring is stored as the caller spelled it;
+    // the components above it keep theirs.
+    let o = d.open(R0, RW | OpenFlags::CREATE, "DATA/New.ESP").unwrap();
+    d.close(o.fh).unwrap();
+    assert_eq!(d.stored_names(R0, 0, "data/new.esp"), Ok("Data/New.ESP"));
+}
+
+/// 3.2, "Keep the spelling a name was created with": a write OPEN that
+/// creates `Data/New.ESP` stores that spelling; READDIR lists it so, and
+/// every fold of it finds the file.
+#[test]
+fn a_created_file_keeps_its_spelling_and_is_found_by_its_fold() {
+    let mut d = Reference::new().writable_under("").with_dir("Data");
+    let o = d.open(R0, RW | OpenFlags::CREATE, "Data/New.ESP").unwrap();
+    assert_eq!(d.write(o.fh, 0, b"xy"), Ok(2));
+    d.close(o.fh).unwrap();
+    let listed = vec![("New.ESP".to_string(), false)];
+    assert_eq!(names(&mut d, R0, "data"), listed);
+    let a = d.get_attr(R0, "data/new.esp").unwrap();
+    assert!(a.found && !a.is_dir && a.size == 2);
+    assert_eq!(d.contents("data/new.esp"), Some(b"xy".to_vec()));
+    // Opening an existing name in another case does not respell it.
+    let trunc = RW | OpenFlags::CREATE | OpenFlags::TRUNC;
+    let o = d.open(R0, trunc, "data/NEW.esp").unwrap();
+    d.close(o.fh).unwrap();
+    assert_eq!(names(&mut d, R0, "data"), listed);
+    // A RENAME target is stored as spelled, a change of case included.
+    assert_eq!(d.rename(R0, "data/new.esp", "data/Renamed.Esp"), Ok(()));
+    assert_eq!(
+        names(&mut d, R0, "data"),
+        vec![("Renamed.Esp".to_string(), false)]
+    );
+    assert_eq!(d.rename(R0, "data/renamed.esp", "data/RENAMED.ESP"), Ok(()));
+    assert_eq!(
+        names(&mut d, R0, "data"),
+        vec![("RENAMED.ESP".to_string(), false)]
+    );
+    assert_eq!(
+        d.stored_names(R0, 0, "data/renamed.esp"),
+        Ok("Data/RENAMED.ESP")
+    );
+}
+
+/// 3.4.13: a file moves between roots (replacing what is there), keeping
+/// the target's spelling; a directory is Status::CrossRoot; equal roots
+/// behave as RENAME.
+#[test]
+fn rename_x_moves_a_file_between_roots_and_refuses_a_directory() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("saves/a.sav", b"abc".to_vec(), ReadStyle::Whole)
+        .with_dir("saves/sub")
+        .with(&key(1, "old.sav"), b"zz".to_vec(), ReadStyle::Whole);
+    assert_eq!(d.rename_x(R0, r1, "saves/a.sav", "Moved.SAV"), Ok(()));
+    assert_eq!(d.contents("saves/a.sav"), None);
+    assert_eq!(d.contents(&key(1, "moved.sav")), Some(b"abc".to_vec()));
+    assert_eq!(
+        names(&mut d, r1, "."),
+        vec![
+            ("Moved.SAV".to_string(), false),
+            ("old.sav".to_string(), false)
+        ]
+    );
+    // Replacing what is there.
+    assert_eq!(d.rename_x(r1, R0, "moved.sav", "x"), Ok(()));
+    assert_eq!(d.rename_x(R0, r1, "x", "old.sav"), Ok(()));
+    assert_eq!(d.contents(&key(1, "old.sav")), Some(b"abc".to_vec()));
+    assert_eq!(d.contents("x"), None);
+    // A directory, the root itself included, is Status::CrossRoot.
+    assert_eq!(
+        d.rename_x(R0, r1, "saves/sub", "sub"),
+        Err(Status::CrossRoot)
+    );
+    assert_eq!(d.rename_x(R0, r1, ".", "sub"), Err(Status::CrossRoot));
+    assert!(d.get_attr(R0, "saves/sub").unwrap().is_dir);
+    // Onto the target root itself, a directory: Status::IsDir, and the file
+    // stays where it was.
+    let o = d.open(R0, RW | OpenFlags::CREATE, "keep.sav").unwrap();
+    d.close(o.fh).unwrap();
+    assert_eq!(d.rename_x(R0, r1, "keep.sav", "."), Err(Status::IsDir));
+    assert_eq!(d.rename_x(R0, r1, "keep.sav", ""), Err(Status::IsDir));
+    assert_eq!(d.contents("keep.sav"), Some(Vec::new()));
+    // A missing source is Status::NotFound.
+    assert_eq!(d.rename_x(R0, r1, "absent", "b"), Err(Status::NotFound));
+    // Equal roots: a RENAME.
+    assert_eq!(d.rename_x(r1, r1, "old.sav", "New.sav"), Ok(()));
+    assert_eq!(d.contents(&key(1, "new.sav")), Some(b"abc".to_vec()));
+    assert_eq!(d.stored_names(r1, 0, "new.sav"), Ok("New.sav"));
+}
+
+/// RENAME_X refuses as RENAME does (3.5.1 has Cairn answer it "as
+/// RENAME"): a source or target outside every writable prefix is
+/// Status::ReadOnly, and nothing moves.
+#[test]
+fn rename_x_outside_a_writable_prefix_is_read_only() {
+    let r1 = RootId(1);
+    let mut d = Reference::new()
+        .with("sealed.esp", vec![1], ReadStyle::Whole)
+        .with("saves/a.sav", vec![2], ReadStyle::Whole)
+        .writable_under("saves/")
+        .with_root(1);
+    assert_eq!(d.rename_x(R0, r1, "sealed.esp", "x"), Err(Status::ReadOnly));
+    assert_eq!(
+        d.rename_x(R0, r1, "saves/a.sav", "x"),
+        Err(Status::ReadOnly)
+    );
+    assert_eq!(d.contents("sealed.esp"), Some(vec![1]));
+    assert_eq!(d.contents("saves/a.sav"), Some(vec![2]));
+    assert!(!d.get_attr(r1, "x").unwrap().found);
+}
+
+/// `ReadStyle::ShorterThanClaimed(n)` with `n` past the file's length is the
+/// whole file, not a panic, and the reference keeps answering.
+#[test]
+fn shorter_than_claimed_past_the_end_reads_the_whole_file() {
+    let mut d = Reference::new().with("f", b"abcde".to_vec(), ReadStyle::ShorterThanClaimed(100));
+    let fh = d.open(R0, OpenFlags::READ, "f").unwrap().fh;
+    assert_eq!(read_inline(&mut d, fh, 0, 64), Ok(b"abcde".to_vec()));
+    assert_eq!(read_inline(&mut d, fh, 3, 64), Ok(b"de".to_vec()));
+    assert_eq!(read_inline(&mut d, fh, 50, 64), Ok(Vec::new()));
+    assert_eq!(d.close(fh), Ok(()));
+    assert!(d.get_attr(R0, "f").unwrap().found);
+}
+
+/// wire.md 3.4.8 (as Cairn's writable layer): an empty directory is
+/// deleted; one with anything under it is Status::IoError; the root is
+/// Status::BadRequest; outside every writable prefix Status::ReadOnly.
+#[test]
+fn delete_removes_an_empty_directory_and_refuses_a_full_one() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("empty")
+        .with_dir("full")
+        .with("full/a", vec![1], ReadStyle::Whole)
+        .with_dir("implied/sub");
+    assert_eq!(d.delete(R0, "EMPTY"), Ok(()));
+    assert!(!d.get_attr(R0, "empty").unwrap().found);
+    assert_eq!(d.delete(R0, "full"), Err(Status::IoError));
+    assert!(d.get_attr(R0, "full").unwrap().is_dir);
+    assert_eq!(d.contents("full/a"), Some(vec![1]));
+    assert_eq!(d.delete(R0, "implied/sub"), Ok(()));
+    assert_eq!(d.delete(R0, "."), Err(Status::BadRequest));
+    assert_eq!(d.delete(R0, "absent"), Err(Status::NotFound));
+
+    let mut ro = Reference::new().with_dir("sealed");
+    assert_eq!(ro.delete(R0, "sealed"), Err(Status::ReadOnly));
+    assert!(ro.get_attr(R0, "sealed").unwrap().is_dir);
+}
+
+/// wire.md 3.4.7 (as Cairn's writable layer): a directory moves with
+/// everything under it, its target spelled as sent; a target inside the
+/// source, or the root at either end, is Status::BadRequest; a non-empty
+/// directory at the target is Status::IoError; an empty one or a file is
+/// replaced.
+#[test]
+fn rename_moves_a_directory_and_what_is_under_it() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with_dir("Mods")
+        .with_dir("Mods/Inner")
+        .with("Mods/Inner/a.esp", vec![1], ReadStyle::Whole)
+        .with("Mods/b.esp", vec![2], ReadStyle::Whole)
+        .with_dir("full")
+        .with("full/x", vec![3], ReadStyle::Whole)
+        .with_dir("hollow");
+    assert_eq!(d.rename(R0, "mods", "Moved"), Ok(()));
+    assert!(!d.get_attr(R0, "mods").unwrap().found);
+    assert!(!d.get_attr(R0, "mods/inner").unwrap().found);
+    assert_eq!(d.contents("mods/b.esp"), None);
+    assert!(d.get_attr(R0, "moved/inner").unwrap().is_dir);
+    assert_eq!(d.contents("moved/inner/a.esp"), Some(vec![1]));
+    assert_eq!(d.contents("moved/b.esp"), Some(vec![2]));
+    assert_eq!(
+        d.stored_names(R0, 0, "moved/inner/a.esp"),
+        Ok("Moved/Inner/a.esp")
+    );
+    assert_eq!(
+        names(&mut d, R0, "moved"),
+        vec![("b.esp".to_string(), false), ("Inner".to_string(), true)]
+    );
+    // A change of case only respells it.
+    assert_eq!(d.rename(R0, "moved", "MOVED"), Ok(()));
+    assert_eq!(
+        d.stored_names(R0, 0, "moved/inner/a.esp"),
+        Ok("MOVED/Inner/a.esp")
+    );
+    // Into itself, or the root: BadRequest.
+    assert_eq!(
+        d.rename(R0, "moved", "moved/inner/x"),
+        Err(Status::BadRequest)
+    );
+    assert_eq!(d.rename(R0, ".", "x"), Err(Status::BadRequest));
+    assert_eq!(d.rename(R0, "moved/b.esp", "."), Err(Status::BadRequest));
+    // Onto a non-empty directory: IoError, nothing moves.
+    assert_eq!(d.rename(R0, "moved", "full"), Err(Status::IoError));
+    assert_eq!(d.contents("moved/b.esp"), Some(vec![2]));
+    assert_eq!(d.contents("full/x"), Some(vec![3]));
+    // Onto an empty directory: replaced.
+    assert_eq!(d.rename(R0, "moved", "hollow"), Ok(()));
+    assert_eq!(d.contents("hollow/b.esp"), Some(vec![2]));
+    assert!(!d.get_attr(R0, "moved").unwrap().found);
+    // A file onto an empty directory: replaced.
+    assert_eq!(d.mkdir(R0, 0o755, "spot"), Ok(()));
+    assert_eq!(d.rename(R0, "full/x", "spot"), Ok(()));
+    let a = d.get_attr(R0, "spot").unwrap();
+    assert!(a.found && !a.is_dir);
+    assert_eq!(d.contents("spot"), Some(vec![3]));
+
+    let mut ro = Reference::new().with_dir("sealed");
+    assert_eq!(ro.rename(R0, "sealed", "x"), Err(Status::ReadOnly));
 }

@@ -69,6 +69,29 @@ jobs:
       - name: Rust tests (every crate)
         timeout-minutes: 25
         run: cargo test --no-fail-fast
+      # What every director must do (contract/scenarios), the malformed
+      # requests, 1024 generated cases compared with the reference, and 256
+      # rounds of 4 clients at once (docs/conformance.md), played against the
+      # reference director over a ring file and over a named section, and
+      # (without the concurrent rounds) over a ring with no bulk arena. The
+      # seed is the run's id, so a failure replays with --seed; the shrunk
+      # case (or failing round) is uploaded.
+      - name: Director conformance (reference, file ring and section)
+        # About a minute measured (docs/conformance.md); generous headroom.
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo build -p aether-conform
+          target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter" --scenarios contract/scenarios --malformed --limits --generate --cases 1024 --concurrent 4 --concurrent-cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
+          target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter --ring section" --scenarios contract/scenarios --malformed --limits --generate --cases 1024 --concurrent 4 --concurrent-cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
+          target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter --no-arena" --scenarios contract/scenarios --malformed --limits --generate --cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
+      - name: Conformance failures (shrunk generated cases)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conform-failures-windows
+          path: target/conform-failures
+          if-no-files-found: ignore
       # A 32-bit (WOW64) process lays its parameter block and environment out
       # differently from an x64 one, and the injector rewrites both; its unit
       # tests run 32-bit targets only when built for i686.
@@ -91,6 +114,8 @@ jobs:
           if ($LASTEXITCODE) { throw 'sign.tests.ps1 failed' }
           .\bin\reuse-natives.tests.ps1
           if ($LASTEXITCODE) { throw 'reuse-natives.tests.ps1 failed' }
+          .\bin\natives-key.tests.ps1
+          if ($LASTEXITCODE) { throw 'natives-key.tests.ps1 failed' }
 
   # The crates that build on Linux (format, lint of the `#[cfg(unix)]` half
   # that nothing else compiles, their tests), then the cross-build of the
@@ -106,7 +131,7 @@ jobs:
         -p aether-ipc -p aether-protocol -p aether-casefold -p aether-pe
         -p aether-env -p aether-registry -p aether-testkit
         -p aether-ntlayout -p aether-redirect -p aether-filering
-        -p aether-rpc -p aether-refdirector
+        -p aether-rpc -p aether-refdirector -p aether-conform
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain (rust-toolchain.toml)
@@ -120,6 +145,24 @@ jobs:
         run: cargo clippy $LINUX_CRATES --all-targets -- -D warnings
       - name: Portable crates (compile and test on Linux)
         run: cargo test --no-fail-fast $LINUX_CRATES
+      # What every director must do (contract/scenarios), the malformed
+      # requests, 1024 generated cases compared with the reference, and 256
+      # rounds of 4 clients at once (docs/conformance.md), played against the
+      # reference director over a ring file. The seed is the run's id; the
+      # shrunk case (or failing round) is uploaded.
+      - name: Director conformance (reference, file ring)
+        # About a minute measured (docs/conformance.md); generous headroom.
+        timeout-minutes: 15
+        run: |
+          cargo build -p aether-conform
+          target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter" --scenarios contract/scenarios --malformed --limits --generate --cases 1024 --concurrent 4 --concurrent-cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
+      - name: Conformance failures (shrunk generated cases)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conform-failures-linux
+          path: target/conform-failures
+          if-no-files-found: ignore
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-xwin

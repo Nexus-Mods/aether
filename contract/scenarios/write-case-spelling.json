@@ -1,0 +1,23 @@
+{
+  "name": "write-case-spelling",
+  "description": "A write open that creates a name keeps the caller's spelling, and the fold finds it (wire.md 3.2: \"Keep the spelling a name was created with. A request that creates a name (a write OPEN ...) carries the caller's spelling\"): READDIR and STORED_NAMES answer with it, a lookup in any case finds it, an open of an existing name with other case does not respell it.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/old.txt", "contents": "o"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/MixedCase.SAV"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "data"}, "expect": {"reply": {"written": 4}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "MixedCase.SAV", "is_dir": false, "size": 4, "mtime": 0}, {"name": "old.txt", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "saves/mixedcase.sav"}, "expect": {"reply": {"names": "saves/MixedCase.SAV"}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/mixedcase.sav"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "SAVES/MIXEDCASE.SAV"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/MIXEDCASE.sav"}, "expect": {"reply": {"fh": 2, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "an existing name: opened, not respelled"},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "MixedCase.SAV", "is_dir": false, "size": 4, "mtime": 0}, {"name": "old.txt", "is_dir": false, "size": 1, "mtime": 0}]}}}
+  ]
+}

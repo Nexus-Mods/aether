@@ -1,0 +1,26 @@
+{
+  "name": "write-trunc",
+  "description": "OPEN_TRUNC on an existing writable file empties it (wire.md 3.4.3 flag table: \"truncate on open\"): the reply's size is 0 and the old bytes are gone; without OPEN_TRUNC the contents stay.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "saves/a.txt", "contents": "old contents"},
+        {"path": "saves/b.txt", "contents": "keep me"}
+      ],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/b.txt"}, "expect": {"reply": {"fh": 1, "size": 7, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "create over an existing file does not truncate"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "trunc"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "new"}, "expect": {"reply": {"written": 3}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/b.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 7, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 3, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 16}, "expect": {"reply": {"data": "new"}}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

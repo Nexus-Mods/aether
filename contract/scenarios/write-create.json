@@ -1,0 +1,23 @@
+{
+  "name": "write-create",
+  "description": "A write open with OPEN_CREATE creates the file under a writable provider (wire.md 3.4.3: \"missing path without `OPEN_CREATE` `ST_NOT_FOUND`\" implies create makes it); WRITE answers `written` equal to the data's length (3.4.5); what was written reads back; the new file is found and listed.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "data/a.esp", "contents": "abc"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "saves/new.txt"}, "expect": {"reply": {"fh": 1, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 1, "offset": 0, "data": "hi"}, "expect": {"reply": {"written": 2}}},
+    {"request": {"op": "write", "fh": 1, "offset": 2, "data": {"hex": "2100ff"}}, "expect": {"reply": {"written": 3}}},
+    {"request": {"op": "write", "fh": 1, "offset": 5, "data": ""}, "expect": {"reply": {"written": 0}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/new.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 5, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "saves"}, "expect": {"reply": {"entries": [{"name": "new.txt", "is_dir": false, "size": 5, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/new.txt"}, "expect": {"reply": {"fh": 2, "size": 5, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": {"hex": "68692100ff"}}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

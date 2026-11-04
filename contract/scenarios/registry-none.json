@@ -1,0 +1,21 @@
+{
+  "name": "registry-none",
+  "description": "A director without a registry layer answers all eight registry opcodes ST_NOT_SUPPORTED (wire.md 4: \"A director without a registry layer answers all eight `ST_NOT_SUPPORTED`\"); the file opcodes still work.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "a.txt", "contents": "a"}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "reg-lookup", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-set-value", "path": "\\Registry\\Machine\\Software\\Cairn", "name": "v", "ty": 4, "data": {"hex": "01000000"}}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-delete-value", "path": "\\Registry\\Machine\\Software\\Cairn", "name": "v"}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-create-key", "path": "\\Registry\\Machine\\Software\\Cairn", "volatile": false}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-delete-key", "path": "\\Registry\\Machine\\Software\\Cairn"}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-rename-key", "path": "\\Registry\\Machine\\Software\\Cairn", "new_leaf": "Other"}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "reg-changed", "path": "\\Registry\\Machine\\Software\\Cairn", "subtree": true, "since": 0}, "expect": {"status": "not-supported"}},
+    {"request": {"op": "getattr", "root": 0, "path": "a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}}
+  ]
+}

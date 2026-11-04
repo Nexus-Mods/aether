@@ -1,0 +1,24 @@
+{
+  "name": "write-setattr-size",
+  "description": "After SETATTR the new length is the file's size: GETATTR, a new OPEN and READ's end of file all agree (wire.md 3.4.6).",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [{"path": "saves/a.txt", "contents": "abcdef"}],
+       "writable": ["saves"]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 1, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "setattr", "fh": 1, "size": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 2, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 16}, "expect": {"reply": {"data": "abc"}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "saves/a.txt"}, "expect": {"reply": {"fh": 3, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "setattr", "fh": 3, "size": 12}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "saves/a.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 12, "mtime": 0}}}
+  ]
+}

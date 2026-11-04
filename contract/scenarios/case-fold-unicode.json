@@ -1,0 +1,29 @@
+{
+  "name": "case-fold-unicode",
+  "description": "The fold is `char::to_lowercase` one character at a time (wire.md 3.2, \"Case folding\"): non-ASCII uppercase folds to its lowercase, and a director must treat two names as one exactly when their folds are equal. \u03a3 folds to \u03c3 in every position (no final-sigma rule); \u0130 (U+0130) folds to i plus U+0307, which is not the fold of I or of i; composed and decomposed \u00e9 stay different names.",
+  "tree": {
+    "roots": [
+      {"id": 0,
+       "files": [
+        {"path": "\u00c9t\u00e9/\u00c9COLE.txt", "contents": "e1"},
+        {"path": "\u0391\u03a3.txt", "contents": "s1"},
+        {"path": "\u0130.txt", "contents": "i1"},
+        {"path": "caf\u00e9.txt", "contents": "composed"},
+        {"path": "cafe\u0301.txt", "contents": "decomposed!"}
+      ]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "getattr", "root": 0, "path": "\u00e9t\u00e9/\u00e9cole.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}, "note": "\u00c9 folds to \u00e9"},
+    {"request": {"op": "getattr", "root": 0, "path": "\u00c9T\u00c9/\u00c9COLE.TXT"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "\u03b1\u03c3.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}, "note": "\u03a3 folds to \u03c3 even at the end of a word"},
+    {"request": {"op": "getattr", "root": 0, "path": "\u03b1\u03c2.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "\u03c2 (final sigma) is a different character, not what \u03a3 folds to"},
+    {"request": {"op": "getattr", "root": 0, "path": "i\u0307.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}, "note": "\u0130 folds to i followed by U+0307"},
+    {"request": {"op": "getattr", "root": 0, "path": "i.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "i alone is not the fold of \u0130"},
+    {"request": {"op": "getattr", "root": 0, "path": "I.txt"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "caf\u00e9.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 8, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "cafe\u0301.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 11, "mtime": 0}}, "note": "decomposed \u00e9 is another name than composed \u00e9"},
+    {"request": {"op": "getattr", "root": 0, "path": "CAF\u00c9.TXT"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 8, "mtime": 0}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "\u00e9t\u00e9/\u00e9cole.txt"}, "expect": {"reply": {"names": "\u00c9t\u00e9/\u00c9COLE.txt"}}}
+  ]
+}

@@ -264,9 +264,9 @@ pub fn final_path_for_open(path: &str) -> Option<String> {
 /// the reparse point's own metadata — stored in its own directory entry, on
 /// the *reparse point's* volume, never the target's — touches only that one
 /// local, already-open handle and cannot block on anything the target
-/// implies. Found by reproduction, not assumed: the escape-matrix vector 7
-/// closeout's own session-start scan hung on exactly this shape of junction
-/// before this function replaced a `final_path_for_open`-based first draft.
+/// implies. Found by reproduction, not assumed: a session-start scan that
+/// opened candidates with `final_path_for_open` hangs on exactly this shape of
+/// junction.
 pub fn reparse_point_target(path: &str) -> Option<String> {
     let wide = to_wide(path);
     // SAFETY: FFI. `FILE_FLAG_OPEN_REPARSE_POINT` is what makes this open

@@ -1,9 +1,9 @@
 //! Closing a director-served (synthetic) handle drops its record from the shim's handle table.
 //!
-//! The synthetic branch of `NtClose` used to return before the table was touched. Synthetic
-//! handle values only increase, so nothing ever reused a key to clear it: every served open left
-//! a record for the life of the process, and after 65,536 of them the `opened_as` budget was
-//! gone for every handle. Witness: the table's size across many open/close pairs.
+//! Synthetic handle values only increase, so nothing ever reuses a key to clear it: if the
+//! synthetic branch of `NtClose` returned before the table was touched, every served open would
+//! leave a record for the life of the process, and after 65,536 of them the `opened_as` budget
+//! would be gone for every handle. Witness: the table's size across many open/close pairs.
 
 use crate::fakedirector;
 

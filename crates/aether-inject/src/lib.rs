@@ -97,7 +97,7 @@ pub enum InjectError {
     /// The target exited — with this exit code, an `NTSTATUS` such as
     /// `0xC0000135` (a DLL it imports is missing) when the loader killed it —
     /// before the shim reported ready. Reported as soon as it is seen rather
-    /// than after the ready timeout, which is what a dead target used to cost.
+    /// than after the ready timeout.
     TargetExited(u32),
     /// A [`TreeKiller`] could not terminate the launch's job (or, for a
     /// launch without one, its process).

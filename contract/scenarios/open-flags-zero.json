@@ -1,6 +1,6 @@
 {
   "name": "open-flags-zero",
-  "description": "oflags == 0 is read as OPEN_READ (wire.md 3.4.3: \"`oflags == 0` is read as `OPEN_READ` by both directors\"), so the file opens and reads.",
+  "description": "oflags == 0 is read as OPEN_READ (wire.md 3.4.3: \"`oflags == 0` is read as `OPEN_READ`\"), so the file opens and reads.",
   "tree": {
     "roots": [
       {"id": 0,

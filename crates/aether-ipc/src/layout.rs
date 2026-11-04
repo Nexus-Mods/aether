@@ -3,32 +3,24 @@
 use core::mem::{align_of, offset_of, size_of};
 
 pub const MAGIC: u32 = 0x5646_4950;
-/// Wire-format generation of the ring's *payloads*, not of the ring framing
-/// itself — `ring::open` refuses a segment whose version differs, which is the
-/// only defence against a stale injected DLL speaking the previous payload
-/// shape into a current director.
+/// Wire-format generation of the ring's payloads and slot state machine.
+/// `ring::open` refuses a segment whose version differs, which is the only
+/// defence against a stale injected DLL speaking another shape into a current
+/// director: a peer with another layout would have, for example, the first
+/// four bytes of a path read as a root id, or its slots read 8 bytes off,
+/// plausible-looking garbage rather than an error.
 ///
-/// - **1** — original: path-carrying payloads were a bare path
-///   or `flags|path` (OPEN).
-/// - **2** — stage 2b task 5: every path-carrying payload gained a leading
-///   `root:u32` (see `aether_protocol::Request`). A version-1 shim
-///   talking to a version-2 director would have the first four bytes of its
-///   path read as a root id and the remainder as a truncated path —
-///   plausible-looking garbage, never an error. Bumping this turns that into
-///   a loud failure at attach.
+/// Version 4 is:
 ///
-/// - **3** — concurrent clients: the slot state machine gained
-///   [`ST_ABANDONED`], the server echoes the request id it answered into
-///   [`SlotHeader::ack`], and the ring header carries the server's worker
-///   count ([`RingHeader::worker_hint`]). No payload changed shape, but the
-///   two ends must agree on who frees a slot whose client stopped waiting: a
-///   version-2 server would publish `COMPLETED` over `ABANDONED` and the slot
-///   would never be freed, and a version-2 client frees a slot its server is
-///   still writing. So the pair is refused at attach, like a payload change.
-/// - **4** — registry overlay: the ring header grew [`RingHeader::reg_gen`]
-///   (8 bytes, so the slots start 8 bytes later) and the registry opcodes
-///   15-22 joined the catalog. A version-3 shim would read its slots 8 bytes
-///   off the director's.
+/// - every path-carrying payload leads with `root:u32` (see
+///   `aether_protocol::Request`);
+/// - the slot state machine has [`ST_ABANDONED`], the server echoes the
+///   request id it answered into [`SlotHeader::ack`], and the two ends agree
+///   that the server frees a slot whose client stopped waiting;
+/// - the ring header carries the server's worker count
+///   ([`RingHeader::worker_hint`]) and the registry generation
+///   ([`RingHeader::reg_gen`]), so the slots start at 48, and the registry
+///   opcodes 15-22 are in the catalog.
 ///
 /// **Bump this whenever a payload layout or the slot state machine changes.**
 /// Opcode numbers are a separate contract and must never be renumbered.
@@ -183,10 +175,9 @@ mod tests {
         assert_eq!(here, protocol);
     }
 
-    /// The historical numbers (from the retired protocol descriptor), as
-    /// literals: a change here is a wire break.
+    /// The layout numbers as literals: a change here is a wire break.
     #[test]
-    fn layout_numbers_are_the_historical_ones() {
+    fn layout_numbers_are_fixed() {
         assert_eq!(MAGIC, 0x5646_4950);
         assert_eq!(VERSION, 4);
         assert_eq!(

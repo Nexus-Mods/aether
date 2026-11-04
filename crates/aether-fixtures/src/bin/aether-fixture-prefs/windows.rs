@@ -12,13 +12,12 @@
 //! NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile → NtUnlockFile → NtClose
 //! ```
 //!
-//! `NtLockFile` had no detour in `aether-hooks`, so the real kernel got handed a
-//! synthetic handle and answered `STATUS_INVALID_HANDLE`; the profile API then
-//! abandoned the whole call and handed its caller back the *default* string it
-//! was passed. The game therefore received no INI data at all — not stale data,
-//! not real-disk data, just its own defaults. `std::fs::read` never locks, so
-//! no existing fixture could see it. See
-//! `.superpowers/sdd/2026-08-14-stage2a-ii-gate4-writes/prefs-read-investigation.md`.
+//! Without an `NtLockFile` detour in `aether-hooks`, the real kernel is handed a
+//! synthetic handle and answers `STATUS_INVALID_HANDLE`; the profile API then
+//! abandons the whole call and hands its caller back the *default* string it
+//! was passed. The game receives no INI data at all: not stale data, not
+//! real-disk data, just its own defaults. `std::fs::read` never locks, so a
+//! fixture that only reads cannot see it.
 //!
 //! ## What it emits
 //!

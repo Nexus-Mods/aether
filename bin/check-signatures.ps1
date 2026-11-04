@@ -1,5 +1,5 @@
 # Checks files' Authenticode signatures, as release.yml does for the natives
-# it signs or reuses. Copied from Cairn's. Prints each file's status and signer,
+# it signs or reuses. Prints each file's status and signer,
 # and writes one line to the output per problem: a file missing, a status
 # other than Valid, or (with -Signer) a signer whose subject isn't -Signer.
 # No output means every file passed. It never throws for a bad file: the
@@ -8,8 +8,7 @@
 #   $bad = @(& .\bin\check-signatures.ps1 -Path a.exe, b.dll [-Signer 'CN=...'])
 #
 # -Signer defaults to $env:EXPECTED_SIGNER (release.yml sets it from the
-# repository variable of that name). One rule, the same as Cairn's
-# cairn.build.package/same-dn?: -Signer must be exactly SignerCertificate.Subject (CN first, Windows' key
+# repository variable of that name). One rule: -Signer must be exactly SignerCertificate.Subject (CN first, Windows' key
 # names), compared case-sensitively ignoring only the spaces after commas
 # (', +' in Get-NormalName).
 # Without -Signer, the signer isn't compared, and a warning says so.

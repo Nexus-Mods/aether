@@ -266,9 +266,8 @@ mod tests {
     use crate::ntdef::STATUS_OBJECT_NAME_INVALID;
 
     /// An `ObjectName` the file hooks cannot decode is left to the real syscall: an odd `Length`
-    /// used to be read with its last byte dropped (so `"ab"` for 5 bytes of `"abc"`), and is
-    /// now undecodable. A zero-length name with a NULL buffer is the empty string like any other
-    /// zero-length name; it used to be undecodable.
+    /// is undecodable (never read with its last byte dropped, `"ab"` for 5 bytes of `"abc"`). A
+    /// zero-length name with a NULL buffer is the empty string like any other zero-length name.
     #[test]
     fn object_name_str_follows_the_shared_unicode_string_rule() {
         let mut w: Vec<u16> = "abc".encode_utf16().collect();

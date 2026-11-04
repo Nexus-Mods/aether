@@ -147,7 +147,7 @@ fn a_tree_with_a_registry_serves_its_keys_and_values() {
     let mut t = tree();
     t.registry = Some(Registry {
         keys: vec![RegKey {
-            path: r"\Registry\Machine\Software\Cairn".into(),
+            path: r"\Registry\Machine\Software\Cabin".into(),
             volatile: false,
             values: vec![RegValue {
                 name: "Path".into(),
@@ -157,7 +157,7 @@ fn a_tree_with_a_registry_serves_its_keys_and_values() {
         }],
     });
     let mut d = Reference::from_tree(&t).unwrap();
-    let k = d.reg_key(r"\Registry\Machine\Software\Cairn").unwrap();
+    let k = d.reg_key(r"\Registry\Machine\Software\Cabin").unwrap();
     let node = k.node.expect("a node for the tree's key");
     assert_eq!(node.values.len(), 1);
     assert_eq!(node.values[0].name, "Path");

@@ -77,9 +77,8 @@ pub struct RingServer<'a, N: Notifier> {
 /// nothing the ring alone can answer reaches this, and the hot path stays a
 /// pure spin with no system call. What is still unanswered after it is
 /// waiting on the provider, and a waiter that keeps a core busy for that
-/// takes the core from whatever else the process wanted to run. One waiter
-/// did so under the old process-wide lock; without it there can be one per
-/// thread.
+/// takes the core from whatever else the process wanted to run, and there can
+/// be one such waiter per thread.
 pub const CLIENT_SPIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(1);
 
 std::thread_local! {
@@ -128,13 +127,12 @@ impl<'a, N: Notifier> RingClient<'a, N> {
     /// Claim a slot, looking at `start` first, waiting while the ring is full
     /// — the way a response is waited for, and for no longer than one.
     ///
-    /// This used to be fifty million bare passes over the slots: seven
-    /// seconds of one core at full tilt, measured, and then `RingFull`. A
-    /// full ring was unreachable while one lock let a single call's pipeline
-    /// in at a time; it is reachable now (gated data slots, retired slots, a
-    /// slot per thread doing metadata), and what fills it is slow requests,
-    /// so the wait is spin, then [`Notifier::idle_client`], bounded by the
-    /// deadline.
+    /// A fixed count of bare passes over the slots would burn a core (fifty
+    /// million passes are seven seconds of one core, measured) and then give
+    /// up with `RingFull`. A full ring is reachable (gated data slots, retired
+    /// slots, a slot per thread doing metadata), and what fills it is slow
+    /// requests, so the wait is spin, then [`Notifier::idle_client`], bounded
+    /// by the deadline.
     fn claim_slot_from(&self, start: u32) -> Result<u32, IpcError> {
         let began = self.notifier.now();
         let mut tries: u32 = 0;

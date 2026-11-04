@@ -31,8 +31,8 @@ pub(crate) unsafe fn reg_real() -> crate::regkeys::Real {
     }
 }
 
-/// Whether a registry hook should go straight to its trampoline: the overlay is off (ruling:
-/// nothing but this check), or this thread is inside the shim's own work.
+/// Whether a registry hook should go straight to its trampoline: the overlay is off (this
+/// check alone), or this thread is inside the shim's own work.
 fn reg_bypass() -> bool {
     !crate::regclient::enabled() || in_hook_reenter()
 }
@@ -566,7 +566,7 @@ pub(super) unsafe fn set_info_object_hook_body(
     }
 }
 
-/// The body of a spec 3.6 hook. The overlay off goes to the real call. With it on, `refuse`
+/// The body of a notification, security or handle-flag hook. The overlay off goes to the real call. With it on, `refuse`
 /// decides: `Some(status)` is returned, `None` makes the real call.
 ///
 /// `modifies`: the call changes the real registry (Restore, Replace, Load*, Unload*, transacted
@@ -606,13 +606,13 @@ macro_rules! out_of_scope_body {
     };
 }
 
-/// A synthetic key handle: none of the spec 3.6 calls can act on it.
+/// A synthetic key handle: none of the security, handle-flag or out-of-scope calls can act on it.
 fn synthetic_key(key: HANDLE) -> Option<NTSTATUS> {
     crate::regkeys::is_synthetic(key as isize).then_some(STATUS_NOT_SUPPORTED)
 }
 
-/// What a real-modifying spec 3.6 call gets for a key the overlay may serve: `NOT_SUPPORTED` on
-/// one it serves, `UNSUCCESSFUL` on one it cannot tell (fails closed, spec section 6), the real
+/// What a real-modifying security, handle-flag or out-of-scope call gets for a key the overlay may serve: `NOT_SUPPORTED` on
+/// one it serves, `UNSUCCESSFUL` on one it cannot tell (fails closed), the real
 /// call (`None`) otherwise.
 fn refusal(serves: crate::regkeys::Serves) -> Option<NTSTATUS> {
     match serves {

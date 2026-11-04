@@ -36,8 +36,8 @@ fn new_normalizes_nt_and_win32_roots() {
 /// not accepted and left to `match_canonical` — which, given zero
 /// components to fold-compare, would match *every* path with the whole
 /// path as the remainder. Reachable via `VFS_VIRTUAL_DIR=""` (the shim's
-/// env entry point checks for unset, not empty) and, since stage 2b, via
-/// a second declared root that is malformed independently of the first.
+/// env entry point checks for unset, not empty) and via a second declared
+/// root that is malformed independently of the first.
 #[test]
 fn an_empty_root_is_rejected_rather_than_matching_every_path() {
     // `RootMap` has no `Debug` impl (it holds a lookup cache), so
@@ -60,12 +60,9 @@ fn an_empty_root_is_rejected_rather_than_matching_every_path() {
     ));
 }
 
-/// Stage 2b task 5, step 1: the structural claim of the whole task. A
-/// path under root 1 resolves to `(RootId(1), rel)`, a path under root 0
-/// to `(RootId(0), rel)`, and a path under neither is outside. Before this
-/// task `RootMap` held exactly one root and could answer only "inside" or
-/// "outside", so the shim could not tell the director which root a path
-/// belonged to.
+/// A path under root 1 resolves to `(RootId(1), rel)`, a path under root 0
+/// to `(RootId(0), rel)`, and a path under neither is outside: `RootMap`
+/// answers which root a path belongs to, so the shim can tell the director.
 #[test]
 fn resolve_answers_with_the_matching_root_id_and_remainder() {
     let map = RootMap::with_roots(
@@ -209,12 +206,12 @@ fn remainder_returns_folded_components() {
     assert_eq!(r.remainder(r"\??\C:\Windows"), None);
 }
 
-// -- Task 3: canonicalisation wired into `under_root` -----------------
+// -- Canonicalisation in `under_root` --------------------------------
 
-/// A device-path spelling of a file under the root, which the old
-/// normalize_vpath-only `under_root` classified outside (no device-prefix
-/// resolution at all), must now resolve inside via the `VolumeMap` handed
-/// to `RootMap::new`.
+/// A device-path spelling of a file under the root, which a
+/// normalize_vpath-only `under_root` would classify outside (no
+/// device-prefix resolution at all), resolves inside via the `VolumeMap`
+/// handed to `RootMap::new`.
 #[test]
 fn under_root_recognises_a_device_path_spelling() {
     let mut volumes = VolumeMap::empty();
@@ -261,7 +258,8 @@ fn under_root_recognises_an_8dot3_style_spelling_of_the_root() {
         Some(s) if !s.eq_ignore_ascii_case(&root_str) => s,
         _ => {
             // 8.3 name generation disabled on this volume: nothing to
-            // test here (Task 6's `unbuildable` case, not a failure).
+            // test here (the escape matrix's `unbuildable` case, not a
+            // failure).
             std::fs::remove_dir_all(&base).ok();
             return;
         }
@@ -269,8 +267,8 @@ fn under_root_recognises_an_8dot3_style_spelling_of_the_root() {
 
     // The OS's own resolution of the short root must be VOLUME_NAME_DOS
     // (`\\?\`-prefixed) when it goes through `final_path_for_open` --
-    // this is exactly the prefix shape flagged in Task 2's review as a
-    // silent-fail-closed trap if a consumer assumes a bare drive form.
+    // this prefix shape is a silent-fail-closed trap if a consumer assumes
+    // a bare drive form.
     let via_final_path = aether_win::final_path_for_open(&short_root);
     if let Some(p) = &via_final_path {
         assert!(
@@ -431,7 +429,7 @@ fn os_consulted_resolution_is_never_cached() {
         Some(s) if !s.eq_ignore_ascii_case(&root_str) => s,
         _ => {
             // 8.3 disabled on this volume: nothing forces the OS-consulted
-            // branch here (Task 6's `unbuildable` case, not a failure).
+            // branch here (the `unbuildable` case, not a failure).
             std::fs::remove_dir_all(&base).ok();
             return;
         }
@@ -543,9 +541,8 @@ fn plainly_outside_path_never_consults_the_os() {
 /// `aether_win::final_path_for_open` returns `GetFinalPathNameByHandleW`'s
 /// default VOLUME_NAME_DOS form, which is `\\?\`-prefixed -- the Win32
 /// spelling, never the NT `\??\` spelling a real hooked open presents.
-/// Task 2's review found a bug of exactly this shape (a volume-GUID key
-/// registered in the wrong prefix silently matched nothing). Guard the
-/// same trap here: canonicalise must treat `\\?\` the same as any other
+/// A volume-GUID key registered in the wrong prefix silently matches
+/// nothing. Guard the same trap here: canonicalise must treat `\\?\` the same as any other
 /// recognised NT/DOS prefix, not require the caller to strip it first,
 /// so feeding a real OS-resolved path straight back into canonicalise
 /// (as `under_root`'s fallback does) can never silently fail closed.
@@ -633,7 +630,7 @@ fn under_root_fallback_branch_does_not_pull_in_a_path_outside_the_root() {
         Some(s) if !s.eq_ignore_ascii_case(&outside_str) => s,
         _ => {
             // 8.3 disabled on this volume: the fallback branch can't be
-            // forced this way here (Task 6's `unbuildable` case).
+            // forced this way here (the `unbuildable` case).
             std::fs::remove_dir_all(&base).ok();
             return;
         }
@@ -652,15 +649,14 @@ fn under_root_fallback_branch_does_not_pull_in_a_path_outside_the_root() {
 
 // -- The object-manager spelling matrix ------------------------------
 //
-// `rust/docs/escape-matrix.md`'s vector 3 covers exactly one
-// object-manager spelling: the colon-free `GLOBALROOT\Device\HarddiskVolumeN`
-// form. Every *colon-bearing* spelling — the ones that reach a drive
-// letter through a namespace token instead of a device name — went
-// uncovered, and all three of them classified as outside every root while
-// the OS resolved them to the file under it, so `create_hook`
-// trampolined the original OBJECT_ATTRIBUTES and the kernel opened the
-// real file. The vectors below are that gap, closed as a table so adding
-// the next spelling is one line rather than a new test.
+// `docs/escape-matrix.md`'s vector 3 is one object-manager spelling: the
+// colon-free `GLOBALROOT\Device\HarddiskVolumeN` form. The *colon-bearing*
+// spellings reach a drive letter through a namespace token instead of a
+// device name; classified as outside every root while the OS resolves them
+// to the file under it, `create_hook` would trampoline the original
+// OBJECT_ATTRIBUTES and the kernel would open the real file. The vectors
+// below are a table so adding the next spelling is one line rather than a
+// new test.
 //
 // Each entry is a template. `{VOL}` is not used; the volume spelling is
 // written out in the template itself, and `{REST}` is substituted with a
@@ -672,7 +668,7 @@ fn under_root_fallback_branch_does_not_pull_in_a_path_outside_the_root() {
 // intercept traffic that was never ours).
 //
 // Every spelling here was verified against the real object manager with a
-// direct `NtCreateFile` call (see this task's report): all of them return
+// direct `NtCreateFile` call: all of them return
 // `STATUS_SUCCESS` for a real file, i.e. each one genuinely reaches the
 // file and is therefore a genuine bypass when misclassified.
 const NT_SPELLING_VECTORS: &[(&str, &str)] = &[
@@ -717,7 +713,7 @@ const NT_SPELLING_VECTORS: &[(&str, &str)] = &[
         r"\GLOBAL??\GLOBALROOT\Device\HarddiskVolume3{REST}",
     ),
     // Volume GUID, in the `\??\`-keyed spelling a real open presents, and
-    // behind the wrapper that used to hide it from `VolumeMap::resolve`.
+    // behind a wrapper that must not hide it from `VolumeMap::resolve`.
     (
         "volume-guid",
         r"\??\Volume{12345678-1234-1234-1234-123456789abc}{REST}",

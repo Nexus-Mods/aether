@@ -1,6 +1,6 @@
 {
   "name": "escape-paths",
-  "description": "A path that leaves its root (`..` above the root) is an error (wire.md 3.2: \"must treat a path that would leave its root ... as an error\"; 3.5: ST_BAD_REQUEST \"a path escaped its root (recommended; see 3.5.1)\"). Where 3.5.1's table shows the directors differing (GETATTR found=0, ST_NOT_FOUND for READDIR, DELETE, MKDIR, STORED_NAMES) the answers it lists are accepted; OPEN, RENAME and RENAME_X are ST_BAD_REQUEST in both. STAGE_EXEC is not-supported when the director stages nothing (3.5.1: checked first), else bad-request or not-found. Every root is writable as a whole, so a read-only answer cannot stand in for the escape error. A mounted path is not reachable through it.",
+  "description": "A path that leaves its root (`..` above the root) is an error (wire.md 3.2: \"must treat a path that would leave its root ... as an error\"; 3.5: ST_BAD_REQUEST \"a path escaped its root (recommended; see 3.5.1)\"). Where 3.5.1's table lets directors differ (GETATTR found=0, ST_NOT_FOUND for READDIR, DELETE, MKDIR, STORED_NAMES) the answers it lists are accepted; OPEN, RENAME and RENAME_X are ST_BAD_REQUEST. STAGE_EXEC is not-supported when the director stages nothing (3.5.1: checked first), else bad-request or not-found. Every root is writable as a whole, so a read-only answer cannot stand in for the escape error. A mounted path is not reachable through it.",
   "tree": {
     "roots": [
       {"id": 0,

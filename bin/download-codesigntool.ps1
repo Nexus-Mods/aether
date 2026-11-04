@@ -7,7 +7,7 @@
 # -Sandbox points the tool at SSL.com's sandbox (cs-try.ssl.com), for testing
 # with sandbox credentials.
 #
-# Copyright (C) 2026 the Cairn authors. Adapted from Vortex's
+# Copyright (C) 2026 the Aether authors. Adapted from Vortex's
 # download-codesigntool.ps1 (https://github.com/Nexus-Mods/Vortex),
 # Copyright (C) the Vortex authors (Nexus Mods), GPL-3.0; see NOTICE.
 #

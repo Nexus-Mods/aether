@@ -1,9 +1,8 @@
 //! The registry query hooks: `NtQueryKey`, `NtEnumerateKey`, `NtQueryValueKey`,
-//! `NtEnumerateValueKey` and `NtQueryMultipleValueKey` on keys the overlay touches (registry
-//! overlay spec sections 3.2, 3.3, 3.5 and 6).
+//! `NtEnumerateValueKey` and `NtQueryMultipleValueKey` on keys the overlay touches.
 //!
 //! **Which handles are merged.** Decided on every call, never remembered on the handle, because
-//! a write through a pass-through handle makes its path virtual (Task 11):
+//! a write through a pass-through handle makes its path virtual:
 //! - a synthetic handle: always merged (its private real handle, if any, plus the overlay node);
 //! - a pass-through handle, including a real key handle opened before the hooks (resolved and
 //!   recorded on first sight by `regkeys::resolve_for_read`): straight to the real call while `regclient::lookup` says the overlay has
@@ -539,7 +538,7 @@ enum ValEntry {
     Real(u32),
 }
 
-/// The merged subkey list (spec 3.3), in `aether_registry::merge`'s order: the real subkeys in
+/// The merged subkey list, in `aether_registry::merge`'s order: the real subkeys in
 /// their order minus tombstoned names, then the overlay's own subkeys sorted. A created-here
 /// node hides the real ones.
 fn sub_entries(real: Option<&[String]>, node: Option<&Node>) -> Vec<SubEntry> {
@@ -575,7 +574,7 @@ fn sub_entries(real: Option<&[String]>, node: Option<&Node>) -> Vec<SubEntry> {
     out
 }
 
-/// The merged value list (spec 3.3): the overlay's values, then the real values not shadowed
+/// The merged value list: the overlay's values, then the real values not shadowed
 /// or tombstoned. A created-here node hides the real ones.
 fn val_entries(real: Option<&[String]>, node: Option<&Node>) -> Vec<ValEntry> {
     let Some(n) = node else {

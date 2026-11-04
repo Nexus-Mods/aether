@@ -35,7 +35,7 @@ pub(crate) fn note_name_lookup() {
 
 /// Registry overlay reads the director did not answer (unreachable, no registry attached, a
 /// reply too large for the ring, a refused request): each one left the caller to serve the
-/// real key alone (spec section 6). Counted whether or not stats are on, so a test can see it.
+/// real key alone. Counted whether or not stats are on, so a test can see it.
 pub(super) static REG_READ_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
 /// A registry overlay read failed; the caller falls back to the real registry.
@@ -94,7 +94,7 @@ pub fn reg_overlay_disabled_by() -> Option<&'static str> {
 
 /// Registry overlay writes refused because the director could not be asked (a lookup the write
 /// needed failed, or the write request itself did not reach it): each one returned
-/// `STATUS_UNSUCCESSFUL` and wrote nothing, real registry included (spec section 6). Kept apart
+/// `STATUS_UNSUCCESSFUL` and wrote nothing, real registry included. Kept apart
 /// from [`REG_READ_FALLBACKS`], which are reads served from the real registry. Counted whether or
 /// not stats are on.
 pub(super) static REG_WRITE_REFUSED: AtomicU64 = AtomicU64::new(0);
@@ -135,7 +135,7 @@ pub fn reg_notify_count(e: RegNotify) -> u64 {
 }
 
 /// Live registry key handles the shim tracks, and the most there have been at once: synthetic
-/// (virtual) and pass-through (spec section 6). Updated by `regkeys` whenever a table changes,
+/// (virtual) and pass-through. Updated by `regkeys` whenever a table changes,
 /// so the report reads atomics rather than the tables' locks.
 pub(super) static REG_HANDLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 

@@ -243,7 +243,7 @@ pub fn path_id(final_dos: &str) -> u64 {
 mod tests {
     use super::*;
 
-    const ROOT: &str = r"C:\Haskill\tpf\game";
+    const ROOT: &str = r"C:\Library\tpf\game";
 
     /// A tree stored as `Data/Interface/CommunityShaders/Fonts/Jost/Jost-Regular.ttf`.
     fn list(dir: &str) -> Option<Vec<String>> {
@@ -270,7 +270,7 @@ mod tests {
         final_dos_path_by_listing(opened, &under(rel), &[ROOT], list)
     }
 
-    const FONTS: &str = r"C:\Haskill\tpf\game\Data\Interface\CommunityShaders\Fonts";
+    const FONTS: &str = r"C:\Library\tpf\game\Data\Interface\CommunityShaders\Fonts";
 
     /// The case the whole module exists for: a directory and a file under it,
     /// each named from its own handle, and the directory's name is a prefix
@@ -278,11 +278,11 @@ mod tests {
     #[test]
     fn a_directory_is_a_prefix_of_a_file_under_it() {
         let dir = name(
-            r"\??\C:\Haskill\tpf\game\Data\Interface\CommunityShaders\Fonts",
+            r"\??\C:\Library\tpf\game\Data\Interface\CommunityShaders\Fonts",
             "Data/Interface/CommunityShaders/Fonts",
         );
         let file = name(
-            r"\??\C:\Haskill\tpf\game\Data\Interface\CommunityShaders\Fonts\Jost\Jost-Regular.ttf",
+            r"\??\C:\Library\tpf\game\Data\Interface\CommunityShaders\Fonts\Jost\Jost-Regular.ttf",
             "Data/Interface/CommunityShaders/Fonts/Jost/Jost-Regular.ttf",
         );
         assert_eq!(dir, FONTS);
@@ -295,9 +295,9 @@ mod tests {
     #[test]
     fn the_spelling_is_the_stored_one_whatever_case_was_asked_for() {
         for opened in [
-            r"\??\c:\haskill\TPF\GAME\data\INTERFACE\communityshaders\FONTS",
-            r"C:/Haskill/tpf/game/Data/Interface/CommunityShaders/Fonts/",
-            r"\\?\C:\HASKILL\TPF\GAME\DATA\INTERFACE\COMMUNITYSHADERS\FONTS",
+            r"\??\c:\library\TPF\GAME\data\INTERFACE\communityshaders\FONTS",
+            r"C:/Library/tpf/game/Data/Interface/CommunityShaders/Fonts/",
+            r"\\?\C:\LIBRARY\TPF\GAME\DATA\INTERFACE\COMMUNITYSHADERS\FONTS",
         ] {
             assert_eq!(
                 name(opened, "data/interface/communityshaders/fonts"),
@@ -309,11 +309,11 @@ mod tests {
 
     #[test]
     fn the_root_itself_is_named_without_a_trailing_separator() {
-        assert_eq!(name(r"\??\C:\Haskill\tpf\game", ""), ROOT);
-        assert_eq!(name(r"\??\c:\HASKILL\tpf\game\", ""), ROOT);
+        assert_eq!(name(r"\??\C:\Library\tpf\game", ""), ROOT);
+        assert_eq!(name(r"\??\c:\LIBRARY\tpf\game\", ""), ROOT);
         // And a file directly under it is that name plus one component.
         assert_eq!(
-            name(r"\??\C:\haskill\tpf\game\skyrimse.EXE", "skyrimse.exe"),
+            name(r"\??\C:\library\tpf\game\skyrimse.EXE", "skyrimse.exe"),
             format!(r"{ROOT}\SkyrimSE.exe")
         );
     }
@@ -340,21 +340,21 @@ mod tests {
     fn a_component_no_listing_has_keeps_the_callers_spelling() {
         assert_eq!(
             name(
-                r"\??\C:\Haskill\tpf\game\DATA\New File.TXT",
+                r"\??\C:\Library\tpf\game\DATA\New File.TXT",
                 "data/new file.txt"
             ),
             format!(r"{ROOT}\Data\New File.TXT")
         );
         assert_eq!(
             name(
-                r"\??\C:\Haskill\tpf\game\data\skyrim.esm:Zone.Identifier",
+                r"\??\C:\Library\tpf\game\data\skyrim.esm:Zone.Identifier",
                 "data/skyrim.esm:zone.identifier"
             ),
             format!(r"{ROOT}\Data\skyrim.esm:Zone.Identifier")
         );
         assert_eq!(
             name(
-                r"\??\C:\Haskill\tpf\game\Data\Gone\Deeper\x.BIN",
+                r"\??\C:\Library\tpf\game\Data\Gone\Deeper\x.BIN",
                 "data/gone/deeper/x.bin"
             ),
             format!(r"{ROOT}\Data\Gone\Deeper\x.BIN")
@@ -377,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             final_dos_path_by_listing(
-                r"\??\c:\haskill\tpf\game\DATA",
+                r"\??\c:\library\tpf\game\DATA",
                 &under("data"),
                 &roots,
                 list
@@ -394,7 +394,7 @@ mod tests {
     fn an_unrecognised_spelling_of_the_root_is_named_as_the_declared_root() {
         assert_eq!(
             name(
-                r"\Device\HarddiskVolume3\Haskill\tpf\game\DATA\NEW.txt",
+                r"\Device\HarddiskVolume3\Library\tpf\game\DATA\NEW.txt",
                 "data/new.txt"
             ),
             format!(r"{ROOT}\Data\NEW.txt")
@@ -402,7 +402,7 @@ mod tests {
         // And when the caller's path does not even end in the components
         // under the root, those are the folded ones — never a guess.
         assert_eq!(
-            name(r"\??\C:\HASKIL~1\tpf\game\DATA~1", "data/unlisted"),
+            name(r"\??\C:\LIBRAR~1\tpf\game\DATA~1", "data/unlisted"),
             format!(r"{ROOT}\Data\unlisted")
         );
     }
@@ -413,7 +413,7 @@ mod tests {
     fn stored_spellings_are_taken_by_component_and_gaps_keep_the_callers() {
         let stored = ["Data", "Interface"];
         let named = final_dos_path(
-            r"\??\c:\haskill\tpf\game\DATA\interface\New.SWF",
+            r"\??\c:\library\tpf\game\DATA\interface\New.SWF",
             &under("data/interface/new.swf"),
             &[ROOT],
             |i| stored.get(i).map(|s| s.to_string()),
@@ -425,7 +425,7 @@ mod tests {
     fn the_callers_spelling_of_what_is_under_the_root_is_the_tail_of_its_path() {
         let u = under("data/skse/new log.txt");
         assert_eq!(
-            opened_tail(r"\??\C:\Haskill\tpf\game\Data\SKSE\New Log.TXT", &u),
+            opened_tail(r"\??\C:\Library\tpf\game\Data\SKSE\New Log.TXT", &u),
             Some(vec!["Data", "SKSE", "New Log.TXT"])
         );
         // The root spelled as a device path: the tail is still there.
@@ -436,11 +436,11 @@ mod tests {
         // A short name under the root is not the caller spelling these
         // components at all.
         assert_eq!(
-            opened_tail(r"C:\Haskill\tpf\game\DATA~1\SKSE\NEWLOG~1.TXT", &u),
+            opened_tail(r"C:\Library\tpf\game\DATA~1\SKSE\NEWLOG~1.TXT", &u),
             None
         );
         assert_eq!(opened_tail(r"C:\x", &u), None);
-        assert_eq!(opened_tail(r"C:\Haskill\tpf\game", &[]), Some(vec![]));
+        assert_eq!(opened_tail(r"C:\Library\tpf\game", &[]), Some(vec![]));
     }
 
     fn names(list: &[&str]) -> Vec<String> {
@@ -514,7 +514,7 @@ mod tests {
     fn the_volume_relative_name_drops_only_the_drive() {
         assert_eq!(
             volume_relative(FONTS),
-            r"\Haskill\tpf\game\Data\Interface\CommunityShaders\Fonts"
+            r"\Library\tpf\game\Data\Interface\CommunityShaders\Fonts"
         );
         assert_eq!(volume_relative(r"C:\"), r"\");
         assert_eq!(volume_relative(r"\already\relative"), r"\already\relative");

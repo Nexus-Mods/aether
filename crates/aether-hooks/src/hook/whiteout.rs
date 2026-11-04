@@ -9,28 +9,23 @@ use aether_redirect::is_whiteout;
 /// Remove the shim's whiteout markers from a directory listing, and with each one
 /// the name it hides.
 ///
-/// The shim spelled a whiteout `<name>.__vfs_wh__` ([`aether_redirect::WHITEOUT_SUFFIX`]);
-/// a director's overlay spells it `.wh.<name>`. Since gate 4 Task 6
-/// those two conventions shared one physical directory — a host mounts
-/// `overlay_layer_dir` as the director's write layer, which is the directory the
-/// shim-local overlay wrote into — and the director has no reason to hide a
-/// spelling it does not use. So `client.readdir` hands the markers back as
-/// ordinary zero-byte files, and before this function the listing branch passed
-/// them straight to the game: a phantom `<file>.__vfs_wh__` entry *and* the file
-/// it was supposed to hide, still listed. Both halves, from one marker.
+/// A shim spells a whiteout `<name>.__vfs_wh__` ([`aether_redirect::WHITEOUT_SUFFIX`]);
+/// a director's overlay spells it `.wh.<name>`. A write layer may hold shim-spelled markers,
+/// and the director has no reason to hide a spelling it does not use, so `client.readdir`
+/// hands them back as ordinary zero-byte files. Passed straight to the game, a marker would be
+/// a phantom `<file>.__vfs_wh__` entry *and* would leave the file it hides still listed. Both
+/// halves, from one marker.
 ///
-/// The shim no longer writes markers (task C8 removed its overlay), but existing
-/// write layers on users' disks still hold the ones older shims wrote, so the
-/// listing keeps honouring them.
+/// The shim writes no markers itself, but a write layer may hold them, so
+/// the listing honours them.
 ///
 /// ## Why the shim never spelled whiteouts `.wh.<name>`
 ///
-/// The old Rust director's overlay answered `is_whiteout` from a **cached
-/// per-directory index**, licensed by its own doc comment: *"this provider is the
-/// only writer of `.wh.` markers in its own upper … A process outside this
-/// provider mutating the upper's markers underneath us is already outside the
-/// contract."* A second writer of `.wh.` into that upper would have left a
-/// listing and an open disagreeing about whether a file exists.
+/// A director's overlay may answer whether a name is whited out from a
+/// **cached per-directory index**, on the grounds that it is the only writer
+/// of `.wh.` markers in its own upper. A second writer of `.wh.` into that
+/// upper would leave a listing and an open disagreeing about whether a file
+/// exists.
 ///
 /// ## Ordering constraint at the call site
 ///

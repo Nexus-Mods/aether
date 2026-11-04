@@ -1,13 +1,8 @@
 //! A write the provider graph *failed* (not refused) fails closed, even with disk fall-through
 //! switched on, and the shim's own counters say where it went.
 //!
-//! This was `an_overlay_directory_that_cannot_be_created_names_itself_in_the_stats_report`
-//! (gate 4, Task 6): with `VFS_ALLOW_DISK_FALLTHROUGH=1` an under-root write reached the
-//! shim-local overlay, whose `ensure_parent` could fail silently, and the test made two claims
-//! about that failure — it must not become a write somewhere the VFS cannot account for, and the
-//! session's own instrumentation must show it. Task C8 removed the shim-local overlay, so there
-//! is no shim-side mutation left to fail. The same two claims are made about the failure that is
-//! left, a director error on the write open itself:
+//! Two claims about a director error on the write open itself: it must not become a write
+//! somewhere the VFS cannot account for, and the session's own instrumentation must show it:
 //!
 //! - **Fails closed.** `VFS_ALLOW_DISK_FALLTHROUGH` relaxes "the director does not have this"
 //!   (`Status::NotFound`), never "the director failed" (`hook/file_open.rs::try_fuse_create`). A

@@ -391,8 +391,7 @@ fn rename_x_moves_a_file_between_roots_and_refuses_a_directory() {
     assert_eq!(d.stored_names(r1, 0, "new.sav"), Ok("New.sav"));
 }
 
-/// RENAME_X refuses as RENAME does (3.5.1 has Cairn answer it "as
-/// RENAME"): a source or target outside every writable prefix is
+/// RENAME_X refuses as RENAME does (3.5.1): a source or target outside every writable prefix is
 /// Status::ReadOnly, and nothing moves.
 #[test]
 fn rename_x_outside_a_writable_prefix_is_read_only() {
@@ -425,7 +424,7 @@ fn shorter_than_claimed_past_the_end_reads_the_whole_file() {
     assert!(d.get_attr(R0, "f").unwrap().found);
 }
 
-/// wire.md 3.4.8 (as Cairn's writable layer): an empty directory is
+/// wire.md 3.4.8: an empty directory is
 /// deleted; one with anything under it is Status::IoError; the root is
 /// Status::BadRequest; outside every writable prefix Status::ReadOnly.
 #[test]
@@ -450,7 +449,7 @@ fn delete_removes_an_empty_directory_and_refuses_a_full_one() {
     assert!(ro.get_attr(R0, "sealed").unwrap().is_dir);
 }
 
-/// wire.md 3.4.7 (as Cairn's writable layer): a directory moves with
+/// wire.md 3.4.7: a directory moves with
 /// everything under it, its target spelled as sent; a target inside the
 /// source, or the root at either end, is Status::BadRequest; a non-empty
 /// directory at the target is Status::IoError; an empty one or a file is

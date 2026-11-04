@@ -41,8 +41,7 @@
 //!   never silently skipped.
 //!
 //! **`VFS_ESCAPE_ACCESS`** selects which access the whole matrix exercises:
-//! `read` (the default, and byte-for-byte the behaviour this fixture had
-//! before write mode existed) or `write`. Every vector builds the *same*
+//! `read` (the default) or `write`. Every vector builds the *same*
 //! spelling either way — only the call made against it changes, which is what
 //! keeps the two matrices comparable line for line.
 //!
@@ -60,41 +59,37 @@
 //! (child process) writes to a sibling name (`<target><V14_WRITE_SUFFIX>`)
 //! instead of to the target itself.
 //!
-//! That vector has always been described as reaching real disk by
-//! construction, on the grounds that the child runs unhooked. **It does not**
-//! — the shim detours `CreateProcessInternalW` and injects into children, so
-//! under a session the child's write is answered by the director like any
-//! other (measured in gate 4 task 8; see `rust/docs/escape-matrix.md`). The
-//! sibling is used anyway, so that this vector can never overwrite the very
-//! bytes the caller's real-filesystem assertions read, whatever the child does.
-//! (Child injection fails closed: a child that cannot be injected is killed and
-//! never runs unhooked.) Aimed at a sibling it shows exactly what it always
-//! showed and costs the caller nothing.
+//! The child does not run unhooked: the shim detours `CreateProcessInternalW`
+//! and injects into children, so under a session the child's write is
+//! answered by the director like any other (`docs/escape-matrix.md`), and a
+//! child that cannot be injected is killed and never runs. The sibling is used
+//! so that this vector can never overwrite the very bytes the caller's
+//! real-filesystem assertions read, whatever the child does.
 //!
 //! `<vector-id>` is `1`..`14` matching the design doc's table, with three
 //! expansions:
 //!
 //! - Vector 3 additionally emits `3b`, `3c` and `3d`: the object-manager
 //!   spellings that reach the target through its **drive letter** rather than
-//!   through a device name. Vector 3 itself only ever built the colon-free
-//!   `GLOBALROOT\Device\HarddiskVolumeN\...` form, and that gap was load
-//!   bearing — the colon-bearing spellings were misclassified as outside every
-//!   managed root (their drive colon was taken for an alternate-data-stream
-//!   separator and the path cut there) while the OS resolved them to the real
-//!   file behind the mount. See those three functions' own comments.
+//!   through a device name. Vector 3 itself builds the colon-free
+//!   `GLOBALROOT\Device\HarddiskVolumeN\...` form, which cannot exercise a
+//!   canonicaliser that takes a drive colon for an alternate-data-stream
+//!   separator and cuts the path there, while the OS resolves such a spelling
+//!   to the real file behind the mount. See those three functions' own
+//!   comments.
 //!
 //! - Vector 5 (handle-relative open) additionally emits `5b`: the same
 //!   mechanism against a root handle (an anonymous pipe) that
-//!   `GetFinalPathNameByHandleW` cannot resolve — the documented case where
-//!   the fix falls back to the pre-existing passthrough. `5b` is a caveat
+//!   `GetFinalPathNameByHandleW` cannot resolve, the documented case where no
+//!   path can be decoded. `5b` is a caveat
 //!   report, not a second pass of vector 5, and must not be read as one.
 //!   Guarded independently of vector 5, so a panic constructing 5 can never
 //!   suppress the logically unrelated attempt at 5b.
 //! - Vectors 10 and 12 each split into their sub-cases — `10a`/`10b`/`10c`
 //!   (case fold, trailing dot, trailing space) and `12a`/`12b`/`12c` (a `.`
 //!   component, a `..` traversal, a doubled separator) — because each
-//!   sub-case became independently meaningful once given a `\\?\` prefix
-//!   (see below), and a combined line that passes says less than three that
+//!   sub-case is independently meaningful with a `\\?\` prefix (see
+//!   below), and a combined line that passes says less than three that
 //!   do.
 //!
 //! **Why 10/10b/10c and 12a/12b/12c are built with a `\\?\` prefix.** Without
@@ -109,7 +104,7 @@
 //! flips the correct standalone expectation: outside a session, nothing
 //! collapses `Data.` or `..` for the OS either, so the literal (nonexistent)
 //! component fails to resolve and `not-found` is the *correct* result, not a
-//! failure. Under a session (Task 6), the shim receives the same raw
+//! failure. Under a session, the shim receives the same raw
 //! spelling and its canonicaliser is what is supposed to collapse it back to
 //! the real file — so `opened` there is evidence the canonicaliser works,
 //! and `not-found` there would be evidence it does not. Each of these lines'
@@ -119,9 +114,8 @@
 //! itself resolves case-insensitively regardless of `\\?\`, so `opened`
 //! standalone is the correct result there too, prefix or not.
 //!
-//! Vectors 13 and 14 are reported, not closed, in this gate — their `<note>`
-//! field says so explicitly rather than leaving a reader to infer it from
-//! silence.
+//! Vectors 13 and 14 are reported, not asserted: their `<note>` field says so
+//! explicitly rather than leaving a reader to infer it from silence.
 //!
 //! Every vector's construction and attempt is wrapped in `catch_unwind`: a
 //! bug or an unexpected OS response on one vector must never stop the run
@@ -129,31 +123,20 @@
 //! through tells you nothing about the vectors after it.
 //!
 //! **Vector `4m`: metadata-only variant of vector 4, opt-in only, not part of
-//! the fourteen-vector matrix above.** Built to prove/document a gap the
-//! final whole-branch review of Gate 3 found in `docs/escape-matrix.md`'s own
-//! claim of metadata containment: `qattr_hook`/`qfull_hook`/`qibn_hook`
-//! (`aether-hooks/src/hook/file_attr.rs`) never call `RootMap::decide` at all. They consult
-//! `fuse_path_attr`, which asks `FuseClient::vpath_under_root` — which was
-//! the client's own string-prefix predicate, not the canonicaliser this whole
-//! matrix is about — before falling through to the real filesystem. `4m`
-//! reuses vector 4's own spelling (a volume-GUID path) but calls
-//! `GetFileAttributesW` instead of `CreateFileW`, so it exercises that hook
-//! family directly rather than the open path vectors 1-14 already cover.
-//!
-//! **That gap closed in stage 2b task 5**: `FuseClient::vpath_under_root` is
-//! now a `RootMap` — the same canonicaliser — so `4m` is expected to report
-//! `not-found`, not `found`, under a session whose providers do not serve the
-//! target. The vector is kept (and still opt-in) as the standing evidence
-//! that the hook family stays sealed; it is not obsolete just because it now
-//! passes for the good reason.
+//! the fourteen-vector matrix above.** It checks metadata containment:
+//! `qattr_hook`/`qfull_hook`/`qibn_hook` (`aether-hooks/src/hook/file_attr.rs`)
+//! do not go through the open path. They consult `fuse_path_attr`, which asks
+//! `FuseClient::vpath_under_root`, a `RootMap` (the same canonicaliser this
+//! matrix is about). `4m` reuses vector 4's own spelling (a volume-GUID path)
+//! but calls `GetFileAttributesW` instead of `CreateFileW`, so it exercises
+//! that hook family directly rather than the open path vectors 1-14 cover. It
+//! is expected to report `not-found`, not `found`, under a session whose
+//! providers do not serve the target.
 //!
 //! Never runs as part of the default (`VFS_ESCAPE_ONLY_VECTOR` unset) matrix
 //! — it is dispatched only when that variable is set to exactly `"4m"`, so it
 //! cannot change any existing matrix run's line count or output. See
-//! `vector4_metadata_query`'s own doc comment and
-//! `test/aether/director/e2e/containment_test.clj`'s
-//! `metadata_queries_are_sealed_for_canonicaliser_only_spellings` port for the
-//! test that uses it.
+//! `vector4_metadata_query`'s own doc comment.
 //!
 //! **Vector `enum`: directory enumeration, opt-in only, not part of the
 //! fourteen-vector matrix either.** Every other vector in this file asks
@@ -163,10 +146,8 @@
 //! on an already-opened handle, through `NtQueryDirectoryFile(Ex)`, and its
 //! own under-root predicate is the FUSE client's rather than
 //! `RootMap::decide` — so the containment of one is not the containment of
-//! the other. `rust/docs/escape-matrix.md` asserted for two gates that it
-//! was, by argument rather than by test; gate 4 task 8b found a live
-//! real-disk drain sitting behind that argument. This vector is the
-//! measurement that replaced it.
+//! the other, and this vector measures enumeration's own containment
+//! (`docs/escape-matrix.md`, "Enumeration").
 //!
 //! It lists the target's parent with `std::fs::read_dir`
 //! (`FindFirstFileW`/`FindNextFileW` on Windows) and reports
@@ -178,9 +159,7 @@
 //! the second would pass on a listing that came back empty because
 //! everything broke.
 //!
-//! Dispatched only when `VFS_ESCAPE_ONLY_VECTOR` is exactly `"enum"`. See
-//! `test/aether/director/e2e/containment_test.clj`'s port of
-//! `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`.
+//! Dispatched only when `VFS_ESCAPE_ONLY_VECTOR` is exactly `"enum"`.
 //!
 //! **`VFS_ESCAPE_ONLY_VECTOR`**: when set to one of the vector ids above,
 //! every *other* vector is skipped entirely — not merely omitted from the
@@ -190,10 +169,8 @@
 //! classification counters (which are not keyed by vector) cannot otherwise
 //! tell "this vector's own attempt was classified" apart from "some *other*
 //! vector sharing the same target filename was classified, and this one
-//! quietly was not" — precisely the ambiguity that let an earlier version
-//! of a fixture in this project report two vectors closed when they had
-//! silently probed nothing. Unset, every vector runs, exactly as before
-//! this existed.
+//! quietly was not", an ambiguity that can report two vectors closed when
+//! they silently probed nothing. Unset, every vector runs.
 mod ffi;
 
 use std::io::Write;
@@ -701,8 +678,8 @@ fn vector3b_globalroot_global_dosdevices(abs: &str) -> Line {
         "object-manager spelling reaching the drive letter through \\GLOBAL?? behind GLOBALROOT; \
          `opened` is the correct standalone result (this is a working object name, verified with \
          a direct NtCreateFile call), and under a session it must be answered by the director -- \
-         this is the spelling whose drive colon the canonicaliser used to mistake for a stream \
-         separator, truncating the path to a stub that matched no root",
+         a canonicaliser that took its drive colon for a stream separator would truncate the \
+         path to a stub that matched no root",
     )
 }
 
@@ -714,8 +691,7 @@ fn vector3c_globalroot_dosdevices(abs: &str) -> Line {
         abs,
         r"GLOBALROOT\??",
         "as 3b, but through the per-session DosDevices directory (\\??) rather than the global \
-         one; a separate object directory reached by the same route, and separately uncovered \
-         before this vector existed",
+         one; a separate object directory reached by the same route",
     )
 }
 
@@ -793,11 +769,9 @@ fn vector4_metadata_query(abs: &str) -> Line {
                 outcome,
                 "metadata-only variant of vector 4 (GetFileAttributesW, not CreateFileW): proves \
                  whether a name-based attribute query on this spelling reaches real disk, \
-                 independent of Gate 3 Task 6's open-path (RootMap::decide) fix. qattr_hook/ \
-                 qfull_hook/qibn_hook still do not go through RootMap::decide — they consult \
-                 fuse_client::vpath_under_root — but since stage 2b task 5 that predicate IS a \
-                 RootMap, so this spelling is recognised and routed rather than falling to disk. \
-                 Expect not-found under a session whose providers do not serve the target",
+                 apart from the open path. qattr_hook/qfull_hook/qibn_hook consult \
+                 fuse_client::vpath_under_root, a RootMap, so this spelling is recognised and \
+                 routed rather than falling to disk. Expect not-found under a session whose providers do not serve the target",
             )
         }
     }
@@ -809,7 +783,7 @@ fn vector4_metadata_query(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 
 /// Separates the entry names packed into this vector's `<note>` field.
-/// Mirrored by `test/aether/director/e2e/containment_test.clj`, which splits on it.
+/// A test that reads this vector's line splits on it.
 /// A Windows filename cannot contain `|`, so no name can forge a boundary.
 const ENUM_NAME_SEP: char = '|';
 
@@ -886,8 +860,8 @@ fn vector5_handle_relative(abs: &str) -> Line {
 }
 
 // ---------------------------------------------------------------------
-// Vector 5b: the caveat, not a second pass of vector 5. The fix in Task 4
-// asks the OS what a RootDirectory handle it never saw actually points at
+// Vector 5b: the caveat, not a second pass of vector 5. The shim asks the OS
+// what a RootDirectory handle it never saw actually points at
 // via GetFinalPathNameByHandleW; an anonymous pipe handle is a real, valid
 // handle that call cannot resolve to a path. Independently buildable (needs
 // only the target's filename, not vector 5's directory handle), so it is
@@ -920,8 +894,8 @@ fn vector5b_unresolvable_handle(abs: &str) -> Line {
         outcome,
         "caveat, not a pass: a handle-relative open only classifies correctly when \
          GetFinalPathNameByHandleW can resolve the root handle. A pipe cannot be resolved \
-         that way, so this line exercises the fallback edge Task 4 left open (falls back to \
-         the pre-existing passthrough), and must not be read as vector 5 succeeding twice.",
+         that way, so this line exercises that edge (no path can be decoded), and must not be \
+         read as vector 5 succeeding twice.",
     )
 }
 
@@ -1315,7 +1289,7 @@ fn vector12c_doubled_separator(abs: &str) -> Line {
 
 // ---------------------------------------------------------------------
 // Vector 13: a handle opened before the root registered. Reported, not
-// closed, in this gate (gate 3's job). This standalone run has no
+// asserted. This standalone run has no
 // session/root at all, so it cannot construct the actual timing — it only
 // shows the ordinary reachability the real scenario builds on.
 // ---------------------------------------------------------------------
@@ -1325,35 +1299,31 @@ fn vector13_preexisting_handle(abs: &str) -> Line {
         "13",
         abs,
         outcome,
-        "reported, not closed in this gate: a handle opened before the managed root was \
-         registered bypasses canonicalisation entirely, because no further open call occurs for \
-         the shim to intercept. Closing that is gate 3's job. This standalone run has no \
-         session/root to open the handle 'before', so this line only shows ordinary \
-         reachability -- the substrate the real scenario builds on, not a reproduction of the \
-         timing itself; that needs Task 6's session-based harness.",
+        "reported, not asserted: a handle opened before the managed root was registered \
+         bypasses canonicalisation entirely, because no further open call occurs for the shim \
+         to intercept. This run cannot open the handle 'before' the root, so this line only \
+         shows ordinary reachability -- the substrate the real scenario builds on, not a \
+         reproduction of the timing itself.",
     )
 }
 
 // ---------------------------------------------------------------------
-// Vector 14: a child process, spawned on the assumption that it runs without
-// the shim. It does not — the shim detours CreateProcessInternalW and injects
-// into children, so the child is hooked and the director answers it (measured
-// in gate 4 task 8; see rust/docs/escape-matrix.md). Still reported, not
-// closed: the child's injection fails closed (see the shim's
-// `child_inject_fails_closed` test), but this fixture does not assert it.
+// Vector 14: a child process. The shim detours CreateProcessInternalW and
+// injects into children, so the child is hooked and the director answers it
+// (docs/escape-matrix.md). Reported, not asserted: the child's injection fails
+// closed (see the shim's `child_inject_fails_closed` test), but this fixture
+// does not assert it.
 // ---------------------------------------------------------------------
 fn vector14_child_without_shim(abs: &str) -> Line {
     match access() {
         Access::Read => {
-            let note = "reported, not closed in this gate: this vector spawns a child process, \
-                        on the assumption that it runs without the shim. MEASURED OTHERWISE in \
-                        gate 4 task 8: the shim hooks CreateProcessInternalW and injects its own \
-                        DLL into children, so under a session this child IS injected and its \
-                        read is answered by the director like any other -- under the negative \
-                        canary it reports error:cmd-exit:1, i.e. the real bytes were NOT \
-                        reachable. Still not asserted here: child injection now fails closed (a \
-                        child that cannot be injected is killed), and the \
-                        escape matrix records that. See rust/docs/escape-matrix.md, 'Gate 4, Task 8'.";
+            let note = "reported, not asserted: this vector spawns a child process. The shim \
+                        hooks CreateProcessInternalW and injects its own DLL into children, so \
+                        under a session this child is injected and its read is answered by the \
+                        director like any other -- under the negative canary it reports \
+                        error:cmd-exit:1, i.e. the real bytes were not reachable. Child injection \
+                        fails closed (a child that cannot be injected is killed); see \
+                        docs/escape-matrix.md.";
             let spelling = format!("cmd /C type {abs}");
             match std::process::Command::new("cmd")
                 .arg("/C")
@@ -1375,16 +1345,13 @@ fn vector14_child_without_shim(abs: &str) -> Line {
             }
         }
         // A **sibling** of the target, not the target — see the module doc's
-        // `VFS_ESCAPE_ACCESS` section. Not because this vector reaches real
-        // disk by construction (it does not: the shim injects into children,
-        // measured in gate 4 task 8), but so that it can never overwrite
-        // the very bytes the caller's containment assertions read.
+        // `VFS_ESCAPE_ACCESS` section: the child is injected like any other
+        // process, and the sibling means it can never overwrite the very
+        // bytes the caller's containment assertions read.
         Access::Write => {
-            let note = "reported, not closed in this gate: this vector spawns a child process, \
-                        on the assumption that it runs without the shim. MEASURED OTHERWISE in \
-                        gate 4 task 8: the shim hooks CreateProcessInternalW and injects into \
-                        children, so under a session this child's write is answered by the \
-                        director too -- `written` against the positive canary (the bytes land in \
+            let note = "reported, not asserted: this vector spawns a child process. The shim \
+                        hooks CreateProcessInternalW and injects into children, so under a \
+                        session this child's write is answered by the director too -- `written` against the positive canary (the bytes land in \
                         the provider store), error:cmd-exit:1 against the negative one. Not \
                         asserted here: child injection fails closed. Targets a SIBLING of \
                         the canary (<target>.v14-child-write.txt) rather than the canary itself, \

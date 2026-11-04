@@ -1,11 +1,8 @@
 //! Runs in its own process: a directory listing under a managed root is exactly what the
 //! director serves. Real, on-disk files beneath the root are never drained into it.
 //!
-//! This was `read_dir_without_a_director_is_denied_outright`, which installed the shim with no
-//! director and showed the root could not even be opened. Task C8 removed the no-director
-//! configuration (bootstrap never installs a detour without a director), and the claim that
-//! survives it is the one this file always existed for: a listing is only ever authoritative
-//! when a director backs it. So the real directory holds files the director does not serve,
+//! Bootstrap never installs a detour without a director, and a listing is only ever
+//! authoritative when a director backs it. So the real directory holds files the director does not serve,
 //! the director serves one the real directory does not hold, and the listing must be the
 //! director's alone (`hook/dirquery.rs::serve_dir_query`).
 use crate::fakedirector;

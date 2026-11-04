@@ -4,13 +4,12 @@ use super::*;
 
 /// One consistent instant across every counter this module tracks.
 ///
-/// Each `render_*` function used to read its own globals live, at the moment
-/// it happened to run inside `start_reporter`'s one `format!` call. Rendering
-/// does real work between those reads — formatting rows, cloning and sorting
-/// HashMaps — so hook calls landing during that work were picked up by later
-/// sections but not earlier ones, and the report could contradict itself:
-/// observed in practice, a run whose "routed" row read 11 while its trace
-/// section — rendered earlier in the same file — said "10" operations.
+/// If each `render_*` function read its own globals live, at the moment it
+/// happened to run inside `start_reporter`'s one `format!` call, hook calls
+/// landing during the rendering work (formatting rows, cloning and sorting
+/// HashMaps) would be picked up by later sections but not earlier ones, and
+/// the report could contradict itself: a "routed" row reading 11 while the
+/// trace section, rendered earlier in the same file, said "10" operations.
 /// Taking every raw value up front, before any formatting starts, shrinks the
 /// window in which that can happen from "however long rendering takes" down
 /// to "however long these loads take": a handful of atomic reads and small
@@ -234,14 +233,13 @@ pub(super) static START: OnceLock<Instant> = OnceLock::new();
 /// investigation lost time to exactly that ambiguity — a missing `NtReadFile`
 /// row that the director's own counters contradicted.
 ///
-/// An exit flush was the obvious fix and was **built, measured, and removed**.
-/// From `DLL_PROCESS_DETACH` — the only place a DLL can act on process exit —
-/// every other thread is already terminated, and one killed mid-`std::fs::write`
-/// leaves a lock (the CRT heap's, among others) that the flush then waits on
-/// forever, inside the loader lock. Measured 2026-08-15 on the daemon's
-/// e2e suite (since ported to the Clojure director's): with the flush, the suite wedged on 2 of 2 runs, each leaving an
-/// unreapable fixture process holding the shim DLL's image lock; without it,
-/// the same suite finished in 3 seconds. Reading counters with `try_lock` does
+/// There is **no exit flush**, and must not be. From `DLL_PROCESS_DETACH`
+/// (the only place a DLL can act on process exit) every other thread is
+/// already terminated, and one killed mid-`std::fs::write` leaves a lock (the
+/// CRT heap's, among others) that a flush would wait on forever, inside the
+/// loader lock. Measured: with a flush, an end-to-end suite wedged on 2 of 2
+/// runs, each leaving an unreapable fixture process holding the shim DLL's
+/// image lock; without it, the same suite finished in 3 seconds. Reading counters with `try_lock` does
 /// not save it, because rendering has to allocate.
 ///
 /// So the banner is the answer instead: a short-lived process that needs its

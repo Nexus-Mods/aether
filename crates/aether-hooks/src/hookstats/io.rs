@@ -217,8 +217,8 @@ pub(super) fn render_fills(snap: &Snapshot) -> String {
 /// case where the handle's path or vpath could not be resolved. The hook
 /// reports `STATUS_SUCCESS` for all of these without doing anything, which is
 /// deliberate for classes we genuinely don't need to act on — but "the set of
-/// classes this applies to is empty" was exactly the assumption that let a
-/// real delete/rename silently no-op before this counter existed. Counting by
+/// classes this applies to is empty" is the assumption that would let a real
+/// delete/rename silently no-op unnoticed. Counting by
 /// class number, not asserting the set is empty, is what keeps that
 /// assumption checkable.
 pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
@@ -402,15 +402,10 @@ pub(super) static READDIRS_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Which mechanism produced a directory listing.
 ///
-/// This used to be a `served: bool` — "a listing we produced" vs "one we
-/// handed to the OS" — and that is not the distinction containment turns on.
-/// Both of `serve_dir_query`'s under-root branches recorded `served: true`,
-/// including the one that drained the *real* directory behind the mount and
-/// merged the (since removed) shim-local overlay onto it, so the one counter that could have
-/// shown an under-root listing coming off real disk reported it identically
-/// to a director-authored one. Gate 4 task 8b split the two and deleted the
-/// draining branch; the three-way label is what makes a regression back to it
-/// visible in the report rather than only in the bytes.
+/// Three-way, not "a listing we produced" vs "one we handed to the OS": that
+/// is not the distinction containment turns on. An under-root listing that
+/// came from anywhere but the director must show up as such in the report,
+/// not only in the bytes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReadDirSource {
     /// The director's own `Opcode::ReadDir` answered. Authoritative and unmerged:
@@ -428,9 +423,8 @@ pub(crate) enum ReadDirSource {
 }
 
 impl ReadDirSource {
-    /// The token this renders as in the report. Parsed by
-    /// `aether.director.e2e.shim-report` (`test/aether/director/e2e/shim_report.clj`);
-    /// keep them in step.
+    /// The token this renders as in the report. A director's end-to-end
+    /// tests parse it; a change here is a change to the report's format.
     pub(crate) fn label(self) -> &'static str {
         match self {
             ReadDirSource::Director => "director",
@@ -458,17 +452,11 @@ pub(crate) fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, sour
     // through repeated `NtQueryDirectoryFile` calls on the same handle, so a
     // single `read_dir` of an N-entry directory reaches here N-ish times. The
     // untracked-handle branch in `serve_dir_query` records `count: 0` for
-    // every one of them, which makes those rows byte-identical — so one
-    // listing of a fat directory used to push hundreds of duplicates, hit
-    // `READDIRS_MAX`, and silently discard every *later* row.
-    //
-    // Not hypothetical: one enumeration of a developer `%TEMP%` holding ~12k
-    // entries filled all 300 rows, so the director-served listing that
-    // the Clojure e2e port of
-    // `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`
-    // asserts on was never recorded. The listing itself was correct; only the
-    // evidence was gone, and the test failed on its own vacuity guard — on
-    // that machine, while passing anywhere `%TEMP%` happened to be small.
+    // every one of them, which makes those rows byte-identical, so one
+    // listing of a fat directory would push hundreds of duplicates, hit
+    // `READDIRS_MAX`, and silently discard every *later* row: one
+    // enumeration of a `%TEMP%` holding ~12k entries fills all 300 rows, and
+    // a director-served listing after it is never recorded.
     //
     // Bounding the table by distinct directories rather than by call volume
     // removes that coupling. `READDIR_CALLS` keeps what the duplicates were
@@ -492,9 +480,8 @@ pub(super) fn render_readdirs(snap: &Snapshot) -> String {
     // duplicates — and `of N calls` is what those duplicates were worth.
     // `dropped` prints whenever it is nonzero, because the failure this
     // guards against was a table that had quietly stopped recording.
-    // `aether.director.e2e.shim-report` finds this section by the
-    // text up to `(` and then skips the header line, so extra fields are safe
-    // to add here.
+    // A reader finds this section by the text up to `(` and then skips the
+    // header line, so extra fields are safe to add here.
     let dropped = snap.readdirs_dropped;
     let mut s = format!(
         "\ndirectory enumerations ({} distinct of {} calls{}):\n",

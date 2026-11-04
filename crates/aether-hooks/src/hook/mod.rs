@@ -65,7 +65,7 @@ use self::whiteout::*;
 use std::sync::OnceLock;
 
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
-/// may open the host path (legacy / debug). Default **off** — game content must
+/// may open the host path (debug only). Default **off** — game content must
 /// come from the director (zip/overrides), never the Steam library tree.
 fn allow_disk_fallthrough() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();

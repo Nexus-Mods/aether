@@ -21,8 +21,8 @@ pub const MAX_DELETED_AT: usize = 16384;
 /// (Windows' own limit).
 pub const MAX_WRITE_DEPTH: usize = 512;
 /// Deepest key nesting a persisted overlay may rebuild with (`format::decode`, `insert_node`).
-/// Higher than [`MAX_WRITE_DEPTH`] because the old writer had no cap, so files with keys up to
-/// 1024 deep may exist and must keep loading; new writes are refused above 512.
+/// Higher than [`MAX_WRITE_DEPTH`] so a persisted layer with keys up to 1024 deep loads; writes
+/// are refused above 512.
 pub const MAX_DECODE_DEPTH: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -621,7 +621,7 @@ mod tests {
             o.set_value(&deep, "v", REG_SZ, b"a", 2),
             Err(RegError::TooDeep)
         );
-        // The rebuild path accepts what the old writer could have saved, up to the decode cap.
+        // The rebuild path accepts keys deeper than a write may create, up to the decode cap.
         assert!(o.insert_node(&deep, Node::default(), 2).is_ok());
         let too_deep = chain(MAX_DECODE_DEPTH + 1);
         assert_eq!(

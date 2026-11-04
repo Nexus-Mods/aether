@@ -65,10 +65,9 @@ pub fn resolve_volume_map(root: &str) -> VolumeMap {
 /// The drive/volume-GUID/admin-share half is global and resolved once; only
 /// the junction scan is per-root, so each declared root contributes its own
 /// aliases to one shared table. Scoping the scan to root 0 alone — which is
-/// what calling the single-root form would amount to — would leave escape
+/// what calling the single-root form would amount to, would leave escape
 /// vector 7 (a junction inside a managed root) closed for the game directory
-/// and wide open for every other root, which is exactly the
-/// first-root-only asymmetry stage 2b exists to remove.
+/// and wide open for every other root.
 pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
     let mut map = VolumeMap::empty();
     #[cfg(windows)]
@@ -102,9 +101,8 @@ pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
 /// map already resolves for a bare device prefix or a `GLOBALROOT`-wrapped
 /// one — see `canon::NAMESPACE_TOKENS`' doc comment for the sibling cases
 /// (`\GLOBAL??\UNC\localhost\C$\...` is a working spelling of this same
-/// share), and this project's own history of a volume-GUID key built
-/// with the wrong (`\\?\`) prefix spelling matching nothing and failing
-/// *closed*, which is the trap this key's `\??\` spelling avoids.
+/// share). A key built with the wrong (`\\?\`) prefix spelling would match
+/// nothing and fail *closed*, the trap this key's `\??\` spelling avoids.
 ///
 /// Scope, chosen deliberately: only the `localhost` hostname spelling is
 /// registered, one alias per drive `aether_win::drive_mappings` already
@@ -115,16 +113,15 @@ pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
 /// benefit over the one spelling escape-matrix vector 9 actually exercises.
 /// A documented gap, not an oversight — see `docs/escape-matrix.md`.
 ///
-/// **Two spellings in that gap were measured, not assumed, while closing the
-/// object-manager prefix spellings** (`canon::NAMESPACE_TOKENS`), and both
-/// return `STATUS_SUCCESS` from a direct `NtCreateFile` against a real file:
+/// **Two spellings in that gap are measured, not assumed** (beside
+/// `canon::NAMESPACE_TOKENS`'s prefix spellings), and both return `STATUS_SUCCESS` from a direct `NtCreateFile` against a real file:
 /// `\??\UNC\127.0.0.1\C$\...` (the loopback-address hostname form named
 /// above) and `\Device\Mup\localhost\C$\...` (the MUP *device* the `\??\UNC`
 /// symlink points at, reached without going through that symlink at all —
 /// the exact shape of the `GLOBALROOT` trick, one namespace down). Neither is
-/// registered here, so both still classify as outside every root. The second
-/// was not previously named anywhere; it is recorded here so the gap is one
-/// someone chose rather than one nobody noticed.
+/// registered here, so both classify as outside every root. They are
+/// recorded here so the gap is one someone chose rather than one nobody
+/// noticed.
 #[cfg(windows)]
 fn admin_share_nt_key(drive: char) -> String {
     format!(r"\??\UNC\localhost\{drive}$")
@@ -208,11 +205,9 @@ fn nt_key_for_win32_path(win32_path: &str) -> String {
 /// discipline used above, a root-subtree junction only ever produces a
 /// redundant no-op (its target is already inside root, so both spellings
 /// already canonicalise correctly on their own) or would require admitting
-/// a genuinely external, unrelated directory into the managed root —
-/// exactly the over-eager failure class this project has already hit twice
-/// (the `subst`-hijack and `GLOBALROOT`-wrapper regressions) and the one
-/// this task's own brief calls out as the worse of the two directions. Left
-/// as a documented non-goal, not a side effect of closing vector 7.
+/// a genuinely external, unrelated directory into the managed root, the
+/// over-eager failure class (a `subst` hijack, a `GLOBALROOT` wrapper) that
+/// is the worse of the two directions. A documented non-goal.
 ///
 /// **Staleness, same limit as the rest of this map:** a junction created,
 /// retargeted, or removed after session start is not reflected until the
@@ -221,13 +216,10 @@ fn nt_key_for_win32_path(win32_path: &str) -> String {
 ///
 /// **Depth, bounded tightly and for a second, load-bearing reason beyond
 /// cost.** Only [`MAX_ANCESTOR_LEVELS`] levels are climbed — deliberately
-/// just enough to reach past this project's own two session-wrapper
-/// directories (the removed daemon's `<TEMP>/vfs-daemon-<pid>-<seq>-<id>/root`,
-/// and `vfs-embed`'s test sessions' `target/tmp/vfs-session-<name>-<pid>-<seq>/root`:
-/// one level for the per-session base directory, one more for the temp
-/// directory itself), not one level further into the broader user
-/// profile tree. Climbing further was tried during verification and found
-/// to cost more than time: a real Windows profile's own built-in
+/// just enough to reach past a session's two wrapper directories (a root at
+/// `<TEMP>/<session>/root`: one level for the per-session base directory,
+/// one more for the temp directory itself), not one level further into the
+/// broader user profile tree. Climbing further costs more than time: a real Windows profile's own built-in
 /// legacy-compatibility junctions (`AppData\Local\Application Data`,
 /// `<profile>\Cookies`, `<profile>\SendTo`, and a dozen more) live exactly
 /// one or two levels above a `%TEMP%`-rooted session, and reading even
@@ -237,12 +229,10 @@ fn nt_key_for_win32_path(win32_path: &str) -> String {
 /// the shim's own stats reporter's tick window in a fast, short-lived test
 /// process (`hookstats::start_reporter`'s own doc comment: "nothing flushes
 /// on exit... a process that exits before its first tick produces no
-/// report file at all") — observed as a real, intermittent classification
-/// miss during this task's own verification, not a hypothetical. A real
-/// game session has no such tight timing window, but there is no reason to
-/// pay the extra cost or the extra exposure to unrelated system junctions
-/// when the fixed, two-level convention this project's own sessions always
-/// use is already enough.
+/// report file at all"), observed as a real, intermittent classification
+/// miss. A real game session has no such tight timing window, but there is
+/// no reason to pay the extra cost or the extra exposure to unrelated system
+/// junctions when two levels are enough.
 #[cfg(windows)]
 fn junction_aliases(root: &str) -> Vec<(String, String)> {
     const MAX_ANCESTOR_LEVELS: usize = 2;
@@ -401,7 +391,7 @@ fn win32_guid_to_nt(win32_guid: &str) -> Option<String> {
 /// to `GetLongPathNameW` only when nothing could be opened at `path` (e.g.
 /// it does not exist).
 ///
-/// **Caution for callers feeding this into `canon`/`RootMap` (Task 3):** the
+/// **Caution for callers feeding this into `canon`/`RootMap`:** the
 /// returned string is `GetFinalPathNameByHandleW`'s default `VOLUME_NAME_DOS`
 /// form, which is `\\?\`-prefixed Win32 spelling — the exact sibling of the
 /// volume-GUID trap fixed in `resolve_volume_map`/`win32_guid_to_nt`. A real
@@ -467,7 +457,7 @@ mod tests {
         );
     }
 
-    /// The handoff from Task 1's review: a volume-GUID path must be keyed
+    /// A volume-GUID path must be keyed
     /// the way it is *actually spelled* when a real open reaches
     /// `canon::resolve` — `\??\Volume{guid}`, not the `\\?\Volume{guid}`
     /// spelling `GetVolumeNameForVolumeMountPointW` returns. Exercise the
@@ -505,8 +495,7 @@ mod tests {
             via_drive.to_ascii_lowercase()
         );
 
-        // The convenience (Win32-spelled) key from Task 1's test fixture must
-        // NOT match the real (NT-spelled) path a live open actually presents
+        // The convenience (Win32-spelled) key must NOT match the real (NT-spelled) path a live open actually presents
         // — that mismatch is exactly the silent-failure mode this test
         // guards against.
         let mut wrong = VolumeMap::empty();
@@ -525,7 +514,7 @@ mod tests {
     /// actually creates (rather than assuming one exists on the machine).
     /// If 8.3 name generation is disabled on this volume, no distinct short
     /// name can be produced and the test is inconclusive by construction —
-    /// that is Task 6's `unbuildable` case, not a reason to fail here.
+    /// that is the `unbuildable` case, not a reason to fail here.
     #[test]
     #[cfg(windows)]
     fn expand_short_name_round_trips_a_real_8dot3_name() {
@@ -742,8 +731,8 @@ mod tests {
         );
     }
 
-    /// `mklink /J` needs no elevation, same convention `aether-fixture-escape`
-    /// and `skyrim-live`'s own `ensure_junction` already use. Returns
+    /// `mklink /J` needs no elevation, the same convention
+    /// `aether-fixture-escape` uses. Returns
     /// whether it succeeded rather than panicking, so a box without
     /// junction support renders the calling test inconclusive rather than
     /// failing it.

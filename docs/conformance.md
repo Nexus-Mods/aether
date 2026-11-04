@@ -546,7 +546,7 @@ its stdout, never two requests at once.
   if it has not exited within the timeout.
 - Whenever the run kills the adapter (a timeout, an error, the end of the
   run), it kills every process the adapter started too, so an adapter may be
-  a launcher (a `.cmd` file, a shell script, `clojure`) that starts the real
+  a launcher (a `.cmd` file, a shell script, `java`) that starts the real
   director. On Windows the adapter runs in a Job Object that kills its
   members when closed; on Unix it leads a process group, which is sent
   `SIGKILL` while the adapter is still unreaped, so the number cannot

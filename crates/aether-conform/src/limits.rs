@@ -520,7 +520,7 @@ fn play(
         (status != i32::MIN || !payload.is_empty()).then(|| {
             "a listing larger than payload_cap is answered with the overflow status i32::MIN and an \
              empty payload (wire.md 3.4.2: \"The whole listing is one reply and must fit \
-             payload_cap\", both directors answer i32::MIN; 2.5 step 3), never a shorter list, \
+             payload_cap\"; the overflow status i32::MIN, 2.5 step 3), never a shorter list, \
              which the shim would show as the whole folder"
                 .to_string()
         }),

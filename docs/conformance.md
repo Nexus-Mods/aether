@@ -30,12 +30,14 @@ For every scenario, and for each generated case and the malformed part:
   `VFS_RING_BYTES` long; `VFS_VIRTUAL_DIR` set, and the roots the shim
   builds from it, `VFS_VIRTUAL_ROOTS`, `VFS_LAUNCH_IMAGE` and
   `VFS_ROOT_BACKINGS` usable (the shim refuses, for example, an empty
-  `VFS_VIRTUAL_DIR`: "managed root is not a usable path"). Two further rules a
-  director must meet are checked too: the header's `payload_cap` equals
-  `VFS_RING_PAYLOAD_CAP` (5.3: "Must equal the header's `payload_cap`"),
-  and when `VFS_ARENA_OFFSET` is given the arena lies inside the mapping
-  (2.6: "Every arena byte must lie inside the first `VFS_RING_BYTES` bytes
-  of the mapping").
+  `VFS_VIRTUAL_DIR`: "managed root is not a usable path"). Three further
+  rules a director must meet are checked too: the header's `payload_cap`
+  equals `VFS_RING_PAYLOAD_CAP` (5.3: "Must equal the header's
+  `payload_cap`"); an arena, if `VFS_ARENA_LEN` gives one, has room for a
+  bank of the shim's chunk per slot (2.6: "`arena_len >= 256 KiB *
+  slot_count`"); and when `VFS_ARENA_OFFSET` is given the arena lies inside
+  the mapping (2.6: "Every arena byte must lie inside the first
+  `VFS_RING_BYTES` bytes of the mapping").
 - **A HEARTBEAT on attach**, as the shim sends one once it has connected.
 - **Every step's answer**: the status, and on `ok` every reply field, equal
   to the step's expectation except where wire.md lets directors differ

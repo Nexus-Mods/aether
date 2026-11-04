@@ -18,10 +18,12 @@
 //!   `VFS_VIRTUAL_ROOTS`, `VFS_LAUNCH_IMAGE` and `VFS_ROOT_BACKINGS` usable
 //!   by `aether_redirect::RootMap::with_roots`, the call the shim makes. The
 //!   header is checked as 2.4 says, and beyond what the shim
-//!   checks, two rules a director must meet: the header's `payload_cap`
+//!   checks, three rules a director must meet: the header's `payload_cap`
 //!   equals `VFS_RING_PAYLOAD_CAP` (5.3: "Must equal the header's
-//!   `payload_cap`") and, when `VFS_ARENA_OFFSET` is given, the arena lies
-//!   inside the first `VFS_RING_BYTES` bytes (2.6).
+//!   `payload_cap`"); an arena gives each slot's bank at least the shim's
+//!   smallest bulk chunk (2.6: "`arena_len >= 256 KiB * slot_count`"); and,
+//!   when `VFS_ARENA_OFFSET` is given, the arena lies inside the first
+//!   `VFS_RING_BYTES` bytes (2.6).
 //! - **Waking** (2.11). On a file ring nothing is signalled: the client
 //!   spins, as the shim does, and the director must not sleep on an event.
 //!   On a section the client opens `VFS_SERVER_EV` with the shim's rights
@@ -127,6 +129,7 @@ impl Attached {
                 aether_env::RING_PAYLOAD_CAP
             ));
         }
+        check_arena(arena_len, geom.slot_count)?;
         if let Some(off) = get(aether_env::ARENA_OFFSET).and_then(|s| s.parse::<usize>().ok()) {
             if arena_len > 0 && off.saturating_add(arena_len) > ring_bytes {
                 return Err(format!(
@@ -219,6 +222,27 @@ fn open_section(name: &str, _ring_bytes: usize) -> Result<(Backing, String), Str
         "{}={name} names a Windows section, which this OS cannot open; give {} (wire.md 2.10)",
         aether_env::RING_SECTION,
         aether_env::RING_PATH
+    ))
+}
+
+/// The shim's smallest bulk chunk (wire.md 2.6: `clamp(VFS_ARENA_LEN /
+/// slot_count, 256 KiB, 1 MiB)`).
+const MIN_BULK_CHUNK: usize = 256 * 1024;
+
+/// wire.md 2.6's bank size rule: an arena, if there is one, gives each of
+/// the `slot_count` banks at least the shim's smallest bulk chunk,
+/// `arena_len >= 256 KiB * slot_count`, since the shim reads a bulk answer
+/// shorter than its chunk as end of file.
+fn check_arena(arena_len: usize, slot_count: u32) -> Result<(), String> {
+    let need = MIN_BULK_CHUNK.saturating_mul(slot_count as usize);
+    if arena_len == 0 || arena_len >= need {
+        return Ok(());
+    }
+    Err(format!(
+        "{}={arena_len} is too small for {slot_count} slots: wire.md 2.6 needs \
+         arena_len >= 256 KiB * slot_count = {need}, so that each bank holds the \
+         shim's bulk chunk (a shorter bulk answer reads as end of file)",
+        aether_env::ARENA_LEN
     ))
 }
 
@@ -390,6 +414,22 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// wire.md 2.6: each bank must hold the shim's smallest bulk chunk,
+    /// `arena_len >= 256 KiB * slot_count`; no arena at all is fine.
+    #[test]
+    fn an_arena_too_small_for_its_banks_fails_attach() {
+        const KIB: usize = 1024;
+        assert_eq!(check_arena(0, 32), Ok(()));
+        assert_eq!(check_arena(256 * KIB * 32, 32), Ok(()));
+        assert_eq!(check_arena(32 * 1024 * KIB, 32), Ok(()));
+        assert_eq!(check_arena(256 * KIB, 1), Ok(()));
+        let e = check_arena(256 * KIB * 32 - 1, 32).unwrap_err();
+        assert!(e.contains("wire.md 2.6"), "{e}");
+        assert!(e.contains("8388607") && e.contains("8388608"), "{e}");
+        assert!(e.contains("32 slots"), "{e}");
+        assert!(check_arena(4096, 8).is_err());
     }
 
     #[test]

@@ -56,10 +56,10 @@ fn synth_final_path(handle: HANDLE) -> Option<String> {
 
 /// The `FILETIME` a time query on a synthetic handle reports (`docs/wire.md`
 /// 3.2, "Timestamps"): the file's `mtime`, asked by GETATTR on the handle's
-/// first time query and kept in its entry until a write or truncate through
-/// it, so a listing, a query by path and a query by handle agree. The first
-/// such query in a process that does not yet know whether the director sends
-/// times asks too, and its answer settles that
+/// first time query and kept in its entry until a write or truncate to the
+/// file through any handle, so a listing, a query by path and a query by
+/// handle agree. The first such query in a process that does not yet know
+/// whether the director sends times asks too, and its answer settles that
 /// ([`FuseClient::settle_times`]). Once it is known that the director sends
 /// none, nothing is asked and [`SYNTH_FILETIME`] is reported, as it is when
 /// the director cannot say.

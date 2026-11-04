@@ -39,4 +39,15 @@ fn a_hit_allocates_nothing() {
     let miss = under("data/other/b.esp");
     let (known, n) = aether_testkit::alloc::allocations(|| c.leading_with(0, &miss, 10, |_| ()));
     assert_eq!((known, n), (1, 0), "a partial hit");
+
+    let (spelled, n) = aether_testkit::alloc::allocations(|| {
+        (0..font.len())
+            .map(|i| c.spelling(0, &font, i).map_or(0, str::len))
+            .sum::<usize>()
+    });
+    assert_eq!(
+        (spelled, n),
+        ("DataInterfaceFontsA.ttf".len(), 0),
+        "each spelling, borrowed"
+    );
 }

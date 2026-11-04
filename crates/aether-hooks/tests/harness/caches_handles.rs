@@ -493,6 +493,69 @@ fn a_time_seen_after_none_was_settled_turns_fetching_on_again() {
     close(d);
 }
 
+/// The `mtime` a director reports after the test's write: [`later_times`]
+/// puts it in every GETATTR and READDIR reply.
+const LATER_MTIME: i64 = 1_800_000_000;
+
+/// Every GETATTR and READDIR reply given [`LATER_MTIME`], as a director
+/// whose file a write just changed answers.
+fn later_times(r: &mut aether_refdirector::harness::OwnedReplyBytes) {
+    let t = LATER_MTIME.to_le_bytes();
+    match r.op() {
+        Some(Opcode::GetAttr) if r.payload.len() >= 18 && r.payload[0] != 0 => {
+            r.payload[10..18].copy_from_slice(&t)
+        }
+        Some(Opcode::ReadDir) if r.payload.len() >= 4 => {
+            let p = &mut r.payload;
+            let count = u32::from_le_bytes(p[0..4].try_into().unwrap());
+            let mut at = 4;
+            for _ in 0..count {
+                let len = u32::from_le_bytes(p[at..at + 4].try_into().unwrap()) as usize;
+                at += 4 + len + 1 + 8;
+                p[at..at + 8].copy_from_slice(&t);
+                at += 8;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Times are kept per file, as NTFS keeps them: a write through one handle
+/// makes every handle on the same file in this process ask again, so the
+/// other handle agrees with the listing and the queries by path after it.
+#[test]
+fn a_write_through_one_handle_refreshes_the_time_another_handle_kept() {
+    isolate!();
+    const MTIME: i64 = 1_700_000_000;
+    let ft = |s: i64| s * 10_000_000 + 116_444_736_000_000_000;
+    let (root, served) = serve(fake().with_mtime("saves/s.ess", MTIME));
+    let saves = root.join("saves");
+    let path = saves.join("s.ess");
+    // The other handle is opened in another case: it is the same file.
+    let other = open_read(&saves.join("S.ESS"));
+    assert_eq!(handle_times(other), [ft(MTIME); 3]);
+
+    let w = open_with(&path, GENERIC_READ | GENERIC_WRITE);
+    let id = served.faults.arm(
+        crate::fakedirector::Match::default(),
+        crate::fakedirector::Fault::Rewrite(later_times),
+    );
+    write_next(w, b"x");
+    close(w);
+
+    let mark = served.recorder.mark();
+    assert_eq!(
+        handle_times(other),
+        [ft(LATER_MTIME); 3],
+        "the kept time was dropped"
+    );
+    assert_eq!(ops(served, mark), [Some(Opcode::GetAttr)]);
+    assert_eq!(listed_time(&saves, "s.ess"), ft(LATER_MTIME));
+    assert_eq!(path_times(&path), [ft(LATER_MTIME); 4]);
+    assert!(served.faults.applied(id) >= 1);
+    close(other);
+}
+
 #[test]
 fn size_and_position_queries_on_a_director_handle_cost_zero_round_trips() {
     isolate!();

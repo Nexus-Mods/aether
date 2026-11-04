@@ -280,3 +280,28 @@ fn a_case_only_rename_of_a_lower_only_name_keeps_the_lower_s_spelling() {
     assert_eq!(names(&data), ["Lower.esp"]);
     close(h);
 }
+
+/// A spelling-cache hit allocates nothing: what `final_path` asks the cache
+/// (`FuseClient::with_stored_names`) is answered from it, borrowed, with no
+/// request and no allocation. `final_path`'s own work (splitting the path,
+/// building its answer) is not the cache's and is not counted here.
+#[test]
+fn a_cached_spelling_allocates_nothing() {
+    isolate!();
+    let (root, served) = serve(fake());
+    let h = open_read(&file(&root));
+    assert_eq!(query(served, &root, h).1, [sn(0, "mods/sub/f.esp")]);
+    let client = aether_hooks::director::global().expect("attached");
+    let under: Vec<String> = ["mods", "sub", "f.esp"].map(String::from).to_vec();
+    let mark = served.recorder.mark();
+    let (spelled, n) =
+        aether_testkit::alloc::allocations(|| client.spelled_length_for_tests(0, &under));
+    assert_eq!(
+        spelled,
+        "ModsSubF.esp".len(),
+        "every component from the cache"
+    );
+    assert_eq!(n, 0, "allocations on a hit");
+    assert_eq!(served.recorder.total_since(mark), 0);
+    close(h);
+}

@@ -31,12 +31,54 @@ struct FuseOpen {
     /// Opened with `FILE_DELETE_ON_CLOSE`: closing it deletes `abs_path` at the director.
     delete_on_close: bool,
     /// The file's `mtime` as GETATTR last answered it for this handle
-    /// (`crate::hook::file_info`), until a write or truncate through the
-    /// handle; `None` when not asked since.
+    /// (`crate::hook::file_info`), until a write or truncate to the file
+    /// through any handle in this process; `None` when not asked since.
     mtime: Option<i64>,
-    /// Writes and truncates through this handle, so a GETATTR that crossed
-    /// one is not kept ([`set_mtime`]).
+    /// Writes and truncates to the file through any handle, so a GETATTR
+    /// that crossed one is not kept ([`set_mtime`]).
     changes: u32,
+    /// Whether this handle has asked for its time ([`time_of`]): only such
+    /// handles are walked when another handle on the file writes
+    /// ([`TIMED`]).
+    timed: bool,
+}
+
+/// How many handles in [`TABLE`] are `timed`. While none is, a write or
+/// truncate touches only its own handle's entry.
+static TIMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A write or truncate through `handle` changed its file: the time every
+/// timed handle on the same file keeps is dropped, and their change counts
+/// move, as NTFS keeps times per file. The same file is the same path, case
+/// apart. Under the table lock the caller holds; allocates nothing (the
+/// writer's path is lent out of its entry for the walk).
+fn file_changed(g: &mut BTreeMap<usize, FuseOpen>, handle: isize) {
+    let Some(e) = g.get_mut(&(handle as usize)) else {
+        return;
+    };
+    e.mtime = None;
+    e.changes = e.changes.wrapping_add(1);
+    if TIMED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return;
+    }
+    let Some(path) = e.abs_path.take() else {
+        return;
+    };
+    for (k, other) in g.iter_mut() {
+        if *k != handle as usize
+            && other.timed
+            && other
+                .abs_path
+                .as_deref()
+                .is_some_and(|p| aether_casefold::eq_folded(p, &path))
+        {
+            other.mtime = None;
+            other.changes = other.changes.wrapping_add(1);
+        }
+    }
+    if let Some(e) = g.get_mut(&(handle as usize)) {
+        e.abs_path = Some(path);
+    }
 }
 
 /// What a read through a handle needs, under one lock: see [`lookup_read`].
@@ -118,6 +160,7 @@ fn insert(
             delete_on_close: false,
             mtime: None,
             changes: 0,
+            timed: false,
         },
     );
     Some(handle as isize)
@@ -206,15 +249,14 @@ pub(crate) fn set_size(handle: isize, size: u64) {
             if e.position > size {
                 e.position = size;
             }
-            e.mtime = None;
-            e.changes = e.changes.wrapping_add(1);
         }
+        file_changed(&mut g, handle);
     }
 }
 
 /// A write through `handle` landed bytes up to `end`: the cached size is
-/// raised to at least `end`, and the time it kept is dropped, so its next
-/// time query asks again.
+/// raised to at least `end`, and the time every handle on the file kept is
+/// dropped, so their next time queries ask again ([`file_changed`]).
 ///
 /// Not [`set_size`]: two writes on one handle can be in flight at once, each
 /// having read the size before either finished, and whichever stores last
@@ -226,17 +268,22 @@ pub(crate) fn wrote(handle: isize, end: u64) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.size = e.size.max(end);
-            e.mtime = None;
-            e.changes = e.changes.wrapping_add(1);
         }
+        file_changed(&mut g, handle);
     }
 }
 
 /// The `mtime` this handle keeps (`None` when it must ask), and its change
-/// count to hand back to [`set_mtime`]. `None` for a handle not in the table.
+/// count to hand back to [`set_mtime`]. Marks the handle `timed`, so a write
+/// to its file through another handle reaches it from now on. `None` for a
+/// handle not in the table.
 pub(crate) fn time_of(handle: isize) -> Option<(Option<i64>, u32)> {
-    let g = TABLE.lock().ok()?;
-    let e = g.get(&(handle as usize))?;
+    let mut g = TABLE.lock().ok()?;
+    let e = g.get_mut(&(handle as usize))?;
+    if !e.timed {
+        e.timed = true;
+        TIMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     Some((e.mtime, e.changes))
 }
 
@@ -271,6 +318,9 @@ pub(crate) fn set_delete_on_close(handle: isize, on: bool) {
 pub(crate) fn close_fuse(handle: isize) -> Option<(Option<u64>, Option<String>)> {
     let mut g = TABLE.lock().ok()?;
     g.remove(&(handle as usize)).map(|e| {
+        if e.timed {
+            TIMED.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // A section still reading through `fh` keeps it open at the
         // director; the CLOSE waits for the section's last release.
         let held = e.issued && HELD.lock().is_ok_and(|mut h| mark_closed(&mut h, e.fh));

@@ -961,9 +961,8 @@ impl FuseClient {
             .filter(|(id, _)| *id == root)
             .map(|(_, p)| p.as_str())
             .collect();
-        let stored = self.stored_names(root, &under);
-        let mut name = aether_redirect::finalname::final_dos_path(path, &under, &spellings, |i| {
-            stored.get(i).cloned()
+        let mut name = self.with_stored_names(root, &under, |stored| {
+            aether_redirect::finalname::final_dos_path(path, &under, &spellings, stored)
         });
         // A named stream is part of what was opened, not of where the file
         // lives; it is carried through as the caller spelled it.
@@ -973,18 +972,54 @@ impl FuseClient {
         Some(name)
     }
 
+    /// `f` given how each component of `under` is spelled where it is stored
+    /// (`None` for one nobody could say). When this client remembers every
+    /// component, `f` runs under the cache's lock with the spellings
+    /// borrowed from it: no request and no allocation. Otherwise the rest are
+    /// asked for ([`Self::stored_names`]).
+    fn with_stored_names<R>(
+        &self,
+        root: RootId,
+        under: &[String],
+        f: impl for<'a> FnOnce(&'a mut dyn FnMut(usize) -> Option<&'a str>) -> R,
+    ) -> R {
+        crate::hookstats::note_name_query();
+        let now = self.name_clock_ms();
+        let mut f = Some(f);
+        if let Ok(names) = self.names.lock() {
+            if names.leading_with(root.0, under, now, |_| ()) == under.len() {
+                crate::hookstats::note_name_query_cached();
+                let f = f.take().expect("not yet called");
+                return f(&mut |i| names.spelling(root.0, under, i));
+            }
+        }
+        let stored = self.stored_names(root, under, now);
+        let f = f.take().expect("not yet called");
+        f(&mut |i| stored.get(i).map(String::as_str))
+    }
+
+    /// The total length of the spellings [`Self::with_stored_names`] gives
+    /// for `under` (folded components) under root `root`, for a test that
+    /// counts what a cache hit costs. Not in the shipped shim.
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn spelled_length_for_tests(&self, root: u32, under: &[String]) -> usize {
+        self.with_stored_names(RootId(root), under, |stored| {
+            (0..under.len())
+                .map(|i| stored(i).map_or(0, str::len))
+                .sum()
+        })
+    }
+
     /// How each component of `under` is spelled where it is stored: from
     /// what this client remembers, and for the rest from the director. Fewer
     /// names than components (none, even) if the director could not say.
-    fn stored_names(&self, root: RootId, under: &[String]) -> Vec<String> {
-        crate::hookstats::note_name_query();
-        let now = self.name_clock_ms();
+    fn stored_names(&self, root: RootId, under: &[String], now: u64) -> Vec<String> {
         let mut known = match self.names.lock() {
             Ok(names) => names.leading(root.0, under, now),
             Err(_) => Vec::new(),
         };
         if known.len() == under.len() {
-            crate::hookstats::note_name_query_cached();
             return known;
         }
         crate::hookstats::note_name_lookup();

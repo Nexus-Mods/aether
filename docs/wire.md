@@ -586,7 +586,10 @@ network-open, all-information and stat classes, which `GetFileTime` and
 `GetFileInformationByHandle` reach) has no time from OPEN, so the handle's
 first time query sends one GETATTR for its path and reports its `mtime` the
 same way. The handle keeps that answer until a WRITE that lands bytes or a
-SETATTR through it, after which its next time query asks again.
+SETATTR reaches the same file (the same path, case apart) through any handle
+in the process, after which its next time query asks again. A change made
+outside the process after a handle kept its time is not seen through that
+handle while it stays open.
 
 The shim learns from these answers whether the director sends times. Once any
 GETATTR or READDIR reply has carried an `mtime` above 0, every handle asks as

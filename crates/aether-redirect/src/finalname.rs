@@ -57,11 +57,11 @@ pub fn opened_tail<'a>(opened: &'a str, under: &[String]) -> Option<Vec<&'a str>
 /// A component with no stored spelling — a named stream, a file that is
 /// gone, a director that cannot be asked — keeps the caller's spelling, so
 /// the answer is never worse than the path that was opened.
-pub fn final_dos_path(
+pub fn final_dos_path<S: AsRef<str>>(
     opened: &str,
     under: &[String],
     roots: &[&str],
-    mut stored: impl FnMut(usize) -> Option<String>,
+    mut stored: impl FnMut(usize) -> Option<S>,
 ) -> String {
     let asked = components(opened);
     let tail = opened_tail(opened, under);
@@ -85,13 +85,12 @@ pub fn final_dos_path(
 
     let mut out = root;
     for (i, folded) in under.iter().enumerate() {
-        let spelled = match (stored(i), &tail) {
-            (Some(name), _) => name,
-            (None, Some(tail)) => tail[i].to_string(),
-            (None, None) => folded.clone(),
-        };
         out.push('\\');
-        out.push_str(&spelled);
+        match (stored(i), &tail) {
+            (Some(name), _) => out.push_str(name.as_ref()),
+            (None, Some(tail)) => out.push_str(tail[i]),
+            (None, None) => out.push_str(folded),
+        }
     }
     // A bare drive is named with its root separator, as NTFS names it.
     if out.len() == 2 && out.ends_with(':') {
@@ -164,7 +163,9 @@ impl NameCache {
 
     /// The stored spellings of the leading components of `under` that are
     /// known and fresh at `now_ms`: as many as are, in order, stopping at the
-    /// first that is not.
+    /// first that is not. Owned: the list and each name are allocated. A
+    /// caller that only reads them uses [`NameCache::leading_with`] and
+    /// [`NameCache::spelling`], which allocate nothing on a hit.
     pub fn leading(&self, root: u32, under: &[String], now_ms: u64) -> Vec<String> {
         let mut out = Vec::new();
         self.leading_with(root, under, now_ms, |name| out.push(name.to_string()));
@@ -203,6 +204,25 @@ impl NameCache {
         }
         self.scratch.set(path);
         known
+    }
+
+    /// The stored spelling of `under[i]` (the path `under[..=i]`), fresh or
+    /// not, borrowed: for a caller that [`NameCache::leading_with`] already
+    /// told every component is fresh. Allocates nothing for a path no longer
+    /// than one [`NameCache::remember`] stored.
+    pub fn spelling(&self, root: u32, under: &[String], i: usize) -> Option<&str> {
+        let tree = self.names.get(&root)?;
+        let mut path = self.scratch.take();
+        path.clear();
+        for (n, comp) in under.get(..=i)?.iter().enumerate() {
+            if n > 0 {
+                path.push('/');
+            }
+            path.push_str(comp);
+        }
+        let found = tree.get(path.as_str()).map(|(name, _)| name.as_str());
+        self.scratch.set(path);
+        found
     }
 
     /// Remember `names` as the spellings of `under[first..]`, learned at

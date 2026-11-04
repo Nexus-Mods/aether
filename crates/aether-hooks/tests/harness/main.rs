@@ -19,4 +19,10 @@ mod fakedirector;
 #[global_allocator]
 static A: aether_testkit::alloc::Counting = aether_testkit::alloc::Counting;
 
+// ntdll bindings, all raw calls.
+#[allow(unsafe_code)]
+#[path = "../ntapi/mod.rs"]
+mod ntapi;
+
+mod bugs_files;
 mod recording;

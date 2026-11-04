@@ -33,6 +33,11 @@ use crate::adapter::{answer_requests, AdapterRequest, Env};
 const SLOTS: u32 = 8;
 const PAYLOAD_CAP: u32 = aether_ipc::DEFAULT_PAYLOAD_CAP;
 const BANK: usize = 1024 * 1024;
+/// The longest [`Break::BumpBeforeWrite`] holds a write for readers.
+const BUMP_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest [`Break::CompleteAbandoned`] holds a slow READ for its client
+/// to give it up.
+const ABANDON_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 /// [`Break::MtimeMillis`]'s time: 2020-01-01 in milliseconds.
 const MILLIS: i64 = 1_577_836_800_000;
 /// The threads serving a ring, each with its own handle on the reference
@@ -107,16 +112,22 @@ pub enum Break {
     /// from would (wire.md 2.6: the bank is the client's while its slot is
     /// `COMPLETED`).
     LateBank,
-    /// READs of 256 KiB or more take 300 ms, and a request given up while
-    /// being processed is completed anyway, `COMPLETED` stored over
+    /// READs of 256 KiB or more are held `PROCESSING` until the client gives
+    /// them up (at most [`ABANDON_HOLD`]), so a client that gives one up
+    /// as soon as it is taken always catches it, and a request given up
+    /// while being processed is completed anyway, `COMPLETED` stored over
     /// `ABANDONED` (wire.md 2.5: "a director must never store COMPLETED over
     /// ABANDONED").
     CompleteAbandoned,
     /// A registry write moves `reg_gen` first and makes the write visible
-    /// 2 ms later (wire.md 4.5: it moves "before the write's reply is
-    /// published", and the shim caches an answer under the generation it
-    /// read before asking, so the new generation must not come before the
-    /// write).
+    /// only once two more REG_KEYs have been answered (or after
+    /// [`BUMP_HOLD`], when no reader comes), so a reader that reads the
+    /// generation and then the key sees the new generation with the old
+    /// value, whatever the timing (wire.md 4.5: it moves "before the write's
+    /// reply is published", and the shim caches an answer under the
+    /// generation it read before asking, so the new generation must not
+    /// come before the write). Until a REG_KEY has been answered at all, a
+    /// write is held for nothing.
     BumpBeforeWrite,
     /// `VFS_REGISTRY` is left out of the mount's environment though the tree
     /// has a registry layer (wire.md 5.3: set to 1 while a layer is
@@ -309,6 +320,7 @@ fn mount(
         staged: String::new(),
         staged_files: staged.clone(),
         write_only: Arc::default(),
+        reg_reads: Arc::default(),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -493,6 +505,7 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 staged: String::new(),
                 staged_files: d.staged_files.clone(),
                 write_only: d.write_only.clone(),
+                reg_reads: d.reg_reads.clone(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
@@ -613,8 +626,14 @@ fn interposed(
                     .get(16..20)
                     .is_some_and(|l| u32::from_le_bytes(l.try_into().unwrap()) >= 256 * 1024)
             {
-                // Slow, so a client gives it up while it is processed.
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                // Slow, so a client gives it up while it is processed: held
+                // until it is given up, or for ABANDON_HOLD when it is not.
+                let since = std::time::Instant::now();
+                while ring::slot_state(seg, &geom, slot) != Some(aether_ipc::layout::ST_ABANDONED)
+                    && since.elapsed() < ABANDON_HOLD
+                {
+                    std::thread::yield_now();
+                }
             }
             let (status, reply) = if head.fits(&geom) {
                 let mut table = handles.lock().unwrap_or_else(|e| e.into_inner());
@@ -647,13 +666,16 @@ fn interposed(
         for (slot, req_id, status, reply) in answers {
             let given_up =
                 ring::slot_state(seg, &geom, slot) == Some(aether_ipc::layout::ST_ABANDONED);
-            ring::server_complete(seg, &geom, slot, req_id, status, &reply)?;
             if how == Break::CompleteAbandoned && given_up {
-                // COMPLETED stored over the slot the client gave up.
+                // COMPLETED stored over the slot the client gave up, straight
+                // from ABANDONED: never FREE in between, which a client
+                // watching the slot could see and pass.
                 seg.write_bytes(
                     geom.slot_off(slot) + aether_ipc::layout::SH_STATE,
                     &aether_ipc::layout::ST_COMPLETED.to_le_bytes(),
                 );
+            } else {
+                ring::server_complete(seg, &geom, slot, req_id, status, &reply)?;
             }
             notifier.notify_client(slot);
         }
@@ -804,6 +826,9 @@ struct Served {
     staged_files: Arc<Mutex<Vec<PathBuf>>>,
     /// [`Break::WriteOnlyUnreadable`]'s handles opened without `OPEN_READ`.
     write_only: Arc<Mutex<std::collections::BTreeSet<u64>>>,
+    /// [`Break::BumpBeforeWrite`]'s count of REG_KEYs answered, shared by
+    /// every serve thread, and signalled at each.
+    reg_reads: Arc<(Mutex<u64>, std::sync::Condvar)>,
 }
 
 impl Served {
@@ -1033,7 +1058,15 @@ impl Director for Served {
     }
     fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
         self.hive(path)?;
-        self.reference.reg_key(path)
+        // Counted once the answer is made, so a write let go by the count
+        // cannot reach it.
+        let reply = self.reference.reg_key(path);
+        if self.broken == Some(Break::BumpBeforeWrite) {
+            let (n, cv) = &*self.reg_reads;
+            *n.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            cv.notify_all();
+        }
+        reply
     }
     fn reg_set_value(
         &mut self,
@@ -1043,9 +1076,18 @@ impl Director for Served {
         data: &[u8],
     ) -> Result<u64, Status> {
         if let (Some(Break::BumpBeforeWrite), Some(ring)) = (self.broken, &self.ring) {
+            let (n, cv) = &*self.reg_reads;
+            let reads = n.lock().unwrap_or_else(|e| e.into_inner());
+            let before = *reads;
             let now = ring::reg_generation(ring.seg());
             ring::publish_reg_generation(ring.seg(), now + 1);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            if before > 0 {
+                // The second REG_KEY answered from here was asked after the
+                // first came back, so after the new generation was out.
+                let _ = cv
+                    .wait_timeout_while(reads, BUMP_HOLD, |r| *r < before + 2)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
         }
         self.reference.reg_set_value(path, name, ty, data)
     }
@@ -1215,5 +1257,81 @@ pub fn test_adapter(how: Misbehave) -> i32 {
             });
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = r"\Registry\Machine\Software\Held";
+
+    /// Two handles on one reference with a registry, breaking `how`, over a
+    /// file ring in `dir` that the reference publishes its generation to.
+    fn pair(how: Break, dir: &Path) -> (Served, Served, Arc<dyn RingBacking>) {
+        let f = aether_filering::FileRing::create(&dir.join("r.ring"), 16 << 20).unwrap();
+        let b: Arc<dyn RingBacking> = Arc::new(f);
+        init(&*b).unwrap();
+        let reference = Reference::new().with_registry();
+        let published = b.clone();
+        reference.publish_generation(move |g| ring::publish_reg_generation(published.seg(), g));
+        let one = Served {
+            reference,
+            broken: Some(how),
+            ring: Some(b.clone()),
+            banks: Arc::default(),
+            staged: String::new(),
+            staged_files: Arc::default(),
+            write_only: Arc::default(),
+            reg_reads: Arc::default(),
+        };
+        let two = Served {
+            reference: one.reference.share(),
+            ring: Some(b.clone()),
+            banks: one.banks.clone(),
+            staged: String::new(),
+            staged_files: one.staged_files.clone(),
+            write_only: one.write_only.clone(),
+            reg_reads: one.reg_reads.clone(),
+            ..one
+        };
+        (one, two, b)
+    }
+
+    /// The value `n` of [`KEY`], as a reader sees it.
+    fn n(d: &mut Served) -> Option<Vec<u8>> {
+        let k = d.reg_key(KEY).unwrap();
+        k.node
+            .as_ref()
+            .and_then(|node| node.values.iter().find(|v| v.name == "n"))
+            .map(|v| v.data.to_vec())
+    }
+
+    /// [`Break::BumpBeforeWrite`] holds a write, its generation already
+    /// published, until a reader has read twice after it: the reader sees
+    /// the new generation with the old value however long it takes to look.
+    #[test]
+    fn bump_before_write_holds_the_write_until_a_reader_has_read_twice() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let (mut writer, mut reader, ring) = pair(Break::BumpBeforeWrite, dir.path());
+        writer.reg_create_key(KEY, false).unwrap();
+        assert_eq!(n(&mut reader), None, "a reader has read once");
+        let before = ring::reg_generation(ring.seg());
+        let w = std::thread::spawn(move || {
+            writer
+                .reg_set_value(KEY, "n", 4, &7u32.to_le_bytes())
+                .map(|_| ())
+        });
+        let began = std::time::Instant::now();
+        while ring::reg_generation(ring.seg()) == before {
+            assert!(began.elapsed() < BUMP_HOLD, "the generation never moved");
+            std::thread::yield_now();
+        }
+        // However slow this reader is, the write is still held.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(n(&mut reader), None, "the first read after the bump");
+        assert_eq!(n(&mut reader), None, "the second read after the bump");
+        assert_eq!(w.join().unwrap(), Ok(()));
+        assert_eq!(n(&mut reader), Some(7u32.to_le_bytes().to_vec()));
     }
 }

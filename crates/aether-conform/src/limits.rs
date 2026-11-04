@@ -499,9 +499,7 @@ fn play(
             request: request.into(),
             expected,
             got,
-            passed: why
-                .as_ref()
-                .is_none_or(|w| w.starts_with("warning: ") || w.starts_with("not exercised: ")),
+            passed: passes(&why),
             note: why,
         });
         next += 1;
@@ -888,16 +886,7 @@ fn abandoned(ring: &Attached, g: Geometry) -> Result<Check, String> {
     }
     let Some((slot, _)) = caught else {
         close(ring, fh);
-        return Ok((
-            what,
-            expected,
-            format!("answered each of {ABANDON_TRIES} times before it could be given up"),
-            Some(
-                "not exercised: this director answered too fast to be caught PROCESSING \
-                 (wire.md 2.5: it must never store COMPLETED over ABANDONED)"
-                    .into(),
-            ),
-        ));
+        return Ok(not_caught(what, expected));
     };
     let began = Instant::now();
     let end = loop {
@@ -936,6 +925,28 @@ fn abandoned(ring: &Attached, g: Geometry) -> Result<Check, String> {
     }
     close(ring, fh);
     Ok((what, expected, got, why))
+}
+
+/// The abandoned-slot step of a director never caught `PROCESSING`: not
+/// exercised, which passes.
+fn not_caught(what: String, expected: String) -> Check {
+    (
+        what,
+        expected,
+        format!("answered each of {ABANDON_TRIES} times before it could be given up"),
+        Some(
+            "not exercised: this director answered too fast to be caught PROCESSING \
+             (wire.md 2.5: it must never store COMPLETED over ABANDONED)"
+                .into(),
+        ),
+    )
+}
+
+/// Whether a check with this note passes: no note, a warning, or a rule
+/// the run could not exercise.
+fn passes(why: &Option<String>) -> bool {
+    why.as_ref()
+        .is_none_or(|w| w.starts_with("warning: ") || w.starts_with("not exercised: "))
 }
 
 fn state_name(s: Option<u32>) -> String {
@@ -987,6 +998,9 @@ fn registry_race(ring: &Attached, env: &Env, timeout: Duration) -> Result<Check,
     }
     let reader = Attached::from_env(env, timeout)?;
     let done = std::sync::atomic::AtomicBool::new(false);
+    // Set once the reader has had its first answer: the writes wait for it,
+    // so that they overlap reads however late the reader's thread starts.
+    let reading = std::sync::atomic::AtomicBool::new(false);
     let (gens, samples) = std::thread::scope(|sc| -> Result<_, String> {
         let r = sc.spawn(|| -> Result<Vec<(u64, u32)>, String> {
             let c = reader.client();
@@ -1010,6 +1024,7 @@ fn registry_race(ring: &Attached, env: &Env, timeout: Duration) -> Result<Check,
                             .map(u32::from_le_bytes)
                             .ok_or("a REG_KEY reply without the value n")?;
                         samples.push((g, v));
+                        reading.store(true, std::sync::atomic::Ordering::Release);
                     }
                     other => return Err(format!("a REG_KEY got {other:?}")),
                 }
@@ -1021,7 +1036,15 @@ fn registry_race(ring: &Attached, env: &Env, timeout: Duration) -> Result<Check,
         let mut gens = Vec::new();
         let mut scratch = Vec::new();
         let mut failed = None;
-        for k in 1..=REG_WRITES {
+        let began = Instant::now();
+        while !reading.load(std::sync::atomic::Ordering::Acquire) && !r.is_finished() {
+            if began.elapsed() > ring.deadline() {
+                failed = Some("the reader had no REG_KEY answer in time".to_string());
+                break;
+            }
+            std::thread::yield_now();
+        }
+        for k in (1..=REG_WRITES).take_while(|_| failed.is_none()) {
             if let Err(e) = set(k, &mut scratch) {
                 failed = Some(format!("REG_SET_VALUE {k} failed: {e}"));
                 break;
@@ -1083,6 +1106,18 @@ mod tests {
             assert_eq!(unique.len(), names.len());
             assert!(names.iter().all(|n| n.len() <= 254));
         }
+    }
+
+    /// A director too fast to be caught processing is reported, not failed.
+    #[test]
+    fn a_director_never_caught_processing_passes_as_not_exercised() {
+        let (.., got, why) = not_caught("what".into(), "expected".into());
+        assert!(passes(&why), "{why:?}");
+        assert!(why.unwrap().starts_with("not exercised: "));
+        assert!(got.contains(&ABANDON_TRIES.to_string()), "{got}");
+        assert!(!passes(&Some(
+            "slot 3 went from ABANDONED to COMPLETED".into()
+        )));
     }
 
     #[test]

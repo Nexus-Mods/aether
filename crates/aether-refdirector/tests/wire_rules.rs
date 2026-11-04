@@ -199,7 +199,8 @@ fn a_write_or_length_past_what_it_holds_is_no_space() {
     assert_eq!(d.write(fh, u64::MAX, b"x"), Err(Status::NoSpace));
     assert_eq!(d.write(fh, u64::MAX - 1, b"xyz"), Err(Status::NoSpace));
     assert_eq!(d.write(fh, cap, b"x"), Err(Status::NoSpace));
-    assert_eq!(d.write(fh, cap + 1_000_000, b""), Err(Status::NoSpace));
+    // A zero-length WRITE changes nothing, wherever its offset (3.4.5).
+    assert_eq!(d.write(fh, cap + 1_000_000, b""), Ok(0));
     assert_eq!(d.set_attr(fh, u64::MAX), Err(Status::NoSpace));
     assert_eq!(d.set_attr(fh, cap + 1), Err(Status::NoSpace));
     assert_eq!(d.contents("a"), Some(b"keep".to_vec()));
@@ -764,4 +765,21 @@ fn a_named_stream_is_a_name_the_reference_does_not_have() {
         vec![("x.sav".to_string(), false)]
     );
     assert_eq!(d.contents("saves/x.sav"), Some(b"data".to_vec()));
+}
+
+/// 3.4.5: a WRITE of `len = 0` is OK with `written = 0` and changes
+/// nothing, wherever its offset: it never grows the file.
+#[test]
+fn a_zero_length_write_changes_nothing() {
+    let mut d = Reference::new()
+        .writable_under("")
+        .with("a", b"abc".to_vec(), ReadStyle::Whole);
+    let fh = d.open(R0, RW, "a").unwrap().fh;
+    let app = d.open(R0, RW | OpenFlags::APPEND, "a").unwrap().fh;
+    for at in [0, 3, 4, 100, u64::MAX] {
+        assert_eq!(d.write(fh, at, b""), Ok(0), "{at}");
+        assert_eq!(d.write(app, at, b""), Ok(0), "{at}");
+    }
+    assert_eq!(d.contents("a"), Some(b"abc".to_vec()));
+    assert_eq!(d.get_attr(R0, "a").unwrap().size, 3);
 }

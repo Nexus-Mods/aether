@@ -1109,6 +1109,11 @@ impl Director for Reference {
         let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get_mut(&k)) else {
             return Err(Status::NotFound);
         };
+        // A zero-length WRITE changes nothing, wherever its offset (wire.md
+        // 3.4.5): no growth to the offset, and no size limit to pass.
+        if data.is_empty() {
+            return Ok(0);
+        }
         let at = if append { e.bytes.len() as u64 } else { offset };
         let end = at
             .checked_add(data.len() as u64)

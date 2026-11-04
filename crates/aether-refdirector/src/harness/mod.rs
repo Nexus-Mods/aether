@@ -10,6 +10,10 @@
 //! the faults see each reply first, as the director gave it, and the
 //! recorder records what the ring sent ([`aether_rpc::Tap::on_sent`]).
 //!
+//! [`Geometry`] lays a ring and its arena out as the shim's tests serve
+//! them, and [`serve_threads_of`] serves any director the way
+//! [`serve_threads`] serves the reference.
+//!
 //! A lock here is never held while a fault waits or a rewrite runs, and one
 //! poisoned by a panic elsewhere is taken anyway: a tap that panics fails its
 //! request (the ring answers `Status::IoError`) and leaves the layers
@@ -24,6 +28,7 @@
 //! ```
 
 mod fault;
+mod geometry;
 mod override_;
 mod record;
 mod serve;
@@ -32,9 +37,10 @@ pub use fault::{
     drop_last_name, set_reserved_open_flag_bits, ArenaShape, BulkLie, Fault, FaultId, Faults,
     Match, OwnedReplyBytes, MAX_DELAY,
 };
+pub use geometry::Geometry;
 pub use override_::{OpenEdit, Override};
 pub use record::{Mark, Recorded, Recorder};
-pub use serve::serve_threads;
+pub use serve::{serve_threads, serve_threads_of};
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 

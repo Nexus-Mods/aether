@@ -9,12 +9,12 @@
 # contract/artifacts.json (the names the four are staged under), read from
 # the working tree, except the crates no native is built from: the fixtures'
 # (crates/*fixture*) and those named in $excluded below (the test kit, the
-# conformance harness, the reference director, the file ring, the fuzz bodies), so a change
-# there changes no native. bin/natives-key.tests.ps1 checks, with cargo tree,
-# that neither native's dependency tree (x64 and i686) contains any of them.
-# They are
-# sorted by path (ordinal), and each is hashed as its UTF-8 path, a NUL, its
-# length in decimal, a NUL, then its bytes. So any change to an input's
+# conformance harness, the reference director, the file ring, the fuzz bodies,
+# the shim benchmark), so a change there changes no native.
+# bin/natives-key.tests.ps1 checks, with cargo tree, that neither native's
+# dependency tree (x64 and i686) contains any of them. They are sorted by
+# path (ordinal), and each is hashed as its UTF-8 path, a NUL, its length in
+# decimal, a NUL, then its bytes. So any change to an input's
 # content, a new or removed input or a rename gives another key. Whatever
 # else the build reads belongs among the inputs too: Cargo configuration in a
 # .cargo/ folder would have to be added here.
@@ -30,7 +30,7 @@ $ErrorActionPreference = 'Stop'
 
 # crates no native depends on (bin/natives-key.tests.ps1 checks it), besides
 # the fixtures' crates/*fixture*
-$excluded = @('crates/aether-testkit', 'crates/aether-conform', 'crates/aether-refdirector', 'crates/aether-filering', 'crates/aether-fuzz')
+$excluded = @('crates/aether-testkit', 'crates/aether-conform', 'crates/aether-refdirector', 'crates/aether-filering', 'crates/aether-fuzz', 'crates/aether-shimbench')
 if ($ListExcluded) { $excluded; exit 0 }
 
 $root = Split-Path -Parent $PSScriptRoot

@@ -1,11 +1,11 @@
 //! [`serve_threads`]: a reference served on several threads behind one tap
 //! chain, as a director with several workers serves a ring (`docs/wire.md`
-//! 2.8).
+//! 2.8). [`serve_threads_of`] does the same for any director.
 
 use super::ArenaShape;
 use crate::Reference;
 use aether_ipc::{DataArena, IpcError, Notifier, RingServer, SharedSeg};
-use aether_rpc::{serve_tapped, Tap};
+use aether_rpc::{serve_tapped, Director, Tap};
 use std::sync::atomic::AtomicBool;
 use std::thread::{Scope, ScopedJoinHandle};
 
@@ -37,9 +37,40 @@ where
     F: Fn() -> N + Sync,
     T: Tap + Clone + Send + 'scope,
 {
+    serve_threads_of(
+        scope,
+        threads,
+        seg,
+        arena,
+        notifier,
+        || d.share(),
+        tap,
+        stop,
+    )
+}
+
+/// [`serve_threads`] for any director: each thread serves the one `director`
+/// makes for it (called once per thread, before the thread starts).
+#[allow(clippy::too_many_arguments)]
+pub fn serve_threads_of<'scope, 'env, N, F, D, T>(
+    scope: &'scope Scope<'scope, 'env>,
+    threads: usize,
+    seg: &'env SharedSeg,
+    arena: Option<ArenaShape>,
+    notifier: &'env F,
+    director: impl Fn() -> D,
+    tap: &T,
+    stop: &'env AtomicBool,
+) -> Vec<ScopedJoinHandle<'scope, Result<(), IpcError>>>
+where
+    N: Notifier,
+    F: Fn() -> N + Sync,
+    D: Director + Send + 'scope,
+    T: Tap + Clone + Send + 'scope,
+{
     (0..threads)
         .map(|_| {
-            let mut d = d.share();
+            let mut d = director();
             let mut tap = tap.clone();
             scope.spawn(move || {
                 let server = RingServer::new(seg, notifier())?;

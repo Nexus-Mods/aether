@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use aether_hooks::director::FuseInitError;
 use aether_ipc::{Notifier, RequestView, SharedSeg};
-use aether_refdirector::harness::{serve_threads, ArenaShape, FaultId};
+use aether_refdirector::harness::{serve_threads, ArenaShape, FaultId, Geometry};
 use aether_rpc::{Tap, TapAction};
 use aether_win::SharedMapping;
 use std::cell::Cell;
@@ -50,15 +50,15 @@ pub(crate) use aether_refdirector::{key, pattern, ReadStyle, Reference as Fake, 
 /// any fixture bigger than that is guaranteed to span several ring round
 /// trips. A test that only ever moved one payload's worth of data would pass
 /// against an implementation that reads once and calls it done.
-pub(crate) const PAYLOAD_CAP: u32 = 4096;
-pub(crate) const SLOTS: u32 = 8;
+pub(crate) const PAYLOAD_CAP: u32 = Geometry::SHIM_TESTS.payload_cap;
+pub(crate) const SLOTS: u32 = Geometry::SHIM_TESTS.slots;
 
 /// An arena of `SLOTS` x 256 KiB. The bank size the client computes
 /// (`arena_len / slot_count`, clamped to at least 256 KiB) then agrees exactly
 /// with the one the server hands out, so a bulk read is not silently truncated
 /// to a smaller bank and resumed, which would still pass a byte-exactness
 /// test while hiding whether the bank sizing was right.
-pub(crate) const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
+pub(crate) const ARENA_LEN: usize = Geometry::SHIM_TESTS.arena_len;
 
 /// How long a serve thread of a [`RingKind::SectionWithWake`] ring waits for
 /// the event before it looks at the ring anyway. Only a bound: the client
@@ -212,14 +212,6 @@ impl Served {
     }
 }
 
-/// Control ring length for this geometry, and therefore the arena's offset
-/// within the ring's memory: the layout a director uses
-/// (`arena_offset = ring_bytes`).
-fn ring_bytes(slots: u32, payload_cap: u32) -> usize {
-    let stride = (32 + payload_cap as usize).next_multiple_of(8);
-    aether_ipc::layout::RING_HEADER_SIZE + slots as usize * stride
-}
-
 /// Publish `fake` on a ring built as [`Options::default`] says, with an arena
 /// of `arena_len`, and point the shim's `FuseClient` at it, once per test
 /// process. Returns the fake so tests can read its counters.
@@ -273,11 +265,14 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
         tap,
     } = opts;
     let fake: &'static Fake = Box::leak(Box::new(fake));
-    let arena_offset = ring_bytes(slots, payload_cap) + arena_gap;
-    // Whole mapping, ring first then arena: `VFS_RING_BYTES` names the
-    // whole thing because the shim maps all of it and a bulk response's
-    // offset is mapping-absolute.
-    let map_bytes = ((arena_offset + arena_len + 0xFFFF) & !0xFFFF).max(256 * 1024);
+    let geometry = Geometry {
+        slots,
+        payload_cap,
+        arena_len,
+        arena_gap,
+    };
+    let arena_offset = geometry.arena_offset();
+    let map_bytes = geometry.map_bytes();
     let seg: &'static SharedSeg = match ring {
         RingKind::Section | RingKind::SectionWithWake => {
             let mapping: &'static SharedMapping = Box::leak(Box::new(
@@ -294,10 +289,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
             aether_ipc::RingBacking::seg(file)
         }
     };
-    aether_ipc::ring::init(seg, slots, payload_cap).expect("ring init");
-    if worker_hint > 0 {
-        aether_ipc::ring::set_worker_hint(seg, worker_hint);
-    }
+    geometry.init(seg, worker_hint).expect("ring init");
     // The registry generation is in the ring header before any client
     // attaches.
     match reg_gen {
@@ -313,11 +305,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
     // One bank per slot: a director worker's shape. `banks == slot_count` is
     // what makes the client's `arena_len / slot_count` bank size agree with
     // the server's.
-    let arena = (arena_len > 0).then(|| ArenaShape {
-        offset: arena_offset as u64,
-        bank_size: (arena_len / slots as usize) as u64,
-        banks: slots,
-    });
+    let arena = geometry.arena();
     let faults = match arena {
         Some(a) => Faults::new(payload_cap).with_arena(a),
         None => Faults::new(payload_cap),

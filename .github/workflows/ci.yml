@@ -63,7 +63,7 @@ jobs:
       # (cargo#6313), so on a clean target dir vproxy must be built first or
       # the link fails with LNK1181. Hence two builds, in this order.
       - name: Build inject artifacts
-        run: cargo build -p aether-inject -p aether-shim -p aether-fixtures -p aether-fixture-vproxy && cargo build -p aether-fixture-staticimp
+        run: cargo build -p aether-inject -p aether-shim -p aether-fixtures -p aether-fixture-vproxy -p aether-shimbench && cargo build -p aether-fixture-staticimp
       # `--no-fail-fast`: without it cargo stops at the first failing test
       # binary and hides how much of the suite broke. No `-p`: every member.
       # This is also the counted-cost gate: aether-hooks' `harness` binary
@@ -74,6 +74,14 @@ jobs:
       - name: Rust tests (every crate)
         timeout-minutes: 25
         run: cargo test --no-fail-fast
+      # The shim's cost per Win32 call (aether-shimbench), as a smoke run:
+      # every case natively and in a process the injector started with the
+      # shim, 10 calls each, in a few seconds. The timings are a shared
+      # runner's and nothing compares them; the requests per call are
+      # checked against costs.txt by the crate's tests in the step above.
+      - name: Shim benchmark (smoke)
+        timeout-minutes: 5
+        run: target/debug/aether-shimbench --iterations 10 --out target/bench/shim-smoke.json
       # What every director must do (contract/scenarios), the malformed
       # requests, 1024 generated cases compared with the reference, and 256
       # rounds of 4 clients at once (docs/conformance.md), played against the

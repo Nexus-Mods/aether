@@ -53,6 +53,10 @@ members = [
   # Its own package because its build.rs links vproxy.dll.lib, which only
   # exists once vproxy is built (in an earlier cargo invocation, cargo#6313).
   "crates/aether-fixture-staticimp",
+  # What a Win32 call costs under the shim (aether-shimbench), natively and
+  # injected. Windows only, a benchmark: not shipped, and not in
+  # contract/artifacts.json.
+  "crates/aether-shimbench",
 ]
 
 [workspace.package]

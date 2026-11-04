@@ -359,8 +359,8 @@ the same machinery.** `path_of_tracked` decodes the `OBJECT_ATTRIBUTES`
 `RootDirectory` a virtual directory handle produces), and the question asked
 of that path is the one the open hooks ask:
 `FuseClient::route`, the director's notion of the root. If it claims the
-path, the director's answer is the caller's answer, both ways: `OP_DELETE`
-accepted is `STATUS_SUCCESS`, `OP_DELETE` refused is a failure the caller
+path, the director's answer is the caller's answer, both ways: `Opcode::Delete`
+accepted is `STATUS_SUCCESS`, `Opcode::Delete` refused is a failure the caller
 sees. It never continues to the kernel from here, for the same reason
 `try_fuse_create` does not: a refusal that falls through is not a refusal.
 `setinfo_hook` gives a handle-based delete of the same path the same answer
@@ -382,7 +382,7 @@ From `hook/close.rs` and `hook/file_open.rs`.
 disposition set-info: it is `NtCreateFile` with `FILE_DELETE_ON_CLOSE` followed by `NtClose`.
 The director has no delete-on-close of its own, so the shim keeps it: `route_open` records the
 flag on the synthetic handle it returns (`synth_file::set_delete_on_close`), and
-`close_hook_body` sends `OP_DELETE` for the handle's path (the path it is named by when it
+`close_hook_body` sends `Opcode::Delete` for the handle's path (the path it is named by when it
 closes, so after a rename through it, the new one) after releasing the `fh`, as NT deletes at
 the last close. Until then every Win32 delete of a director-served file under Proton reported
 success and deleted nothing.
@@ -395,7 +395,7 @@ success and deleted nothing.
   access, which is not a write open, and nothing in a read open's answer says whether the path
   is deletable, so knowing would cost a round trip on every such open.
 - **No second delete.** A set-info delete that succeeds through a handle that also has the flag
-  clears it, so the close does not send `OP_DELETE` again, which could delete a file recreated
+  clears it, so the close does not send `Opcode::Delete` again, which could delete a file recreated
   under the same name in between.
 - **Not honoured on a directory `try_fuse_mkdir` created.** That handle is synthesised without a
   path recorded on it (`open_fuse(0, 0, true)`) and the flag is never set, so a directory created
@@ -405,7 +405,7 @@ success and deleted nothing.
 
 From `hook/file_mutate.rs`.
 
-The NT status for a director `OP_DELETE` refusal.
+The NT status for a director `Opcode::Delete` refusal.
 
 **Flattening every refusal to `STATUS_UNSUCCESSFUL` is not neutral.** That
 maps to `ERROR_GEN_FAILURE`, and the delete-then-create idiom (the single
@@ -584,7 +584,7 @@ content crossing out of it, and the source being legitimately
 outside does not make the target's root any less managed.
 
 Refused rather than routed, and there is no third option available:
-`OP_RENAME` carries one root and two vpaths under it (see
+`Opcode::Rename` carries one root and two vpaths under it (see
 `FuseClient::rename`), so the provider contract has no operation for
 an import from outside. `STATUS_ACCESS_DENIED` rather than the
 `STATUS_UNSUCCESSFUL` the cross-root arm above returns, because it is

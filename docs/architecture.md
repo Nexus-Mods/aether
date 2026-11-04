@@ -891,6 +891,9 @@ observer before concluding the process is idle.
 | `aether-casefold` | the case fold every name crosses the ring in, for file paths and registry keys; no dependencies |
 | `aether-protocol` | ring wire codecs, opcodes, statuses, open flags and `RootId`; the shim bootstrap config (`VFSC` v2) |
 | `aether-ipc` | control ring + bulk arena + read cache, OS-free |
+| `aether-rpc` | typed ring ends over `aether-protocol`: the `Client` the shim calls the director with (compiled into the shim DLL) and the `Director` trait a director in Rust implements |
+| `aether-refdirector` | the reference director (answers every file and registry opcode from memory, the server the shim's tests run against) and a null one for measuring the ring; not shipped |
+| `aether-filering` | a ring in a memory-mapped file on any OS (`FileRing`), the Linux-under-Wine backing of wire.md 2.10 for a native tool |
 | `aether-win` | Windows shared memory, events and volume lookups |
 | `aether-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
 | `aether-env` | every `VFS_*` switch, defined once, with a drift test |

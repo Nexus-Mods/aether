@@ -14,6 +14,8 @@ aether-ntlayout.workspace = true
 aether-casefold.workspace = true
 aether-protocol.workspace = true
 aether-ipc.workspace = true
+# The typed client the shim sends its requests through.
+aether-rpc.workspace = true
 aether-win.workspace = true
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
 aether-env.workspace = true
@@ -35,6 +37,9 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# The director the shim's tests serve (`tests/fakedirector`); its serve loop is
+# `aether-rpc`'s, a normal dependency above.
+aether-refdirector.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

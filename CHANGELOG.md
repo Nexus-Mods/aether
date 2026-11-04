@@ -5,6 +5,42 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (the wire is one typed table)
+
+The wire does not change: every golden vector, the wire version (4),
+`contract/env.json` and `contract/artifacts.json` are as they were. What
+changes is the Rust API over it. `aether-protocol`'s numeric API is gone: the
+`OP_*`, `ST_*`, `OPEN_*` and `FLAG_READ_BULK` constants, `OPEN_RESP_IMMUTABLE`,
+the `OPCODES` and `STATUSES` tables, the `DirEntryWire`, `ReadReq`, `WriteReq`
+and `SetattrReq` structs and every `encode_*`/`decode_*` free function for a
+ring message (the shim configuration keeps `shimcfg::encode_config` and
+`decode_config`). In their place are `Opcode`, `Status`, `OpenFlags` and
+`RequestFlags` (`Opcode::ALL`, `Status::ALL`, `name()`, `code()`, `TryFrom`),
+and `Request` and `Reply`, which encode into any `Buf` and decode borrowing
+from a payload; `contract/protocol.json` publishes the same table as data.
+`aether-rpc` is the typed client (`Client::call`, which refuses a bulk READ:
+those hold their slot through `aether-ipc`'s held-slot calls) and the
+`Director` trait a director in Rust implements; `aether-refdirector` is the
+reference director the shim's tests run against. `aether_ipc::layout`
+re-exports `Opcode` instead of the `OP_*` constants, and
+`aether_ntlayout::open_create_flags` returns `OpenFlags`. The shim's
+`FuseClient` and `RegClient` methods return `Status` as their error, not an
+`i32`, with three exceptions: `FuseClient::delete` returns `CallError`, which
+separates a director's refusal from a call that failed before one answered;
+`FuseClient::read_fragmented` still returns the `i32` of `aether_ipc`'s bulk
+read as its error; and `FuseClient::read_cached` returns `Option<usize>`, `None`
+when the cache does not serve the read.
+
+Three crates are new. `aether-rpc` and `aether-refdirector` are as above, and
+`aether-filering` is a ring in a memory-mapped file on any OS
+(`FileRing::create`, `FileRing::open`), the Wine arrangement of `docs/wire.md`
+2.10 for a native tool; it replaces the deleted `aether-unix`'s mapping.
+`contract/protocol.json` is new too, the protocol table as data, with the
+meaning of each field type in its `"types"` section. `aether-rpc` is compiled
+into the shim DLL. The wire does not change, but the natives' sources do: the
+shim and the injector's dependencies are different, so the next release signs
+new natives.
+
 ## Unreleased (the shim DLL is `aether_shim.dll`)
 
 The shim DLL is `aether_shim.dll` (x64) and `aether_shim32.dll` (x86), was

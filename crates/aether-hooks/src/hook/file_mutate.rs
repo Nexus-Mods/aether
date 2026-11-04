@@ -15,6 +15,7 @@ use crate::ntdef::{
     STATUS_UNSUCCESSFUL,
 };
 use crate::synth_file::FileView;
+use aether_protocol::Status;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
@@ -70,7 +71,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
             crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {
                 Ok(()) => STATUS_SUCCESS,
-                Err(st) => delete_status_for(st),
+                Err(e) => delete_status_for(crate::director::failed(e)),
             };
         }
     }
@@ -87,21 +88,21 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     unsafe { tramp(oa) }
 }
 
-/// The NT status for a director `OP_DELETE` refusal. Flattening every refusal to
+/// The NT status for a director `Opcode::Delete` refusal. Flattening every refusal to
 /// `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) would stop delete-then-create
 /// callers, which tolerate only `ERROR_FILE_NOT_FOUND`; this is the same mapping as
 /// `try_fuse_create`'s `Err` arms, kept in one function so the two cannot drift:
 ///
-/// - `ST_NOT_FOUND` -> `STATUS_OBJECT_NAME_NOT_FOUND`: nothing to delete is not a failure.
-/// - `ST_READ_ONLY` -> `STATUS_ACCESS_DENIED`, as a read-only filesystem answers `DeleteFileW`.
-/// - `ST_IS_DIR` -> `STATUS_FILE_IS_A_DIRECTORY`, folded to `ERROR_ACCESS_DENIED`, as
+/// - `Status::NotFound` -> `STATUS_OBJECT_NAME_NOT_FOUND`: nothing to delete is not a failure.
+/// - `Status::ReadOnly` -> `STATUS_ACCESS_DENIED`, as a read-only filesystem answers `DeleteFileW`.
+/// - `Status::IsDir` -> `STATUS_FILE_IS_A_DIRECTORY`, folded to `ERROR_ACCESS_DENIED`, as
 ///   `DeleteFileW` answers a directory.
 /// - Anything else (I/O error, a provider that broke) keeps `STATUS_UNSUCCESSFUL`.
-fn delete_status_for(st: i32) -> NTSTATUS {
+fn delete_status_for(st: Status) -> NTSTATUS {
     match st {
-        aether_protocol::ST_NOT_FOUND => STATUS_OBJECT_NAME_NOT_FOUND,
-        aether_protocol::ST_READ_ONLY => STATUS_ACCESS_DENIED,
-        aether_protocol::ST_IS_DIR => STATUS_FILE_IS_A_DIRECTORY,
+        Status::NotFound => STATUS_OBJECT_NAME_NOT_FOUND,
+        Status::ReadOnly => STATUS_ACCESS_DENIED,
+        Status::IsDir => STATUS_FILE_IS_A_DIRECTORY,
         _ => STATUS_UNSUCCESSFUL,
     }
 }
@@ -174,8 +175,8 @@ unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
-/// A delete or rename through `handle`, whose path is `nt`, answered by the director: `OP_DELETE`,
-/// `OP_RENAME` when the target lands under the same root, or `OP_RENAME_X` when it lands under
+/// A delete or rename through `handle`, whose path is `nt`, answered by the director: `Opcode::Delete`,
+/// `Opcode::Rename` when the target lands under the same root, or `Opcode::RenameX` when it lands under
 /// another root (a root and one nested in its location). `None` when `nt` is under no root, so
 /// the caller decides; otherwise the caller's answer.
 ///
@@ -236,7 +237,7 @@ unsafe fn director_delete_or_rename(
                         }
                         STATUS_SUCCESS
                     }
-                    Err(aether_protocol::ST_CROSS_ROOT) => crate::ntdef::STATUS_NOT_SAME_DEVICE,
+                    Err(Status::CrossRoot) => crate::ntdef::STATUS_NOT_SAME_DEVICE,
                     Err(_) => STATUS_UNSUCCESSFUL,
                 }
             }
@@ -295,7 +296,7 @@ pub(super) unsafe fn setinfo_hook_body(
             }
             return STATUS_SUCCESS;
         }
-        // Truncate (`File::set_len`) → ring OP_SETATTR on the virtual write handle.
+        // Truncate (`File::set_len`) → ring Opcode::SetAttr on the virtual write handle.
         if class == FILE_END_OF_FILE_INFORMATION
             && !info.is_null()
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
@@ -325,7 +326,7 @@ pub(super) unsafe fn setinfo_hook_body(
             crate::hookstats::note_link_refused(src.as_deref().unwrap_or("<synthetic handle>"));
             return STATUS_ACCESS_DENIED;
         }
-        // Delete / rename of a virtual handle → ring OP_DELETE / OP_RENAME, keyed
+        // Delete / rename of a virtual handle → ring Opcode::Delete / Opcode::Rename, keyed
         // by the NT path recorded (record_path) when the handle was opened.
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let is_delete = unsafe { is_delete_request(info, length, class) };
@@ -390,7 +391,7 @@ pub(super) unsafe fn setinfo_hook_body(
         // graph does not serve. Refused with `STATUS_ACCESS_DENIED`; the cross-root arm's
         // `STATUS_UNSUCCESSFUL` is a different answer ("the graph cannot express this
         // move", against "the destination will not accept content by this route").
-        // `OP_RENAME` carries one root, so there is no import operation to route it to.
+        // `Opcode::Rename` carries one root, so there is no import operation to route it to.
         //
         // NOTE: `parse_rename_target` discards `parent_dir_of_handle`'s OS-consulted
         // provenance bit, so a target named against a directory handle the shim never saw

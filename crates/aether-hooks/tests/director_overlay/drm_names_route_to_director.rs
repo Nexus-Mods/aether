@@ -182,7 +182,7 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
     assert_eq!(
         fake.tally.writes("steam_appid.txt"),
         1,
-        "the payload must have crossed the ring as an OP_WRITE; the right bytes at the \
+        "the payload must have crossed the ring as an Opcode::Write; the right bytes at the \
          director with a zero here would mean something else put them there"
     );
 
@@ -196,7 +196,7 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
         }
         assert!(
             fake.tally.opens(vpath) >= 1,
-            "{name} never reached the director as an OP_OPEN"
+            "{name} never reached the director as an Opcode::Open"
         );
     }
 

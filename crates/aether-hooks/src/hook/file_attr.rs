@@ -11,18 +11,19 @@ use crate::ntdef::{
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use aether_ntlayout::SYNTH_FILETIME;
+use aether_protocol::Status;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::NTSTATUS;
 
-/// Path-based getattr via director OP_GETATTR when FUSE client is live.
+/// Path-based getattr via director `Opcode::GetAttr` when FUSE client is live.
 /// `Some(...)` means the path is under the managed root — caller must not tramp
 /// to the Steam tree on NOT_FOUND (seal under-root).
-unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
+unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), Status>> {
     let client = crate::director::global()?;
     let (root, vp) = client.route(path)?;
     Some(match client.getattr(root, &vp) {
         Ok(a) if a.found => Ok((a.is_dir, a.size, a.mtime)),
-        Ok(_) => Err(aether_protocol::ST_NOT_FOUND),
+        Ok(_) => Err(Status::NotFound),
         Err(st) => Err(st),
     })
 }
@@ -81,7 +82,7 @@ fn stat_by_path(
                 return Some(STATUS_SUCCESS);
             }
         }
-        Some(Err(st)) if st == aether_protocol::ST_NOT_FOUND => {
+        Some(Err(Status::NotFound)) => {
             note(StatEvent::NotFound);
             if !allow_disk_fallthrough() {
                 return Some(STATUS_OBJECT_NAME_NOT_FOUND);

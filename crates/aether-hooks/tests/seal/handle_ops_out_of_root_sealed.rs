@@ -11,7 +11,7 @@
 //!
 //! 1. **A delete through a handle the shim never saw opened.** No table of ours
 //!    records it, so its path is recovered with `GetFinalPathNameByHandleW` and
-//!    the delete is sent to the director (`OP_DELETE`), as `delete_hook` does
+//!    the delete is sent to the director (`Opcode::Delete`), as `delete_hook` does
 //!    for the same path. It used to write a shim-spelled whiteout marker into
 //!    the shim-local overlay instead, which the director never consulted.
 //! 2. **A rename out of a managed root** to a target outside every root, by
@@ -178,7 +178,7 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
     assert_eq!(
         fake.tally.deletes("data/unseen.esp"),
         1,
-        "the delete through the unseen handle never reached the director as an OP_DELETE: a \
+        "the delete through the unseen handle never reached the director as an Opcode::Delete: a \
          handle the shim never saw opened is still a handle on a path under a managed root, \
          and a table miss must not be read as `not ours`"
     );
@@ -201,7 +201,7 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
             fake.tally.renames(vpath),
             0,
             "{vpath}: a rename out of the root reached the director, which has no operation for \
-             it (OP_RENAME carries one root and two vpaths, both inside it)"
+             it (Opcode::Rename carries one root and two vpaths, both inside it)"
         );
     }
 

@@ -8,7 +8,7 @@
 //! backing directories (`aether_env::ROOT_BACKINGS`), the process hook therefore
 //!
 //! - starts a child whose image only the VFS holds from a copy the director
-//!   stages into the root's backing directory (`OP_STAGE_EXEC`), leaving the
+//!   stages into the root's backing directory (`Opcode::StageExec`), leaving the
 //!   command line, with its virtual `argv[0]`, as the caller wrote it;
 //! - starts a child whose working directory is under a root in that root's
 //!   backing directory, and tells it the virtual one before it runs;

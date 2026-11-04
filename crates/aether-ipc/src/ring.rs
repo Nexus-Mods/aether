@@ -172,6 +172,24 @@ pub fn publish_request(
     if payload.len() > geom.payload_cap as usize {
         return Err(IpcError::PayloadTooLarge);
     }
+    seg.write_bytes(geom.payload_off(slot), payload);
+    publish_written(seg, geom, slot, opcode, flags, payload.len())
+}
+
+/// [`publish_request`] for a request whose `len` payload bytes are already in
+/// the CLAIMED slot's payload region (written there through
+/// [`payload_region`]). Returns the req_id.
+pub fn publish_written(
+    seg: &SharedSeg,
+    geom: &Geom,
+    slot: u32,
+    opcode: u32,
+    flags: u32,
+    len: usize,
+) -> Result<u64, IpcError> {
+    if len > geom.payload_cap as usize {
+        return Err(IpcError::PayloadTooLarge);
+    }
     let base = geom.slot_off(slot);
     let req_id = seg
         .atomic_u64(RH_REQ_SEQ)
@@ -179,9 +197,8 @@ pub fn publish_request(
         .fetch_add(1, Ordering::Relaxed);
     seg.write_u32(base + SH_OPCODE, opcode);
     seg.write_u32(base + SH_FLAGS, flags);
-    seg.write_u32(base + SH_PAYLOAD_LEN, payload.len() as u32);
+    seg.write_u32(base + SH_PAYLOAD_LEN, len as u32);
     seg.write_u64(base + SH_REQ_ID, req_id);
-    seg.write_bytes(geom.payload_off(slot), payload);
     state(seg, geom, slot)
         .ok_or(IpcError::Layout)?
         .store(ST_SUBMITTED, Ordering::Release);
@@ -225,16 +242,75 @@ pub fn server_take_from(seg: &SharedSeg, geom: &Geom, start: u32) -> Option<u32>
 
 /// Read (opcode, flags, req_id, payload) from a PROCESSING slot.
 pub fn read_request(seg: &SharedSeg, geom: &Geom, slot: u32) -> Option<(u32, u32, u64, Vec<u8>)> {
-    let base = geom.slot_off(slot);
-    let opcode = seg.read_u32(base + SH_OPCODE)?;
-    let flags = seg.read_u32(base + SH_FLAGS)?;
-    let req_id = seg.read_u64(base + SH_REQ_ID)?;
-    let len = seg.read_u32(base + SH_PAYLOAD_LEN)? as usize;
-    if len > geom.payload_cap as usize {
+    let mut payload = Vec::new();
+    let head = read_request_into(seg, geom, slot, &mut payload)?;
+    if !head.fits(geom) {
         return None;
     }
-    let payload = seg.read_bytes(geom.payload_off(slot), len)?;
-    Some((opcode, flags, req_id, payload))
+    Some((head.opcode, head.flags, head.req_id, payload))
+}
+
+/// A request's slot header, as [`read_request_into`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestHeader {
+    pub opcode: u32,
+    pub flags: u32,
+    pub req_id: u64,
+    /// As the client wrote it: it may claim more than the slot holds.
+    pub payload_len: u32,
+}
+
+impl RequestHeader {
+    /// The payload length is within the ring's `payload_cap`, so the payload
+    /// was read.
+    pub fn fits(&self, geom: &Geom) -> bool {
+        self.payload_len <= geom.payload_cap
+    }
+}
+
+/// [`read_request`], copying the payload into `out` (cleared first), which
+/// grows only when its capacity is short. A header whose payload length is
+/// past `payload_cap` is still returned, with `out` empty, so the director
+/// can answer it (`docs/wire.md` 2.5: every taken slot is completed). `None`
+/// only when the header lies outside the segment.
+pub fn read_request_into(
+    seg: &SharedSeg,
+    geom: &Geom,
+    slot: u32,
+    out: &mut Vec<u8>,
+) -> Option<RequestHeader> {
+    let base = geom.slot_off(slot);
+    let head = RequestHeader {
+        opcode: seg.read_u32(base + SH_OPCODE)?,
+        flags: seg.read_u32(base + SH_FLAGS)?,
+        req_id: seg.read_u64(base + SH_REQ_ID)?,
+        payload_len: seg.read_u32(base + SH_PAYLOAD_LEN)?,
+    };
+    if head.fits(geom) {
+        copy_into(seg, geom.payload_off(slot), head.payload_len as usize, out)?;
+    } else {
+        out.clear();
+    }
+    Some(head)
+}
+
+/// Replace `out` with the `len` bytes at `off`, reusing its capacity.
+fn copy_into(seg: &SharedSeg, off: usize, len: usize, out: &mut Vec<u8>) -> Option<()> {
+    out.clear();
+    out.resize(len, 0);
+    seg.copy_to(off, out)
+}
+
+/// Run `f` over the payload region of `slot`, all `payload_cap` bytes of it,
+/// for a client to write a request into a slot it has CLAIMED before
+/// [`publish_written`]. `None` if the region is outside the segment.
+pub fn payload_region<R>(
+    seg: &SharedSeg,
+    geom: &Geom,
+    slot: u32,
+    f: impl FnOnce(&mut [u8]) -> R,
+) -> Option<R> {
+    seg.with_mut_bytes(geom.payload_off(slot), geom.payload_cap as usize, f)
 }
 
 /// What became of a response handed to [`server_complete`].
@@ -324,6 +400,20 @@ pub fn take_response(
     slot: u32,
     req_id: u64,
 ) -> Result<Option<(i32, Vec<u8>)>, IpcError> {
+    let mut payload = Vec::new();
+    Ok(take_response_into(seg, geom, slot, req_id, &mut payload)?.map(|status| (status, payload)))
+}
+
+/// [`take_response`], copying the payload into `out` (cleared first), which
+/// grows only when its capacity is short. Returns the status. `out` is left
+/// as it was while the response has not arrived.
+pub fn take_response_into(
+    seg: &SharedSeg,
+    geom: &Geom,
+    slot: u32,
+    req_id: u64,
+    out: &mut Vec<u8>,
+) -> Result<Option<i32>, IpcError> {
     let st = state(seg, geom, slot).ok_or(IpcError::Layout)?;
     if st.load(Ordering::Acquire) != ST_COMPLETED {
         return Ok(None);
@@ -339,10 +429,8 @@ pub fn take_response(
     if len > geom.payload_cap as usize {
         return Err(IpcError::BadResponse);
     }
-    let payload = seg
-        .read_bytes(geom.payload_off(slot), len)
-        .ok_or(IpcError::Layout)?;
-    Ok(Some((status, payload)))
+    copy_into(seg, geom.payload_off(slot), len, out).ok_or(IpcError::Layout)?;
+    Ok(Some(status))
 }
 
 /// Client: release a slot back to FREE.
@@ -457,12 +545,13 @@ mod tests {
 
         let slot = claim_free(seg, &geom).unwrap();
         assert_eq!(slot, 0);
-        let req_id = publish_request(seg, &geom, slot, OP_GETATTR, 7, b"hello").unwrap();
+        let req_id =
+            publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 7, b"hello").unwrap();
 
         let taken = server_take(seg, &geom).unwrap();
         assert_eq!(taken, slot);
         let (opcode, flags, rid, payload) = read_request(seg, &geom, taken).unwrap();
-        assert_eq!(opcode, OP_GETATTR);
+        assert_eq!(opcode, Opcode::GetAttr as u32);
         assert_eq!(flags, 7);
         assert_eq!(rid, req_id);
         assert_eq!(payload, b"hello");
@@ -528,7 +617,7 @@ mod tests {
         let seg = owned.seg();
         for _ in 0..4 {
             let s = claim_free(seg, &geom).unwrap();
-            publish_request(seg, &geom, s, OP_GETATTR, 0, b"").unwrap();
+            publish_request(seg, &geom, s, Opcode::GetAttr as u32, 0, b"").unwrap();
         }
         assert_eq!(server_take_from(seg, &geom, 3), Some(3));
         assert_eq!(server_take_from(seg, &geom, 4), Some(0), "wraps");
@@ -544,7 +633,7 @@ mod tests {
         let (owned, geom) = ring(2, 32);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        publish_request(seg, &geom, slot, OP_GETATTR, 0, b"x").unwrap();
+        publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 0, b"x").unwrap();
         assert_eq!(abandon(seg, &geom, slot), Ok(Abandon::Freed));
         assert_eq!(slot_state(seg, &geom, slot), Some(ST_FREE));
         assert_eq!(server_take(seg, &geom), None);
@@ -561,7 +650,7 @@ mod tests {
 
         let slot = claim_free(seg, &geom).unwrap();
         assert_eq!(slot, 0);
-        let old_id = publish_request(seg, &geom, slot, OP_READ, 0, b"old").unwrap();
+        let old_id = publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"old").unwrap();
         assert_eq!(server_take(seg, &geom), Some(slot));
 
         // The client's deadline passes while the server is still at work.
@@ -574,7 +663,7 @@ mod tests {
         let next = claim_free(seg, &geom).unwrap();
         assert_eq!(next, 1, "the retired slot must not be claimable");
         assert_eq!(claim_free(seg, &geom), None);
-        let new_id = publish_request(seg, &geom, next, OP_READ, 0, b"new").unwrap();
+        let new_id = publish_request(seg, &geom, next, Opcode::Read as u32, 0, b"new").unwrap();
 
         // The late reply arrives: dropped, and the slot freed by the server.
         assert_eq!(
@@ -588,7 +677,7 @@ mod tests {
         // And the drained slot is an ordinary slot again.
         let again = claim_free(seg, &geom).unwrap();
         assert_eq!(again, slot);
-        let id = publish_request(seg, &geom, again, OP_READ, 0, b"fresh").unwrap();
+        let id = publish_request(seg, &geom, again, Opcode::Read as u32, 0, b"fresh").unwrap();
         assert_eq!(take_response(seg, &geom, again, id), Ok(None));
         assert_eq!(server_take(seg, &geom), Some(again));
         assert_eq!(server_take(seg, &geom), Some(next));
@@ -609,7 +698,7 @@ mod tests {
         let (owned, geom) = ring(1, 32);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        let id = publish_request(seg, &geom, slot, OP_GETATTR, 0, b"").unwrap();
+        let id = publish_request(seg, &geom, slot, Opcode::GetAttr as u32, 0, b"").unwrap();
         server_take(seg, &geom).unwrap();
         assert_eq!(
             server_complete(seg, &geom, slot, id, 0, b"just in time"),
@@ -628,14 +717,15 @@ mod tests {
         let (owned, geom) = ring(1, 64);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        let old_id = publish_request(seg, &geom, slot, OP_READ, 0, b"old").unwrap();
+        let old_id = publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"old").unwrap();
         server_take(seg, &geom).unwrap();
 
         // The rule-breaking free, then a new request in the same slot, taken
         // by another server thread.
         free_slot(seg, &geom, slot).unwrap();
         assert_eq!(claim_free(seg, &geom), Some(slot));
-        let new_id = publish_request(seg, &geom, slot, OP_READ, 0, b"new request").unwrap();
+        let new_id =
+            publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"new request").unwrap();
         assert_ne!(new_id, old_id);
         assert_eq!(server_take(seg, &geom), Some(slot));
 
@@ -666,7 +756,7 @@ mod tests {
         let (owned, geom) = ring(1, 64);
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
-        let id = publish_request(seg, &geom, slot, OP_READ, 0, b"q").unwrap();
+        let id = publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"q").unwrap();
         server_take(seg, &geom).unwrap();
         server_complete(seg, &geom, slot, id, 0, b"a").unwrap();
         assert_eq!(
@@ -685,7 +775,14 @@ mod tests {
         let seg = owned.seg();
         let slot = claim_free(seg, &geom).unwrap();
         assert_eq!(
-            publish_request(seg, &geom, slot, OP_READ, 0, b"way too long payload"),
+            publish_request(
+                seg,
+                &geom,
+                slot,
+                Opcode::Read as u32,
+                0,
+                b"way too long payload"
+            ),
             Err(IpcError::PayloadTooLarge)
         );
     }

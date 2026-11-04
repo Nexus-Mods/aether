@@ -196,17 +196,14 @@ unsafe fn serve_dir_query(
         match routed {
             Some((client, (root, vp))) => {
                 let vp = vp.as_str();
-                let items = match client.readdir(root, vp) {
-                    Ok(entries) => {
-                        let items: Vec<DirItem> = entries
-                            .into_iter()
-                            .map(|e| DirItem {
-                                name: e.name,
-                                is_dir: e.is_dir,
-                                size: e.size,
-                                mtime: e.mtime,
-                            })
-                            .collect();
+                let listed = client.readdir(root, vp, |e| DirItem {
+                    name: e.name.to_string(),
+                    is_dir: e.is_dir,
+                    size: e.size,
+                    mtime: e.mtime,
+                });
+                let items = match listed {
+                    Ok(items) => {
                         // The director's write layer is the directory older shims wrote their own
                         // `<name>.__vfs_wh__` whiteout markers into, and it spells whiteouts
                         // `.wh.<name>`, so those markers come back as ordinary files. Strip them

@@ -1105,7 +1105,7 @@ Two things came with it, both structural rather than incidental:
   used to be the client's own second prefix test is now just another
   declared entry sharing root 0's id.
 - **The ring wire carries the root.** Every path-carrying payload leads with
-  a `root:u32` (`aether_protocol::encode_path_req` and friends), and
+  a `root:u32` (the typed `Request` in `aether-protocol`), and
   `aether_ipc::layout::VERSION` went to 2 so a stale injected DLL speaking the
   old shape is refused at ring attach rather than having its first four path
   bytes read as a root id.
@@ -1426,7 +1426,7 @@ Nothing tested either branch. No fixture called `read_dir` or
 `write_seal.rs` ran in the uninjected harness against physical disk. The
 shim-level enumeration tests (`hook_direnum.rs`, `hook_enum_parity.rs`,
 `hook_relative_paths.rs`) install real detours but attach no director, and
-their fake director implements no `OP_READDIR`. The director-level `readdir`
+their fake director implements no `Opcode::ReadDir`. The director-level `readdir`
 tests are numerous and all positive-presence or de-duplication; none asserted
 that an unserved real file was absent.
 
@@ -1556,7 +1556,7 @@ itself, against the real filesystem, and unlinked the real file under the root.
 
 It is now hooked (`hook.rs::delete_hook`), and it decides on the path with the
 same machinery `create_hook`/`open_hook` use rather than a second predicate:
-`path_of_tracked` to decode, then `FuseClient::vpath_under_root` -> `OP_DELETE`,
+`path_of_tracked` to decode, then `FuseClient::vpath_under_root` -> `Opcode::Delete`,
 then `Engine::whiteout`, then `path_is_ours` as a fail-closed backstop. Outside
 every root it trampolines unchanged.
 
@@ -1565,7 +1565,7 @@ the bytes at the director differ per path:
 
 - `data/served.esp`: pre-hook the real file was unlinked and the
   director's copy was untouched. Now the director's copy is gone, the real file
-  still holds its host bytes, and the fake counts exactly one `OP_DELETE`.
+  still holds its host bytes, and the fake counts exactly one `Opcode::Delete`.
 - `data/unserved.bin`: real file on disk, not served by the director. Pre-hook
   it was unlinked. Now the delete fails and the file stays: the director's
   not-found is the caller's not-found, deletes included.
@@ -1606,7 +1606,7 @@ rename target whenever the class says rename, and refuses with
 `STATUS_ACCESS_DENIED` if `path_is_ours` claims it, regardless of where the
 source lives, and after the existing source-keyed arms have had their chance,
 so a legitimate within-root rename is unaffected. Refused rather than routed
-because there is no third option: `OP_RENAME` carries one root and two vpaths
+because there is no third option: `Opcode::Rename` carries one root and two vpaths
 under it, so the provider contract has no import-from-outside.
 
 Test: `rename_into_root_sealed.rs`, which asserts the destination is absent
@@ -1622,7 +1622,7 @@ for being a *distinct* assertion, not merely a failure:
 | reverted | failing assertion |
 | --- | --- |
 | `d_delete.enable()` | the real file under the root was deleted (both delete binaries) |
-| the `vpath_under_root`/`OP_DELETE` arm | *"the director accepted the delete, so the caller must see success"* — still contained by the backstop, no longer answered |
+| the `vpath_under_root`/`Opcode::Delete` arm | *"the director accepted the delete, so the caller must see success"* — still contained by the backstop, no longer answered |
 | the `Engine::whiteout` arm | *"the whiteout handled it"* — `0xC0000022` instead of success, and no whiteout marker |
 | the `path_is_ours` backstop | the root-directory delete returned `0x0` from the kernel |
 | the rename destination check | the imported file exists on real disk under the root |
@@ -1662,7 +1662,7 @@ A single `path_is_ours(source)` refusal after the existing arms closes the last
 two, and it is what makes the branch's rule statable in one sentence.
 
 **The director's refusals are also no longer flattened.** `delete_hook` mapped
-every `OP_DELETE` error to `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`). The
+every `Opcode::Delete` error to `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`). The
 delete-then-create idiom treats only `ERROR_FILE_NOT_FOUND` as benign, so a
 delete of a path the director does not have would stop callers a real filesystem
 lets straight through. `delete_status_for` now maps `ST_NOT_FOUND`,

@@ -214,7 +214,7 @@ pub(super) unsafe fn write_hook_body(
                 // SAFETY: NtWriteFile contract — buffer is readable for `length` bytes.
                 let slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, want) };
                 match crate::director::global()
-                    .ok_or(aether_protocol::ST_IO_ERROR)
+                    .ok_or(aether_protocol::Status::IoError)
                     .and_then(|c| c.write(fh, off, slice))
                 {
                     Ok(n) => n,
@@ -322,7 +322,7 @@ pub(super) unsafe fn read_hook_body(
                 };
                 match cached.ok_or(()).or_else(|()| {
                     crate::director::global()
-                        .ok_or(aether_protocol::ST_IO_ERROR)
+                        .ok_or(aether_protocol::Status::IoError.code())
                         .and_then(|c| c.read_fragmented(fh, off, slice))
                 }) {
                     Ok(n) => n,

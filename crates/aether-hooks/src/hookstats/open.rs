@@ -238,7 +238,7 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
     OUTCOME_COUNTS[outcome as usize].load(Ordering::Relaxed)
 }
 
-/// `OP_OPEN`s the shim issued that no [`OpenOutcome::Routed`] accounts for.
+/// `Opcode::Open`s the shim issued that no [`OpenOutcome::Routed`] accounts for.
 ///
 /// This exists to keep one specific invariant true. Four recorded sessions
 /// have used `routed == opens_ok + opens_err` (the director's own arrived-open
@@ -248,7 +248,7 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
 /// one place, which breaks the equality without any bypass existing: **the
 /// directory downgrade** (`hook/file_open.rs`), where a write-flavoured open of a
 /// directory is re-issued as a read open, so one `Routed` produces two
-/// `OP_OPEN`s. (The shim-local copy-up was the second such place, until task C8
+/// `Opcode::Open`s. (The shim-local copy-up was the second such place, until task C8
 /// removed it.)
 ///
 /// Counting them rather than tolerating them keeps the reconciliation exact:
@@ -272,7 +272,7 @@ pub(super) static UNROUTED_DIRECTOR_OPENS: AtomicU64 = AtomicU64::new(0);
 /// inequality.
 pub(crate) const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";
 
-/// Record an `OP_OPEN` the shim issued on its own behalf, or a re-issue of one
+/// Record an `Opcode::Open` the shim issued on its own behalf, or a re-issue of one
 /// already counted as `Routed`. See [`UNROUTED_DIRECTOR_OPENS`].
 pub(crate) fn note_unrouted_director_open() {
     if !enabled() {

@@ -106,7 +106,7 @@ pub fn final_dos_path(
 /// be listed.
 ///
 /// One listing per component. This is how the shim first answered a name
-/// query, and what the one-name lookup (`OP_STORED_NAMES`) replaced; it is
+/// query, and what the one-name lookup (`Opcode::StoredNames`) replaced; it is
 /// kept as the reference the lookup is tested and measured against.
 pub fn final_dos_path_by_listing(
     opened: &str,

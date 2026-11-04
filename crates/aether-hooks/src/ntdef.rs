@@ -29,7 +29,7 @@ pub(crate) const STATUS_OBJECT_PATH_NOT_FOUND: NTSTATUS = 0xC000_003Au32 as i32;
 
 /// `STATUS_ACCESS_DENIED` — maps to `ERROR_ACCESS_DENIED`. The honest NT
 /// answer when the provider graph serves a path but no layer of it accepts
-/// writes (`ST_READ_ONLY`), which is what a real read-only filesystem
+/// writes (`Status::ReadOnly`), which is what a real read-only filesystem
 /// returns for the same open.
 pub(crate) const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as i32;
 

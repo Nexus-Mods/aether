@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use aether_protocol::{ST_BAD_REQUEST, ST_EXISTS};
+use aether_protocol::Status;
 use aether_registry::path::{self, PathError};
 use aether_registry::Lookup;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
@@ -1167,13 +1167,13 @@ impl Key<'_> {
         match crate::regclient::create_key(&self.canonical, volatile) {
             Ok(()) => self.synthetic(None, REG_CREATED_NEW_KEY),
             // Another thread or process created it first: it exists now.
-            Err(ST_EXISTS) => match crate::regclient::lookup(&self.canonical) {
+            Err(Status::Exists) => match crate::regclient::lookup(&self.canonical) {
                 Ok((Lookup::Present { created }, _)) => self
                     .virtual_open(Some(created))
                     .unwrap_or_else(Outcome::fail),
                 _ => Outcome::fail(STATUS_UNSUCCESSFUL),
             },
-            Err(ST_BAD_REQUEST) => Outcome::fail(STATUS_INVALID_PARAMETER),
+            Err(Status::BadRequest) => Outcome::fail(STATUS_INVALID_PARAMETER),
             Err(_) => Outcome::fail(STATUS_UNSUCCESSFUL),
         }
     }

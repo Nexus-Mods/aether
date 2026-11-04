@@ -14,3 +14,4 @@ mod fakedirector;
 mod director_reads;
 mod drm_names_route_to_director;
 mod overlay_failure_reporting;
+mod wire_bytes;

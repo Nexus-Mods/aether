@@ -17,6 +17,7 @@ use aether_ntlayout::{
     dir_open_downgrades, disposition_information, disposition_needs_existence_probe,
     is_append_only, is_write_open, open_create_flags,
 };
+use aether_protocol::{OpenFlags, Status};
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
@@ -62,7 +63,7 @@ unsafe fn try_fuse_create(
     iosb: *mut c_void,
     write: bool,
     disposition: u32,
-    create_flags: u32,
+    create_flags: OpenFlags,
     append_only: bool,
     // Set to `true` when this call already recorded an `OpenOutcome` for the
     // physical open before returning `None`. Exactly one site does that — the
@@ -136,7 +137,7 @@ unsafe fn try_fuse_create(
         && dir_open_downgrades(disposition)
         && matches!(client.getattr(root, vp), Ok(a) if a.found && a.is_dir)
     {
-        // Second `OP_OPEN` for one `Routed`: the caller records the outcome
+        // Second `Opcode::Open` for one `Routed`: the caller records the outcome
         // once for this open, but the director's own arrived-open counter
         // sees two. Counted so the shim/director reconciliation stays an
         // exact equality — see `hookstats::UNROUTED_DIRECTOR_OPENS`.
@@ -199,7 +200,7 @@ unsafe fn try_fuse_create(
         // unseals the root wholesale (see `allow_disk_fallthrough`). A write used to fall
         // through to the (since removed) shim-local engine here; it no longer does.
         // See docs/shim-invariants.md, "Sealed root: statuses".
-        Err(st) if st == aether_protocol::ST_NOT_FOUND => {
+        Err(Status::NotFound) => {
             if allow_disk_fallthrough() {
                 // The root is unsealed by operator opt-in. A write really does
                 // fall through here, so it is still recorded as one — this is
@@ -216,13 +217,13 @@ unsafe fn try_fuse_create(
                 }
                 None
             } else if write {
-                // Two failures wear `ST_NOT_FOUND` on a write open, and NT distinguishes them:
-                // - a create (`OPEN_CREATE`) that no writable provider can serve is
+                // Two failures wear `Status::NotFound` on a write open, and NT distinguishes them:
+                // - a create (`OpenFlags::CREATE`) that no writable provider can serve is
                 //   `STATUS_OBJECT_PATH_NOT_FOUND`, as NTFS answers a create whose directory is
                 //   missing;
                 // - an open of an absent file is `STATUS_OBJECT_NAME_NOT_FOUND`, the same as the
                 //   read seal below, so the open-for-write-then-create idiom still works.
-                Some(if create_flags & aether_protocol::OPEN_CREATE != 0 {
+                Some(if create_flags.contains(OpenFlags::CREATE) {
                     STATUS_OBJECT_PATH_NOT_FOUND
                 } else {
                     STATUS_OBJECT_NAME_NOT_FOUND
@@ -231,23 +232,23 @@ unsafe fn try_fuse_create(
                 Some(STATUS_OBJECT_NAME_NOT_FOUND)
             }
         }
-        // `OPEN_EXCL` (CREATE_NEW / FILE_CREATE) against a path that already
+        // `OpenFlags::EXCL` (CREATE_NEW / FILE_CREATE) against a path that already
         // exists. Without this arm it fell into the generic `Err(_) if write`
         // guard below and fell through to the (since removed) shim-local overlay, which
         // *created the file there and reported success* — an exclusive
         // create silently "succeeding" against an existing file. Report the
         // real collision instead of falling through.
-        Err(st) if st == aether_protocol::ST_EXISTS => Some(STATUS_OBJECT_NAME_COLLISION),
+        Err(Status::Exists) => Some(STATUS_OBJECT_NAME_COLLISION),
         // Any other director error on a write, by cause:
-        // - `ST_READ_ONLY` (no `ReadWrite` provider serves the path) is `STATUS_ACCESS_DENIED`;
-        // - `ST_IS_DIR` (a file create aimed at a directory) is `STATUS_FILE_IS_A_DIRECTORY`;
+        // - `Status::ReadOnly` (no `ReadWrite` provider serves the path) is `STATUS_ACCESS_DENIED`;
+        // - `Status::IsDir` (a file create aimed at a directory) is `STATUS_FILE_IS_A_DIRECTORY`;
         // - anything else is `STATUS_UNSUCCESSFUL`, like the read side.
         // No `allow_disk_fallthrough` escape: that relaxes "the director does not have
         // this", never "the director failed".
         // See docs/shim-invariants.md, "Sealed root: statuses".
         Err(st) if write => Some(match st {
-            aether_protocol::ST_READ_ONLY => STATUS_ACCESS_DENIED,
-            aether_protocol::ST_IS_DIR => STATUS_FILE_IS_A_DIRECTORY,
+            Status::ReadOnly => STATUS_ACCESS_DENIED,
+            Status::IsDir => STATUS_FILE_IS_A_DIRECTORY,
             _ => STATUS_UNSUCCESSFUL,
         }),
         Err(_) => {
@@ -352,7 +353,7 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
     append_trace_line(path, &format!("director-open\tsize={size}"), &p);
 }
 
-/// Create a virtual directory under the managed root via the ring (`OP_MKDIR`),
+/// Create a virtual directory under the managed root via the ring (`Opcode::Mkdir`),
 /// then hand back a virtual directory handle. Only acts on directory opens
 /// (`FILE_DIRECTORY_FILE`) with a creating disposition (CREATE / OPEN_IF /
 /// OVERWRITE_IF); a plain FILE_OPEN of an existing dir is left to
@@ -384,7 +385,7 @@ unsafe fn try_fuse_mkdir(
     client.names_changed(root, &aether_casefold::fold(vp));
     match client.mkdir(root, vp, 0o755) {
         Ok(()) => {
-            // Synthesize a virtual directory handle directly — do NOT OP_OPEN the
+            // Synthesize a virtual directory handle directly — do NOT Opcode::Open the
             // new dir: the overlay opens paths as FileChannels, and a directory
             // open throws. fh=0 is never a real director handle, so the NtClose-time
             // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
@@ -413,7 +414,7 @@ unsafe fn try_fuse_mkdir(
         }
         // Parent missing → name-not-found (do not fall through to a real on-disk
         // mkdir under the root).
-        Err(st) if st == aether_protocol::ST_NOT_FOUND => Some(STATUS_OBJECT_NAME_NOT_FOUND),
+        Err(Status::NotFound) => Some(STATUS_OBJECT_NAME_NOT_FOUND),
         // mkdir failed — most often the directory already exists (the overlay
         // raises :already-exists, which the director has no dedicated status for and
         // reports as a generic error). Probe: if a directory is really there,
@@ -452,7 +453,7 @@ unsafe fn try_fuse_mkdir(
             // Not there, and refused because no writable layer serves the path
             // (a read-only root, the folder chain above a location): a
             // read-only filesystem's answer.
-            _ if st == aether_protocol::ST_READ_ONLY => Some(STATUS_ACCESS_DENIED),
+            _ if st == Status::ReadOnly => Some(STATUS_ACCESS_DENIED),
             _ => Some(STATUS_UNSUCCESSFUL),
         },
     }
@@ -598,7 +599,7 @@ unsafe fn route_open(
     // `aether_redirect::UncachedScope`'s doc comment.
     let _uncached_guard = os_consulted.then(aether_redirect::UncachedScope::enter);
 
-    // Directory create under the managed root → ring OP_MKDIR (must precede the
+    // Directory create under the managed root → ring Opcode::Mkdir (must precede the
     // generic file open below, which would otherwise create a FILE named as the
     // directory via the write-create path).
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -619,7 +620,7 @@ unsafe fn route_open(
     // fallback) for this open before returning `None` — see
     // `note_passthrough_outcome` for why that suppresses the recording below.
     let mut outcome_recorded = false;
-    // `open_create_flags(FILE_OPEN)` is 0: an open-only call never creates,
+    // `open_create_flags(FILE_OPEN)` is empty: an open-only call never creates,
     // truncates, or excludes.
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     if let Some(st) = unsafe {

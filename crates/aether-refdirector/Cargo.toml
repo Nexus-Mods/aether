@@ -1,0 +1,19 @@
+[package]
+name = "aether-refdirector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The fold names are matched by (docs/wire.md 3.2).
+aether-casefold.workspace = true
+aether-ipc.workspace = true
+aether-protocol.workspace = true
+# The registry overlay the registry opcodes are answered from.
+aether-registry.workspace = true
+aether-rpc.workspace = true
+
+[lints]
+workspace = true

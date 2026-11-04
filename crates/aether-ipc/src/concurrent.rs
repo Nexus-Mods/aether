@@ -24,10 +24,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
-use aether_protocol::{
-    decode_read_bulk_resp, decode_read_resp_into, encode_read_req, is_read_resp_bulk, ReadReq,
-    FLAG_READ_BULK, OP_READ, ST_BAD_REQUEST, ST_IO_ERROR, ST_OK,
-};
+use aether_protocol::{Opcode, ReadReply, Reply, Request, RequestFlags, Status};
 
 use crate::arena::DEFAULT_WORKER_COUNT;
 use crate::endpoint::RingClient;
@@ -608,7 +605,7 @@ pub fn read_fragmented<N: Notifier>(
                 rem.div_ceil(per).min(depth) as u32,
                 c.deadline(),
             )
-            .ok_or(ST_IO_ERROR)?;
+            .ok_or(Status::IoError.code())?;
 
         let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
         let mut wants: Vec<usize> = Vec::new();
@@ -624,16 +621,21 @@ pub fn read_fragmented<N: Notifier>(
             if chunk == 0 {
                 break;
             }
-            let flags = if bulk { FLAG_READ_BULK } else { 0 };
-            reqs.push((
-                OP_READ,
-                flags,
-                encode_read_req(&ReadReq {
-                    fh,
-                    offset: offset + batch_off as u64,
-                    len: chunk as u32,
-                }),
-            ));
+            let req = Request::Read {
+                slot_flags: if bulk {
+                    RequestFlags::READ_BULK
+                } else {
+                    RequestFlags::empty()
+                },
+                fh,
+                offset: offset + batch_off as u64,
+                len: chunk as u32,
+            };
+            // The held-slot path below takes owned payloads, so each request
+            // is encoded into a buffer of its own (one allocation, as before).
+            let mut payload = Vec::new();
+            req.encode(&mut payload);
+            reqs.push((req.opcode() as u32, req.flags(), payload));
             wants.push(chunk);
             batch_off += chunk;
         }
@@ -648,41 +650,42 @@ pub fn read_fragmented<N: Notifier>(
             // The director still has these: their permits stay out until it
             // is done with them.
             permits.retire(&u.retired);
-            ST_IO_ERROR
+            Status::IoError.code()
         })?;
 
         let mut batch_filled = 0usize;
         let mut eof = false;
         let mut copy_err: Option<i32> = None;
-        for (resp, want) in responses.iter().zip(wants.iter()) {
-            if resp.status != ST_OK {
+        for ((resp, want), (_, flags, _)) in responses.iter().zip(wants.iter()).zip(reqs.iter()) {
+            if resp.status != Status::Ok.code() {
                 copy_err = Some(resp.status);
                 break;
             }
             let frag_start = filled + batch_filled;
             let dest = &mut buf[frag_start..frag_start + *want];
-            let n = if is_read_resp_bulk(&resp.payload) {
-                let (bn, aoff) = match decode_read_bulk_resp(&resp.payload) {
-                    Some(x) => x,
-                    None => {
-                        copy_err = Some(ST_BAD_REQUEST);
+            // Decoded only after OK; an OK reply that does not decode is a
+            // bad request (`docs/wire.md` 3.1).
+            let n = match Reply::decode(Opcode::Read, *flags, &resp.payload) {
+                Ok(Reply::Read(ReadReply::Bulk {
+                    len: bn,
+                    arena_offset: aoff,
+                })) => {
+                    let n = (bn as usize).min(dest.len());
+                    // Shared arena → destination (one memcpy; not via ring).
+                    if n > 0 && seg.copy_to(aoff as usize, &mut dest[..n]).is_none() {
+                        copy_err = Some(Status::IoError.code());
                         break;
                     }
-                };
-                let n = (bn as usize).min(dest.len());
-                // Shared arena → destination (one memcpy; not via ring).
-                if n > 0 && seg.copy_to(aoff as usize, &mut dest[..n]).is_none() {
-                    copy_err = Some(ST_IO_ERROR);
-                    break;
+                    n
                 }
-                n
-            } else {
-                match decode_read_resp_into(&resp.payload, dest) {
-                    Some(n) => n,
-                    None => {
-                        copy_err = Some(ST_BAD_REQUEST);
-                        break;
-                    }
+                Ok(Reply::Read(ReadReply::Inline(data))) => {
+                    let n = data.len().min(dest.len());
+                    dest[..n].copy_from_slice(&data[..n]);
+                    n
+                }
+                _ => {
+                    copy_err = Some(Status::BadRequest.code());
+                    break;
                 }
             };
             batch_filled += n;
@@ -721,7 +724,6 @@ fn take_one(a: &AtomicU32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::OP_READ as L_OP_READ;
     use crate::seg::OwnedSeg;
 
     const LONG: Duration = Duration::from_secs(30);
@@ -909,7 +911,7 @@ mod tests {
 
         // A request the server took and the client then gave up on.
         let slot = ring::claim_free(seg, &geom).unwrap();
-        let id = ring::publish_request(seg, &geom, slot, L_OP_READ, 0, b"").unwrap();
+        let id = ring::publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"").unwrap();
         ring::server_take(seg, &geom).unwrap();
         let mut p = g.acquire((seg, &geom), 1, LONG).unwrap();
         assert_eq!(ring::abandon(seg, &geom, slot), Ok(ring::Abandon::Retired));
@@ -952,7 +954,7 @@ mod tests {
         for _ in 0..2 {
             let slot = ring::claim_free(seg, &geom).unwrap();
             assert_eq!(slot, 0);
-            let id = ring::publish_request(seg, &geom, slot, L_OP_READ, 0, b"").unwrap();
+            let id = ring::publish_request(seg, &geom, slot, Opcode::Read as u32, 0, b"").unwrap();
             ring::server_take(seg, &geom).unwrap();
             let mut p = g.acquire((seg, &geom), 1, LONG).unwrap();
             ring::abandon(seg, &geom, slot).unwrap();

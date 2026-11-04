@@ -1,205 +1,45 @@
 //! Wire freeze: fixed inputs must encode to exactly the bytes in
-//! `golden/vectors.txt` (one `name hex` line per vector).
+//! `golden/vectors.txt` (one `name hex` line per vector). Every ring message
+//! among them is built as a typed `Request` or `Reply` (`common/mod.rs`) and
+//! encoded by the protocol table.
 //!
 //! The file is the contract with the injected shim. If an encoder changes on
 //! purpose, bump the ring `VERSION` where the layout changed, then regenerate
 //! with `GOLDEN_UPDATE=1 cargo test -p aether-protocol --test golden` and review
 //! the diff (the update run itself fails, by design, so it cannot pass in CI). A changed existing line is a wire break.
 
-use aether_protocol as P;
-use aether_protocol::shimcfg::{decode_config, encode_config, encode_config_full, StaticImport};
-use aether_protocol::{AttrResp, DirEntryWire, OpenResp, ReadReq, SetattrReq, WriteReq};
-use aether_registry::{Child, Node, Value};
+mod common;
+
+use aether_protocol::shimcfg::{decode_config, StaticImport};
+use aether_protocol::{
+    AttrResp, Lookup, LookupReply, Opcode, OpenFlags, OpenResp, ReadReply, Reply, Request,
+    RequestFlags, RootId,
+};
+use common::{sample_node, Msg};
 use std::fmt::Write as _;
 
-fn sample_node() -> Node {
-    let mut n = Node {
-        values: vec![
-            Value {
-                name: "Path".into(),
-                ty: 1,
-                data: vec![1, 2, 3],
-            },
-            Value {
-                name: String::new(),
-                ty: 4,
-                data: vec![],
-            },
-        ],
-        value_tombstones: vec!["gone".into()],
-        created: true,
-        volatile: true,
-        last_write: 0x0123_4567_89ab_cdef,
-        ..Node::default()
-    };
-    n.children
-        .insert("sub".into(), ("Sub".into(), Child::Present));
-    n.children
-        .insert("dead".into(), ("Dead".into(), Child::Tombstone));
-    n
+fn vectors() -> Vec<(&'static str, Vec<u8>)> {
+    common::vectors()
+        .into_iter()
+        .map(|(name, m)| (name, m.bytes()))
+        .collect()
 }
 
-fn vectors() -> Vec<(&'static str, Vec<u8>)> {
-    vec![
-        (
-            "shim-config-v2-root-runtime",
-            encode_config(r"C:\GameLayers\runtime"),
-        ),
-        (
-            "open-req-read-skyrim",
-            P::encode_open_req(0, P::OPEN_READ, "Data/Skyrim.esm"),
-        ),
-        (
-            "getattr-resp-file-123",
-            P::encode_getattr_resp(&AttrResp {
-                found: true,
-                is_dir: false,
-                size: 123,
-                mtime: -7,
-            }),
-        ),
-        (
-            "read-req-fh7-off10-len4",
-            P::encode_read_req(&ReadReq {
-                fh: 7,
-                offset: 10,
-                len: 4,
-            }),
-        ),
-        ("read-resp-abcd", P::encode_read_resp(b"abcd")),
-        (
-            "readdir-resp-two",
-            P::encode_readdir_resp(&[
-                DirEntryWire {
-                    name: "a.esp".into(),
-                    is_dir: false,
-                    size: 10,
-                    mtime: 1,
-                },
-                DirEntryWire {
-                    name: "sub".into(),
-                    is_dir: true,
-                    size: 0,
-                    mtime: 0,
-                },
-            ]),
-        ),
-        ("close-req-99", P::encode_close_req(99)),
-        (
-            "open-resp-fh42-size1000",
-            P::encode_open_resp(&OpenResp {
-                fh: 42,
-                size: 1000,
-                ..Default::default()
-            }),
-        ),
-        (
-            "read-resp-bulk-len5-off65536",
-            P::encode_read_resp_bulk(5, 65536),
-        ),
-        (
-            "write-req-fh7-off10-abc",
-            P::encode_write_req(
-                &WriteReq {
-                    fh: 7,
-                    offset: 10,
-                    len: 3,
-                },
-                b"abc",
+/// Every typed vector decodes back to the value it was encoded from.
+#[test]
+fn golden_vectors_decode_to_their_typed_values() {
+    for (name, m) in common::vectors() {
+        let bytes = m.bytes();
+        match m {
+            Msg::Req(r) => assert_eq!(
+                Request::decode(r.opcode(), r.flags(), &bytes),
+                Ok(r),
+                "{name}"
             ),
-        ),
-        ("write-resp-3", P::encode_write_resp(3)),
-        (
-            "mkdir-req-mode493-dir",
-            P::encode_mkdir_req(0, 493, "sub/dir"),
-        ),
-        (
-            "rename-req-a-b",
-            P::encode_rename_req(0, "old.txt", "new.txt"),
-        ),
-        (
-            "setattr-req-fh5-size100",
-            P::encode_setattr_req(&SetattrReq { fh: 5, size: 100 }),
-        ),
-        ("ring-header-slots4-cap256", {
-            use aether_ipc::seg::OwnedSeg;
-            let owned = OwnedSeg::new(4096);
-            aether_ipc::ring::init(owned.seg(), 4, 256).unwrap();
-            owned
-                .seg()
-                .read_bytes(0, aether_ipc::layout::RING_HEADER_SIZE)
-                .unwrap()
-        }),
-        // Added with the descriptor's removal: the flags, stored names,
-        // shim-config extras and every registry codec.
-        (
-            "open-resp-immutable-gen-0xa1b2c3d4",
-            P::encode_open_resp(&OpenResp {
-                fh: 42,
-                size: 1000,
-                is_dir: false,
-                immutable: true,
-                mount_gen: 0xA1B2_C3D4,
-            }),
-        ),
-        ("path-req-root1-a", P::encode_path_req(1, "a")),
-        (
-            "names-req-root2-skip1",
-            P::encode_names_req(2, 1, "Data/Textures"),
-        ),
-        (
-            "names-resp-two",
-            P::encode_names_resp(&["Data".to_string(), "Skyrim.esm".to_string()]),
-        ),
-        (
-            "shim-config-v2-one-static-import",
-            encode_config_full(
-                r"C:\GameLayers\runtime",
-                &[StaticImport {
-                    dll_name: "d3d11.dll".into(),
-                    backing_path: r"C:\GameLayers\d3d11.dll".into(),
-                }],
-            ),
-        ),
-        (
-            "reg-path",
-            P::encode_reg_path(r"\Registry\Machine\Software"),
-        ),
-        (
-            "reg-set-value",
-            P::encode_reg_set_value(r"\Registry\Machine\Software", "Name", 3, &[9, 8, 7]),
-        ),
-        (
-            "reg-delete-value",
-            P::encode_reg_delete_value(r"\Registry\Machine\Software", "Name"),
-        ),
-        (
-            "reg-create-key-volatile",
-            P::encode_reg_create_key(r"\Registry\Machine\Software", true),
-        ),
-        (
-            "reg-rename-key",
-            P::encode_reg_rename_key(r"\Registry\Machine\Software", "Other"),
-        ),
-        (
-            "reg-changed-subtree-since77",
-            P::encode_reg_changed(r"\Registry\Machine", true, 77),
-        ),
-        (
-            "reg-changed-reply-true-5",
-            P::encode_reg_changed_reply(true, 5),
-        ),
-        ("reg-version-reply-9", P::encode_reg_version_reply(9)),
-        (
-            "reg-lookup-reply-state1-below-42",
-            P::encode_reg_lookup_reply(1, true, 42),
-        ),
-        ("reg-key-reply-none-13", P::encode_reg_key_reply(None, 13)),
-        (
-            "reg-key-reply-sample-node-12",
-            P::encode_reg_key_reply(Some(&sample_node()), 12),
-        ),
-    ]
+            Msg::Rep(op, r) => assert_eq!(Reply::decode(op, 0, &bytes), Ok(r), "{name}"),
+            Msg::Raw(_) => {}
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -251,46 +91,59 @@ fn golden_bytes_decode_to_their_inputs() {
             .map(|i| u8::from_str_radix(&l[2 * i..2 * i + 2], 16).unwrap())
             .collect()
     };
+    let req =
+        |op: Opcode, name: &str| Request::decode(op, 0, &line(name)).map(|r| format!("{r:?}"));
+    let rep = |op: Opcode, name: &str| Reply::decode(op, 0, &line(name)).map(|r| format!("{r:?}"));
+    let dbg = |v: &dyn std::fmt::Debug| Ok(format!("{v:?}"));
     assert_eq!(
-        P::decode_open_req(&line("open-req-read-skyrim")),
-        Some((0, P::OPEN_READ, "Data/Skyrim.esm".to_string()))
+        req(Opcode::Open, "open-req-read-skyrim"),
+        dbg(&Request::Open {
+            root: RootId(0),
+            flags: OpenFlags::READ,
+            path: "Data/Skyrim.esm"
+        })
     );
     assert_eq!(
-        P::decode_getattr_resp(&line("getattr-resp-file-123")),
-        Some(AttrResp {
+        rep(Opcode::GetAttr, "getattr-resp-file-123"),
+        dbg(&Reply::GetAttr(AttrResp {
             found: true,
             is_dir: false,
             size: 123,
             mtime: -7
-        })
+        }))
     );
     assert_eq!(
-        P::decode_read_req(&line("read-req-fh7-off10-len4")),
-        Some(ReadReq {
+        req(Opcode::Read, "read-req-fh7-off10-len4"),
+        dbg(&Request::Read {
+            slot_flags: RequestFlags::empty(),
             fh: 7,
             offset: 10,
             len: 4
         })
     );
     assert_eq!(
-        P::decode_read_resp(&line("read-resp-abcd")),
-        Some(b"abcd".to_vec())
+        rep(Opcode::Read, "read-resp-abcd"),
+        dbg(&Reply::Read(ReadReply::Inline(b"abcd")))
     );
+    let two = line("readdir-resp-two");
+    assert!(matches!(
+        Reply::decode(Opcode::ReadDir, 0, &two),
+        Ok(Reply::ReadDir(l)) if l.len() == 2
+    ));
     assert_eq!(
-        P::decode_readdir_resp(&line("readdir-resp-two")).map(|v| v.len()),
-        Some(2)
+        req(Opcode::Close, "close-req-99"),
+        dbg(&Request::Close { fh: 99 })
     );
-    assert_eq!(P::decode_close_req(&line("close-req-99")), Some(99));
-    assert_eq!(P::decode_write_resp(&line("write-resp-3")), Some(3));
+    assert_eq!(rep(Opcode::Write, "write-resp-3"), dbg(&Reply::Write(3)));
     assert_eq!(
-        P::decode_open_resp(&line("open-resp-immutable-gen-0xa1b2c3d4")),
-        Some(OpenResp {
+        rep(Opcode::Open, "open-resp-immutable-gen-0xa1b2c3d4"),
+        dbg(&Reply::Open(OpenResp {
             fh: 42,
             size: 1000,
             is_dir: false,
             immutable: true,
             mount_gen: 0xA1B2_C3D4
-        })
+        }))
     );
     let cfg = decode_config(&line("shim-config-v2-one-static-import")).unwrap();
     assert_eq!(cfg.root, r"C:\GameLayers\runtime");
@@ -302,23 +155,44 @@ fn golden_bytes_decode_to_their_inputs() {
         }]
     );
     assert_eq!(
-        P::decode_names_req(&line("names-req-root2-skip1")),
-        Some((2, 1, "Data/Textures".to_string()))
+        req(Opcode::StoredNames, "names-req-root2-skip1"),
+        dbg(&Request::StoredNames {
+            root: RootId(2),
+            skip: 1,
+            path: "Data/Textures"
+        })
     );
     assert_eq!(
-        P::decode_reg_set_value(&line("reg-set-value")),
-        Some((r"\Registry\Machine\Software", "Name", 3, &[9u8, 8, 7][..]))
+        req(Opcode::RegSetValue, "reg-set-value"),
+        dbg(&Request::RegSetValue {
+            path: r"\Registry\Machine\Software",
+            name: "Name",
+            ty: 3,
+            data: &[9, 8, 7]
+        })
+    );
+    let key = line("reg-key-reply-sample-node-12");
+    let Ok(Reply::RegKey(k)) = Reply::decode(Opcode::RegKey, 0, &key) else {
+        panic!("a REG_KEY reply");
+    };
+    assert_eq!(
+        (k.node.map(std::borrow::Cow::into_owned), k.version),
+        (Some(sample_node()), 12)
     );
     assert_eq!(
-        P::decode_reg_key_reply(&line("reg-key-reply-sample-node-12")),
-        Some((Some(sample_node()), 12))
+        rep(Opcode::RegLookup, "reg-lookup-reply-state1-below-42"),
+        dbg(&Reply::RegLookup(LookupReply {
+            version: 42,
+            state: Lookup::Present { created: false },
+            below: true
+        }))
     );
     assert_eq!(
-        P::decode_reg_lookup_reply(&line("reg-lookup-reply-state1-below-42")),
-        Some((1, true, 42))
-    );
-    assert_eq!(
-        P::decode_reg_changed(&line("reg-changed-subtree-since77")),
-        Some((r"\Registry\Machine", true, 77))
+        req(Opcode::RegChanged, "reg-changed-subtree-since77"),
+        dbg(&Request::RegChanged {
+            path: r"\Registry\Machine",
+            subtree: true,
+            since: 77
+        })
     );
 }

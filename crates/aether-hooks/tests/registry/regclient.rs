@@ -16,10 +16,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use aether_hooks::regclient::{self, RegClient};
-use aether_protocol::{
-    OP_REG_KEY, OP_REG_LOOKUP, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR,
-    ST_NOT_SUPPORTED, ST_REPLY_TOO_LARGE,
-};
+use aether_protocol::{Opcode, Status};
 use aether_registry::{Child, Lookup};
 use fakedirector::Fake;
 
@@ -94,7 +91,7 @@ fn every_call_round_trips() {
         regclient::lookup(&sub),
         Ok((Lookup::Present { created: true }, false))
     );
-    assert_eq!(regclient::create_key(&sub, false), Err(ST_EXISTS));
+    assert_eq!(regclient::create_key(&sub, false), Err(Status::Exists));
 
     regclient::rename_key(&sub, "Renamed").unwrap();
     assert_eq!(regclient::lookup(&sub), Ok((Lookup::Tombstoned, false)));
@@ -135,12 +132,20 @@ fn a_write_by_another_process_invalidates_every_cache() {
     assert_eq!(a.lookup(&k), Ok((Lookup::Absent, false)));
     assert_eq!(a.key(&k), Ok(None));
     assert_eq!(a.key(&k), Ok(None));
-    assert_eq!(reqs(OP_REG_LOOKUP), 1, "the second lookup was a cache hit");
-    assert_eq!(reqs(OP_REG_KEY), 1, "the second key read was a cache hit");
+    assert_eq!(
+        reqs(Opcode::RegLookup),
+        1,
+        "the second lookup was a cache hit"
+    );
+    assert_eq!(
+        reqs(Opcode::RegKey),
+        1,
+        "the second key read was a cache hit"
+    );
     // The other process caches its own answers.
     assert_eq!(b.key(&k), Ok(None));
     assert_eq!(b.key(&k), Ok(None));
-    assert_eq!(reqs(OP_REG_KEY), 2);
+    assert_eq!(reqs(Opcode::RegKey), 2);
 
     // B writes; A's next read asks again and sees it.
     b.set_value(&k, "Fov", REG_DWORD, &90u32.to_le_bytes())
@@ -151,11 +156,11 @@ fn a_write_by_another_process_invalidates_every_cache() {
         a.lookup(&k),
         Ok((Lookup::Present { created: false }, false))
     );
-    assert_eq!(reqs(OP_REG_KEY), 3);
-    assert_eq!(reqs(OP_REG_LOOKUP), 2);
+    assert_eq!(reqs(Opcode::RegKey), 3);
+    assert_eq!(reqs(Opcode::RegLookup), 2);
     // ... and caches the new answer.
     a.key(&k).unwrap();
-    assert_eq!(reqs(OP_REG_KEY), 3);
+    assert_eq!(reqs(Opcode::RegKey), 3);
 
     // And the other way round: A writes, B's cached answer is not used.
     assert_eq!(b.key(&k).unwrap().unwrap().values.len(), 1);
@@ -165,7 +170,7 @@ fn a_write_by_another_process_invalidates_every_cache() {
     assert!(a.key(&k).unwrap().unwrap().values.is_empty());
 }
 
-/// A director with no registry layer answers `ST_NOT_SUPPORTED`: reads and writes fail, and an
+/// A director with no registry layer answers `Status::NotSupported`: reads and writes fail, and an
 /// answer cached while the layer was attached is not served after it is detached.
 #[test]
 fn no_registry_layer_fails_reads_and_writes() {
@@ -191,14 +196,14 @@ fn no_registry_layer_fails_reads_and_writes() {
     let fallbacks = aether_hooks::reg_read_fallback_count() - fallbacks;
     f.fake.attach_registry();
 
-    assert_eq!(result.0, Err(ST_NOT_SUPPORTED), "lookup");
-    assert_eq!(result.1, Err(ST_NOT_SUPPORTED), "key");
-    assert_eq!(result.2, Err(ST_NOT_SUPPORTED), "set_value");
-    assert_eq!(result.3, Err(ST_NOT_SUPPORTED), "delete_value");
-    assert_eq!(result.4, Err(ST_NOT_SUPPORTED), "create_key");
-    assert_eq!(result.5, Err(ST_NOT_SUPPORTED), "delete_key");
-    assert_eq!(result.6, Err(ST_NOT_SUPPORTED), "rename_key");
-    assert_eq!(result.7, Err(ST_NOT_SUPPORTED), "changed");
+    assert_eq!(result.0, Err(Status::NotSupported), "lookup");
+    assert_eq!(result.1, Err(Status::NotSupported), "key");
+    assert_eq!(result.2, Err(Status::NotSupported), "set_value");
+    assert_eq!(result.3, Err(Status::NotSupported), "delete_value");
+    assert_eq!(result.4, Err(Status::NotSupported), "create_key");
+    assert_eq!(result.5, Err(Status::NotSupported), "delete_key");
+    assert_eq!(result.6, Err(Status::NotSupported), "rename_key");
+    assert_eq!(result.7, Err(Status::NotSupported), "changed");
     assert_eq!(fallbacks, 2, "both failed reads counted as fallbacks");
 
     // Reattached, the same layer answers again.
@@ -217,7 +222,7 @@ fn a_key_too_large_for_the_ring_is_a_read_failure() {
         regclient::set_value(&k, name, 3, &[0x5a; 1500]).unwrap();
     }
     let fallbacks = aether_hooks::reg_read_fallback_count();
-    assert_eq!(regclient::key(&k), Err(ST_REPLY_TOO_LARGE));
+    assert_eq!(regclient::key(&k), Err(Status::ReplyTooLarge));
     assert_eq!(aether_hooks::reg_read_fallback_count() - fallbacks, 1);
     // The lookup is small and still answers.
     assert_eq!(
@@ -236,19 +241,22 @@ fn a_dead_director_fails_reads_and_writes() {
     let c = RegClient::new(&dead);
     let k = key_path("Dead");
     let fallbacks = aether_hooks::reg_read_fallback_count();
-    assert_eq!(c.lookup(&k), Err(ST_IO_ERROR));
-    assert_eq!(c.key(&k), Err(ST_IO_ERROR));
+    assert_eq!(c.lookup(&k), Err(Status::IoError));
+    assert_eq!(c.key(&k), Err(Status::IoError));
     assert_eq!(aether_hooks::reg_read_fallback_count() - fallbacks, 2);
-    assert_eq!(c.set_value(&k, "v", REG_DWORD, &[0; 4]), Err(ST_IO_ERROR));
-    assert_eq!(c.delete_value(&k, "v"), Err(ST_IO_ERROR));
-    assert_eq!(c.create_key(&k, false), Err(ST_IO_ERROR));
-    assert_eq!(c.delete_key(&k), Err(ST_IO_ERROR));
-    assert_eq!(c.rename_key(&k, "Other"), Err(ST_IO_ERROR));
-    assert_eq!(c.changed(&k, false, 0), Err(ST_IO_ERROR));
+    assert_eq!(
+        c.set_value(&k, "v", REG_DWORD, &[0; 4]),
+        Err(Status::IoError)
+    );
+    assert_eq!(c.delete_value(&k, "v"), Err(Status::IoError));
+    assert_eq!(c.create_key(&k, false), Err(Status::IoError));
+    assert_eq!(c.delete_key(&k), Err(Status::IoError));
+    assert_eq!(c.rename_key(&k, "Other"), Err(Status::IoError));
+    assert_eq!(c.changed(&k, false, 0), Err(Status::IoError));
 }
 
 /// A write whose request cannot fit one ring payload is refused by the client with
-/// `ST_BAD_REQUEST` and never sent; one that exactly fits is sent and applied.
+/// `Status::BadRequest` and never sent; one that exactly fits is sent and applied.
 #[test]
 fn a_request_too_large_for_the_ring_is_refused_unsent() {
     isolate!();
@@ -259,9 +267,16 @@ fn a_request_too_large_for_the_ring_is_refused_unsent() {
     let fits = vec![0x11u8; fakedirector::PAYLOAD_CAP as usize - overhead];
     let over = vec![0x22u8; fits.len() + 1];
 
-    assert_eq!(regclient::set_value(&k, "v", 3, &over), Err(ST_BAD_REQUEST));
-    assert_eq!(f.fake.tally.reg(OP_REG_SET_VALUE, &k), 0, "never submitted");
+    assert_eq!(
+        regclient::set_value(&k, "v", 3, &over),
+        Err(Status::BadRequest)
+    );
+    assert_eq!(
+        f.fake.tally.reg(Opcode::RegSetValue, &k),
+        0,
+        "never submitted"
+    );
 
     regclient::set_value(&k, "v", 3, &fits).unwrap();
-    assert_eq!(f.fake.tally.reg(OP_REG_SET_VALUE, &k), 1);
+    assert_eq!(f.fake.tally.reg(Opcode::RegSetValue, &k), 1);
 }

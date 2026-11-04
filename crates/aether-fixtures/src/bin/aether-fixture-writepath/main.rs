@@ -223,7 +223,7 @@ fn main() {
     drop(f);
     println!("WRITEPATH FIXTURE OK: same-handle write-then-read round-tripped");
 
-    // 9. CREATE_NEW (OPEN_EXCL) exclusivity. The first create-new against a
+    // 9. CREATE_NEW (OpenFlags::EXCL) exclusivity. The first create-new against a
     // fresh path must succeed; a second create-new against the now-existing
     // path must fail. Before the fix, the director's write-open error for an
     // existing path had no distinct status, so the shim treated it like any

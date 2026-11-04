@@ -224,20 +224,22 @@ pub(super) fn render_fills(snap: &Snapshot) -> String {
 pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
 
 /// Deletes on close the director refused: a handle opened with `FILE_DELETE_ON_CLOSE` was
-/// closed, `OP_DELETE` for its path failed (a read-only layer, a provider error, a director that
+/// closed, `Opcode::Delete` for its path failed (a read-only layer, a provider error, a director that
 /// is gone), and the file stayed. `NtClose` cannot report it — Wine's `DeleteFileW` returns
 /// TRUE regardless — so this is the only record. The total is counted whether or not stats are
 /// on; the paths only when they are.
 pub(super) static DELETE_ON_CLOSE_REFUSED: AtomicU64 = AtomicU64::new(0);
 pub(super) static DELETE_ON_CLOSE_REFUSED_PATHS: BoundedTally<String> = BoundedTally::new(2000);
 
-/// A delete-on-close of `path` was refused by the director with `status`.
-pub(crate) fn note_delete_on_close_refused(path: &str, status: i32) {
+/// A delete-on-close of `path` was refused by the director with the status
+/// word `code`: the number the director sent, whether or not the table has it
+/// (`director::wire_code`).
+pub(crate) fn note_delete_on_close_refused(path: &str, code: i32) {
     DELETE_ON_CLOSE_REFUSED.fetch_add(1, Ordering::Relaxed);
     if !enabled() {
         return;
     }
-    DELETE_ON_CLOSE_REFUSED_PATHS.add(format!("{path} (status {status})"));
+    DELETE_ON_CLOSE_REFUSED_PATHS.add(delete_on_close_refused_entry(path, code));
     note_trace("delete-on-close", path, "REFUSED");
 }
 
@@ -253,6 +255,11 @@ pub(crate) fn note_link_refused(path: &str) {
         return;
     }
     note_trace("link", path, "REFUSED");
+}
+
+/// The refused-paths entry for a delete-on-close of `path` refused with `code`.
+pub(crate) fn delete_on_close_refused_entry(path: &str, code: i32) -> String {
+    format!("{path} (status {code})")
 }
 
 /// How many hard links the shim has refused so far.
@@ -406,7 +413,7 @@ pub(super) static READDIRS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// visible in the report rather than only in the bytes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReadDirSource {
-    /// The director's own `OP_READDIR` answered. Authoritative and unmerged:
+    /// The director's own `Opcode::ReadDir` answered. Authoritative and unmerged:
     /// nothing from the real filesystem can appear in it.
     Director,
     /// A tracked directory the director could not be asked about: its client

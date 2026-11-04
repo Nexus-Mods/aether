@@ -30,7 +30,7 @@
 use core::ffi::c_void;
 use std::collections::HashSet;
 
-use aether_protocol::{ST_BAD_REQUEST, ST_EXISTS, ST_NOT_FOUND};
+use aether_protocol::Status;
 use aether_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
 use aether_registry::path::{self, fold};
 use aether_registry::{merge, utf16_len, Child, KeyView, Lookup, Node, Value};
@@ -93,14 +93,14 @@ fn live(t: &KeyRef) -> Result<Lookup, NTSTATUS> {
 }
 
 /// A director write's failure as the NT status the caller gets (spec section 6).
-fn write_status(st: i32) -> NTSTATUS {
+fn write_status(st: Status) -> NTSTATUS {
     match st {
         // Over the spec's limits (oversize data, a bad name).
-        ST_BAD_REQUEST => STATUS_INVALID_PARAMETER,
+        Status::BadRequest => STATUS_INVALID_PARAMETER,
         // The key is tombstoned (a delete raced this write).
-        ST_NOT_FOUND => STATUS_KEY_DELETED,
+        Status::NotFound => STATUS_KEY_DELETED,
         // A name that exists (rename, create).
-        ST_EXISTS => STATUS_CANNOT_DELETE,
+        Status::Exists => STATUS_CANNOT_DELETE,
         _ => STATUS_UNSUCCESSFUL,
     }
 }
@@ -515,10 +515,10 @@ unsafe fn copy_rename(real: &Real, t: &KeyRef, dest: &str) -> Result<(), NTSTATU
     match regclient::create_key(dest, root.volatile) {
         Ok(()) => {}
         // Someone created the name since it was checked: nothing of ours is there.
-        Err(ST_EXISTS) => return Err(STATUS_CANNOT_DELETE),
+        Err(Status::Exists) => return Err(STATUS_CANNOT_DELETE),
         Err(st) => return Err(write_status(st)),
     }
-    let write = || -> Result<(), i32> {
+    let write = || -> Result<(), Status> {
         for (i, c) in tree.iter().enumerate() {
             let p = format!("{dest}{}", c.rel);
             if i != 0 {
@@ -647,13 +647,10 @@ mod tests {
 
     #[test]
     fn director_failures_map_to_nt_statuses() {
-        assert_eq!(write_status(ST_BAD_REQUEST), STATUS_INVALID_PARAMETER);
-        assert_eq!(write_status(ST_NOT_FOUND), STATUS_KEY_DELETED);
-        assert_eq!(write_status(ST_EXISTS), STATUS_CANNOT_DELETE);
-        assert_eq!(
-            write_status(aether_protocol::ST_IO_ERROR),
-            STATUS_UNSUCCESSFUL
-        );
+        assert_eq!(write_status(Status::BadRequest), STATUS_INVALID_PARAMETER);
+        assert_eq!(write_status(Status::NotFound), STATUS_KEY_DELETED);
+        assert_eq!(write_status(Status::Exists), STATUS_CANNOT_DELETE);
+        assert_eq!(write_status(Status::IoError), STATUS_UNSUCCESSFUL);
     }
 
     /// A [`KeyRead`] over an overlay alone: every key's node, and no real keys.

@@ -378,7 +378,7 @@ honours `VFS_RING_PATH` on Windows too.
 
 ### 2.10 Linux under Wine: a file both sides map
 
-Source: `crates/aether-unix/src/mapping.rs`, `crates/aether-win/src/mapping.rs`
+Source: `crates/aether-filering/src/lib.rs` (`FileRing`), `crates/aether-win/src/mapping.rs`
 (`open_file_backed`), `crates/aether-hooks/src/director.rs` (`ring_source`).
 
 A page-file section has no identity outside one Windows (or Wine) session, so a
@@ -387,7 +387,7 @@ native Linux director and a shim under Wine share a file:
 - The director creates the file, grows it to at least the map size before
   mapping it (an `mmap` past end of file faults on touch), never shrinks an
   existing file, and maps it `MAP_SHARED`, `PROT_READ | PROT_WRITE`. The Rust
-  `FileMapping::create` reuses an existing file grow-only; Cairn deletes and
+  `FileRing::create` reuses an existing file grow-only; Cairn deletes and
   recreates it (`ring/backing.clj`) so a stale reader keeps the old inode.
 - The shim opens `VFS_RING_PATH` with `CreateFileW(FILE_GENERIC_READ |
   FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)`, refuses
@@ -456,14 +456,14 @@ then fails to decode is treated as `ST_BAD_REQUEST`
 
 ### 3.2 Shared encodings
 
-Source: `crates/aether-protocol/src/lib.rs`, `crates/aether-protocol/src/wire.rs`.
+Source: `crates/aether-protocol/src/field.rs`, `crates/aether-protocol/src/wire.rs`.
 
 **Root ids.** A session has several managed roots, each a `u32` id. Root 0 is
 `VFS_VIRTUAL_DIR`; others come from `VFS_VIRTUAL_ROOTS` (section 5.3). Every
 path-carrying file request starts with the root it addresses. Handle-keyed
 requests (READ, WRITE, SETATTR, CLOSE) carry no root: the handle implies it.
 
-**Path request** (`encode_path_req`), used by GETATTR, READDIR, DELETE,
+**Path request** (`Request`'s `root` and `path`), used by GETATTR, READDIR, DELETE,
 STAGE_EXEC:
 
 | Offset | Size | Type | Field |
@@ -550,14 +550,14 @@ differed on anything else, so a client must not rely on it:
   except that its OPEN refuses, with `ST_BAD_REQUEST`, a path that starts
   with `/` or `\` or contains `\` at all (`ring.clj`, `wellformed?`).
 
-**Booleans.** In file-op replies a flag byte is read as `!= 0` (`Rd::flag`). In
-registry messages a boolean must be exactly 0 or 1 (`Rd::bool`).
+**Booleans.** In file-op replies a flag byte is read as `!= 0` (`Flag` in
+`field.rs`). In registry messages a boolean must be exactly 0 or 1 (`Bool`).
 
 **Lenient vs strict.** The file-op decoders ignore trailing bytes after the
 fields they read. Separately, the final `pad:u32` of a READ request is
-optional: `decode_read_req` stops after `len`, so a 20-byte READ decodes
-(`crates/aether-protocol/src/lib.rs`). WRITE's pad is **not** optional:
-`decode_write_req` reads it before the data, so a WRITE must have its 24-byte
+optional: `Request::decode` stops after READ's `len`, so a 20-byte READ decodes
+(`PadAfter` in `crates/aether-protocol/src/field.rs`). WRITE's pad is **not**
+optional: WRITE's `LenPadBytes` reads it before the data, so a WRITE must have its 24-byte
 header. The registry decoders reject trailing bytes, truncation, bad UTF-8
 and out-of-range values.
 
@@ -567,8 +567,46 @@ means "no time" and the shim substitutes 2024-01-01T00:00:00Z
 
 ### 3.3 Opcode table
 
-Source: `crates/aether-protocol/src/lib.rs` (`OP_*`, `OPCODES`,
-`wire_numbers_are_the_historical_ones`). Numbers are never renumbered.
+Source: the protocol table in `crates/aether-protocol/src/table.rs` (`Opcode`,
+`Opcode::ALL`). Numbers are never renumbered. The table is also published as data,
+`contract/protocol.json`: every opcode with its request and reply fields in
+wire order (padding included, as `pad` entries), strictness, the statuses and
+the flag bits, generated from the table by `aether_protocol::contract_json()`
+and checked equal by `crates/aether-protocol/tests/contract.rs`
+(`UPDATE_CONTRACT=1` rewrites it). It is the machine-readable form of the
+layouts below, for building a director's tables in another language.
+
+The file defines its own field types, so it can be read without this
+document. Its `"types"` section gives each field type's wire form, and
+`"attributes"` the keys a field may carry besides `name` and `type`; both are
+generated from the code, and the types are:
+
+| Type | Wire form |
+|---|---|
+| `u32` | little-endian unsigned 32-bit integer |
+| `u64` | little-endian unsigned 64-bit integer |
+| `i64` | little-endian signed 64-bit integer |
+| `root_id` | u32, a root's id |
+| `open_flags` | u32 of the open_flags masks |
+| `bool` | one byte, exactly 0 or 1 (a decoder refuses others) |
+| `bool_lenient` | one byte, written 0 or 1, any non-zero reads as true |
+| `bool_bit0` | one byte, bit 0 is the value, the rest written 0 and ignored |
+| `lookup_state` | one byte, the values in the values attribute |
+| `child_state` | one byte, the values in the values attribute |
+| `pad` | size bytes, written 0, skipped on read; optional means a reader may find them missing |
+| `str_u32` | len:u32 then len bytes of UTF-8; max_utf16 is a limit in UTF-16 units |
+| `str_rest` | the rest of the payload as UTF-8 |
+| `bytes_u32` | len:u32, then pad_after_len zero bytes if given, then len bytes; max is a limit on len |
+| `list_u32` | count:u32 then count items, each laid out as the fields in of |
+| `optional_node` | has_node:u8 (a bool) then, if 1, the fields in node |
+| `inline_or_bulk` | a READ reply: if the bulk_bit mask is set in its first u32 the reply is the fields in bulk, else the fields in inline |
+
+Attributes (`size`, `optional`, `max`, `max_utf16`, `pad_after_len`, `values`,
+`of`, `node`, `bulk_bit`, `inline`, `bulk`, `bit31`) are defined in the file's
+`"attributes"` section, and `bit31` marks the `len` of a bulk READ reply, whose
+top bit is the bulk flag. The `"open_flags"` and `"request_flags"` lists give
+each flag's `"mask"`, the value it has in the word (`append` is 32), not a bit
+index.
 
 | # | Name | Request | Reply (on ST_OK) | Shim sends flags |
 |---:|---|---|---|---|
@@ -605,7 +643,7 @@ Source: `crates/aether-protocol/src/lib.rs` (`OP_*`, `OPCODES`,
 
 #### 3.4.1 GETATTR (1)
 
-Request: path request. Reply (`encode_getattr_resp`), 18 bytes:
+Request: path request. Reply (`Reply::GetAttr`), 18 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -623,7 +661,7 @@ non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
 #### 3.4.2 READDIR (2)
 
 Request: path request (the directory; `"."` for the root). Reply
-(`encode_readdir_resp`):
+(`Reply::ReadDir`):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -656,7 +694,7 @@ overflow status `i32::MIN` (section 2.5, step 3; Cairn `p/overflow`).
 
 #### 3.4.3 OPEN (3)
 
-Request (`encode_open_req`):
+Request (`Request::Open`):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -683,14 +721,14 @@ Open flags (`crates/aether-protocol/src/status.rs`):
 `CREATE|EXCL`, `FILE_OPEN_IF` = `CREATE`, `FILE_OVERWRITE` = `TRUNC`,
 `FILE_OPEN` = none. The current shim never sends `OPEN_APPEND`.
 
-Reply (`encode_open_resp`), 24 bytes:
+Reply (`Reply::Open`), 24 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
 | 0 | 8 | u64 | `fh`: the director's handle |
 | 8 | 8 | u64 | `size` |
 | 16 | 1 | u8 | `is_dir` |
-| 17 | 1 | u8 | `flags`: bit 0 `OPEN_RESP_IMMUTABLE` (1); other bits zero |
+| 17 | 1 | u8 | `flags`: bit 0 is `immutable` (1); other bits zero |
 | 18 | 2 | — | zero |
 | 20 | 4 | u32 | `mount_gen` |
 
@@ -711,7 +749,7 @@ Reply (`encode_open_resp`), 24 bytes:
 
 #### 3.4.4 READ (5)
 
-Request (`encode_read_req`), 24 bytes (a director must accept 20):
+Request (`Request::Read`), 24 bytes (a director must accept 20):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -723,7 +761,7 @@ Request (`encode_read_req`), 24 bytes (a director must accept 20):
 The director answers in bulk when (`flags & FLAG_READ_BULK`) or `len >= 65536`
 (`BULK_THRESHOLD`, both directors), and it has an arena; otherwise inline.
 
-Inline reply (`encode_read_resp`), `8 + n` bytes, `n <= min(len, payload_cap - 8)`:
+Inline reply (`ReadReply::Inline`), `8 + n` bytes, `n <= min(len, payload_cap - 8)`:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -731,7 +769,7 @@ Inline reply (`encode_read_resp`), `8 + n` bytes, `n <= min(len, payload_cap - 8
 | 4 | 4 | — | zero |
 | 8 | `n` | bytes | data |
 
-Bulk reply (`encode_read_resp_bulk`), 16 bytes, `n <= min(len, bank_size)`:
+Bulk reply (`ReadReply::Bulk`), 16 bytes, `n <= min(len, bank_size)`:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -740,13 +778,13 @@ Bulk reply (`encode_read_resp_bulk`), 16 bytes, `n <= min(len, bank_size)`:
 | 8 | 8 | u64 | `arena_offset`: mapping offset of the data (the slot's bank) |
 
 The client tells the forms apart by bit 31 of the first word
-(`is_read_resp_bulk`), so it must accept either whatever flag it sent. `n <
+(`ReadReply`'s decoder), so it must accept either whatever flag it sent. `n <
 len` means end of file; the shim stops there. Errors: unknown `fh`
 `ST_BAD_FH`; a directory handle `ST_IS_DIR`.
 
 #### 3.4.5 WRITE (6)
 
-Request (`encode_write_req`):
+Request (`Request::Write`):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -760,18 +798,18 @@ A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`. The
 shim sends at most `VFS_RING_PAYLOAD_CAP - 24` bytes per WRITE and repeats
 until done or a short write.
 
-Reply (`encode_write_resp`), 8 bytes: `written:u32 | zero:u32`. The shim reads
+Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
 
 #### 3.4.6 SETATTR (7)
 
-Request (`encode_setattr_req`), 16 bytes: `fh:u64 | size:u64`. Sets the file's
+Request (`Request::SetAttr`), 16 bytes: `fh:u64 | size:u64`. Sets the file's
 length (truncate or extend) on an open handle; there is no path-keyed form.
 Reply: status only. Unknown `fh` `ST_BAD_FH`.
 
 #### 3.4.7 RENAME (8)
 
-Request (`encode_rename_req`):
+Request (`Request::Rename`):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -788,12 +826,12 @@ Request: path request. Reply: status only. Unknown root `ST_NOT_FOUND`.
 
 #### 3.4.9 MKDIR (10)
 
-Request (`encode_mkdir_req`): `root:u32 | mode:u32 | vpath utf8…`. The shim
+Request (`Request::Mkdir`): `root:u32 | mode:u32 | vpath utf8…`. The shim
 sends `mode = 0o755` (493); both directors ignore it. Reply: status only.
 
 #### 3.4.10 CLOSE (11)
 
-Request (`encode_close_req`), 8 bytes: `fh:u64`. Reply: status only. Unknown
+Request (`Request::Close`), 8 bytes: `fh:u64`. Reply: status only. Unknown
 `fh` `ST_BAD_FH`.
 
 #### 3.4.11 HEARTBEAT (13)
@@ -804,7 +842,7 @@ one, right after attaching, and fails its load unless it gets `ST_OK`
 
 #### 3.4.12 STORED_NAMES (14)
 
-Request (`encode_names_req`):
+Request (`Request::StoredNames`):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -812,7 +850,7 @@ Request (`encode_names_req`):
 | 4 | 4 | u32 | `skip`: components the client already knows |
 | 8 | rest | utf8… | `vpath` (folded) |
 
-Reply (`encode_names_resp`): the stored spelling of each component of `vpath`
+Reply (`Reply::StoredNames`): the stored spelling of each component of `vpath`
 from index `skip` on, joined by `/`, no length prefix, exactly
 `components - skip` names. A component the director has no entry for SHOULD
 come back as it was sent, as the old Rust director's did. A director MAY
@@ -821,13 +859,13 @@ discards a reply with the wrong number of names, and on any non-OK status or
 discarded reply uses the caller's own spelling (`FuseClient::stored_names`).
 Used for `GetFinalPathNameByHandle`.
 
-An empty reply payload decodes as one empty name (`decode_names_resp`, as
-`str::split` has it). The shim never asks for zero names: when it already
+An empty reply payload is one empty name (the shim splits `Reply::StoredNames`
+with `str::split`). The shim never asks for zero names: when it already
 knows every component it sends no request.
 
 #### 3.4.13 RENAME_X (23)
 
-Request (`encode_rename_x_req`):
+Request (`Request::RenameX`):
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -861,8 +899,8 @@ loader may resolve elsewhere) the image path is left as it was.
 
 ### 3.5 Status values
 
-Source: `crates/aether-protocol/src/status.rs`, `crates/aether-protocol/src/lib.rs`
-(`STATUSES`), `crates/aether-ipc/src/ring.rs` (overflow).
+Source: `crates/aether-protocol/src/status.rs` (`Status`, `Status::ALL`),
+`crates/aether-ipc/src/ring.rs` (overflow).
 
 | Value | Name | Meaning |
 |---:|---|---|
@@ -879,10 +917,17 @@ Source: `crates/aether-protocol/src/status.rs`, `crates/aether-protocol/src/lib.
 | -10 | `ST_EXISTS` | `OPEN_EXCL` on an existing path; registry key already exists. |
 | -11 | `ST_REPLY_TOO_LARGE` | A registry answer larger than `payload_cap - 8` (in practice only REG_KEY's can be; section 4.3). |
 | -12 | `ST_CROSS_ROOT` | RENAME_X of a directory. |
-| `i32::MIN` (`-2147483648`) | overflow | Written by the ring layer when a reply exceeds `payload_cap`; payload length 0. Not in `STATUSES`. |
+| `i32::MIN` (`-2147483648`) | overflow | Written by the ring layer when a reply exceeds `payload_cap`; payload length 0. Not in `Status::ALL`. |
 
 Values 0 to -11 are fixed by the shim, which matches statuses by number. New
 statuses take the next free negative number.
+
+The `ST_*` names are this document's names for the wire values. In Rust
+each is a `Status` variant (`ST_NOT_FOUND` is `Status::NotFound`), and in
+`contract/protocol.json` its lowercase, hyphenated name (`"not-found"`). The
+`OPEN_*` flags of 3.4.3 map the same way: `OPEN_CREATE` is
+`OpenFlags::CREATE` in Rust and `"create"` in the JSON's `open_flags`, whose
+`"mask"` is the value in the table (`OPEN_APPEND` is 32).
 
 #### 3.5.1 Malformed requests: what each director answers
 
@@ -914,10 +959,10 @@ decodes it with replacement characters and carries on.
 
 | Where | Bit | Value | Name | Source |
 |---|---:|---:|---|---|
-| slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply | `crates/aether-protocol/src/lib.rs` |
-| READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk | `crates/aether-protocol/src/lib.rs` |
-| OPEN reply byte 17 | 0 | `0x01` | `OPEN_RESP_IMMUTABLE` | `crates/aether-protocol/src/lib.rs` |
-| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `crates/aether-protocol/src/status.rs` |
+| slot `flags` of READ | 0 | `0x1` | `FLAG_READ_BULK`: prefer a bulk-arena reply | `RequestFlags::READ_BULK` in `crates/aether-protocol/src/status.rs` |
+| READ reply word 0 | 31 | `0x8000_0000` | `READ_RESP_BULK_BIT`: the reply is bulk | `READ_RESP_BULK_BIT` in `crates/aether-protocol/src/table.rs` |
+| OPEN reply byte 17 | 0 | `0x01` | `immutable` | `OpenResp::immutable` in `crates/aether-protocol/src/table.rs` |
+| OPEN request `oflags` | 0-5 | 1-32 | `OPEN_*` (3.4.3) | `OpenFlags` in `crates/aether-protocol/src/status.rs` |
 
 The slot `flags` word is ignored for every opcode but READ, and bits other
 than bit 0 are ignored for READ, by both directors.
@@ -934,7 +979,7 @@ every registry detour installed (`crates/aether-hooks/src/regclient.rs`,
 
 ### 4.1 Field encodings and limits
 
-Source: `crates/aether-protocol/src/lib.rs` (registry codecs),
+Source: `crates/aether-protocol/src/table.rs` (registry messages),
 `crates/aether-protocol/src/wire.rs`, `crates/aether-registry/src/overlay.rs`.
 
 - `str` = `len:u32 | utf8[len]`. Limits count UTF-16 code units
@@ -996,7 +1041,7 @@ operation.
 | 21 | REG_RENAME_KEY | `path:str \| new_leaf:str` | `version:u64` |
 | 22 | REG_CHANGED | `path:str \| subtree:u8 \| since:u64` | `version:u64 \| changed:u8` |
 
-REG_LOOKUP `state` (`encode_reg_lookup_reply`):
+REG_LOOKUP `state` (`LookupReply`):
 
 | Value | Meaning |
 |---:|---|
@@ -1008,7 +1053,7 @@ REG_LOOKUP `state` (`encode_reg_lookup_reply`):
 A decoder rejects `state > 3`. `below` is 1 when the overlay has anything
 strictly under the key.
 
-REG_KEY `node`, present when `has_node == 1` (`encode_reg_key_reply`):
+REG_KEY `node`, present when `has_node == 1` (`KeyReply`):
 
 | Size | Type | Field |
 |---:|---|---|
@@ -1023,7 +1068,7 @@ REG_KEY `node`, present when `has_node == 1` (`encode_reg_key_reply`):
 | … | child x `nchildren` | `folded:str \| spelling:str \| state:u8` (0 present, 1 tombstone), sorted by `folded` in byte order |
 
 With `has_node == 0` the reply is exactly 9 bytes. The decoder inserts the
-children into a map keyed by `folded` (`decode_reg_key_reply`), so their
+children into a map keyed by `folded` (`Reply::decode` for REG_KEY), so their
 order is not checked and a duplicate `folded` key keeps the last one; send them
 sorted and unique, as both encoders do.
 
@@ -1354,6 +1399,10 @@ Rules:
 Until a director conformance harness exists, **the code is normative**: where
 this document and `crates/aether-ipc`, `crates/aether-protocol` or the shim
 disagree, the code is right and this document is wrong.
+
+`contract/protocol.json` is the machine-readable form of the protocol table
+(3.3): a director in another language builds its opcode, status and field
+tables from it instead of from the prose.
 
 The executable part of the contract is
 `crates/aether-protocol/tests/golden/vectors.txt`: one `name hex` line per

@@ -17,6 +17,14 @@ members = [
   # aether-casefold. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
   "crates/aether-registry",
   "crates/aether-ipc",
+  # A ring in a memory-mapped file (aether_ipc::RingBacking), for native tools on any OS.
+  "crates/aether-filering",
+  # The ring's typed ends: a Client (the shim's) and a Director trait with serve
+  # (every Rust-side server's), over aether-protocol's table.
+  "crates/aether-rpc",
+  # The reference director (an in-memory provider graph and registry overlay, the
+  # shim tests' server and the conformance oracle) and a null director.
+  "crates/aether-refdirector",
   "crates/aether-inject",
   # Pure NT byte layouts and decisions (directory records, dispositions, object names)
   # for the shim, split out so they build and test on any host.
@@ -65,6 +73,7 @@ unimplemented = "warn"
 # Internal crates.
 aether-casefold = { path = "crates/aether-casefold" }
 aether-env = { path = "crates/aether-env" }
+aether-filering = { path = "crates/aether-filering" }
 aether-hooks = { path = "crates/aether-hooks" }
 aether-inject = { path = "crates/aether-inject" }
 aether-ipc = { path = "crates/aether-ipc" }
@@ -72,15 +81,22 @@ aether-ntlayout = { path = "crates/aether-ntlayout" }
 aether-pe = { path = "crates/aether-pe" }
 aether-protocol = { path = "crates/aether-protocol" }
 aether-redirect = { path = "crates/aether-redirect" }
+aether-refdirector = { path = "crates/aether-refdirector" }
 aether-registry = { path = "crates/aether-registry" }
+aether-rpc = { path = "crates/aether-rpc" }
 aether-testkit = { path = "crates/aether-testkit" }
 aether-win = { path = "crates/aether-win" }
 
 # Shared external crates: one version spec each. Members add their own
 # `features` / `optional` on top.
 tempfile = "3.27"
+memmap2 = "0.9"
 serde_json = "1"
 windows-sys = "0.61"
+# Flag words of the wire protocol (aether-protocol: OpenFlags, RequestFlags).
+bitflags = "2"
+# Generative tests of the wire codecs (aether-protocol, its `testing` feature).
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 # Everything here unwinds so the library can catch panics at FFI boundaries
 # instead of killing its host process.

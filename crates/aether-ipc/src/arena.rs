@@ -86,7 +86,7 @@ impl<'a> DataArena<'a> {
                 let n = n.min(buf.len());
                 Ok((off as u64, n))
             })
-            .ok_or(aether_protocol::ST_IO_ERROR)?
+            .ok_or(aether_protocol::Status::IoError.code())?
     }
 }
 

@@ -43,8 +43,11 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
                     if let Some((root, vp)) = c.route(p) {
                         c.names_changed(root, &vp);
                         crate::read_cache::invalidate_path(root.0, &vp);
-                        if let Err(st) = c.delete(root, &vp) {
-                            crate::hookstats::note_delete_on_close_refused(p, st);
+                        if let Err(e) = c.delete(root, &vp) {
+                            crate::hookstats::note_delete_on_close_refused(
+                                p,
+                                crate::director::wire_code(&e),
+                            );
                         }
                     }
                 }

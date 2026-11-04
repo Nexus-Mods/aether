@@ -772,7 +772,7 @@ fn a_status_outside_the_table_is_reported_as_it_came() {
 #[test]
 fn the_request_reaches_the_ring_as_its_table_encoding() {
     let req = Request::Read {
-        slot_flags: RequestFlags::READ_BULK,
+        slot_flags: RequestFlags::empty(),
         fh: 9,
         offset: 10,
         len: 11,
@@ -791,11 +791,49 @@ fn the_request_reaches_the_ring_as_its_table_encoding() {
     );
     assert_eq!(
         seen.into_inner().unwrap(),
-        Some((
-            aether_protocol::Opcode::Read as u32,
-            RequestFlags::READ_BULK.bits(),
-            want
-        ))
+        Some((aether_protocol::Opcode::Read as u32, 0, want))
+    );
+}
+
+/// `call` frees its slot before it returns, so it cannot hand back a bulk
+/// READ reply whose data is still in that slot's arena bank: such a request
+/// is refused before it claims a slot, and nothing reaches the ring.
+#[test]
+fn a_bulk_read_is_refused_unsent() {
+    let owned = OwnedSeg::new(64 * 1024);
+    let geom = ring::init(owned.seg(), SLOTS, CAP).unwrap();
+    let ring = RingClient::new(owned.seg(), SpinNotifier)
+        .unwrap()
+        .with_deadline(Duration::from_millis(100));
+    let client = Client::new(ring);
+    let req = Request::Read {
+        slot_flags: RequestFlags::READ_BULK,
+        fh: 9,
+        offset: 0,
+        len: 64 * 1024,
+    };
+    assert_eq!(
+        client.call(&req, &mut Vec::new()).map(|_| ()),
+        Err(CallError::BulkRead)
+    );
+    for slot in 0..SLOTS {
+        assert_eq!(
+            ring::slot_state(owned.seg(), &geom, slot),
+            Some(aether_ipc::layout::ST_FREE),
+            "slot {slot} was touched"
+        );
+    }
+    // The same READ without the bulk flag is sent (and, with nobody serving
+    // the ring, times out).
+    let inline = Request::Read {
+        slot_flags: RequestFlags::empty(),
+        fh: 9,
+        offset: 0,
+        len: 16,
+    };
+    assert_eq!(
+        client.call(&inline, &mut Vec::new()).map(|_| ()),
+        Err(CallError::Ipc(IpcError::Timeout))
     );
 }
 

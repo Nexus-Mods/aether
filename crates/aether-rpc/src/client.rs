@@ -1,7 +1,7 @@
 //! The calling end: a typed request in, a typed reply out.
 
 use aether_ipc::{IpcError, Notifier, RingClient};
-use aether_protocol::{Reply, Request, SliceBuf, Status};
+use aether_protocol::{Reply, Request, RequestFlags, SliceBuf, Status};
 
 /// Why [`Client::call`] has no reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,12 @@ pub enum CallError {
     Undecodable,
     /// The ring gave no answer.
     Ipc(IpcError),
+    /// A READ that asks for a bulk reply ([`RequestFlags::READ_BULK`]). Its
+    /// data would sit in the slot's arena bank, and [`Client::call`] frees the
+    /// slot before it returns, so the bank could be reused before the caller
+    /// read it. Bulk reads hold their slots through the ring's held-slot calls
+    /// instead. Nothing was sent.
+    BulkRead,
 }
 
 impl core::fmt::Display for CallError {
@@ -27,6 +33,7 @@ impl core::fmt::Display for CallError {
             CallError::UnknownStatus(n) => write!(f, "director answered unknown status {n}"),
             CallError::Undecodable => f.write_str("director's OK reply does not decode"),
             CallError::Ipc(e) => write!(f, "ring error: {e:?}"),
+            CallError::BulkRead => f.write_str("a bulk READ needs a held slot"),
         }
     }
 }
@@ -60,8 +67,9 @@ impl<'a, N: Notifier> Client<'a, N> {
     /// grow. A non-OK status is returned without decoding the payload.
     ///
     /// The slot is freed before this returns, so a bulk READ reply's arena
-    /// bank may already belong to another request: bulk reads go through the
-    /// ring's held-slot calls instead.
+    /// bank could already belong to another request: a READ asking for bulk
+    /// is refused with [`CallError::BulkRead`], unsent, and bulk reads go
+    /// through the ring's held-slot calls instead.
     pub fn call<'r>(
         &self,
         req: &Request<'_>,
@@ -69,6 +77,9 @@ impl<'a, N: Notifier> Client<'a, N> {
     ) -> Result<Reply<'r>, CallError> {
         let op = req.opcode();
         let flags = req.flags();
+        if RequestFlags::from_bits_truncate(flags).contains(RequestFlags::READ_BULK) {
+            return Err(CallError::BulkRead);
+        }
         let status = self
             .ring
             .submit_in_place(

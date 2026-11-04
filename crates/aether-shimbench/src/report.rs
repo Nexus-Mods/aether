@@ -23,7 +23,6 @@
 //! is over batch means, not single calls. `overhead_ns` is the shim's value
 //! less the native one at the same quantile, so it can be negative where the
 //! two are within noise.
-#![allow(unsafe_code)] // registry reads
 
 use crate::launch::{Counted, DirectorKind, GeometryKind, TargetOutput, SERVE_THREADS};
 use crate::{warmup, Case};
@@ -53,7 +52,7 @@ pub fn build(
         CaseResult::Failed(_) => None,
     });
     json!({
-        "machine": machine(),
+        "machine": aether_conform::machine::machine(),
         "director": director.name(),
         "iterations": iterations,
         "warmup": warmup(iterations),
@@ -165,15 +164,7 @@ pub fn compare(now: &Value, base: &Value) -> Result<Comparison, String> {
             now["geometry"], base["geometry"]
         ));
     }
-    for k in ["cpu", "cores", "os"] {
-        if now["machine"][k] != base["machine"][k] {
-            return Err(format!(
-                "the baseline is from another machine ({k}: {} here, {} there); \
-                 compare only reports from the same machine",
-                now["machine"][k], base["machine"][k]
-            ));
-        }
-    }
+    aether_conform::machine::same_machine(now, base)?;
     if now["director"] != base["director"] {
         return Err(format!(
             "the baseline served {}, this run {}",
@@ -199,11 +190,7 @@ pub fn compare(now: &Value, base: &Value) -> Result<Comparison, String> {
                 b["shim"][k].as_u64().unwrap_or(0),
                 c["shim"][k].as_u64().unwrap_or(0),
             );
-            let pct = if was == 0 {
-                0.0
-            } else {
-                (is as f64 - was as f64) * 100.0 / was as f64
-            };
+            let pct = aether_conform::machine::percent(was as f64, is as f64);
             if k == "p50" {
                 worst = worst.max(pct);
             }
@@ -226,107 +213,6 @@ pub fn compare(now: &Value, base: &Value) -> Result<Comparison, String> {
         lines,
         worst_rise_pct: if worst.is_finite() { worst } else { 0.0 },
     })
-}
-
-/// The machine: CPU model and logical cores, the OS, and how this program
-/// was built (its profile, the toolchain `rust-toolchain.toml` pins, and
-/// the commit the source is at).
-pub fn machine() -> Value {
-    let cpu = reg_string(
-        r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-        "ProcessorNameString",
-    )
-    .map(|s| s.trim().to_string())
-    .unwrap_or_else(|| "unknown".into());
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(0);
-    let nt = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
-    let os = format!(
-        "{} {} build {}.{}",
-        reg_string(nt, "ProductName").unwrap_or_else(|| "Windows".into()),
-        reg_string(nt, "DisplayVersion").unwrap_or_default(),
-        reg_string(nt, "CurrentBuildNumber").unwrap_or_default(),
-        reg_dword(nt, "UBR").unwrap_or(0),
-    );
-    json!({
-        "cpu": cpu,
-        "cores": cores,
-        "os": os,
-        "build": {
-            "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
-            "rustc": tool_line("rustc", &["-V"]),
-            "git": tool_line("git", &["rev-parse", "--short=12", "HEAD"]),
-        },
-    })
-}
-
-/// The first line `program args` prints, run in this crate's folder (so
-/// rustup picks the pinned toolchain), or `unknown`.
-fn tool_line(program: &str, args: &[&str]) -> String {
-    std::process::Command::new(program)
-        .args(args)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".into())
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
-}
-
-fn reg_string(key: &str, value: &str) -> Option<String> {
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
-    let (k, v) = (wide(key), wide(value));
-    let mut buf = vec![0u16; 512];
-    let mut bytes = (buf.len() * 2) as u32;
-    // SAFETY: NUL-terminated names and a buffer of `bytes` bytes.
-    let r = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            k.as_ptr(),
-            v.as_ptr(),
-            RRF_RT_REG_SZ,
-            core::ptr::null_mut(),
-            buf.as_mut_ptr().cast(),
-            &mut bytes,
-        )
-    };
-    if r != 0 {
-        return None;
-    }
-    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..n]))
-}
-
-fn reg_dword(key: &str, value: &str) -> Option<u32> {
-    use windows_sys::Win32::System::Registry::{
-        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD,
-    };
-    let (k, v) = (wide(key), wide(value));
-    let mut out = 0u32;
-    let mut bytes = 4u32;
-    // SAFETY: NUL-terminated names and a 4-byte buffer.
-    let r = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            k.as_ptr(),
-            v.as_ptr(),
-            RRF_RT_REG_DWORD,
-            core::ptr::null_mut(),
-            (&mut out as *mut u32).cast(),
-            &mut bytes,
-        )
-    };
-    (r == 0).then_some(out)
 }
 
 #[cfg(test)]
@@ -367,13 +253,5 @@ mod tests {
         let c = compare(&report("a", 150), &report("a", 100)).unwrap();
         assert_eq!(c.worst_rise_pct, 50.0);
         assert!(c.lines.iter().any(|l| l.contains("100 -> 150 ns (+50.0%)")));
-    }
-
-    #[test]
-    fn the_machine_names_a_cpu_and_cores() {
-        let m = machine();
-        assert!(m["cores"].as_u64().unwrap() > 0);
-        assert!(m["cpu"].as_str().is_some());
-        assert!(m["os"].as_str().unwrap().contains("build"));
     }
 }

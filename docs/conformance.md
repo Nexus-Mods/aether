@@ -6,7 +6,9 @@ program, has it mount a scenario's tree, attaches to the ring the director
 names exactly as the shim would, plays the scenario's requests, and compares
 each answer with the one the scenario expects. Scenarios live in
 `contract/scenarios/` and their format is described in
-`contract/scenarios/README.md`.
+`contract/scenarios/README.md`. Through the same adapter, `aether-conform
+bench` times a director on the workloads in `contract/workloads/`
+("Benchmarks" below).
 
 A run has up to five parts, all through the same adapter:
 
@@ -864,3 +866,104 @@ names the rule and shows the slot fields and payload in hex. The generated
 part is one entry, `generated`: passed, with no steps and the case count and
 seed as its `file`, or failed, with the shrunk case's steps and the file it
 was written to.
+
+## Benchmarks
+
+`aether-conform bench` times a director on the workloads in
+`contract/workloads/` (their format is in `contract/workloads/README.md`):
+the same adapter as `run`, the same attach, and then requests sent as fast
+as client threads can send them, not compared with anything but the floor.
+
+```sh
+cargo build --release -p aether-conform
+target/release/aether-conform bench --director "target/release/aether-conform reference-adapter" \
+    --workloads contract/workloads --out target/bench/reference.json
+# Over a named section (Windows), one workload, four clients per thread:
+target/release/aether-conform bench --director "target/release/aether-conform reference-adapter --ring section" \
+    --only launch-storm --clients 4 --out target/bench/storm.json
+# Against an earlier report from this machine:
+target/release/aether-conform bench --director "..." --baseline target/bench/reference.json
+```
+
+Per workload the adapter mounts its tree (written as a scenario file with
+no steps, so an adapter needs nothing new). Each phase is played once as a
+warm-up, not recorded, and then recorded: `threads x --clients` threads at
+once, each with its own ring client, each sending the requests the workload
+gives that thread in the same order every time. A request is timed from
+before it is sent until its reply is decoded, a bulk READ's data copied out
+of the arena as the shim copies it, into a histogram per opcode (1 ns to
+60 s, three significant figures). Then the same requests go to the floor: by
+default `aether-conform null-adapter`, which answers every request OK with
+the smallest reply and never reads the tree, on a ring of the director's
+kind with the director's slot count, payload cap, arena length and
+`worker_hint` as its serving threads. Its numbers are what the ring costs;
+the report gives both and, per opcode, the director's p50, p99 and p99.9
+less the floor's. `--floor "<command line>"` names another floor adapter.
+
+A reply that is not what the phase expects stops the workload with an
+error, and the workload has no numbers: a status other than OK, a GETATTR
+of a file of the tree with `found = 0`, a READ shorter than the file the
+OPEN described, a WRITE that took fewer bytes than sent, a READDIR with
+another number of entries than the tree has. The floor is held to OK
+statuses only. A workload the ring cannot carry (a WRITE or an inline READ
+past the payload cap, a bulk READ with no arena) fails the same way.
+
+`bench`'s options:
+
+| Option | Meaning |
+|---|---|
+| `--director "<command line>"` | The adapter to start, as for `run`. Required. |
+| `--workloads DIR` | Default `contract/workloads`. |
+| `--only NAME[,NAME...]` | Only these workloads. |
+| `--floor "<command line>"` | The floor's adapter. Default: this program's `null-adapter` on a ring like the director's. |
+| `--clients N` | Client threads per phase thread, 1 to 64. Default 1. |
+| `--quick` | One repeat of at most 64 requests per thread (and the CLOSEs of what they opened): checks that every workload mounts and is answered, for CI. Its numbers are not timings. |
+| `--out FILE` | Where the JSON report goes. A summary goes to stdout either way. |
+| `--baseline FILE` | Print each value's change against an earlier report. A report from another machine (CPU model, logical cores, OS), director, ring geometry, `--clients` or `--quick` is refused. |
+| `--fail-over PCT` | With `--baseline`: exit 3 when an opcode's p50 rose more than PCT percent. |
+| `--timeout SECS` | Every adapter answer and request. Default 120 (a mount builds large trees). |
+
+Exit code: 0 when every workload ran, 1 when one failed, 2 on a usage or
+adapter error or a refused baseline, 3 for a rise past `--fail-over`. A run
+slower than its baseline exits 0: timed numbers are one machine's, and only
+someone at that machine, asking with `--fail-over`, turns them into a
+failure. CI never does; it runs the `--quick` pass over every workload but
+`sequential-bulk` (whose 256 MiB tree is slow to build in a debug build),
+which checks replies and counts and nothing that is timed.
+
+The report:
+
+```json
+{
+  "machine": {"cpu": "...", "cores": 16, "os": "...",
+              "build": {"profile": "release", "rustc": "rustc ...", "git": "..."}},
+  "director": "<command line>", "floor": "<command line>", "clients": 1, "quick": false,
+  "geometry": {"ring": "file", "slots": 8, "payload_cap": 1048576, "arena_len": 8388608,
+               "worker_hint": 4},
+  "floor_geometry": {"...": "the same fields, for the floor's ring"},
+  "workloads": [
+    {"name": "random-small", "phases": [
+      {"name": "reads", "threads": 4, "requests": 32776, "seconds": 0.41,
+       "requests_per_s": 79941.5, "bulk_mib_s": null,
+       "floor": {"seconds": 0.07, "requests_per_s": 468228.6},
+       "per_op": {"read": {"count": 32768, "p50_us": 18.2, "p99_us": 61.0,
+                           "p999_us": 140.3, "max_us": 802.0, "mean_us": 20.1,
+                           "floor_p50_us": 3.1, "floor_p99_us": 9.4,
+                           "floor_p999_us": 21.0, "floor_max_us": 95.1,
+                           "over_floor_p50_us": 15.1, "over_floor_p99_us": 51.6,
+                           "over_floor_p999_us": 119.3}}}]},
+    {"name": "save-heavy", "error": "phase save, thread 0: request 3 (write ...): ..."}
+  ]
+}
+```
+
+Times are microseconds; `bulk_mib_s` is the bytes bulk READs returned over
+the phase's wall time, `null` for a phase that sent none. The numbers above
+show the shape, not a machine's results.
+
+`aether-conform null-adapter [--ring file|section] [--slots N]
+[--payload-cap N] [--arena-len N] [--workers N]` is the floor: the adapter
+protocol with a director behind it that answers every opcode OK with the
+smallest valid reply (GETATTR finds nothing, OPEN gives handle 1 of size 0,
+READ gives no bytes), on a ring of 8 slots, a 1 MiB payload cap, an 8 MiB
+arena and 4 serving threads unless told otherwise.

@@ -100,6 +100,14 @@ jobs:
           target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter" --scenarios contract/scenarios --malformed --limits --generate --cases 1024 --concurrent 4 --concurrent-cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
           target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter --ring section" --scenarios contract/scenarios --malformed --limits --generate --cases 1024 --concurrent 4 --concurrent-cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
           target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter --no-arena" --scenarios contract/scenarios --malformed --limits --generate --cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
+      # aether-conform bench, --quick: every workload but sequential-bulk
+      # (a 256 MiB tree, slow to build in a debug build) mounted and played
+      # once, a few requests per thread, against the reference and the null
+      # adapter's floor. It fails only on replies and counts: timed numbers
+      # never fail CI (docs/conformance.md, "Benchmarks"). About 6 s measured.
+      - name: Director benchmark (smoke)
+        timeout-minutes: 5
+        run: target/debug/aether-conform bench --director "target/debug/aether-conform reference-adapter" --workloads contract/workloads --only launch-storm,random-small,readdir-large,save-heavy --quick --out target/bench/conform-smoke.json
       - name: Conformance failures (shrunk generated cases)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -179,6 +187,14 @@ jobs:
         run: |
           cargo build -p aether-conform
           target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter" --scenarios contract/scenarios --malformed --limits --generate --cases 1024 --concurrent 4 --concurrent-cases 256 --seed ${{ github.run_id }} --failures target/conform-failures
+      # aether-conform bench, --quick: every workload but sequential-bulk
+      # (a 256 MiB tree, slow to build in a debug build) mounted and played
+      # once, a few requests per thread, against the reference and the null
+      # adapter's floor. It fails only on replies and counts: timed numbers
+      # never fail CI (docs/conformance.md, "Benchmarks"). About 6 s measured.
+      - name: Director benchmark (smoke)
+        timeout-minutes: 5
+        run: target/debug/aether-conform bench --director "target/debug/aether-conform reference-adapter" --workloads contract/workloads --only launch-storm,random-small,readdir-large,save-heavy --quick --out target/bench/conform-smoke.json
       - name: Conformance failures (shrunk generated cases)
         if: failure()
         uses: actions/upload-artifact@v4

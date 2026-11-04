@@ -25,6 +25,7 @@ dependencies = [
  "aether-rpc",
  "aether-testkit",
  "aether-win",
+ "hdrhistogram",
  "proptest",
  "serde_json",
  "tempfile",
@@ -204,6 +205,7 @@ dependencies = [
 name = "aether-shimbench"
 version = "0.1.0"
 dependencies = [
+ "aether-conform",
  "aether-env",
  "aether-ipc",
  "aether-protocol",
@@ -280,6 +282,12 @@ name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cast"
@@ -464,6 +472,16 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]

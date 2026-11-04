@@ -538,6 +538,195 @@ impl Mounted {
     }
 }
 
+/// The ring the null adapter serves: how many slots, the payload cap, the
+/// arena's length (0 for none) and the threads serving it. The default is
+/// the reference adapter's ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NullGeometry {
+    pub slots: u32,
+    pub payload_cap: u32,
+    pub arena_len: usize,
+    pub workers: u32,
+}
+
+impl Default for NullGeometry {
+    fn default() -> NullGeometry {
+        NullGeometry {
+            slots: SLOTS,
+            payload_cap: PAYLOAD_CAP,
+            arena_len: SLOTS as usize * BANK,
+            workers: WORKERS,
+        }
+    }
+}
+
+/// Runs the null adapter until EOF on stdin: the adapter protocol with
+/// [`aether_refdirector::Null`] behind it, which answers every request OK
+/// with the smallest reply, on a ring of `geometry` (a file, or on Windows a
+/// named section). The tree a mount names is never read. What a request
+/// costs here is the ring's own cost, the floor `aether-conform bench`
+/// subtracts. The exit code.
+pub fn null_adapter(kind: RingKind, geometry: NullGeometry) -> i32 {
+    if kind == RingKind::Section && !cfg!(windows) {
+        eprintln!("null-adapter: --ring section needs Windows");
+        return 2;
+    }
+    let mut mounted: Option<Mounted> = None;
+    answer_requests(|req| match req {
+        AdapterRequest::Mount { .. } => {
+            if mounted.is_some() {
+                return json!({"ok": false, "error": "a tree is already mounted"});
+            }
+            match mount_null(kind, geometry) {
+                Ok(m) => {
+                    let env = m.env.clone();
+                    mounted = Some(m);
+                    json!({"ok": true, "env": env})
+                }
+                Err(e) => json!({"ok": false, "error": e}),
+            }
+        }
+        AdapterRequest::Unmount => match mounted.take().map(Mounted::unmount) {
+            Some(Err(e)) => json!({"ok": false, "error": e}),
+            _ => json!({"ok": true}),
+        },
+    });
+    if let Some(m) = mounted.take() {
+        let _ = m.unmount();
+    }
+    0
+}
+
+/// A ring of `g` served by `Null` on `g.workers` threads, and the
+/// handshake variables naming it.
+fn mount_null(kind: RingKind, g: NullGeometry) -> Result<Mounted, String> {
+    if g.slots == 0 || g.workers == 0 {
+        return Err("a ring needs at least one slot and one serving thread".into());
+    }
+    let stride = (32 + g.payload_cap as usize).next_multiple_of(8);
+    let arena_offset = aether_ipc::layout::RING_HEADER_SIZE + g.slots as usize * stride;
+    let ring_bytes = (arena_offset + g.arena_len)
+        .next_multiple_of(65536)
+        .max(2 * 1024 * 1024);
+    let init = |b: &dyn RingBacking| -> Result<(), String> {
+        ring::init(b.seg(), g.slots, g.payload_cap).map_err(|e| format!("ring init: {e:?}"))?;
+        ring::set_worker_hint(b.seg(), g.workers);
+        Ok(())
+    };
+    let mut env = Env::new();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (backing, file, threads): Started = match kind {
+        RingKind::File => {
+            let path = std::env::temp_dir().join(format!("{}.ring", unique("null-ring")));
+            let f = aether_filering::FileRing::create(&path, ring_bytes)
+                .map_err(|e| format!("create {}: {e}", path.display()))?;
+            let b: Arc<dyn RingBacking> = Arc::new(f);
+            init(&*b)?;
+            env.insert(
+                aether_env::RING_PATH.into(),
+                path.to_string_lossy().into_owned(),
+            );
+            let t = serve_null(
+                b.clone(),
+                Arc::new(aether_ipc::AdaptiveNotifier),
+                g,
+                arena_offset,
+                stop.clone(),
+            );
+            (b, Some(path), t)
+        }
+        RingKind::Section => null_section(&mut env, g, ring_bytes, arena_offset, &init, &stop)?,
+    };
+    env.insert(aether_env::RING_BYTES.into(), ring_bytes.to_string());
+    env.insert(
+        aether_env::RING_PAYLOAD_CAP.into(),
+        g.payload_cap.to_string(),
+    );
+    if g.arena_len > 0 {
+        env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+        env.insert(aether_env::ARENA_LEN.into(), g.arena_len.to_string());
+    }
+    env.insert(
+        aether_env::VIRTUAL_DIR.into(),
+        r"C:\aether-conform\root0".into(),
+    );
+    Ok(Mounted {
+        stop,
+        threads,
+        backing,
+        file,
+        cfg: PathBuf::new(),
+        staged: Arc::default(),
+        env,
+    })
+}
+
+#[cfg(windows)]
+fn null_section(
+    env: &mut Env,
+    g: NullGeometry,
+    ring_bytes: usize,
+    arena_offset: usize,
+    init: &dyn Fn(&dyn RingBacking) -> Result<(), String>,
+    stop: &Arc<AtomicBool>,
+) -> Result<Started, String> {
+    let name = format!(r"Local\{}", unique("null-section"));
+    let (srv, cli) = (format!("{name}_srv"), format!("{name}_cli"));
+    let m = aether_win::SharedMapping::create(&name, ring_bytes)
+        .map_err(|e| format!("create section {name}: {e}"))?;
+    let events = aether_win::EventNotifier::create(&srv, &cli)
+        .map_err(|e| format!("create events {srv}, {cli}: {e}"))?;
+    let b: Arc<dyn RingBacking> = Arc::new(m);
+    init(&*b)?;
+    env.insert(aether_env::RING_SECTION.into(), name);
+    env.insert(aether_env::SERVER_EV.into(), srv);
+    env.insert(aether_env::CLIENT_EV.into(), cli);
+    let t = serve_null(b.clone(), Arc::new(events), g, arena_offset, stop.clone());
+    Ok((b, None, t))
+}
+
+#[cfg(not(windows))]
+fn null_section(
+    _env: &mut Env,
+    _g: NullGeometry,
+    _ring_bytes: usize,
+    _arena_offset: usize,
+    _init: &dyn Fn(&dyn RingBacking) -> Result<(), String>,
+    _stop: &Arc<AtomicBool>,
+) -> Result<Started, String> {
+    Err("a named section needs Windows".into())
+}
+
+/// Serves `Null` on `backing` until `stop`, on `g.workers` threads sharing
+/// one notifier, as a Rust director serves (`aether_rpc::serve_with_arena`).
+fn serve_null<N: Notifier + Send + Sync + 'static>(
+    backing: Arc<dyn RingBacking>,
+    notifier: Arc<N>,
+    g: NullGeometry,
+    arena_offset: usize,
+    stop: Arc<AtomicBool>,
+) -> Vec<JoinHandle<Result<(), IpcError>>> {
+    (0..g.workers)
+        .map(|_| {
+            let backing = backing.clone();
+            let notifier = SharedNotifier(notifier.clone());
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let seg = backing.seg();
+                let server = RingServer::new(seg, notifier)?;
+                let arena = (g.arena_len > 0)
+                    .then(|| DataArena::new(seg, arena_offset, g.arena_len, g.slots as usize));
+                aether_rpc::serve_with_arena(
+                    &server,
+                    arena.as_ref(),
+                    &mut aether_refdirector::Null,
+                    &stop,
+                )
+            })
+        })
+        .collect()
+}
+
 /// A name no other mount of this or another process has.
 fn unique(tag: &str) -> String {
     static N: AtomicU32 = AtomicU32::new(0);

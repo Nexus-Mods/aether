@@ -114,6 +114,9 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Micro-benchmarks (benches/ of five crates, dev-dependency only). No plots: the
 # HTML reports would pull in plotters for nothing a terminal does not say.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Latency histograms of `aether-conform bench`. No serialisation formats: the
+# report is JSON of quantiles, not histogram logs.
+hdrhistogram = { version = "7.5", default-features = false }
 
 # Everything here unwinds so the library can catch panics at FFI boundaries
 # instead of killing its host process.

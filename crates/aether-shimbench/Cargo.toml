@@ -17,6 +17,9 @@ serde_json.workspace = true
 [target.'cfg(windows)'.dependencies]
 # The handshake names the injector's environment carries.
 aether-env.workspace = true
+# The machine a report names and the baseline rules (`aether_conform::machine`),
+# shared with `aether-conform bench`.
+aether-conform.workspace = true
 aether-ipc.workspace = true
 # The shim's config file (docs/wire.md 5.1).
 aether-protocol.workspace = true
@@ -33,7 +36,6 @@ windows-sys = { workspace = true, features = [
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
   "Win32_System_Performance",
-  "Win32_System_Registry",
   "Win32_System_Threading",
 ] }
 

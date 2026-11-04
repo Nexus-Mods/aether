@@ -704,6 +704,12 @@ The whole listing is one reply and must fit `payload_cap`. Unknown root:
 `ST_NOT_FOUND`. Both directors reply to an oversized listing with the
 overflow status `i32::MIN` (section 2.5, step 3; Cairn `p/overflow`).
 
+The shim lists a directory answered `ST_NOT_FOUND` as empty (it is gone).
+Any other failure (another status, the overflow status, a reply that does
+not decode, no reply in time) fails the program's query with
+`STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) and keeps nothing, so its next
+query on that handle sends READDIR again.
+
 #### 3.4.3 OPEN (3)
 
 Request (`Request::Open`):

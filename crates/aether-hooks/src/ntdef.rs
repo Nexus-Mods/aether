@@ -597,6 +597,9 @@ pub(crate) const STATUS_NO_MORE_ENTRIES: NTSTATUS = 0x8000_001Au32 as i32;
 pub(crate) const STATUS_KEY_DELETED: NTSTATUS = 0xC000_017Cu32 as i32;
 /// `STATUS_ACCESS_VIOLATION`, for a NULL buffer the caller said was non-empty.
 pub(crate) const STATUS_ACCESS_VIOLATION: NTSTATUS = 0xC000_0005u32 as i32;
+/// `STATUS_IN_PAGE_ERROR`: the paging read behind a mapped page failed. The
+/// demand-paged section raises it when its fill keeps failing (`lazy_section`).
+pub(crate) const STATUS_IN_PAGE_ERROR: NTSTATUS = 0xC000_0006u32 as i32;
 
 /// `ntdll!NtSetValueKey`.
 pub(crate) type NtSetValueKeyFn = unsafe extern "system" fn(

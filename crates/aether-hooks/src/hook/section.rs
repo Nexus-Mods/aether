@@ -258,14 +258,11 @@ unsafe fn fuse_create_section(
     }
     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
     let dest = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, map_len) };
-    let fill_ok = match client.read_fragmented(fh, 0, dest) {
-        Ok(n) if n == map_len => true,
-        Ok(n) if n > 0 => {
-            dest[n..].fill(0);
-            true
-        }
-        _ => false,
-    };
+    // Whole or not at all: OPEN gave the size, so a short answer before it
+    // is a failed read, not the end of the file (docs/wire.md 3.4.4's
+    // `n < len` is the end only at that size), and zeros in its place would
+    // be data the file does not hold.
+    let fill_ok = matches!(client.read_fragmented(fh, 0, dest), Ok(n) if n == map_len);
     // Opt-in trace only: this runs inside NtCreateSection, so the file I/O
     // re-enters our own hooks on every section the game creates.
     if let Some(path) = aether_env::raw(aether_env::SECTION_FILL_LOG) {

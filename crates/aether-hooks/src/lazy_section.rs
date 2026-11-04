@@ -23,7 +23,8 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Memory::{
-    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE,
+    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS,
+    PAGE_READWRITE,
 };
 
 const PAGE: usize = 4096;
@@ -65,7 +66,11 @@ pub(crate) fn set_eager_max(bytes: u64) {
 
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-use crate::ntdef::STATUS_ACCESS_VIOLATION;
+use crate::ntdef::{STATUS_ACCESS_VIOLATION, STATUS_IN_PAGE_ERROR, STATUS_UNSUCCESSFUL};
+
+/// How many times a failed fill is asked again within one fault before the
+/// fault becomes `STATUS_IN_PAGE_ERROR`.
+const FILL_RETRIES: u32 = 3;
 
 /// A shim-owned VA range backing one synthetic section.
 struct OwnedRegion {
@@ -370,7 +375,7 @@ pub(crate) unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> boo
     let end = offset.saturating_add(len);
     let mut off = offset / CHUNK * CHUNK;
     while off < end {
-        if !fill_chunk_at(base + off) {
+        if fill_chunk_at(base + off) != Fill::Done {
             return false;
         }
         off += CHUNK;
@@ -462,36 +467,80 @@ unsafe fn veh_handler_body(info: *mut EXCEPTION_POINTERS) -> i32 {
     let Some(_veh) = VehGuard::enter() else {
         return EXCEPTION_CONTINUE_SEARCH;
     };
-    if fill_chunk_at(fault_addr) {
-        EXCEPTION_CONTINUE_EXECUTION
-    } else {
-        EXCEPTION_CONTINUE_SEARCH
+    let mut fails = 0;
+    let deadline = crate::director::global()
+        .map(|c| c.deadline())
+        .unwrap_or(aether_ipc::RESPONSE_DEADLINE);
+    let started = std::time::Instant::now();
+    loop {
+        match fill_chunk_at(fault_addr) {
+            Fill::Done => return EXCEPTION_CONTINUE_EXECUTION,
+            Fill::NotOurs => return EXCEPTION_CONTINUE_SEARCH,
+            Fill::Failed => {
+                fails += 1;
+                // The first try and up to FILL_RETRIES more, none started
+                // after the client's deadline has passed since the first.
+                if fails > FILL_RETRIES || started.elapsed() >= deadline {
+                    break;
+                }
+            }
+        }
     }
+    // The page holds nothing the file holds, and it is still `PAGE_NOACCESS`:
+    // the fault becomes the one NT raises when a mapped file's paging read
+    // fails, for the program's handlers (or the end of the process) to see.
+    // Parameters as NT gives them: the access type (kept), the address, and
+    // the status the read failed with.
+    (*rec).ExceptionCode = STATUS_IN_PAGE_ERROR;
+    (*rec).NumberParameters = 3;
+    (*rec).ExceptionInformation[1] = fault_addr;
+    (*rec).ExceptionInformation[2] = STATUS_UNSUCCESSFUL as u32 as usize;
+    EXCEPTION_CONTINUE_SEARCH
+}
+
+/// What [`fill_chunk_at`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// The chunk holds the file's bytes (now, or already).
+    Done,
+    /// The address is in no demand-paged region, or the chunk could not be
+    /// committed: not a fault this module can serve.
+    NotOurs,
+    /// The READ failed, or came back short of what the file holds there.
+    /// Nothing was committed: the chunk is `PAGE_NOACCESS` again, and the
+    /// next touch faults and asks again.
+    Failed,
 }
 
 /// Commit + stream the CHUNK covering `addr` (addr may be anywhere in the chunk).
-unsafe fn fill_chunk_at(addr: usize) -> bool {
+///
+/// A fill is committed only whole: `min(CHUNK, size - offset)` bytes from
+/// the director, then zeros past the end of the file, as NT gives the tail of
+/// a mapped file's last page. A short answer before the file's size is not
+/// the end of the file here (OPEN gave the size; docs/wire.md 3.4.4's
+/// `n < len` end of file is only at that size), so it is [`Fill::Failed`].
+unsafe fn fill_chunk_at(addr: usize) -> Fill {
     let _guard = match FILL_LOCK.lock() {
         Ok(g) => g,
-        Err(_) => return false,
+        Err(_) => return Fill::NotOurs,
     };
 
     let (base, file_size, fh, chunk_idx, commit_off, commit_len) = {
         let g = match REGIONS.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return Fill::NotOurs,
         };
         let Some((_, region)) = g
             .range(..=addr)
             .next_back()
             .filter(|(_, r)| r.lazy && addr < r.base + r.reserved)
         else {
-            return false;
+            return Fill::NotOurs;
         };
         let off = addr - region.base;
         let chunk_idx = off / CHUNK;
         if region.committed.contains(&chunk_idx) {
-            return true;
+            return Fill::Done;
         }
         let commit_off = chunk_idx * CHUNK;
         let commit_len = CHUNK.min(region.reserved - commit_off);
@@ -517,9 +566,9 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
             .and_then(|g| g.get(&base).map(|r| r.committed.contains(&chunk_idx)))
             .unwrap_or(false)
         {
-            return true;
+            return Fill::Done;
         }
-        return false;
+        return Fill::NotOurs;
     }
 
     let file_off = commit_off as u64;
@@ -535,16 +584,13 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
         crate::hookstats::note_fill_start();
         let t0 = std::time::Instant::now();
         let n_read = fill_bytes(fh, file_off, page as usize, readable);
-        crate::hookstats::note_fill_end(
-            n_read.unwrap_or(0),
-            t0.elapsed().as_nanos() as u64,
-            n_read.is_some(),
-        );
-        let dest = core::slice::from_raw_parts_mut(page as *mut u8, readable);
-        match n_read {
-            Some(n) if n < readable => dest[n..].fill(0),
-            Some(_) => {}
-            None => dest.fill(0),
+        let whole = n_read == Some(readable);
+        crate::hookstats::note_fill_end(n_read.unwrap_or(0), t0.elapsed().as_nanos() as u64, whole);
+        if !whole {
+            // Back to reserved and `PAGE_NOACCESS`, so no thread reads the
+            // part-filled chunk, and the next touch faults to fill it again.
+            VirtualFree(page, commit_len, MEM_DECOMMIT);
+            return Fill::Failed;
         }
     }
     if readable < commit_len {
@@ -557,7 +603,7 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
             region.committed.insert(chunk_idx);
         }
     }
-    true
+    Fill::Done
 }
 
 #[cfg(test)]

@@ -478,6 +478,11 @@ impl FuseClient {
         self
     }
 
+    /// How long this client waits for an answer to one request.
+    pub(crate) fn deadline(&self) -> core::time::Duration {
+        self.deadline
+    }
+
     /// Test-only constructor for the predicate alone: no ring, no OS volume
     /// scan. `connect` needs a live shared section, which a unit test has no
     /// business standing up just to ask whether a path is under a root.

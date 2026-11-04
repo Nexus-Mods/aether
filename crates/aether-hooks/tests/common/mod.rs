@@ -45,11 +45,20 @@ macro_rules! isolate_expecting_exit {
 /// code), so returns `false` only on success. `fn_path` is the type name of a function item
 /// nested in the test.
 pub(crate) fn run_isolated(fn_path: &str, exit: Option<u32>) -> bool {
+    run_isolated_output(fn_path, exit).is_none()
+}
+
+/// [`run_isolated`], returning what the child wrote to its standard output
+/// once it passed: `None` in the child, which runs the body. A child reaches
+/// the parent past libtest's capture by writing to `std::io::stdout()`
+/// directly rather than through `println!`.
+#[allow(dead_code)]
+pub(crate) fn run_isolated_output(fn_path: &str, exit: Option<u32>) -> Option<String> {
     if std::env::var_os(CHILD_ENV).is_some() {
         if exit.is_some() {
             no_crash_dialog();
         }
-        return true;
+        return None;
     }
     // `crate::module::test::f` -> libtest's `module::test`.
     let path = fn_path.strip_suffix("::f").expect("a nested fn named f");
@@ -75,7 +84,7 @@ pub(crate) fn run_isolated(fn_path: &str, exit: Option<u32>) -> bool {
             stdout.contains("running 1 test"),
             "{name} did not run in its own process:\n{stdout}\n{stderr}"
         );
-        return false;
+        return Some(stdout.into_owned());
     }
     assert!(
         out.status.success(),
@@ -87,7 +96,7 @@ pub(crate) fn run_isolated(fn_path: &str, exit: Option<u32>) -> bool {
         stdout.contains("1 passed"),
         "{name} did not run in its own process:\n{stdout}\n{stderr}"
     );
-    false
+    Some(stdout.into_owned())
 }
 
 /// An unhandled exception in this process ends it with the exception's code, without Windows

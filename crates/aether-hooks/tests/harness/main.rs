@@ -36,6 +36,7 @@ mod caches_names;
 mod caches_read;
 mod caches_registry;
 mod child_start;
+mod costs;
 mod fault_table;
 mod fileops;
 mod geometry;

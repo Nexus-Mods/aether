@@ -66,6 +66,11 @@ jobs:
         run: cargo build -p aether-inject -p aether-shim -p aether-fixtures -p aether-fixture-vproxy && cargo build -p aether-fixture-staticimp
       # `--no-fail-fast`: without it cargo stops at the first failing test
       # binary and hides how much of the suite broke. No `-p`: every member.
+      # This is also the counted-cost gate: aether-hooks' `harness` binary
+      # checks each hooked call's round trips, ring bytes and allocations
+      # against crates/aether-hooks/tests/harness/costs.txt (a few seconds, in
+      # this run, not a step of its own). A count that went down passes with
+      # a notice naming the command that lowers the record.
       - name: Rust tests (every crate)
         timeout-minutes: 25
         run: cargo test --no-fail-fast

@@ -37,7 +37,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 /// The served image's name under root 0.
-const IMAGE: &str = "aether-probe.exe";
+pub(crate) const IMAGE: &str = "aether-probe.exe";
 
 /// How long a child the hook killed may take to be gone.
 const GONE_MS: u32 = 10_000;
@@ -91,7 +91,7 @@ fn observe(process: HANDLE, _pid: u32) {
 }
 
 /// Take what the observer saw, waiting for each child to be gone.
-fn created() -> Vec<String> {
+pub(crate) fn created() -> Vec<String> {
     let all = std::mem::take(&mut *CREATED.lock().unwrap_or_else(|e| e.into_inner()));
     all.into_iter()
         .map(|c| {
@@ -114,7 +114,7 @@ fn created() -> Vec<String> {
 
 /// `aether-probe.exe` as cargo built it, beside this test's profile folder.
 /// `None` prints SKIP, or panics under `VFS_TEST_REQUIRE_ALL=1`.
-fn probe() -> Option<PathBuf> {
+pub(crate) fn probe() -> Option<PathBuf> {
     let exe = std::env::current_exe().expect("current exe");
     let deps = exe.parent().expect("test exe folder");
     let profile = if deps.file_name().is_some_and(|n| n == "deps") {
@@ -137,26 +137,29 @@ fn probe() -> Option<PathBuf> {
 }
 
 /// The test's folders, kept for the life of the test process.
-struct Setup {
+pub(crate) struct Setup {
     /// Root 0's location, with a real `aether-probe.exe` in it.
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     /// Where the director staged its copy.
-    staged: PathBuf,
-    served: &'static fakedirector::Served,
-    _hooks: aether_hooks::HookGuard,
+    pub(crate) staged: PathBuf,
+    pub(crate) served: &'static fakedirector::Served,
+    pub(crate) _hooks: aether_hooks::HookGuard,
 }
 
 /// What the director holds and how the roots are laid out.
-struct Given {
+pub(crate) struct Given {
     /// The reference stages `IMAGE` (else STAGE_EXEC is NotSupported).
-    stages: bool,
+    pub(crate) stages: bool,
     /// Root 0 has a backing directory.
-    backed: bool,
+    pub(crate) backed: bool,
     /// Faults armed on STAGE_EXEC.
-    fault: Option<Fault>,
+    pub(crate) fault: Option<Fault>,
 }
 
-fn setup(probe: &Path, given: Given) -> (Setup, Option<aether_refdirector::harness::FaultId>) {
+pub(crate) fn setup(
+    probe: &Path,
+    given: Given,
+) -> (Setup, Option<aether_refdirector::harness::FaultId>) {
     let dir = aether_testkit::tempdir().expect("temp folder");
     let base = dir.path().to_path_buf();
     std::mem::forget(dir);
@@ -216,7 +219,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// `CreateProcessW(app, "\"app\"")`: the process id, or the call's error.
 /// A child that did start is killed and waited for.
-fn create(app: &Path) -> Result<u32, u32> {
+pub(crate) fn create(app: &Path) -> Result<u32, u32> {
     let app_w = wide(&app.to_string_lossy());
     let mut cmd = wide(&format!("\"{}\"", app.display()));
     // SAFETY: zeroed is a valid STARTUPINFOW once `cb` is set.

@@ -197,6 +197,52 @@ pub(super) unsafe fn path_of(oa: *const ObjectAttributes) -> Result<Option<Strin
     Ok(unsafe { path_of_tracked(oa) }?.map(|d| d.path))
 }
 
+thread_local! {
+    /// The name [`surely_outside`] decides on, decoded into a buffer each
+    /// thread keeps, so the test allocates nothing once the buffer has grown.
+    static NAME_SCRATCH: core::cell::RefCell<String> =
+        const { core::cell::RefCell::new(String::new()) };
+}
+
+/// Whether `oa` names a path outside every root, answered without allocating:
+/// the passthrough of every file a program touches outside the roots. The
+/// name is decoded as [`path_of`] decodes it, into a buffer kept per thread,
+/// and asked whether it is under a root, as [`path_is_ours`] asks. `false` when this cannot tell cheaply (no name,
+/// a name relative to a handle, a name NT refuses, the buffer already in use
+/// on this thread): the caller then takes its full path, which decides the
+/// same way.
+pub(super) unsafe fn surely_outside(oa: *const ObjectAttributes) -> bool {
+    if oa.is_null() {
+        return false;
+    }
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let oa_ref = unsafe { &*oa };
+    if !oa_ref.root_directory.is_null() {
+        return false;
+    }
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let Ok(Some(units)) = (unsafe { crate::ntbuf::us_units(oa_ref.object_name) }) else {
+        return false;
+    };
+    if units.is_empty() {
+        return false;
+    }
+    NAME_SCRATCH
+        .try_with(|cell| {
+            let Ok(mut name) = cell.try_borrow_mut() else {
+                return false;
+            };
+            name.clear();
+            // `String::from_utf16_lossy`'s decoding, into the kept buffer.
+            name.extend(
+                char::decode_utf16(units.iter().copied())
+                    .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
+            );
+            !crate::director::global().is_some_and(|c| c.is_under_root(&name))
+        })
+        .unwrap_or(false)
+}
+
 /// Is this path one we are responsible for: under a root the director's client declared?
 ///
 /// The same question `FuseClient::route` answers, asked without building the wire vpath. Every

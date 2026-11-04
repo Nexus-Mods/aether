@@ -3,8 +3,8 @@
 
 use super::{
     allow_disk_fallthrough, attributes, caller_buf, in_hook_reenter, path_file_id, path_of,
-    put_basic, put_network_open, time_or, BASIC_LEN, NETWORK_OPEN_LEN, TRAMP_QATTR, TRAMP_QFULL,
-    TRAMP_QIBN,
+    put_basic, put_network_open, surely_outside, time_or, BASIC_LEN, NETWORK_OPEN_LEN, TRAMP_QATTR,
+    TRAMP_QFULL, TRAMP_QIBN,
 };
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes,
@@ -207,6 +207,13 @@ pub(super) unsafe fn qattr_hook_body(
         // SAFETY: the original NT function, called with valid NT arguments.
         return unsafe { tramp(oa, info) };
     }
+    // Outside every root: the host answers, and the decision allocates
+    // nothing. With stats on, the full path below records the stat.
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if !crate::hookstats::enabled() && unsafe { surely_outside(oa) } {
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(oa, info) };
+    }
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     if let Some(path) = match unsafe { path_of(oa) } {
         Ok(p) => p,
@@ -247,6 +254,13 @@ pub(super) unsafe fn qfull_hook_body(
         None => return STATUS_UNSUCCESSFUL,
     };
     if in_hook_reenter() {
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(oa, info) };
+    }
+    // Outside every root: the host answers, and the decision allocates
+    // nothing. With stats on, the full path below records the stat.
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if !crate::hookstats::enabled() && unsafe { surely_outside(oa) } {
         // SAFETY: the original NT function, called with valid NT arguments.
         return unsafe { tramp(oa, info) };
     }

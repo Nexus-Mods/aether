@@ -180,7 +180,14 @@ impl RootMap {
     }
 
     /// Whether `nt_path` lies under any managed root (well-formed, not escaping).
+    /// A cached answer is read in place, so asking about a path seen before
+    /// allocates nothing.
     pub fn contains(&self, nt_path: &str) -> bool {
+        if !cache_suppressed() {
+            if let Some(inside) = self.cache.is_inside(nt_path) {
+                return inside;
+            }
+        }
         self.under_root(nt_path).is_some()
     }
 

@@ -126,6 +126,7 @@ const CASES: &[&str] = &[
     "list_next_entry",
     "move",
     "open_missing",
+    "open_outside_root",
     "open_read_root",
     "open_write_writable",
     "query_key_not_a_key",
@@ -711,6 +712,24 @@ fn attributes_outside_root() {
     let (ok, m) = measure(served, || attributes(&w));
     assert!(ok);
     check("attributes_outside_root", m);
+}
+
+/// `CreateFileW` and `CloseHandle` of a real file outside every root.
+#[test]
+fn open_outside_root() {
+    cost_case!();
+    let (_root, served) = serve();
+    let outside = aether_testkit::tempdir().expect("temp folder");
+    let file = outside.path().join("real.txt");
+    std::fs::write(&file, b"on disk").unwrap();
+    let w = wide(&file);
+    close(open_wide(&w, GENERIC_READ));
+    let ((), m) = measure(served, || {
+        let h = open_wide(&w, GENERIC_READ);
+        assert_ne!(h, INVALID_HANDLE_VALUE);
+        close(h);
+    });
+    check("open_outside_root", m);
 }
 
 #[test]

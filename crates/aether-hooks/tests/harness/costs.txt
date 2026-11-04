@@ -5,7 +5,7 @@
 # commit:
 #   AETHER_COSTS_UPDATE=1 cargo test -p aether-hooks --test harness costs::
 attributes_in_root round_trips=1 ring_bytes=32 allocs<=7
-attributes_outside_root round_trips=0 ring_bytes=0 allocs<=2
+attributes_outside_root round_trips=0 ring_bytes=0 allocs<=0
 close round_trips=1 ring_bytes=8 allocs<=0
 create_directory round_trips=2 ring_bytes=50 allocs<=79
 create_process round_trips=2 ring_bytes=58 allocs<=120
@@ -17,6 +17,7 @@ list_100_entries round_trips=3 ring_bytes=2966 allocs<=131
 list_next_entry round_trips=0 ring_bytes=0 allocs<=1
 move round_trips=3 ring_bytes=85 allocs<=150
 open_missing round_trips=1 ring_bytes=24 allocs<=7
+open_outside_root round_trips=0 ring_bytes=0 allocs<=4
 open_read_root round_trips=1 ring_bytes=42 allocs<=17
 open_write_writable round_trips=1 ring_bytes=43 allocs<=33
 query_key_not_a_key round_trips=0 ring_bytes=0 allocs<=0

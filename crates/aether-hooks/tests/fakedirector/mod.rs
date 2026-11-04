@@ -37,7 +37,9 @@ use aether_ipc::{Notifier, RequestView, SharedSeg};
 use aether_refdirector::harness::{serve_threads, ArenaShape, FaultId};
 use aether_rpc::{Tap, TapAction};
 use aether_win::SharedMapping;
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use std::cell::Cell;
+use std::time::Instant;
+use windows_sys::Win32::System::Threading::{CreateEventW, Sleep, WaitForSingleObject};
 
 // The tests know the reference director by its old name here.
 pub(crate) use aether_refdirector::harness::{Fault, Faults, Match, Override, Recorder};
@@ -62,6 +64,13 @@ pub(crate) const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
 /// signals the event for every request, and an auto-reset event keeps a
 /// signal until a waiter takes it.
 const WAKE_WAIT_MS: u32 = 1_000;
+
+/// How long a polling serve thread stays hot (no back-off) after it served a
+/// request: a test's calls in quick succession see no added latency. After
+/// that the thread looks once a millisecond (Windows rounds `Sleep(1)` up to
+/// its timer resolution, up to about 15.6 ms), the cost of a request after a
+/// quiet spell.
+const HOT_FOR: Duration = Duration::from_millis(20);
 
 /// The ring's transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -306,7 +315,7 @@ fn serve(virtual_dir: &Path, fake: Fake, opts: Options) -> Served {
             static STOP: AtomicBool = AtomicBool::new(false);
             let notifier = move || match wake {
                 Some(h) => Wake::Event(h),
-                None => Wake::Yield,
+                None => Wake::Poll(Cell::new(None)),
             };
             std::thread::scope(|s| {
                 let workers = serve_threads(s, threads, seg, arena, &notifier, fake, &chain, &STOP);
@@ -354,10 +363,17 @@ fn attach_with_deadline(d: Duration) -> Result<(), FuseInitError> {
         .map_err(|_| FuseInitError::ConnectFailed("a client was already installed".into()))
 }
 
-/// The serve threads' notifier: look again at once (giving the processor to
-/// whatever else is ready), or wait on the director's wake event.
+/// The serve threads' notifier: poll the ring, or wait on the director's wake
+/// event.
 enum Wake {
-    Yield,
+    /// Look again at once (giving the processor to whatever else is ready)
+    /// for [`HOT_FOR`] after this thread last served a request, then 1 ms
+    /// between looks. `yield_now` (`SwitchToThread`) returns at once when
+    /// nothing else is ready, so without the back-off an idle thread is a
+    /// busy loop. The back-off is `Sleep`, which is `NtDelayExecution` and
+    /// makes no handle (std's `thread::sleep` creates a waitable timer and
+    /// closes it through the hooked `NtClose`). `None`: nothing served yet.
+    Poll(Cell<Option<Instant>>),
     /// The event's handle, as an address (a `HANDLE` is not `Send`).
     Event(usize),
 }
@@ -365,12 +381,22 @@ enum Wake {
 impl Notifier for Wake {
     fn wait_server(&self) {
         match *self {
-            Wake::Yield => std::thread::yield_now(),
+            Wake::Poll(ref last) => match last.get() {
+                Some(t) if t.elapsed() < HOT_FOR => std::thread::yield_now(),
+                // SAFETY: a plain delay; no handle.
+                _ => unsafe { Sleep(1) },
+            },
             // SAFETY: the event is leaked with the ring, so the handle stays
             // valid for the process.
             Wake::Event(h) => unsafe {
                 WaitForSingleObject(h as _, WAKE_WAIT_MS);
             },
+        }
+    }
+    // Called by the server after each request it completes.
+    fn notify_client(&self, _slot: u32) {
+        if let Wake::Poll(ref last) = *self {
+            last.set(Some(Instant::now()));
         }
     }
 }

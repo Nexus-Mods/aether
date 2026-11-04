@@ -797,3 +797,114 @@ fn a_lazy_section_whose_section_reserve_fails_is_private_and_still_reads() {
     close(section);
     close(file);
 }
+
+// ---- demand-paged: many threads on a chunk whose fill keeps failing ------
+
+/// The semaphore [`in_page_parker`] releases once per in-page error, as an
+/// address (`HANDLE` is not `Sync`).
+static RAISED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// A last vectored handler that counts each in-page error the shim passed on
+/// and parks the thread that took it for good (it cannot resume: its page
+/// has nothing). The test thread reads the count and ends the process.
+unsafe extern "system" fn in_page_parker(info: *mut EXCEPTION_POINTERS) -> i32 {
+    use windows_sys::Win32::System::Threading::{ReleaseSemaphore, Sleep};
+    let rec = &*(*info).ExceptionRecord;
+    if rec.ExceptionCode as u32 != STATUS_IN_PAGE_ERROR {
+        return 0; // EXCEPTION_CONTINUE_SEARCH
+    }
+    ReleaseSemaphore(*RAISED.get().expect("armed") as _, 1, core::ptr::null_mut());
+    loop {
+        Sleep(u32::MAX);
+    }
+}
+
+/// Exit code of the many-waiters test when the raises or the READs are not
+/// what the shim should give.
+const WRONG_WAITERS: u32 = 0xE000_0002;
+
+/// Every thread waiting on a chunk whose fill failed its bounded retries
+/// raises at once, without READs of its own, and so does a later touch: the
+/// chunk is failed for the life of its section.
+#[test]
+fn threads_on_a_chunk_whose_fill_keeps_failing_all_raise_after_one_bounded_try() {
+    isolate_expecting_exit!(STATUS_IN_PAGE_ERROR);
+    use std::time::Duration;
+    use windows_sys::Win32::System::Threading::{CreateSemaphoreW, WaitForSingleObject};
+    const WAITERS: usize = 4;
+    // OPEN says 8 MiB; the director has 5, so every READ of the chunk at 6
+    // MiB comes back short: a failed fill.
+    let (root, served) = serve(
+        Fake::new().with(
+            FILE,
+            pattern(LAZY),
+            ReadStyle::ShorterThanClaimed(5 * MIB as u64),
+        ),
+        true,
+    );
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section) as usize;
+    // The first READ is held so every waiter is queued on the chunk before
+    // any try fails.
+    let hold = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..reads(Opcode::Read)
+        },
+        Fault::Delay(Duration::from_secs(10)),
+    );
+    served
+        .faults
+        .arm(reads(Opcode::Read), Fault::Status(Status::IoError));
+    // SAFETY: an unnamed semaphore, leaked with the process.
+    let sem = unsafe { CreateSemaphoreW(core::ptr::null(), 0, 64, core::ptr::null()) };
+    assert!(!sem.is_null());
+    let _ = RAISED.set(sem as usize);
+    // SAFETY: a handler that only counts and parks.
+    assert!(!unsafe { AddVectoredExceptionHandler(0, Some(in_page_parker)) }.is_null());
+    let mark = served.recorder.mark();
+
+    let touch = move |at: usize| {
+        std::thread::spawn(move || {
+            let got = bytes(v as *const u8, at, 1);
+            panic!("a page whose READs all fail was read as {got:?}");
+        })
+    };
+    let wait_raised = |n: usize| {
+        for _ in 0..n {
+            // SAFETY: the semaphore above.
+            if unsafe { WaitForSingleObject(sem, 30_000) } != 0 {
+                // SAFETY: plain FFI.
+                unsafe { ExitProcess(WRONG_WAITERS) };
+            }
+        }
+    };
+    let _first = touch(TOUCH);
+    assert!(served.faults.wait_applied(hold, 1, Duration::from_secs(10)));
+    let _waiters: Vec<_> = (1..WAITERS).map(|i| touch(TOUCH + i * PAGE)).collect();
+    // The waiters reach the chunk while its first READ is held. Nothing can
+    // say they are blocked on it, so they are given a moment, as a bound on
+    // the test, not a condition of its result: a waiter that comes after
+    // the chunk failed raises the same way.
+    std::thread::sleep(Duration::from_millis(200));
+    served.faults.release();
+    wait_raised(WAITERS);
+    // A later touch of the failed chunk.
+    let _later = touch(TOUCH + WAITERS * PAGE);
+    wait_raised(1);
+
+    let reads = read_offsets(served, mark);
+    let raised = aether_hooks::section_failure_count("in-page-error");
+    // SAFETY: plain FFI.
+    unsafe {
+        ExitProcess(
+            if reads == [TOUCH as u64; 4] && raised == (WAITERS + 1) as u64 {
+                STATUS_IN_PAGE_ERROR
+            } else {
+                eprintln!("READs {reads:?}, in-page errors {raised}");
+                WRONG_WAITERS
+            },
+        )
+    };
+}

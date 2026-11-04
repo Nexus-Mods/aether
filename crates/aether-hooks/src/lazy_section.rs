@@ -38,7 +38,7 @@
 
 use core::cell::Cell;
 use core::ffi::c_void;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
@@ -117,15 +117,56 @@ struct OwnedRegion {
     /// The section handle is still open.
     section_open: bool,
     committed: HashSet<usize>,
+    /// Chunks whose fills have failed and are still within their bounded
+    /// retries: the tries so far, and when the first failed. Counted per
+    /// chunk, not per faulting thread, so threads waiting on one chunk
+    /// share one bound.
+    failing: HashMap<usize, (u32, std::time::Instant)>,
+    /// Chunks whose fill failed its bounded retries: every touch raises at
+    /// once, with no READ, for the life of the region (a reopened section
+    /// is a new region, and asks again).
+    failed: HashSet<usize>,
+    /// Fills in progress: while any is, the region is not dropped (see
+    /// [`Filling`]).
+    filling: u32,
 }
 
 impl OwnedRegion {
     /// NT keeps a section's pages alive while any view is mapped, even after
     /// the handle is closed. `synth_section` owns the view refcounts, so ask it
-    /// rather than keeping a second tally that can drift out of step.
+    /// rather than keeping a second tally that can drift out of step. A fill
+    /// in progress keeps it too ([`Filling`]).
     fn is_dead(&self) -> bool {
-        !self.section_open && !crate::synth_section::has_view_in(self.base, self.reserved)
+        !self.section_open
+            && self.filling == 0
+            && !crate::synth_section::has_view_in(self.base, self.reserved)
     }
+}
+
+/// The bytes a region over a file of `file_size` reserves, a whole number of
+/// pages, or `None` when that is 0 or more than `limit` (the address space,
+/// `usize::MAX`). Worked in 64 bits: on x86 a file of 4 GiB or more does not
+/// fit, rather than wrapping to a smaller region.
+fn region_len_within(file_size: u64, limit: u64) -> Option<usize> {
+    let page = PAGE as u64;
+    let len = file_size.checked_add(page - 1)? & !(page - 1);
+    (len != 0 && len <= limit).then_some(len as usize)
+}
+
+/// [`region_len_within`] this target's address space.
+fn region_len(file_size: u64) -> Option<usize> {
+    region_len_within(file_size, usize::MAX as u64)
+}
+
+/// The bytes of the file a fill of `span` bytes at `file_off` reads: what
+/// the file holds there, at most `span`. Worked in 64 bits.
+fn fill_len(file_size: u64, file_off: u64, span: usize) -> usize {
+    file_size.saturating_sub(file_off).min(span as u64) as usize
+}
+
+/// The window filled at creation: [`WARM_BYTES`], or less of a smaller file.
+fn warm_len(file_size: u64) -> usize {
+    file_size.min(WARM_BYTES as u64) as usize
 }
 
 static REGIONS: Mutex<BTreeMap<usize, OwnedRegion>> = Mutex::new(BTreeMap::new());
@@ -429,10 +470,9 @@ pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option
     if file_size == 0 || file_size > MAX_LAZY {
         return None;
     }
-    let reserved = align_up(file_size as usize, PAGE);
-    if reserved == 0 {
-        return None;
-    }
+    // 64-bit first: on x86 a file of 4 GiB or more gets no region
+    // (`STATUS_SECTION_TOO_BIG`), not one cut to its size's low 32 bits.
+    let reserved = region_len(file_size)?;
     // Install VEH only if not disabled (VFS_LAZY_NO_VEH=1 for debug).
     if !aether_env::present(aether_env::LAZY_NO_VEH) {
         ensure_veh();
@@ -470,7 +510,7 @@ pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option
         return None;
     }
     // Warm header/index window so first peeks work even if VEH is slow/racy.
-    let warm = (file_size as usize).min(WARM_BYTES);
+    let warm = warm_len(file_size);
     if warm > 0 {
         let _ = ensure_range(base_u, 0, warm);
     }
@@ -489,7 +529,10 @@ pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option
 /// Without this the shim leaks every eager mapping (up to 256 MiB each) for the
 /// life of the process.
 pub(crate) fn track_eager_section(base: usize, size: u64) -> bool {
-    track(base, align_up(size as usize, PAGE), size, 0, false, 0)
+    match region_len(size) {
+        Some(len) => track(base, len, size, 0, false, 0),
+        None => false,
+    }
 }
 
 fn track(
@@ -513,6 +556,9 @@ fn track(
                     lazy,
                     section_open: true,
                     committed: HashSet::new(),
+                    failing: HashMap::new(),
+                    failed: HashSet::new(),
+                    filling: 0,
                 },
             );
             true
@@ -708,23 +754,15 @@ unsafe fn veh_handler_body(info: *mut EXCEPTION_POINTERS) -> i32 {
     let Some(_veh) = VehGuard::enter() else {
         return EXCEPTION_CONTINUE_SEARCH;
     };
-    let mut fails = 0;
-    let deadline = crate::director::global()
-        .map(|c| c.deadline())
-        .unwrap_or(aether_ipc::RESPONSE_DEADLINE);
-    let started = std::time::Instant::now();
+    // Ask until the chunk is filled or stamped failed. The bound is the
+    // chunk's, shared by every thread on it (`record_failure`), so this ends:
+    // each `Failed` is one of at most 1 + FILL_RETRIES tries in all.
     loop {
         match fill_chunk_at(fault_addr) {
             Fill::Done => return EXCEPTION_CONTINUE_EXECUTION,
             Fill::NotOurs => return EXCEPTION_CONTINUE_SEARCH,
-            Fill::Failed => {
-                fails += 1;
-                // The first try and up to FILL_RETRIES more, none started
-                // after the client's deadline has passed since the first.
-                if fails > FILL_RETRIES || started.elapsed() >= deadline {
-                    break;
-                }
-            }
+            Fill::Failed => {}
+            Fill::Dead => break,
         }
     }
     // The page holds nothing the file holds, and it is still `PAGE_NOACCESS`:
@@ -750,8 +788,70 @@ enum Fill {
     NotOurs,
     /// The READ failed, or came back short of what the file holds there.
     /// The chunk is inaccessible (`PAGE_NOACCESS`, or reserved again), and
-    /// the next touch faults and asks again.
+    /// the next try asks again.
     Failed,
+    /// The chunk's fill has failed its bounded retries (the first try and
+    /// [`FILL_RETRIES`] more, none started after the client's deadline has
+    /// passed since the first failed), whichever threads made them: this
+    /// touch, and every later one for the life of the region, raises
+    /// `STATUS_IN_PAGE_ERROR` with no READ.
+    Dead,
+}
+
+/// Count one failed fill of `chunk` in the region at `base`: [`Fill::Dead`]
+/// when that was its last allowed try (it is then stamped failed),
+/// [`Fill::Failed`] otherwise.
+fn record_failure(base: usize, chunk: usize) -> Fill {
+    let deadline = crate::director::global()
+        .map(|c| c.deadline())
+        .unwrap_or(aether_ipc::RESPONSE_DEADLINE);
+    let Ok(mut g) = REGIONS.lock() else {
+        // Nothing to count with: no more tries.
+        return Fill::Dead;
+    };
+    let Some(r) = g.get_mut(&base) else {
+        return Fill::Dead;
+    };
+    let (tries, first) = r
+        .failing
+        .entry(chunk)
+        .or_insert((0, std::time::Instant::now()));
+    *tries += 1;
+    if *tries > FILL_RETRIES || first.elapsed() >= deadline {
+        r.failing.remove(&chunk);
+        r.failed.insert(chunk);
+        return Fill::Dead;
+    }
+    Fill::Failed
+}
+
+/// A fill in progress on the region at its address (`OwnedRegion::filling`).
+///
+/// The fill uses the region's section handle and memory after `REGIONS` is
+/// unlocked (the READ is a round trip). Without this, a program that unmaps
+/// the last view and closes the section while another of its threads is
+/// faulting on it would have the region reaped mid-fill: the section handle
+/// closed and its value free for reuse, so the worker's `MapViewOfFile`
+/// could map an unrelated section and write this file's bytes into it, or
+/// the fill write into freed address space. While one of these lives the
+/// region is not dropped; the last fill to end drops a region that died
+/// meanwhile. (No test: the only reproduction is a program that unmaps a
+/// view another thread is reading, which ends that process either way.)
+struct Filling(usize);
+
+impl Drop for Filling {
+    fn drop(&mut self) {
+        let dropped = match REGIONS.lock() {
+            Ok(mut g) => {
+                if let Some(r) = g.get_mut(&self.0) {
+                    r.filling = r.filling.saturating_sub(1);
+                }
+                reap(&mut g, self.0)
+            }
+            Err(_) => None,
+        };
+        let_go(dropped);
+    }
 }
 
 /// Commit + stream the CHUNK covering `addr` (addr may be anywhere in the chunk).
@@ -768,12 +868,12 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
     };
 
     let (base, file_size, fh, section, chunk_idx, commit_off, commit_len) = {
-        let g = match REGIONS.lock() {
+        let mut g = match REGIONS.lock() {
             Ok(g) => g,
             Err(_) => return Fill::NotOurs,
         };
         let Some((_, region)) = g
-            .range(..=addr)
+            .range_mut(..=addr)
             .next_back()
             .filter(|(_, r)| r.lazy && addr < r.base + r.reserved)
         else {
@@ -784,6 +884,10 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
         if region.committed.contains(&chunk_idx) {
             return Fill::Done;
         }
+        if region.failed.contains(&chunk_idx) {
+            return Fill::Dead;
+        }
+        region.filling += 1;
         let commit_off = chunk_idx * CHUNK;
         let commit_len = CHUNK.min(region.reserved - commit_off);
         (
@@ -796,6 +900,9 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
             commit_len,
         )
     };
+    // Counted in `filling` above, under the same lock: the region outlives
+    // this fill.
+    let _filling = Filling(base);
 
     let page = (base + commit_off) as *mut c_void;
     // Align commit length to pages (required).
@@ -822,11 +929,7 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
     }
 
     let file_off = commit_off as u64;
-    let readable = if file_off >= file_size {
-        0usize
-    } else {
-        ((file_size - file_off) as usize).min(commit_len)
-    };
+    let readable = fill_len(file_size, file_off, commit_len);
 
     if readable > 0 {
         // Bracket the fill: a started-without-completed pair is the signature of
@@ -852,18 +955,19 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
             if section == 0 {
                 VirtualFree(page, commit_len, MEM_DECOMMIT);
             }
-            return Fill::Failed;
+            return record_failure(base, chunk_idx);
         }
     }
     // Readable only now, every byte in place (zeros past the file's end).
     let mut old = 0;
     if section != 0 && VirtualProtect(page, commit_len, PAGE_READWRITE, &mut old) == 0 {
-        return Fill::Failed;
+        return record_failure(base, chunk_idx);
     }
 
     if let Ok(mut g) = REGIONS.lock() {
         if let Some(region) = g.get_mut(&base) {
             region.committed.insert(chunk_idx);
+            region.failing.remove(&chunk_idx);
         }
     }
     Fill::Done
@@ -1033,6 +1137,37 @@ mod tests {
             UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as _ });
             release_va(base, section);
         }
+    }
+
+    /// Sizes and offsets are worked in 64 bits and only then fitted to the
+    /// address space. `limit` stands for the target's `usize::MAX`, so the
+    /// 32-bit case is checked on any host: a version that cast the file's
+    /// size to `usize` first would give a 5 GiB file a 1 GiB region there.
+    #[test]
+    fn region_sizes_and_fill_lengths_are_64_bit_before_they_fit_the_address_space() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let x86 = u32::MAX as u64;
+        assert_eq!(region_len_within(5 * GIB, x86), None, "5 GiB on x86");
+        assert_eq!(region_len_within(4 * GIB, x86), None, "4 GiB on x86");
+        assert_eq!(region_len_within(GIB + 1, x86), Some((GIB + 4096) as usize));
+        assert_eq!(region_len_within(3 * 4096 + 1, x86), Some(4 * 4096));
+        assert_eq!(region_len_within(0, x86), None);
+        assert_eq!(region_len_within(u64::MAX, u64::MAX), None, "no overflow");
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(region_len(64 * GIB), Some((64 * GIB) as usize));
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(region_len(5 * GIB), None);
+
+        assert_eq!(fill_len(5 * GIB, 0, CHUNK), CHUNK);
+        assert_eq!(fill_len(5 * GIB, 5 * GIB - 100, CHUNK), 100);
+        assert_eq!(fill_len(5 * GIB, 5 * GIB, CHUNK), 0);
+        assert_eq!(fill_len(4 * GIB + 1, 4 * GIB, CHUNK), 1);
+        assert_eq!(
+            warm_len(4 * GIB + 1),
+            WARM_BYTES,
+            "not the size's low 32 bits"
+        );
+        assert_eq!(warm_len(100), 100);
     }
 
     #[test]

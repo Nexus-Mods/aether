@@ -244,7 +244,11 @@ unsafe fn fuse_create_section(
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
-    let map_len = size as usize;
+    // At most `eager_max()` (256 MiB), so it fits; checked, not cast, so a
+    // test's larger limit on x86 cannot wrap it.
+    let Ok(map_len) = usize::try_from(size) else {
+        return STATUS_SECTION_TOO_BIG;
+    };
     // SAFETY: FFI call with valid arguments.
     let base = unsafe {
         VirtualAlloc(

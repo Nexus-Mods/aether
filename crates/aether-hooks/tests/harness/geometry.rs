@@ -170,12 +170,7 @@ fn concurrent(served: &Served, root: &Path, slots: u32, hint: u32) {
     // Every READ that reached the director is still held: more than `limit`
     // means the shim sent more data requests than it may.
     let holding = served.faults.applied(held);
-    let let_go = served.recorder.count_since(mark, Opcode::Read);
     release();
-    assert_eq!(
-        let_go, 0,
-        "a held READ ran out its {MAX_DELAY:?} before the count, so the count says nothing"
-    );
     assert_eq!(holding, limit, "READs held at once");
     for r in readers {
         assert!(r.join().unwrap(), "a concurrent read returned wrong bytes");

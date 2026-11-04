@@ -852,8 +852,9 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
     // Failed for a reply in the wrong slot, not a timeout. Which mismatch
     // shows first depends on which two requests were swapped: another
     // client's answer, a status meant for another request, a payload of
-    // another opcode's shape that does not decode, or a meeting whose two
-    // requests got each other's answers.
+    // another opcode's shape that does not decode or is not that opcode's
+    // length (an attach's HEARTBEAT given a GETATTR's reply, say), or a
+    // meeting whose two requests got each other's answers.
     let concurrent = entry(&entries, "concurrent");
     let error = concurrent.2.as_deref().unwrap_or("");
     assert!(!error.contains("no answer within"), "{concurrent:?}");
@@ -862,6 +863,8 @@ fn a_director_swapping_replies_in_flight_together_fails_the_concurrent_clients()
             || s.starts_with("a different")
             || s.starts_with("none of the allowed")
             || s.contains("does not decode")
+            || (s.contains(" reply ") && s.contains("payload (wire.md 3.4"))
+            || (s.contains(" reply of ") && s.contains(" bytes (wire.md 3.4"))
             || s.contains(" got Got(")
             || s.contains("meeting:")
     };

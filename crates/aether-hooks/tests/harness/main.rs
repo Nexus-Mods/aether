@@ -24,8 +24,15 @@ static A: aether_testkit::alloc::Counting = aether_testkit::alloc::Counting;
 #[path = "../ntapi/mod.rs"]
 mod ntapi;
 
+// The registry tests' director and hooks, NT key calls and scratch keys; this binary uses
+// some of them.
+#[allow(unsafe_code, dead_code)]
+#[path = "../common/reg.rs"]
+mod reg;
+
 mod bugs_files;
 mod caches_read;
+mod caches_registry;
 mod child_start;
 mod geometry;
 mod idle;

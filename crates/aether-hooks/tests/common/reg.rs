@@ -516,16 +516,47 @@ fn reg_checker() {
 /// overlay on (`VFS_REGISTRY`, which `regclient::enabled` reads once). Returns the virtual
 /// root's directory too.
 pub(crate) fn start_director(tag: &str) -> (&'static Fake, std::path::PathBuf) {
+    let (served, root) = start_director_with(
+        tag,
+        fakedirector::Options {
+            arena_len: 0,
+            ..fakedirector::Options::default()
+        },
+    );
+    (served.fake, root)
+}
+
+/// [`start_director`] on a ring and with a registry generation as `opts` says, returning
+/// what the harness taps saw and can do (`fakedirector::install_with`).
+pub(crate) fn start_director_with(
+    tag: &str,
+    opts: fakedirector::Options,
+) -> (&'static fakedirector::Served, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!("aether-shim-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var(aether_env::REGISTRY, "1");
-    let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
-    (fake, root)
+    let served = fakedirector::install_with(&root, Fake::new().with_registry(), opts);
+    (served, root)
 }
 
 /// [`start_director`], then the shim's hooks over an empty root. Never uninstalled.
 pub(crate) fn install_hooks(tag: &str) -> &'static Fake {
-    let (fake, _root) = start_director(tag);
+    install_hooks_with(
+        tag,
+        fakedirector::Options {
+            arena_len: 0,
+            ..fakedirector::Options::default()
+        },
+    )
+    .fake
+}
+
+/// [`start_director_with`], then the shim's hooks over an empty root. Never uninstalled.
+pub(crate) fn install_hooks_with(
+    tag: &str,
+    opts: fakedirector::Options,
+) -> &'static fakedirector::Served {
+    let (served, _root) = start_director_with(tag, opts);
     std::mem::forget(install().expect("install"));
     assert_eq!(
         aether_hooks::reg_overlay_disabled_by(),
@@ -533,7 +564,7 @@ pub(crate) fn install_hooks(tag: &str) -> &'static Fake {
         "every registry detour is in"
     );
     assert!(regclient::enabled());
-    fake
+    served
 }
 
 /// Whether this test runs under Wine: Wine's ntdll exports `wine_get_version`, Windows' does

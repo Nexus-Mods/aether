@@ -81,14 +81,51 @@ mod tests {
 
     #[test]
     fn eq_folded_is_equality_of_the_folds() {
+        // Cases a property may not draw: characters outside the BMP, the
+        // three sigmas, a fold that is a prefix of the other, a character
+        // whose lowercase is two characters.
         let words = [
             "File.txt", "file.TXT", "File.tx", "", "ÄÖÜ", "äöü", "Äö", "ǅ", "ǆ", "İ", "i̇", "ẞ",
-            "ß", "K", "K", "k",
+            "ß", "ss", "K", "K", "k", "𐐀", "𐐨", "𐐀𐐁", "𐐨𐐩", "Σ", "σ", "ς", "ΣΑΣ", "σας",
         ];
         for a in words {
             for b in words {
                 assert_eq!(eq_folded(a, b), fold(a) == fold(b), "{a:?} {b:?}");
             }
+        }
+    }
+
+    /// `s` with each character upper- or lowercased as `flips` says: another
+    /// spelling of the same name, or, where a mapping is not reversible,
+    /// another name.
+    fn respell(s: &str, flips: &[bool]) -> String {
+        s.chars()
+            .zip(flips.iter().cycle())
+            .flat_map(|(c, up)| {
+                let out: Vec<char> = if *up {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_lowercase().collect()
+                };
+                out
+            })
+            .collect()
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn eq_folded_agrees_with_the_folds_for_any_two_strings(a in ".*", b in ".*") {
+            proptest::prop_assert_eq!(eq_folded(&a, &b), fold(&a) == fold(&b));
+        }
+
+        #[test]
+        fn eq_folded_agrees_with_the_folds_for_a_string_and_a_respelling(
+            a in ".*",
+            flips in proptest::collection::vec(proptest::bool::ANY, 1..8),
+        ) {
+            let b = respell(&a, &flips);
+            proptest::prop_assert_eq!(eq_folded(&a, &b), fold(&a) == fold(&b));
+            proptest::prop_assert_eq!(eq_folded(&b, &a), fold(&b) == fold(&a));
         }
     }
 

@@ -1,0 +1,1029 @@
+//! Scenarios: a tree to mount and a list of steps, each a request and the
+//! answer expected for it, read from JSON in the protocol table's own names
+//! (`contract/protocol.json`). The format is in `contract/scenarios/README.md`;
+//! in short:
+//!
+//! ```json
+//! {
+//!   "name": "read-a-file",
+//!   "description": "OPEN, READ and CLOSE of a mounted file",
+//!   "tree": {"roots": [{"id": 0, "files": [{"path": "data/a.esp", "contents": "abc"}]}]},
+//!   "steps": [
+//!     {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/a.esp"},
+//!      "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+//!     {"request": {"op": "read", "fh": 1, "offset": 0, "len": 16},
+//!      "expect": {"reply": {"data": "abc"}}},
+//!     {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}}
+//!   ]
+//! }
+//! ```
+//!
+//! A request is `op` (an opcode's name) and that opcode's request fields;
+//! READ may add `slot_flags` (`["read_bulk"]`). An expectation is a
+//! `reply` (the opcode's reply fields), a `status` name, or `one_of`
+//! several, which needs `wire`, the `docs/wire.md` section that allows more
+//! than one answer. `{"status": "ok"}` is the empty reply, for the opcodes
+//! that have one. Bytes are a string (UTF-8), `{"hex": ".."}` or
+//! `{"size": N, "seed": S}`. File paths in requests are canonical
+//! (`docs/wire.md` 3.2: other syntax is director-defined). Anything else (an
+//! unknown op, field, flag or status, a missing field, a non-canonical path)
+//! is a [`LoadError`] naming the file, the step and the field.
+
+use std::collections::BTreeSet;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use aether_protocol::{
+    AttrResp, ChangedReply, Lookup, LookupReply, Opcode, OpenFlags, OpenResp, ReadReply, Reply,
+    Request, RequestFlags, RootId, Status,
+};
+use aether_refdirector::tree::{is_canonical, Contents, Tree};
+use aether_registry::{Child, Node, Value as RegValue};
+use serde_json::{Map, Value};
+
+/// One scenario: what to mount and what to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scenario {
+    pub name: String,
+    pub description: String,
+    pub tree: Tree,
+    pub steps: Vec<Step>,
+}
+
+/// A request and the answer it must get.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub request: OwnedRequest,
+    pub expect: Expect,
+    /// The `docs/wire.md` section that allows an [`Expect::OneOf`].
+    pub cite: Option<String>,
+    /// What the step is for, if the scenario says.
+    pub note: Option<String>,
+}
+
+/// What a step expects: a reply (status OK), an error status, or any of
+/// several where `docs/wire.md` allows more than one answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expect {
+    Reply(OwnedReply),
+    Status(Status),
+    OneOf(Vec<Expect>),
+}
+
+/// A [`Request`] owning its strings and bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedRequest {
+    GetAttr {
+        root: RootId,
+        path: String,
+    },
+    ReadDir {
+        root: RootId,
+        path: String,
+    },
+    Open {
+        root: RootId,
+        flags: OpenFlags,
+        path: String,
+    },
+    Read {
+        slot_flags: RequestFlags,
+        fh: u64,
+        offset: u64,
+        len: u32,
+    },
+    Write {
+        fh: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    SetAttr {
+        fh: u64,
+        size: u64,
+    },
+    Rename {
+        root: RootId,
+        from: String,
+        to: String,
+    },
+    Delete {
+        root: RootId,
+        path: String,
+    },
+    Mkdir {
+        root: RootId,
+        mode: u32,
+        path: String,
+    },
+    Close {
+        fh: u64,
+    },
+    Heartbeat,
+    StoredNames {
+        root: RootId,
+        skip: u32,
+        path: String,
+    },
+    RegLookup {
+        path: String,
+    },
+    RegKey {
+        path: String,
+    },
+    RegSetValue {
+        path: String,
+        name: String,
+        ty: u32,
+        data: Vec<u8>,
+    },
+    RegDeleteValue {
+        path: String,
+        name: String,
+    },
+    RegCreateKey {
+        path: String,
+        volatile: bool,
+    },
+    RegDeleteKey {
+        path: String,
+    },
+    RegRenameKey {
+        path: String,
+        new_leaf: String,
+    },
+    RegChanged {
+        path: String,
+        subtree: bool,
+        since: u64,
+    },
+    RenameX {
+        from_root: RootId,
+        to_root: RootId,
+        from: String,
+        to: String,
+    },
+    StageExec {
+        root: RootId,
+        path: String,
+    },
+}
+
+impl OwnedRequest {
+    /// The borrowed request, to send.
+    pub fn as_request(&self) -> Request<'_> {
+        use OwnedRequest as O;
+        match self {
+            O::GetAttr { root, path } => Request::GetAttr { root: *root, path },
+            O::ReadDir { root, path } => Request::ReadDir { root: *root, path },
+            O::Open { root, flags, path } => Request::Open {
+                root: *root,
+                flags: *flags,
+                path,
+            },
+            O::Read {
+                slot_flags,
+                fh,
+                offset,
+                len,
+            } => Request::Read {
+                slot_flags: *slot_flags,
+                fh: *fh,
+                offset: *offset,
+                len: *len,
+            },
+            O::Write { fh, offset, data } => Request::Write {
+                fh: *fh,
+                offset: *offset,
+                data,
+            },
+            O::SetAttr { fh, size } => Request::SetAttr {
+                fh: *fh,
+                size: *size,
+            },
+            O::Rename { root, from, to } => Request::Rename {
+                root: *root,
+                from,
+                to,
+            },
+            O::Delete { root, path } => Request::Delete { root: *root, path },
+            O::Mkdir { root, mode, path } => Request::Mkdir {
+                root: *root,
+                mode: *mode,
+                path,
+            },
+            O::Close { fh } => Request::Close { fh: *fh },
+            O::Heartbeat => Request::Heartbeat {},
+            O::StoredNames { root, skip, path } => Request::StoredNames {
+                root: *root,
+                skip: *skip,
+                path,
+            },
+            O::RegLookup { path } => Request::RegLookup { path },
+            O::RegKey { path } => Request::RegKey { path },
+            O::RegSetValue {
+                path,
+                name,
+                ty,
+                data,
+            } => Request::RegSetValue {
+                path,
+                name,
+                ty: *ty,
+                data,
+            },
+            O::RegDeleteValue { path, name } => Request::RegDeleteValue { path, name },
+            O::RegCreateKey { path, volatile } => Request::RegCreateKey {
+                path,
+                volatile: *volatile,
+            },
+            O::RegDeleteKey { path } => Request::RegDeleteKey { path },
+            O::RegRenameKey { path, new_leaf } => Request::RegRenameKey { path, new_leaf },
+            O::RegChanged {
+                path,
+                subtree,
+                since,
+            } => Request::RegChanged {
+                path,
+                subtree: *subtree,
+                since: *since,
+            },
+            O::RenameX {
+                from_root,
+                to_root,
+                from,
+                to,
+            } => Request::RenameX {
+                from_root: *from_root,
+                to_root: *to_root,
+                from,
+                to,
+            },
+            O::StageExec { root, path } => Request::StageExec { root: *root, path },
+        }
+    }
+
+    /// The request's opcode.
+    pub fn opcode(&self) -> Opcode {
+        self.as_request().opcode()
+    }
+}
+
+/// One READDIR entry, owned.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OwnedDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+/// A [`Reply`] owning its strings, bytes and registry node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedReply {
+    GetAttr(AttrResp),
+    ReadDir(Vec<OwnedDirEntry>),
+    Open(OpenResp),
+    /// A READ's data, however it was carried.
+    Read(Vec<u8>),
+    /// A bulk READ reply not yet read from the arena
+    /// ([`OwnedReply::resolve_bulk`]); it compares with nothing.
+    ReadBulk {
+        len: u32,
+        arena_offset: u64,
+    },
+    Write(u32),
+    StoredNames(String),
+    StageExec(String),
+    RegLookup(LookupReply),
+    RegKey {
+        version: u64,
+        node: Option<Node>,
+    },
+    RegVersion(u64),
+    RegChanged(ChangedReply),
+    Empty,
+}
+
+impl OwnedReply {
+    /// The owned form of `r`. A bulk READ reply's data is in the arena,
+    /// which `r` cannot reach: it becomes [`OwnedReply::ReadBulk`].
+    pub fn from_reply(r: &Reply<'_>) -> OwnedReply {
+        match r {
+            Reply::GetAttr(a) => OwnedReply::GetAttr(a.clone()),
+            Reply::ReadDir(es) => OwnedReply::ReadDir(
+                es.iter()
+                    .map(|e| OwnedDirEntry {
+                        name: e.name.to_string(),
+                        is_dir: e.is_dir,
+                        size: e.size,
+                        mtime: e.mtime,
+                    })
+                    .collect(),
+            ),
+            Reply::Open(o) => OwnedReply::Open(o.clone()),
+            Reply::Read(ReadReply::Inline(b)) => OwnedReply::Read(b.to_vec()),
+            Reply::Read(ReadReply::Bulk { len, arena_offset }) => OwnedReply::ReadBulk {
+                len: *len,
+                arena_offset: *arena_offset,
+            },
+            Reply::Write(n) => OwnedReply::Write(*n),
+            Reply::StoredNames(s) => OwnedReply::StoredNames(s.to_string()),
+            Reply::StageExec(s) => OwnedReply::StageExec(s.to_string()),
+            Reply::RegLookup(l) => OwnedReply::RegLookup(*l),
+            Reply::RegKey(k) => OwnedReply::RegKey {
+                version: k.version,
+                node: k.node.as_ref().map(|n| n.as_ref().clone()),
+            },
+            Reply::RegVersion(v) => OwnedReply::RegVersion(*v),
+            Reply::RegChanged(c) => OwnedReply::RegChanged(*c),
+            Reply::Empty => OwnedReply::Empty,
+        }
+    }
+
+    /// A [`OwnedReply::ReadBulk`] with its data read by `read(len,
+    /// arena_offset)`; any other reply as it is.
+    pub fn resolve_bulk(self, read: impl FnOnce(u32, u64) -> Vec<u8>) -> OwnedReply {
+        match self {
+            OwnedReply::ReadBulk { len, arena_offset } => OwnedReply::Read(read(len, arena_offset)),
+            r => r,
+        }
+    }
+}
+
+/// Why a scenario did not load: the file, the step (if the error is in
+/// one), the field, and what was wrong with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadError {
+    pub file: PathBuf,
+    pub step: Option<usize>,
+    /// Dotted, from the scenario or step (`request.flags`, `tree`).
+    pub field: String,
+    pub message: String,
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.file.display())?;
+        if let Some(i) = self.step {
+            write!(f, ": step {i}")?;
+        }
+        if !self.field.is_empty() {
+            write!(f, ": {}", self.field)?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// Reads the scenario in `path`.
+pub fn load(path: &Path) -> Result<Scenario, LoadError> {
+    let err = |field: &str, message: String| LoadError {
+        file: path.to_path_buf(),
+        step: None,
+        field: field.to_string(),
+        message,
+    };
+    let text = std::fs::read(path).map_err(|e| err("", e.to_string()))?;
+    let v: Value = serde_json::from_slice(&text).map_err(|e| err("", e.to_string()))?;
+    parse_scenario(&v).map_err(|e| LoadError {
+        file: path.to_path_buf(),
+        step: e.step,
+        field: e.field,
+        message: e.message,
+    })
+}
+
+/// Reads every `*.json` file in `dir` as a scenario, in file-name order.
+pub fn load_dir(dir: &Path) -> Result<Vec<Scenario>, LoadError> {
+    let entries = std::fs::read_dir(dir).map_err(|e| LoadError {
+        file: dir.to_path_buf(),
+        step: None,
+        field: String::new(),
+        message: e.to_string(),
+    })?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    files.iter().map(|p| load(p)).collect()
+}
+
+/// The request fields of the opcode named `op`, as `contract/protocol.json`
+/// names them (padding aside), plus `slot_flags` for READ; `None` for a name
+/// that is not an opcode's.
+pub fn request_fields(op: &str) -> Option<&'static [&'static str]> {
+    Some(match opcode(op)? {
+        Opcode::GetAttr | Opcode::ReadDir | Opcode::Delete | Opcode::StageExec => &["root", "path"],
+        Opcode::Open => &["root", "flags", "path"],
+        Opcode::Read => &["slot_flags", "fh", "offset", "len"],
+        Opcode::Write => &["fh", "offset", "data"],
+        Opcode::SetAttr => &["fh", "size"],
+        Opcode::Rename => &["root", "from", "to"],
+        Opcode::Mkdir => &["root", "mode", "path"],
+        Opcode::Close => &["fh"],
+        Opcode::Heartbeat => &[],
+        Opcode::StoredNames => &["root", "skip", "path"],
+        Opcode::RegLookup | Opcode::RegKey | Opcode::RegDeleteKey => &["path"],
+        Opcode::RegSetValue => &["path", "name", "ty", "data"],
+        Opcode::RegDeleteValue => &["path", "name"],
+        Opcode::RegCreateKey => &["path", "volatile"],
+        Opcode::RegRenameKey => &["path", "new_leaf"],
+        Opcode::RegChanged => &["path", "subtree", "since"],
+        Opcode::RenameX => &["from_root", "to_root", "from", "to"],
+    })
+}
+
+/// The reply fields of `op` on OK, as `contract/protocol.json` names them
+/// (padding aside).
+fn reply_fields(op: Opcode) -> &'static [&'static str] {
+    match op {
+        Opcode::GetAttr => &["found", "is_dir", "size", "mtime"],
+        Opcode::ReadDir => &["entries"],
+        Opcode::Open => &["fh", "size", "is_dir", "immutable", "mount_gen"],
+        Opcode::Read => &["data"],
+        Opcode::Write => &["written"],
+        Opcode::StoredNames => &["names"],
+        Opcode::StageExec => &["path"],
+        Opcode::RegLookup => &["version", "state", "below"],
+        Opcode::RegKey => &["version", "node"],
+        Opcode::RegSetValue
+        | Opcode::RegDeleteValue
+        | Opcode::RegCreateKey
+        | Opcode::RegDeleteKey
+        | Opcode::RegRenameKey => &["version"],
+        Opcode::RegChanged => &["version", "changed"],
+        Opcode::SetAttr
+        | Opcode::Rename
+        | Opcode::Delete
+        | Opcode::Mkdir
+        | Opcode::Close
+        | Opcode::Heartbeat
+        | Opcode::RenameX => &[],
+    }
+}
+
+fn opcode(name: &str) -> Option<Opcode> {
+    Opcode::ALL.iter().copied().find(|o| o.name() == name)
+}
+
+fn status(name: &str) -> Option<Status> {
+    Status::ALL.iter().copied().find(|s| s.name() == name)
+}
+
+/// An error inside a scenario, before the file is attached.
+struct Bad {
+    step: Option<usize>,
+    field: String,
+    message: String,
+}
+
+type R<T> = Result<T, Bad>;
+
+/// The fields of one JSON object, read by name and checked for leftovers.
+struct Obj<'v> {
+    map: &'v Map<String, Value>,
+    /// Dotted prefix of every field named here (`request.`).
+    at: String,
+    step: Option<usize>,
+    used: BTreeSet<&'v str>,
+}
+
+impl<'v> Obj<'v> {
+    fn new(v: &'v Value, at: &str, step: Option<usize>) -> R<Obj<'v>> {
+        let map = v.as_object().ok_or_else(|| Bad {
+            step,
+            field: at.trim_end_matches('.').to_string(),
+            message: format!("an object expected, found {v}"),
+        })?;
+        Ok(Obj {
+            map,
+            at: at.to_string(),
+            step,
+            used: BTreeSet::new(),
+        })
+    }
+
+    fn bad(&self, field: &str, message: impl Into<String>) -> Bad {
+        Bad {
+            step: self.step,
+            field: format!("{}{field}", self.at),
+            message: message.into(),
+        }
+    }
+
+    fn opt(&mut self, name: &str) -> Option<&'v Value> {
+        let (k, v) = self.map.get_key_value(name)?;
+        self.used.insert(k.as_str());
+        Some(v)
+    }
+
+    fn get(&mut self, name: &str) -> R<&'v Value> {
+        self.opt(name).ok_or_else(|| self.bad(name, "missing"))
+    }
+
+    fn u64(&mut self, name: &str) -> R<u64> {
+        let v = self.get(name)?;
+        v.as_u64()
+            .ok_or_else(|| self.bad(name, format!("an unsigned integer expected, found {v}")))
+    }
+
+    fn u32(&mut self, name: &str) -> R<u32> {
+        let n = self.u64(name)?;
+        u32::try_from(n).map_err(|_| self.bad(name, format!("{n} does not fit a u32")))
+    }
+
+    fn i64(&mut self, name: &str) -> R<i64> {
+        let v = self.get(name)?;
+        v.as_i64()
+            .ok_or_else(|| self.bad(name, format!("an integer expected, found {v}")))
+    }
+
+    fn bool(&mut self, name: &str) -> R<bool> {
+        let v = self.get(name)?;
+        v.as_bool()
+            .ok_or_else(|| self.bad(name, format!("true or false expected, found {v}")))
+    }
+
+    fn str(&mut self, name: &str) -> R<String> {
+        let v = self.get(name)?;
+        v.as_str()
+            .map(str::to_string)
+            .ok_or_else(|| self.bad(name, format!("a string expected, found {v}")))
+    }
+
+    fn root(&mut self, name: &str) -> R<RootId> {
+        self.u32(name).map(RootId)
+    }
+
+    /// A file path: canonical (`docs/wire.md` 3.2).
+    fn vpath(&mut self, name: &str) -> R<String> {
+        let p = self.str(name)?;
+        if !is_canonical(&p) {
+            return Err(self.bad(
+                name,
+                format!(
+                    "{p:?} is not a canonical path (docs/wire.md 3.2: `/`-joined, \
+                     no empty, `.` or `..` component, `.` for the root)"
+                ),
+            ));
+        }
+        Ok(p)
+    }
+
+    fn bytes(&mut self, name: &str) -> R<Vec<u8>> {
+        let v = self.get(name)?;
+        serde_json::from_value::<Contents>(v.clone())
+            .map(|c| c.bytes())
+            .map_err(|e| self.bad(name, e.to_string()))
+    }
+
+    /// A list of names, each one of `known`'s, as their masks or'ed.
+    fn flags(&mut self, name: &str, known: &[(&str, u32)]) -> R<u32> {
+        let v = self.get(name)?;
+        let list = v
+            .as_array()
+            .ok_or_else(|| self.bad(name, format!("a list of names expected, found {v}")))?;
+        let mut bits = 0;
+        for f in list {
+            let n = f
+                .as_str()
+                .ok_or_else(|| self.bad(name, format!("a flag name expected, found {f}")))?;
+            let (_, mask) = known.iter().find(|(k, _)| *k == n).ok_or_else(|| {
+                let names: Vec<&str> = known.iter().map(|(k, _)| *k).collect();
+                self.bad(
+                    name,
+                    format!("unknown flag {n:?}, expected one of {}", names.join(", ")),
+                )
+            })?;
+            bits |= mask;
+        }
+        Ok(bits)
+    }
+
+    /// Fails on any field not read.
+    fn done(self) -> R<()> {
+        match self.map.keys().find(|k| !self.used.contains(k.as_str())) {
+            None => Ok(()),
+            Some(k) => Err(self.bad(k, format!("unknown field {k:?}"))),
+        }
+    }
+}
+
+/// The names and masks of `OpenFlags`, as `contract/protocol.json`'s
+/// `open_flags`.
+fn open_flag_names() -> Vec<(String, u32)> {
+    OpenFlags::all()
+        .iter_names()
+        .map(|(n, f)| (n.to_ascii_lowercase(), f.bits()))
+        .collect()
+}
+
+fn request_flag_names() -> Vec<(String, u32)> {
+    RequestFlags::all()
+        .iter_names()
+        .map(|(n, f)| (n.to_ascii_lowercase(), f.bits()))
+        .collect()
+}
+
+fn as_refs(v: &[(String, u32)]) -> Vec<(&str, u32)> {
+    v.iter().map(|(n, m)| (n.as_str(), *m)).collect()
+}
+
+fn parse_scenario(v: &Value) -> R<Scenario> {
+    let mut o = Obj::new(v, "", None)?;
+    let name = o.str("name")?;
+    let description = o.str("description")?;
+    let tree_v = o.get("tree")?;
+    let tree: Tree =
+        serde_json::from_value(tree_v.clone()).map_err(|e| o.bad("tree", e.to_string()))?;
+    tree.validate().map_err(|e| o.bad("tree", e))?;
+    let steps_v = o.get("steps")?;
+    let list = steps_v
+        .as_array()
+        .ok_or_else(|| o.bad("steps", "a list of steps expected"))?;
+    o.done()?;
+    let steps = list
+        .iter()
+        .enumerate()
+        .map(|(i, s)| parse_step(i, s))
+        .collect::<R<Vec<Step>>>()?;
+    Ok(Scenario {
+        name,
+        description,
+        tree,
+        steps,
+    })
+}
+
+fn parse_step(i: usize, v: &Value) -> R<Step> {
+    let mut o = Obj::new(v, "", Some(i))?;
+    let request = parse_request(i, o.get("request")?)?;
+    let note = match o.opt("note") {
+        None => None,
+        Some(_) => Some(o.str("note")?),
+    };
+    let (expect, cite) = parse_expect(i, request.opcode(), o.get("expect")?, "expect.", true)?;
+    o.done()?;
+    Ok(Step {
+        request,
+        expect,
+        cite,
+        note,
+    })
+}
+
+fn parse_request(i: usize, v: &Value) -> R<OwnedRequest> {
+    use OwnedRequest as O;
+    let mut o = Obj::new(v, "request.", Some(i))?;
+    let name = o.str("op")?;
+    let op = opcode(&name).ok_or_else(|| {
+        let all: Vec<&str> = Opcode::ALL.iter().map(|o| o.name()).collect();
+        o.bad(
+            "op",
+            format!("unknown op {name:?}, expected one of {}", all.join(", ")),
+        )
+    })?;
+    let open_flags = open_flag_names();
+    let req = match op {
+        Opcode::GetAttr => O::GetAttr {
+            root: o.root("root")?,
+            path: o.vpath("path")?,
+        },
+        Opcode::ReadDir => O::ReadDir {
+            root: o.root("root")?,
+            path: o.vpath("path")?,
+        },
+        Opcode::Open => O::Open {
+            root: o.root("root")?,
+            flags: OpenFlags::from_bits_retain(o.flags("flags", &as_refs(&open_flags))?),
+            path: o.vpath("path")?,
+        },
+        Opcode::Read => O::Read {
+            slot_flags: match o.opt("slot_flags") {
+                None => RequestFlags::empty(),
+                Some(_) => RequestFlags::from_bits_retain(
+                    o.flags("slot_flags", &as_refs(&request_flag_names()))?,
+                ),
+            },
+            fh: o.u64("fh")?,
+            offset: o.u64("offset")?,
+            len: o.u32("len")?,
+        },
+        Opcode::Write => O::Write {
+            fh: o.u64("fh")?,
+            offset: o.u64("offset")?,
+            data: o.bytes("data")?,
+        },
+        Opcode::SetAttr => O::SetAttr {
+            fh: o.u64("fh")?,
+            size: o.u64("size")?,
+        },
+        Opcode::Rename => O::Rename {
+            root: o.root("root")?,
+            from: o.vpath("from")?,
+            to: o.vpath("to")?,
+        },
+        Opcode::Delete => O::Delete {
+            root: o.root("root")?,
+            path: o.vpath("path")?,
+        },
+        Opcode::Mkdir => O::Mkdir {
+            root: o.root("root")?,
+            mode: o.u32("mode")?,
+            path: o.vpath("path")?,
+        },
+        Opcode::Close => O::Close { fh: o.u64("fh")? },
+        Opcode::Heartbeat => O::Heartbeat,
+        Opcode::StoredNames => O::StoredNames {
+            root: o.root("root")?,
+            skip: o.u32("skip")?,
+            path: o.vpath("path")?,
+        },
+        Opcode::RegLookup => O::RegLookup {
+            path: o.str("path")?,
+        },
+        Opcode::RegKey => O::RegKey {
+            path: o.str("path")?,
+        },
+        Opcode::RegSetValue => O::RegSetValue {
+            path: o.str("path")?,
+            name: o.str("name")?,
+            ty: o.u32("ty")?,
+            data: o.bytes("data")?,
+        },
+        Opcode::RegDeleteValue => O::RegDeleteValue {
+            path: o.str("path")?,
+            name: o.str("name")?,
+        },
+        Opcode::RegCreateKey => O::RegCreateKey {
+            path: o.str("path")?,
+            volatile: o.bool("volatile")?,
+        },
+        Opcode::RegDeleteKey => O::RegDeleteKey {
+            path: o.str("path")?,
+        },
+        Opcode::RegRenameKey => O::RegRenameKey {
+            path: o.str("path")?,
+            new_leaf: o.str("new_leaf")?,
+        },
+        Opcode::RegChanged => O::RegChanged {
+            path: o.str("path")?,
+            subtree: o.bool("subtree")?,
+            since: o.u64("since")?,
+        },
+        Opcode::RenameX => O::RenameX {
+            from_root: o.root("from_root")?,
+            to_root: o.root("to_root")?,
+            from: o.vpath("from")?,
+            to: o.vpath("to")?,
+        },
+        Opcode::StageExec => O::StageExec {
+            root: o.root("root")?,
+            path: o.vpath("path")?,
+        },
+    };
+    o.done()?;
+    Ok(req)
+}
+
+/// An expectation for a request with opcode `op`, and the wire section a
+/// top-level `one_of` cites.
+fn parse_expect(
+    i: usize,
+    op: Opcode,
+    v: &Value,
+    at: &str,
+    top: bool,
+) -> R<(Expect, Option<String>)> {
+    let mut o = Obj::new(v, at, Some(i))?;
+    let (reply, st, one_of) = (o.opt("reply"), o.opt("status"), o.opt("one_of"));
+    let out = match (reply, st, one_of) {
+        (Some(r), None, None) => (
+            Expect::Reply(parse_reply(i, op, r, &format!("{at}reply."))?),
+            None,
+        ),
+        (None, Some(_), None) => {
+            let name = o.str("status")?;
+            let s = status(&name).ok_or_else(|| {
+                let all: Vec<&str> = Status::ALL.iter().map(|s| s.name()).collect();
+                o.bad(
+                    "status",
+                    format!(
+                        "unknown status {name:?}, expected one of {}",
+                        all.join(", ")
+                    ),
+                )
+            })?;
+            if s == Status::Ok {
+                if !reply_fields(op).is_empty() {
+                    return Err(o.bad(
+                        "status",
+                        format!(
+                            "\"ok\" stands only for an empty reply; {} replies with {}, \
+                             so write {{\"reply\": {{...}}}}",
+                            op.name(),
+                            reply_fields(op).join(", ")
+                        ),
+                    ));
+                }
+                (Expect::Reply(OwnedReply::Empty), None)
+            } else {
+                (Expect::Status(s), None)
+            }
+        }
+        (None, None, Some(list)) => {
+            if !top {
+                return Err(o.bad("one_of", "one_of does not nest"));
+            }
+            let list = list
+                .as_array()
+                .ok_or_else(|| o.bad("one_of", "a list of expectations expected"))?;
+            let cite = match o.opt("wire") {
+                None => {
+                    return Err(o.bad(
+                        "wire",
+                        "one_of needs \"wire\": the docs/wire.md section that allows \
+                         more than one answer",
+                    ))
+                }
+                Some(_) => o.str("wire")?,
+            };
+            let alts = list
+                .iter()
+                .enumerate()
+                .map(|(n, e)| {
+                    parse_expect(i, op, e, &format!("{at}one_of[{n}]."), false).map(|(e, _)| e)
+                })
+                .collect::<R<Vec<_>>>()?;
+            (Expect::OneOf(alts), Some(cite))
+        }
+        _ => {
+            return Err(o.bad(
+                at.trim_end_matches('.')
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("expect"),
+                "exactly one of \"reply\", \"status\" or \"one_of\" expected",
+            ))
+        }
+    };
+    o.done()?;
+    Ok(out)
+}
+
+fn parse_reply(i: usize, op: Opcode, v: &Value, at: &str) -> R<OwnedReply> {
+    let mut o = Obj::new(v, at, Some(i))?;
+    let r = match op {
+        Opcode::GetAttr => OwnedReply::GetAttr(AttrResp {
+            found: o.bool("found")?,
+            is_dir: o.bool("is_dir")?,
+            size: o.u64("size")?,
+            mtime: o.i64("mtime")?,
+        }),
+        Opcode::ReadDir => {
+            let list = o.get("entries")?;
+            let list = list
+                .as_array()
+                .ok_or_else(|| o.bad("entries", "a list of entries expected"))?;
+            let entries = list
+                .iter()
+                .enumerate()
+                .map(|(n, e)| {
+                    let mut e = Obj::new(e, &format!("{at}entries[{n}]."), Some(i))?;
+                    let entry = OwnedDirEntry {
+                        name: e.str("name")?,
+                        is_dir: e.bool("is_dir")?,
+                        size: e.u64("size")?,
+                        mtime: e.i64("mtime")?,
+                    };
+                    e.done()?;
+                    Ok(entry)
+                })
+                .collect::<R<Vec<_>>>()?;
+            OwnedReply::ReadDir(entries)
+        }
+        Opcode::Open => OwnedReply::Open(OpenResp {
+            fh: o.u64("fh")?,
+            size: o.u64("size")?,
+            is_dir: o.bool("is_dir")?,
+            immutable: o.bool("immutable")?,
+            mount_gen: o.u32("mount_gen")?,
+        }),
+        Opcode::Read => OwnedReply::Read(o.bytes("data")?),
+        Opcode::Write => OwnedReply::Write(o.u32("written")?),
+        Opcode::StoredNames => OwnedReply::StoredNames(o.str("names")?),
+        Opcode::StageExec => OwnedReply::StageExec(o.str("path")?),
+        Opcode::RegLookup => {
+            let version = o.u64("version")?;
+            let name = o.str("state")?;
+            let state = match name.as_str() {
+                "absent" => Lookup::Absent,
+                "present" => Lookup::Present { created: false },
+                "created" => Lookup::Present { created: true },
+                "tombstoned" => Lookup::Tombstoned,
+                _ => {
+                    return Err(o.bad(
+                        "state",
+                        format!(
+                            "unknown state {name:?}, expected absent, present, created \
+                             or tombstoned"
+                        ),
+                    ))
+                }
+            };
+            OwnedReply::RegLookup(LookupReply {
+                version,
+                state,
+                below: o.bool("below")?,
+            })
+        }
+        Opcode::RegKey => {
+            let version = o.u64("version")?;
+            let node = o.get("node")?;
+            let node = if node.is_null() {
+                None
+            } else {
+                Some(parse_node(i, node, &format!("{at}node."))?)
+            };
+            OwnedReply::RegKey { version, node }
+        }
+        Opcode::RegSetValue
+        | Opcode::RegDeleteValue
+        | Opcode::RegCreateKey
+        | Opcode::RegDeleteKey
+        | Opcode::RegRenameKey => OwnedReply::RegVersion(o.u64("version")?),
+        Opcode::RegChanged => OwnedReply::RegChanged(ChangedReply {
+            version: o.u64("version")?,
+            changed: o.bool("changed")?,
+        }),
+        Opcode::SetAttr
+        | Opcode::Rename
+        | Opcode::Delete
+        | Opcode::Mkdir
+        | Opcode::Close
+        | Opcode::Heartbeat
+        | Opcode::RenameX => OwnedReply::Empty,
+    };
+    o.done()?;
+    Ok(r)
+}
+
+fn parse_node(i: usize, v: &Value, at: &str) -> R<Node> {
+    let mut o = Obj::new(v, at, Some(i))?;
+    let list = |o: &mut Obj<'_>, name: &str| -> R<Vec<Value>> {
+        let v = o.get(name)?;
+        v.as_array()
+            .cloned()
+            .ok_or_else(|| o.bad(name, "a list expected"))
+    };
+    let created = o.bool("created")?;
+    let volatile = o.bool("volatile")?;
+    let last_write = o.u64("last_write")?;
+    let mut values = Vec::new();
+    for (n, v) in list(&mut o, "values")?.iter().enumerate() {
+        let mut e = Obj::new(v, &format!("{at}values[{n}]."), Some(i))?;
+        values.push(RegValue {
+            name: e.str("name")?,
+            ty: e.u32("ty")?,
+            data: e.bytes("data")?,
+        });
+        e.done()?;
+    }
+    let mut value_tombstones = Vec::new();
+    for v in list(&mut o, "value_tombstones")? {
+        value_tombstones.push(
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| o.bad("value_tombstones", "a list of names expected"))?,
+        );
+    }
+    let mut children = std::collections::BTreeMap::new();
+    for (n, v) in list(&mut o, "children")?.iter().enumerate() {
+        let mut e = Obj::new(v, &format!("{at}children[{n}]."), Some(i))?;
+        let folded = e.str("folded")?;
+        let spelling = e.str("spelling")?;
+        let state = match e.str("state")?.as_str() {
+            "present" => Child::Present,
+            "tombstone" => Child::Tombstone,
+            s => {
+                return Err(e.bad(
+                    "state",
+                    format!("unknown state {s:?}, expected present or tombstone"),
+                ))
+            }
+        };
+        e.done()?;
+        children.insert(folded, (spelling, state));
+    }
+    o.done()?;
+    Ok(Node {
+        values,
+        value_tombstones,
+        children,
+        created,
+        volatile,
+        last_write,
+    })
+}

@@ -37,6 +37,7 @@ pub mod concurrent;
 pub mod generate;
 #[cfg(windows)]
 pub mod job;
+pub mod limits;
 pub mod malformed;
 pub mod model;
 pub mod report;

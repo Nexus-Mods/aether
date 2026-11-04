@@ -16,7 +16,7 @@ use aether_conform::run::{run, RunError, RunOptions};
 const USAGE: &str = "\
 usage:
   aether-conform run --director \"<command line>\" [--scenarios DIR]
-                     [--malformed] [--generate [--cases N] [--seed S]
+                     [--malformed] [--limits] [--generate [--cases N] [--seed S]
                      [--steps M] [--failures DIR]]
                      [--concurrent N [--concurrent-cases C]]
                      [--report tap|json] [--out FILE] [--timeout SECS]
@@ -31,6 +31,10 @@ run       starts the director's adapter (the command line) and plays every
           --malformed also sends requests that are not valid requests (short,
           trailing bytes, bad UTF-8, unknown opcodes, odd slot flags, an
           over-long header) and checks the answers wire.md gives them.
+          --limits also plays requests sized from the director's ring: READs
+          of the shim's own sizes, a WRITE of payload_cap, READDIR at the cap,
+          READs of one handle in flight together, an abandoned slot, and a
+          registry writer against a reader.
           --generate also plays N generated cases (default 64) of at most M
           operations (default 32) from seed S (default: from the clock;
           printed either way), each compared with the reference; the first
@@ -187,7 +191,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
             "--concurrent",
             "--concurrent-cases",
         ],
-        &["--malformed", "--generate"],
+        &["--malformed", "--limits", "--generate"],
     ) {
         Ok(f) => f,
         Err(e) => return usage(&e),
@@ -213,6 +217,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
             }
         },
     };
+    if timeout > Duration::from_secs(60) {
+        // wire.md 2.5: the shim gives up on a request after
+        // RESPONSE_DEADLINE, 60 s.
+        eprintln!(
+            "aether-conform: warning: --timeout {} s is longer than the shim waits for an              answer (60 s, wire.md 2.5, RESPONSE_DEADLINE): a director this run accepts may              still be one the shim gives up on",
+            timeout.as_secs_f64()
+        );
+    }
     let number = |k: &str, default: u64| -> Result<u64, String> {
         match get(k) {
             None => Ok(default),
@@ -299,6 +311,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
             .unwrap_or_else(|| PathBuf::from("contract/scenarios")),
         timeout,
         malformed: has("--malformed"),
+        limits: has("--limits"),
         generate,
         concurrent,
     };
@@ -306,6 +319,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         .map(|f| f.len())
         .unwrap_or(0)
         + usize::from(opts.malformed)
+        + usize::from(opts.limits)
         + usize::from(opts.generate.is_some())
         + usize::from(opts.concurrent.is_some());
     let result = match run(&opts) {

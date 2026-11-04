@@ -50,6 +50,8 @@ pub struct RunOptions {
     pub timeout: Duration,
     /// Also send the malformed requests ([`crate::malformed`]).
     pub malformed: bool,
+    /// Also play the requests sized from the ring ([`crate::limits`]).
+    pub limits: bool,
     /// Also play generated cases ([`crate::generate`]).
     pub generate: Option<GenerateOptions>,
     /// Also play rounds of clients at once ([`crate::concurrent`]).
@@ -198,6 +200,15 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             }
         }
     }
+    if opts.limits {
+        match crate::limits::run(&mut adapter, opts.timeout) {
+            Ok(r) => report.scenarios.push(r),
+            Err(e) => {
+                report.adapter_error = Some(e.to_string());
+                return Ok(report);
+            }
+        }
+    }
     if let Some(g) = &opts.generate {
         match crate::generate::run(&mut adapter, g, opts.timeout) {
             Ok(r) => report.scenarios.push(r),
@@ -287,7 +298,7 @@ enum Sent {
 /// pairs the handles of all of them, since handles are ring-global (wire.md
 /// 2.8.1), and one [`RegGen`] reads the generation each step's own client
 /// read. `Err` when the ring stopped answering.
-fn play(
+pub(crate) fn play(
     ring: &Attached,
     env: &crate::adapter::Env,
     timeout: Duration,

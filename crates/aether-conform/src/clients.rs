@@ -199,7 +199,7 @@ fn idle(wake: &crate::attach::Wake<'_>, slot: u32, waited: Duration) {
 
 /// The answer in a completed slot: its status, or its decoded reply, a bulk
 /// one read from the arena once it is found in the slot's own bank.
-fn decode(
+pub(crate) fn decode(
     ring: &Attached,
     slot: u32,
     op: Opcode,

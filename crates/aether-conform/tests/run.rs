@@ -937,3 +937,112 @@ fn a_killed_client_process_leaves_the_director_serving_the_others_on_a_file_ring
 fn a_killed_client_process_leaves_the_director_serving_the_others_on_a_named_section() {
     a_killed_client("section");
 }
+
+// ---------------------------------------------------------------------------
+// Requests sized from the ring (`--limits`, `aether_conform::limits`).
+
+/// A folder holding the one scenario `heartbeat`, for runs whose part under
+/// test is a built-in one.
+fn heartbeat_only() -> TempDir {
+    let from =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios/heartbeat.json");
+    let dir = aether_testkit::tempdir().unwrap();
+    std::fs::copy(&from, dir.path().join("heartbeat.json")).unwrap();
+    dir
+}
+
+/// `run --limits` against `director`: its exit code, and the `limits` entry.
+fn limits_against(director: &str) -> (Option<i32>, Entry, String) {
+    let dir = heartbeat_only();
+    let (code, entries, _, all) = run_json(director, dir.path(), "20", &["--limits"]);
+    assert!(entry(&entries, "heartbeat").1, "{all}");
+    (code, entry(&entries, "limits").clone(), all)
+}
+
+/// The reference meets every limit, over a file ring.
+#[test]
+fn the_reference_passes_the_limits_on_a_file_ring() {
+    let (code, limits, all) = limits_against("reference-adapter");
+    assert!(limits.1, "{limits:?}\n{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// The same over a named section.
+#[cfg(windows)]
+#[test]
+fn the_reference_passes_the_limits_on_a_named_section() {
+    let (code, limits, all) = limits_against("reference-adapter --ring section");
+    assert!(limits.1, "{limits:?}\n{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// `run --limits` against `test-adapter --misbehave <how>`: the failing
+/// steps' notes, the run having failed.
+fn limits_failing(how: &str) -> Vec<String> {
+    let (code, limits, all) = limits_against(&format!("test-adapter --misbehave {how}"));
+    assert_eq!(code, Some(1), "{all}");
+    assert!(!limits.1, "{limits:?}");
+    assert_eq!(limits.2, None, "{limits:?}");
+    limits.3
+}
+
+/// wire.md 2.6 and 3.4.4: a director whose bulk answers stop at 256 KiB
+/// fails the READs of the shim's own chunk, which it would read as end of
+/// file.
+#[test]
+fn a_director_answering_short_bulk_reads_fails_the_shims_chunk() {
+    let notes = limits_failing("short-bulk");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("the shim's bulk chunk") && n.contains("wire.md 2.6")),
+        "{notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("read cache's run")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.4.2 and 2.5 step 3: a listing over the cap cut short and
+/// answered OK fails, and only that.
+#[test]
+fn a_director_truncating_a_listing_over_the_cap_fails() {
+    let notes = limits_failing("truncate-readdir");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("overflow status i32::MIN"), "{notes:?}");
+    assert!(notes[0].contains("wire.md 3.4.2"), "{notes:?}");
+}
+
+/// wire.md 2.5 and 2.6: a director that writes a bank again after its slot
+/// is completed fails the READs of one handle held together, and only them.
+#[test]
+fn a_director_writing_a_completed_slots_bank_fails_the_held_reads() {
+    let notes = limits_failing("late-bank");
+    assert!(!notes.is_empty());
+    for n in &notes {
+        assert!(n.contains("COMPLETED") && n.contains("2.6"), "{notes:?}");
+    }
+}
+
+/// wire.md 2.5: a director that stores COMPLETED over ABANDONED fails the
+/// abandoned slot.
+#[test]
+fn a_director_completing_an_abandoned_slot_fails() {
+    let notes = limits_failing("complete-abandoned");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("never store COMPLETED over ABANDONED")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 4.5: a director that moves `reg_gen` before the write is visible
+/// fails the registry writer against a reader, and only that.
+#[test]
+fn a_director_moving_reg_gen_before_the_write_fails_the_reader() {
+    let notes = limits_failing("bump-before-write");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("wire.md 4.5"), "{notes:?}");
+}

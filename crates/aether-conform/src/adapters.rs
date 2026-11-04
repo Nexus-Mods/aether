@@ -92,6 +92,30 @@ pub enum Break {
     /// 3.4.3 allows ("any u64 the director chooses"). A run must pass it,
     /// whatever numbers it sends for handles it has no number of its own for.
     DownwardFh,
+    /// A bulk READ answers at most 256 KiB, as a director whose banks are
+    /// smaller than `arena_len / slot_count` would (wire.md 2.6: each bank
+    /// holds the shim's chunk; 3.4.4: `n < len` means end of file).
+    ShortBulk,
+    /// A READDIR listing larger than `payload_cap` is cut to the entries that
+    /// fit and answered OK (wire.md 3.4.2: it must fit, and is answered with
+    /// the overflow status otherwise; 2.5 step 3).
+    TruncateReaddir,
+    /// Each READ first writes over the banks of earlier bulk replies in other
+    /// slots, as a director staging read-ahead in a bank it already answered
+    /// from would (wire.md 2.6: the bank is the client's while its slot is
+    /// `COMPLETED`).
+    LateBank,
+    /// READs of 256 KiB or more take 300 ms, and a request given up while
+    /// being processed is completed anyway, `COMPLETED` stored over
+    /// `ABANDONED` (wire.md 2.5: "a director must never store COMPLETED over
+    /// ABANDONED").
+    CompleteAbandoned,
+    /// A registry write moves `reg_gen` first and makes the write visible
+    /// 2 ms later (wire.md 4.5: it moves "before the write's reply is
+    /// published", and the shim caches an answer under the generation it
+    /// read before asking, so the new generation must not come before the
+    /// write).
+    BumpBeforeWrite,
 }
 
 impl Break {
@@ -107,6 +131,11 @@ impl Break {
             "slot-zero-only" => Some(Break::SlotZeroOnly),
             "bank-zero" => Some(Break::BankZero),
             "downward-fh" => Some(Break::DownwardFh),
+            "short-bulk" => Some(Break::ShortBulk),
+            "truncate-readdir" => Some(Break::TruncateReaddir),
+            "late-bank" => Some(Break::LateBank),
+            "complete-abandoned" => Some(Break::CompleteAbandoned),
+            "bump-before-write" => Some(Break::BumpBeforeWrite),
             _ => None,
         }
     }
@@ -190,6 +219,8 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
     let d = Served {
         reference: Reference::from_tree(&s.tree)?,
         broken,
+        ring: None,
+        banks: Arc::default(),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -335,6 +366,7 @@ fn serve<N: Notifier + Send + Sync + 'static>(
         ring::publish_reg_generation(published.seg(), g)
     });
     let handles = Arc::new(Mutex::new(SlotHandles::default()));
+    let banks = Arc::new(Mutex::new(Vec::new()));
     (0..WORKERS)
         .map(|_| {
             let backing = backing.clone();
@@ -344,13 +376,18 @@ fn serve<N: Notifier + Send + Sync + 'static>(
             let mut d = Served {
                 reference: d.reference.share(),
                 broken: d.broken,
+                ring: Some(backing.clone()),
+                banks: banks.clone(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
                 let served = match d.broken {
-                    Some(b @ (Break::SwapReplies | Break::PerSlotFh | Break::SlotZeroOnly)) => {
-                        interposed(seg, &notifier, &mut d, b, &handles, &stop)
-                    }
+                    Some(
+                        b @ (Break::SwapReplies
+                        | Break::PerSlotFh
+                        | Break::SlotZeroOnly
+                        | Break::CompleteAbandoned),
+                    ) => interposed(seg, &notifier, &mut d, b, &handles, &stop),
                     _ => RingServer::new(seg, notifier).and_then(|server| {
                         let arena = DataArena::new(seg, arena_offset, arena_len, SLOTS as usize);
                         aether_rpc::serve_with_arena(&server, Some(&arena), &mut d, &stop)
@@ -452,6 +489,15 @@ fn interposed(
         for &slot in &taken {
             let head =
                 ring::read_request_into(seg, &geom, slot, &mut payload).ok_or(IpcError::Layout)?;
+            if how == Break::CompleteAbandoned
+                && head.opcode == Opcode::Read as u32
+                && payload
+                    .get(16..20)
+                    .is_some_and(|l| u32::from_le_bytes(l.try_into().unwrap()) >= 256 * 1024)
+            {
+                // Slow, so a client gives it up while it is processed.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
             let (status, reply) = if head.fits(&geom) {
                 let mut table = handles.lock().unwrap_or_else(|e| e.into_inner());
                 let req = Raw {
@@ -472,7 +518,16 @@ fn interposed(
             std::mem::swap(&mut a.3, &mut b.3);
         }
         for (slot, req_id, status, reply) in answers {
+            let given_up =
+                ring::slot_state(seg, &geom, slot) == Some(aether_ipc::layout::ST_ABANDONED);
             ring::server_complete(seg, &geom, slot, req_id, status, &reply)?;
+            if how == Break::CompleteAbandoned && given_up {
+                // COMPLETED stored over the slot the client gave up.
+                seg.write_bytes(
+                    geom.slot_off(slot) + aether_ipc::layout::SH_STATE,
+                    &aether_ipc::layout::ST_COMPLETED.to_le_bytes(),
+                );
+            }
             notifier.notify_client(slot);
         }
     }
@@ -613,6 +668,10 @@ impl Inner {
 struct Served {
     reference: Reference,
     broken: Option<Break>,
+    /// The ring served, for the breaks that write its header themselves.
+    ring: Option<Arc<dyn RingBacking>>,
+    /// [`Break::LateBank`]'s (slot, length) of bulk replies already given.
+    banks: Arc<Mutex<Vec<(u32, usize)>>>,
 }
 
 impl Served {
@@ -643,7 +702,29 @@ impl Director for Served {
         Ok(a)
     }
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
-        self.reference.read_dir(root, path, out)
+        self.reference.read_dir(root, path, out)?;
+        if self.broken == Some(Break::TruncateReaddir) {
+            // `count`, then 21 bytes and the name per entry (wire.md 3.4.2).
+            let mut size = 4usize;
+            let kept: Vec<(String, bool, u64, i64)> = out
+                .iter()
+                .take_while(|e| {
+                    size += 21 + e.name.len();
+                    size <= PAYLOAD_CAP as usize
+                })
+                .map(|e| (e.name.to_string(), e.is_dir, e.size, e.mtime))
+                .collect();
+            *out = Listing::default();
+            for (name, is_dir, size, mtime) in &kept {
+                out.push(aether_protocol::DirEntry {
+                    name,
+                    is_dir: *is_dir,
+                    size: *size,
+                    mtime: *mtime,
+                });
+            }
+        }
+        Ok(())
     }
     fn open(&mut self, root: RootId, flags: OpenFlags, path: &str) -> Result<OpenResp, Status> {
         let mut o = self.reference.open(root, flags, path)?;
@@ -669,7 +750,34 @@ impl Director for Served {
             _ => at,
         };
         let fh = self.fh_in(fh);
-        self.reference.read(at, slot_flags, fh, offset, len)
+        if let (Some(Break::LateBank), Some(arena)) = (self.broken, at.arena) {
+            let mut banks = self.banks.lock().unwrap_or_else(|e| e.into_inner());
+            for (slot, n) in banks.drain(..).filter(|&(s, _)| s != at.slot) {
+                let _ = arena.fill_bank(slot, n, |b| {
+                    b.fill(0xEE);
+                    Ok(b.len())
+                });
+            }
+        }
+        let broken = self.broken;
+        let banks = self.banks.clone();
+        match self.reference.read(at, slot_flags, fh, offset, len) {
+            Ok(ReadReply::Bulk { len, arena_offset }) => {
+                let len = match broken {
+                    Some(Break::ShortBulk) => len.min(256 * 1024),
+                    Some(Break::LateBank) => {
+                        banks
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((at.slot, len as usize));
+                        len
+                    }
+                    _ => len,
+                };
+                Ok(ReadReply::Bulk { len, arena_offset })
+            }
+            other => other,
+        }
     }
     fn write(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, Status> {
         self.reference.write(self.fh_in(fh), offset, data)
@@ -708,6 +816,11 @@ impl Director for Served {
         ty: u32,
         data: &[u8],
     ) -> Result<u64, Status> {
+        if let (Some(Break::BumpBeforeWrite), Some(ring)) = (self.broken, &self.ring) {
+            let now = ring::reg_generation(ring.seg());
+            ring::publish_reg_generation(ring.seg(), now + 1);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         self.reference.reg_set_value(path, name, ty, data)
     }
     fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {

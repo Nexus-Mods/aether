@@ -8,7 +8,7 @@ each answer with the one the scenario expects. Scenarios live in
 `contract/scenarios/` and their format is described in
 `contract/scenarios/README.md`.
 
-A run has up to four parts, all through the same adapter:
+A run has up to five parts, all through the same adapter:
 
 - **Scenarios**, the files in `--scenarios` (always). A step may name the
   client that sends it; every client but 0 is a process of its own
@@ -16,6 +16,10 @@ A run has up to four parts, all through the same adapter:
 - **Malformed requests** (`--malformed`): payloads that are not valid
   requests, sent on the raw ring, and the answers wire.md gives them
   ("Malformed requests" below).
+- **Requests sized from the ring** (`--limits`): READs, a WRITE and
+  listings of the director's own limits, READs of one handle in flight
+  together, an abandoned slot, and a registry writer against a reader
+  ("Requests sized from the ring" below).
 - **Generated cases** (`--generate`): trees and operation sequences made
   from a seed, each step compared with the reference director's answer, and
   the first failure shrunk and written as a scenario file ("Generated cases"
@@ -104,8 +108,10 @@ them (`one_of`) and names the section that allows it.
 
 **What a run does not exercise.** The director's thread count against
 `worker_hint` (2.8: a run keeps its data requests below the limit the hint
-gives, as the shim does, but cannot count a director's threads), how
-quickly a director wakes (2.11), `shim.cfg` and the injector (5.1, 6), a
+gives, as the shim does, but cannot count a director's threads; `--limits`
+warns on a hint of 0 or above the slot count), how quickly a director wakes
+(2.11; `--limits` reports a HEARTBEAT round trip, never failing it), the
+injector (6), a
 process killed while it holds a slot (a slot left `CLAIMED` is lost to the
 ring, and wire.md says nothing to recover it), and the read cache's rule
 (3.4.3) across a remount, which no scenario makes. The handshake variables a
@@ -183,12 +189,14 @@ rules are not expressible in the scenario format. The malformed part of a run
 - 2.5: a slot whose header claims more than `payload_cap` bytes is completed
   with `ST_BAD_REQUEST` and no payload.
 
+Left out of the scenarios because their sizes are the director's (its
+`payload_cap`, slot count and arena), and played by the limits part of a run
+(`--limits`, "Requests sized from the ring" below): READs of the shim's own
+sizes, a WRITE of exactly `payload_cap`, a READDIR listing at the cap and one
+byte over it (3.4.2: the overflow status `i32::MIN`).
+
 Still left out of every part of a run:
 
-- 3.4.2: a READDIR listing larger than `payload_cap` is answered with the
-  overflow status `i32::MIN` and an empty payload. A tree large enough to
-  overflow depends on the director's cap, which the run learns only once the
-  tree is mounted.
 - A WRITE or request larger than the ring's payload, and a registry value over
   `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
   REG_KEY is covered only as a `one_of`, since the cap is the director's.
@@ -297,6 +305,29 @@ fault that needs requests in flight together may not show in the replay.
 Concurrent clients are threads of the run, not processes, since a round has
 many of them. The processes the wire speaks of are what the `multi-*`
 scenarios and the killed-client test cover, over both kinds of ring.
+
+## Requests sized from the ring
+
+`run --limits` (`crates/aether-conform/src/limits.rs`) mounts an empty tree
+to learn the ring's `payload_cap`, slot count and `VFS_ARENA_LEN`, then a
+tree sized from them: a file of eight of the shim's read chunks and a bit,
+a directory whose READDIR reply is exactly `payload_cap` bytes and one whose
+reply is a byte longer, a writable directory, and a registry key. The report
+has one entry, `limits`: its steps first, played as a scenario's are (every
+comparison rule applies), then the checks a step cannot say.
+
+| What | Answer | wire.md |
+|---|---|---|
+| READs of the shim's bulk chunk `clamp(VFS_ARENA_LEN / slot_count, 256 KiB, 1 MiB)` with `FLAG_READ_BULK`, at the start, inside, at the last whole chunk and at the end; remainders of 64 KiB and of a chunk less a byte; the read cache's run of 16 blocks of 64 KiB; 65 535 bytes inline; `payload_cap - 8` and `payload_cap - 9` without the flag | the bytes, all of them to the end of the file | 2.6, 3.4.4: `n < len` means end of file, so a READ comes back whole when its form can hold it; a director with an arena answers a flagged READ over `payload_cap - 8` in bulk |
+| A READ of the chunk plus one byte | all of it, or at most a bank | 3.4.4: a bulk reply's `n <= min(len, bank_size)` |
+| Two WRITEs of `payload_cap - 24` bytes (requests of exactly `payload_cap`), then GETATTR and READs back | `written` = the length; the size and bytes of both | 3.4.5 |
+| READDIR of a listing of exactly `payload_cap` bytes | the whole listing | 3.4.2 |
+| READDIR of a listing a byte longer | status `i32::MIN`, payload length 0 | 3.4.2, 2.5 step 3 |
+| 4 and then up to 8 bulk READs of one handle (one slot kept free), and 4 inline READs of 65 535 bytes, each set published at once at offsets out of order, held until all are `COMPLETED`, another READ answered meanwhile, and only then copied out, as `read_fragmented` does | each its own offset's bytes, in its own slot's bank | 2.5, "Order of service" (a pipelined read publishes up to 4 requests at once, 8 for reads of 4 MiB or more); 2.6: the bank is the client's while the slot is `COMPLETED` |
+| A bulk READ given up (`abandon`) the moment the director takes it, tried up to 100 times until it is caught `PROCESSING` | the slot ends `FREE`, never `COMPLETED`; then a HEARTBEAT from every slot is answered. A director never caught processing is not failed: the step says the rule was not exercised | 2.5: "a director must never store `COMPLETED` over `ABANDONED`" |
+| 300 REG_SET_VALUEs of one value from one client while another reads it with REG_KEY, reading `reg_gen` before each read | a read made at a generation a write's reply had already published sees that write (the writer reads `reg_gen` after each reply, which is at least the generation its write published) | 4.5: it moves "before the write's reply is published", and the shim caches an answer under the generation it read before asking. A director with no registry layer skips it |
+| `worker_hint` | a warning, never a failure, when it is 0 or above the slot count | 2.8 |
+| 200 HEARTBEATs one after another | the median and slowest round trip, a warning only | 2.11 |
 
 ## Malformed requests
 
@@ -566,6 +597,7 @@ aether-conform run --director "java -jar my-director-adapter.jar" --scenarios co
 | `--out FILE` | Where the report goes. Default stdout. |
 | `--timeout SECS` | How long every adapter answer and every ring request may take. Default 30. |
 | `--malformed` | Also send the malformed requests ("Malformed requests"). |
+| `--limits` | Also play the requests sized from the ring ("Requests sized from the ring"). |
 | `--generate` | Also play generated cases ("Generated cases"). |
 | `--cases N` | How many generated cases. Default 64. |
 | `--seed S` | The seed the cases are made from. Default: from the clock, printed. |
@@ -578,7 +610,7 @@ Exit code: 0 when every scenario passes, 1 when any fails, 2 on a usage
 error, a scenario that does not load, an adapter error, or a generator error
 (the reference answered a generated request otherwise than wire.md says).
 
-CI runs the committed scenarios, `--malformed`, `--generate --cases 1024`
+CI runs the committed scenarios, `--malformed`, `--limits`, `--generate --cases 1024`
 and `--concurrent 4 --concurrent-cases 256` against the reference, over a
 file ring on Linux and Windows and over a section on Windows, with the
 workflow run's id as the seed. The concurrent rounds take about 15 s per

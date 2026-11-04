@@ -795,6 +795,18 @@ The client tells the forms apart by bit 31 of the first word
 len` means end of file; the shim stops there. Errors: unknown `fh`
 `ST_BAD_FH`; a directory handle `ST_IS_DIR`.
 
+So a READ comes back whole, `n = min(len, size - offset)`, whenever its form
+can hold that many bytes; a shorter answer is a truncated file to the shim
+(Cairn and the reference: Cairn's `read-into` is "short only at end of file",
+`provider.clj`). Both answer a READ that sets `FLAG_READ_BULK` in bulk when
+they have an arena, so a director that gives an arena (`VFS_ARENA_LEN`) must
+answer such a READ of more than `payload_cap - 8` bytes in bulk: an inline
+reply cannot hold it. The shim's own READs are section 2.6's bulk chunk and
+remainders of 64 KiB up to it, with the flag, and inline READs of at most
+65 535 bytes, or of at most `payload_cap - 8` with no arena
+(`aether_ipc::read_fragmented`); its read cache fetches runs of up to 16
+blocks of 64 KiB the same way.
+
 #### 3.4.5 WRITE (6)
 
 Request (`Request::Write`):

@@ -738,6 +738,12 @@ Open flags (`crates/aether-protocol/src/status.rs`):
 `FILE_SUPERSEDE`/`FILE_OVERWRITE_IF` = `CREATE|TRUNC`, `FILE_CREATE` =
 `CREATE|EXCL`, `FILE_OPEN_IF` = `CREATE`, `FILE_OVERWRITE` = `TRUNC`,
 `FILE_OPEN` = none. The current shim never sends `OPEN_APPEND`.
+The shim never adds `OPEN_READ` to a write open, even when the program asked
+for read access as well: a handle opened with `OPEN_WRITE` serves READ and
+SETATTR too, and the shim reads and truncates through it (Cairn: its disk
+provider opens every handle readable, `provider/disk.clj`, `options`, and its
+write layer reads through any handle, `provider/layer.clj`; the reference
+director checks no access bits on READ).
 
 Reply (`Reply::Open`), 24 bytes:
 

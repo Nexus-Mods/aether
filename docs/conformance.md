@@ -167,6 +167,7 @@ over a section (`cargo test -p aether-conform` and CI run both).
 | `stored-names-*` | STORED_NAMES: stored spelling, `skip`, unknown names, after changes (3.4.12) |
 | `case-fold-*` | the fold: ASCII, Unicode (`Σ`, `İ`, composed and decomposed), fold-equal names are one entry (3.2) |
 | `names-stream` | a path with a named stream suffix is a name the director does not have, never its base file (3.2) |
+| `names-non-bmp` | names with characters outside the BMP read, created, listed, respelled and renamed like any other (3.2) |
 | `roots-*` | several roots kept apart, unserved roots (3.2, 3.5.1) |
 | `stage-exec` | STAGE_EXEC: `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` or a path (3.4.14) |
 | `registry-none` | no registry layer: all eight opcodes `ST_NOT_SUPPORTED` (4) |

@@ -25,6 +25,9 @@ pub struct FileRing {
 impl FileRing {
     /// Create (or truncate) the file at `path`, size it to exactly `bytes`
     /// (zero-filled) and map it. The caller initialises the ring on it.
+    ///
+    /// This truncates the file: truncating a file another process currently
+    /// maps faults that process (SIGBUS on Unix).
     pub fn create(path: &Path, bytes: usize) -> io::Result<FileRing> {
         if bytes == 0 {
             return Err(io::Error::new(

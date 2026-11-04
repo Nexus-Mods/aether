@@ -41,6 +41,9 @@ impl Mapped {
     }
 
     pub(crate) fn as_mut_ptr(&self) -> *mut u8 {
+        // Intentional: the mapping is `MAP_SHARED` read/write and the ring
+        // protocol writes through `&self`, so the const-to-mut cast mirrors
+        // `SharedSeg`'s raw-pointer contract; no `&mut` alias is created.
         self.map.as_ptr() as *mut u8
     }
 }

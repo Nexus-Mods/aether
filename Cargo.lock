@@ -19,8 +19,8 @@ name = "aether-filering"
 version = "0.1.0"
 dependencies = [
  "aether-ipc",
+ "aether-testkit",
  "memmap2",
- "tempfile",
 ]
 
 [[package]]

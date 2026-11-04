@@ -11,7 +11,7 @@ aether-ipc.workspace = true
 memmap2.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+aether-testkit.workspace = true
 
 [lints]
 workspace = true

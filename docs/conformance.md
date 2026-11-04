@@ -105,13 +105,13 @@ are the only exceptions, and each is allowed by the wire.md text quoted
 
 | What | Rule | wire.md |
 |---|---|---|
-| OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles." |
+| OPEN `fh` | Paired one to one with the scenario's number while open; requests carry the director's number. After a CLOSE the director's old number is sent, so a use after close tests that handle; a number never paired gets a stand-in no open handle has. Never 0. | 3.4.3: "`fh` is any u64 the director chooses, unique among open handles"; the shim keeps 0 for a directory it made. |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced", and the directors start it differently. |
-| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). | 3.4.3: "Never set it for a write open or a directory". |
+| OPEN `immutable` | Not compared, but must be clear on a write open and on a directory, and reads through immutable handles are checked against each other ("What the shim caches", above). The reply's other flag bits and bytes 18-19 must be zero. | 3.4.3: "Never set it for a write open or a directory"; "other bits zero"; 7. |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
-| `mtime` (GETATTR, READDIR) | Not compared. | 3.2: "Which time a director reports for a path, if any, is the director's to choose". |
+| `mtime` (GETATTR, READDIR) | Not compared, but below 2^40 (the year 36812): a time in milliseconds is past it. | 3.2: "Which time a director reports for a path, if any, is the director's to choose"; "`mtime` is seconds since the Unix epoch". |
 | READ inline or bulk | Compared by data. | 3.4.4: the client "must accept either whatever flag it sent". |
-| STAGE_EXEC `path` | Not compared. | 3.4.14: the reply is the "on-disk Windows path to start it from", wherever the director staged it. |
+| STAGE_EXEC `path` | Not compared, but it must be an absolute Windows path (a drive letter's or UNC), and where the run's host can read it, its bytes must be the ones the director serves for the image (read through the ring). A mount without `VFS_ROOT_BACKINGS` gets a warning: the shim sends STAGE_EXEC only with one. | 3.4.14: the reply is the "on-disk Windows path to start it from", wherever the director staged it. |
 | Registry `version` | Compared up to one constant offset per scenario, fixed by the first registry reply; a REG_CHANGED `since` is sent shifted by it, except `u64::MAX`, the shim's probe for the current version, sent as it is. | 4.3: "two directors serving one layer may number its versions apart by a constant, and a REG_CHANGED `since` is in the numbering of the director it is sent to". |
 | REG_KEY `last_write` | Not compared. | 4.3: a "FILETIME" the overlay stamps from the director's clock. |
 

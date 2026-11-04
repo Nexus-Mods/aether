@@ -1111,3 +1111,82 @@ fn a_mount_passing_on_a_stale_session_fails_every_mount() {
     let failed = environment_failures("inherit-env", "wire.md 5.2");
     assert!(failed.contains(&"heartbeat".to_string()), "{failed:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Rules of single replies beyond equality (`compare.rs`, `run.rs`).
+
+/// The committed suite against `test-adapter --misbehave <how>`: the
+/// failed scenarios' names and every failing step's note.
+fn failing_notes(how: &str) -> (Vec<String>, Vec<String>) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let (code, entries, _, all) =
+        run_json(&format!("test-adapter --misbehave {how}"), &dir, "20", &[]);
+    assert_eq!(code, Some(1), "{all}");
+    let failed: Vec<&Entry> = entries.iter().filter(|e| !e.1).collect();
+    (
+        failed.iter().map(|e| e.0.clone()).collect(),
+        failed.iter().flat_map(|e| e.3.clone()).collect(),
+    )
+}
+
+/// wire.md 3.4.3: the shim keeps `fh` 0 for a directory it made with
+/// MKDIR. A director that numbers handles from 0 fails at the OPEN that
+/// issues 0.
+#[test]
+fn a_director_issuing_fh_0_fails() {
+    let (failed, notes) = failing_notes("fh-from-zero");
+    assert!(failed.contains(&"open-read".to_string()), "{failed:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.starts_with("fh 0") && n.contains("wire.md 3.4.3")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.2: `mtime` is seconds. A director reporting milliseconds fails
+/// every GETATTR and READDIR that finds something, citing 3.2.
+#[test]
+fn a_director_reporting_mtime_in_milliseconds_fails() {
+    let (failed, notes) = failing_notes("mtime-millis");
+    assert!(failed.contains(&"getattr-files".to_string()), "{failed:?}");
+    assert!(
+        failed.contains(&"readdir-listing".to_string()),
+        "{failed:?}"
+    );
+    for n in &notes {
+        assert!(n.contains("wire.md 3.2, Timestamps"), "{n}");
+    }
+}
+
+/// wire.md 3.4.3: an OPEN reply's other flag bits and bytes 18-19 are zero.
+#[test]
+fn a_director_setting_reserved_open_reply_bits_fails() {
+    let (failed, notes) = failing_notes("open-flag-bits");
+    assert!(failed.contains(&"open-read".to_string()), "{failed:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("only bit 0 (immutable) may be set")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.4.14: a director that stages answers the real path of a copy
+/// of the file. One that does passes; one whose copy has other bytes fails
+/// `stage-exec`, and only that.
+#[cfg(windows)]
+#[test]
+fn a_staged_copy_must_hold_the_served_bytes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let (code, entries, _, all) = run_json("test-adapter --misbehave stage-copy", &dir, "20", &[]);
+    assert_eq!(code, Some(0), "{all}");
+    let stage = entry(&entries, "stage-exec");
+    assert!(stage.1, "{stage:?}");
+    let (failed, notes) = failing_notes("stage-wrong-bytes");
+    assert_eq!(failed, ["stage-exec"], "{notes:?}");
+    assert!(
+        notes.iter().any(|n| n.contains("wire.md 3.4.14")),
+        "{notes:?}"
+    );
+}

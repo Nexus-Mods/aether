@@ -745,7 +745,10 @@ Reply (`Reply::Open`), 24 bytes:
 | 20 | 4 | u32 | `mount_gen` |
 
 - `fh` is any u64 the director chooses, unique among open handles. Both
-  directors start at 1 and count up.
+  directors start at 1 and count up. Neither issues 0, and a director must
+  not: the shim keeps 0 for a directory it created with MKDIR, which it holds
+  no director handle for, and sends `CLOSE(0)` when the program closes it
+  (`crates/aether-hooks/src/hook/file_open.rs`, `try_fuse_mkdir`).
 - `immutable`: the handle's bytes cannot change while it is open. The shim's
   read cache (`crates/aether-ipc/src/readcache/mod.rs`) caches small reads only
   through read-only, immutable handles. Never set it for a write open or a
@@ -988,7 +991,9 @@ before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
 a director with a stager may answer `ST_NOT_FOUND` for a file it does not
 stage (Cairn, `ring.clj`, `op-stage-exec`).
 
-How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): for each
+How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): only
+when `VFS_ROOT_BACKINGS` names at least one backing (`plan` returns early
+otherwise, and the child starts as it would without the VFS). Then, for each
 candidate image path that routes under a root it first sends GETATTR, and
 sends STAGE_EXEC only for the first candidate that is a file (`found`, not
 `is_dir`). On success the child is started from the returned path. If no

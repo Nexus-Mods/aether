@@ -33,6 +33,8 @@ use crate::adapter::{answer_requests, AdapterRequest, Env};
 const SLOTS: u32 = 8;
 const PAYLOAD_CAP: u32 = aether_ipc::DEFAULT_PAYLOAD_CAP;
 const BANK: usize = 1024 * 1024;
+/// [`Break::MtimeMillis`]'s time: 2020-01-01 in milliseconds.
+const MILLIS: i64 = 1_577_836_800_000;
 /// The threads serving a ring, each with its own handle on the reference
 /// (`Reference::share`), and the `worker_hint` published (wire.md 2.8).
 const WORKERS: u32 = 4;
@@ -131,6 +133,23 @@ pub enum Break {
     /// environment would pass a stale session's on (wire.md 5.2: a launch
     /// sets or removes every one).
     InheritEnv,
+    /// Handles are numbered from 0 (the reference's 1 is 0). wire.md 3.4.3:
+    /// the shim keeps `fh` 0 for a directory it made with MKDIR, so a
+    /// director never issues it.
+    FhFromZero,
+    /// GETATTR and READDIR report `mtime` in milliseconds (wire.md 3.2:
+    /// "`mtime` is seconds since the Unix epoch").
+    MtimeMillis,
+    /// OPEN replies set bit 1 of the flags byte and byte 18 (wire.md 3.4.3:
+    /// "other bits zero", and bytes 18-19 zero).
+    OpenFlagBits,
+    /// Not a broken rule: STAGE_EXEC copies the file to a folder of its own
+    /// and answers that path, as a director with a stager does (wire.md
+    /// 3.4.14), so the tests can show the staged copy is checked.
+    StageCopy,
+    /// STAGE_EXEC copies the file with its first byte changed (wire.md
+    /// 3.4.14: the child is started from the copy, so it must be the file).
+    StageWrongBytes,
 }
 
 impl Break {
@@ -155,6 +174,11 @@ impl Break {
             "undeclared-roots" => Some(Break::UndeclaredRoots),
             "bad-shim-cfg" => Some(Break::BadShimCfg),
             "inherit-env" => Some(Break::InheritEnv),
+            "fh-from-zero" => Some(Break::FhFromZero),
+            "mtime-millis" => Some(Break::MtimeMillis),
+            "open-flag-bits" => Some(Break::OpenFlagBits),
+            "stage-copy" => Some(Break::StageCopy),
+            "stage-wrong-bytes" => Some(Break::StageWrongBytes),
             _ => None,
         }
     }
@@ -202,6 +226,8 @@ struct Mounted {
     file: Option<PathBuf>,
     /// The shim.cfg written for the mount.
     cfg: PathBuf,
+    /// The copies STAGE_EXEC made ([`Break::StageCopy`]).
+    staged: Arc<Mutex<Vec<PathBuf>>>,
     env: Env,
 }
 
@@ -214,6 +240,17 @@ impl Mounted {
             let _ = std::fs::remove_file(f);
         }
         let _ = std::fs::remove_file(&self.cfg);
+        for f in self
+            .staged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            let _ = std::fs::remove_file(&f);
+            if let Some(dir) = f.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
         for s in served {
             match s {
                 Ok(Ok(())) => {}
@@ -238,11 +275,14 @@ fn unique(tag: &str) -> String {
 
 fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mounted, String> {
     let s = crate::scenario::load(scenario).map_err(|e| e.to_string())?;
+    let staged = Arc::new(Mutex::new(Vec::new()));
     let d = Served {
         reference: Reference::from_tree(&s.tree)?,
         broken,
         ring: None,
         banks: Arc::default(),
+        staged: String::new(),
+        staged_files: staged.clone(),
     };
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
@@ -324,6 +364,7 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
         backing,
         file,
         cfg,
+        staged,
         env,
     })
 }
@@ -421,6 +462,8 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                 broken: d.broken,
                 ring: Some(backing.clone()),
                 banks: banks.clone(),
+                staged: String::new(),
+                staged_files: d.staged_files.clone(),
             };
             std::thread::spawn(move || {
                 let seg = backing.seg();
@@ -429,7 +472,8 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                         b @ (Break::SwapReplies
                         | Break::PerSlotFh
                         | Break::SlotZeroOnly
-                        | Break::CompleteAbandoned),
+                        | Break::CompleteAbandoned
+                        | Break::OpenFlagBits),
                     ) => interposed(seg, &notifier, &mut d, b, &handles, &stop),
                     _ => RingServer::new(seg, notifier).and_then(|server| {
                         let arena = DataArena::new(seg, arena_offset, arena_len, SLOTS as usize);
@@ -553,6 +597,15 @@ fn interposed(
             } else {
                 (Status::BadRequest.code(), Vec::new())
             };
+            let mut reply = reply;
+            if how == Break::OpenFlagBits
+                && head.opcode == Opcode::Open as u32
+                && status == Status::Ok.code()
+                && reply.len() >= 24
+            {
+                reply[17] |= 0x02;
+                reply[18] = 1;
+            }
             answers.push((slot, head.req_id, status, reply));
         }
         if let [a, b] = answers.as_mut_slice() {
@@ -715,6 +768,9 @@ struct Served {
     ring: Option<Arc<dyn RingBacking>>,
     /// [`Break::LateBank`]'s (slot, length) of bulk replies already given.
     banks: Arc<Mutex<Vec<(u32, usize)>>>,
+    /// The last STAGE_EXEC answer, and every copy made, for the unmount.
+    staged: String,
+    staged_files: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Served {
@@ -722,6 +778,7 @@ impl Served {
     fn fh_out(&self, fh: u64) -> u64 {
         match self.broken {
             Some(Break::DownwardFh) => u64::MAX - (fh - 1),
+            Some(Break::FhFromZero) => fh - 1,
             _ => fh,
         }
     }
@@ -731,6 +788,7 @@ impl Served {
         match self.broken {
             // 0 becomes the reference's 2^64, which wraps to 0: never issued.
             Some(Break::DownwardFh) => (u64::MAX - fh).wrapping_add(1),
+            Some(Break::FhFromZero) => fh.wrapping_add(1),
             _ => fh,
         }
     }
@@ -742,20 +800,28 @@ impl Director for Served {
         if self.broken == Some(Break::FoundForMissing) && !a.found {
             a.found = true;
         }
+        if self.broken == Some(Break::MtimeMillis) && a.found {
+            a.mtime = MILLIS;
+        }
         Ok(a)
     }
     fn read_dir(&mut self, root: RootId, path: &str, out: &mut Listing) -> Result<(), Status> {
         self.reference.read_dir(root, path, out)?;
-        if self.broken == Some(Break::TruncateReaddir) {
+        let millis = self.broken == Some(Break::MtimeMillis);
+        if self.broken == Some(Break::TruncateReaddir) || millis {
             // `count`, then 21 bytes and the name per entry (wire.md 3.4.2).
             let mut size = 4usize;
+            let truncate = !millis;
             let kept: Vec<(String, bool, u64, i64)> = out
                 .iter()
                 .take_while(|e| {
                     size += 21 + e.name.len();
-                    size <= PAYLOAD_CAP as usize
+                    !truncate || size <= PAYLOAD_CAP as usize
                 })
-                .map(|e| (e.name.to_string(), e.is_dir, e.size, e.mtime))
+                .map(|e| {
+                    let mtime = if millis { MILLIS } else { e.mtime };
+                    (e.name.to_string(), e.is_dir, e.size, mtime)
+                })
                 .collect();
             *out = Listing::default();
             for (name, is_dir, size, mtime) in &kept {
@@ -896,7 +962,46 @@ impl Director for Served {
         self.reference.rename_x(from_root, to_root, from, to)
     }
     fn stage_exec(&mut self, root: RootId, path: &str) -> Result<&str, Status> {
-        self.reference.stage_exec(root, path)
+        let wrong = match self.broken {
+            Some(Break::StageCopy) => false,
+            Some(Break::StageWrongBytes) => true,
+            _ => return self.reference.stage_exec(root, path),
+        };
+        let fh = self.reference.open(root, OpenFlags::READ, path)?.fh;
+        let at = ReadSlot {
+            slot: 0,
+            arena: None,
+        };
+        let read = self
+            .reference
+            .read(at, RequestFlags::empty(), fh, 0, u32::MAX)
+            .map(|r| match r {
+                ReadReply::Inline(d) => d.to_vec(),
+                ReadReply::Bulk { .. } => Vec::new(),
+            });
+        let _ = self.reference.close(fh);
+        let mut bytes = read?;
+        if wrong {
+            if let Some(b) = bytes.first_mut() {
+                *b ^= 0xff;
+            } else {
+                bytes.push(1);
+            }
+        }
+        let name = path.rsplit('/').next().unwrap_or("staged");
+        let dir = std::env::temp_dir().join(unique("staged"));
+        std::fs::create_dir_all(&dir).map_err(|_| Status::IoError)?;
+        let to = dir.join(name);
+        std::fs::write(&to, &bytes).map_err(|_| Status::IoError)?;
+        self.staged_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(to.clone());
+        self.staged = std::path::absolute(&to)
+            .unwrap_or(to)
+            .to_string_lossy()
+            .into_owned();
+        Ok(&self.staged)
     }
     fn unknown(&mut self, opcode: u32) -> Status {
         match self.broken {

@@ -372,6 +372,20 @@ pub(crate) fn play(
                 (why.clone(), false)
             }
         };
+        if let (
+            Sent::Answer(Ok(OwnedReply::StageExec(staged))),
+            OwnedRequest::StageExec { root, path },
+        ) = (&sent, &req)
+        {
+            match stage_check(ring, env, *root, path, staged) {
+                Stage::Fine => {}
+                Stage::Warn(w) => notes.push(w),
+                Stage::Wrong(why) => {
+                    notes.insert(0, why);
+                    passed = false;
+                }
+            }
+        }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
         let gen_after = reg_gen.after(&step.request, succeeded, gen_before, gen_now);
         if let Some(why) = gen_broken.or(gen_after) {
@@ -550,6 +564,122 @@ fn join(mut notes: Vec<String>, scenario_note: Option<&str>) -> String {
     notes.join("; ")
 }
 
+/// What a STAGE_EXEC reply's path is.
+enum Stage {
+    Fine,
+    /// Fine, with something to say.
+    Warn(String),
+    /// Not what wire.md 3.4.14 says it is.
+    Wrong(String),
+}
+
+/// Whether `staged`, a STAGE_EXEC reply for `path` under `root`, is what
+/// wire.md 3.4.14 says it is: "the real, on-disk Windows path to start it
+/// from", so an absolute Windows path (a drive letter's or a UNC one) and,
+/// where this host can read it, a file with the bytes the director serves
+/// for `path` (read through the ring here). A director that stages but
+/// gives no `VFS_ROOT_BACKINGS` is told so: the shim asks STAGE_EXEC only
+/// with a backing (`hook/child_start.rs`, `plan`).
+fn stage_check(
+    ring: &Attached,
+    env: &crate::adapter::Env,
+    root: aether_protocol::RootId,
+    path: &str,
+    staged: &str,
+) -> Stage {
+    let b = staged.as_bytes();
+    let drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    let unc = staged.starts_with("\\\\");
+    if !drive && !unc {
+        return Stage::Wrong(format!(
+            "STAGE_EXEC answered {staged:?}, not an absolute Windows path (wire.md 3.4.14: \
+             \"the real, on-disk Windows path to start it from\")"
+        ));
+    }
+    let backings = env
+        .get(aether_env::ROOT_BACKINGS)
+        .is_some_and(|v| !v.trim().is_empty());
+    let mut warn = (!backings).then(|| {
+        format!(
+            "warning: the director stages, but the mount gives no {}, and the shim sends \
+             STAGE_EXEC only when it names a backing (hook/child_start.rs, plan)",
+            aether_env::ROOT_BACKINGS
+        )
+    });
+    let on_disk = match std::fs::read(staged) {
+        Ok(b) => b,
+        // A path of the shim's host this one cannot read (a Wine drive).
+        Err(_) => {
+            return match warn {
+                Some(w) => Stage::Warn(w),
+                None => Stage::Fine,
+            }
+        }
+    };
+    match served(ring, root, path) {
+        Ok(served) if served == on_disk => {}
+        Ok(served) => {
+            return Stage::Wrong(format!(
+                "STAGE_EXEC staged {staged}, {} bytes that differ from the {} bytes served for \
+                 {path} (wire.md 3.4.14: the director puts the program on real disk, and the \
+                 child is started from that copy)",
+                on_disk.len(),
+                served.len()
+            ))
+        }
+        Err(e) => warn = Some(format!("warning: the staged copy was not compared: {e}")),
+    }
+    match warn {
+        Some(w) => Stage::Warn(w),
+        None => Stage::Fine,
+    }
+}
+
+/// The bytes the director serves for `path` under `root`: OPEN, READs of
+/// inline size to the end, CLOSE.
+fn served(ring: &Attached, root: aether_protocol::RootId, path: &str) -> Result<Vec<u8>, String> {
+    let client = ring.client();
+    let mut scratch = Vec::new();
+    let fh = match client.call(
+        &Request::Open {
+            root,
+            flags: aether_protocol::OpenFlags::READ,
+            path,
+        },
+        &mut scratch,
+    ) {
+        Ok(Reply::Open(o)) => o.fh,
+        other => return Err(format!("OPEN {path} gave {other:?}")),
+    };
+    let step = ring.geom().payload_cap.saturating_sub(8).min(60_000);
+    let mut out = Vec::new();
+    let got = loop {
+        let read = Request::Read {
+            slot_flags: aether_protocol::RequestFlags::empty(),
+            fh,
+            offset: out.len() as u64,
+            len: step,
+        };
+        match self::read(ring, &client, &read) {
+            Ok(Sent::Answer(Ok(OwnedReply::Read(d)))) => {
+                let short = d.len() < step as usize;
+                out.extend_from_slice(&d);
+                if short {
+                    break Ok(out);
+                }
+            }
+            Ok(Sent::Answer(other)) => break Err(format!("a READ of {path} gave {other:?}")),
+            Ok(Sent::Bad(why)) => break Err(why),
+            Err(e) => break Err(e),
+        }
+    };
+    let _ = client.call(&Request::Close { fh }, &mut scratch);
+    got
+}
+
 /// Sends `req`. `Err` when the ring gave no answer at all.
 fn send<N: aether_ipc::Notifier>(
     ring: &Attached,
@@ -560,6 +690,9 @@ fn send<N: aether_ipc::Notifier>(
     let request = req.as_request();
     if request.opcode() == Opcode::Read {
         return read(ring, client, &request);
+    }
+    if request.opcode() == Opcode::Open {
+        return open(client, &request);
     }
     Ok(match client.call(&request, scratch) {
         Ok(reply) => Sent::Answer(Ok(OwnedReply::from_reply(&reply))),
@@ -572,6 +705,40 @@ fn send<N: aether_ipc::Notifier>(
         ),
         Err(CallError::Ipc(e)) => return Err(format!("{e:?}")),
         Err(CallError::BulkRead) => unreachable!("READ is sent on a held slot"),
+    })
+}
+
+/// An OPEN on a held slot, so its payload's reserved bytes can be read
+/// (`compare::open_reply_reserved`) before it is decoded.
+fn open<N: aether_ipc::Notifier>(
+    client: &aether_rpc::Client<'_, N>,
+    request: &Request<'_>,
+) -> Result<Sent, String> {
+    let mut body = Vec::new();
+    request.encode(&mut body);
+    let (mut replies, slots) = client
+        .ring()
+        .submit_many_held(&[(Opcode::Open as u32, 0, body)])
+        .map_err(|e| format!("{e:?}"))?;
+    client.ring().release_slots(&slots);
+    let reply = replies.pop().expect("one reply per request");
+    Ok(if reply.status != Status::Ok.code() {
+        match Status::try_from(reply.status) {
+            Ok(s) => Sent::Answer(Err(s)),
+            Err(_) => Sent::Bad(format!(
+                "status {}, which the protocol table does not have",
+                reply.status
+            )),
+        }
+    } else if let Some(why) = crate::compare::open_reply_reserved(&reply.payload) {
+        Sent::Bad(why)
+    } else {
+        match Reply::decode(Opcode::Open, 0, &reply.payload) {
+            Ok(r) => Sent::Answer(Ok(OwnedReply::from_reply(&r))),
+            Err(_) => Sent::Bad(
+                "an OK reply whose payload does not decode as an OPEN reply (wire.md 3.1)".into(),
+            ),
+        }
     })
 }
 

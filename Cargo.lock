@@ -70,6 +70,8 @@ version = "0.1.0"
 dependencies = [
  "aether-casefold",
  "aether-env",
+ "aether-filering",
+ "aether-hooks",
  "aether-inject",
  "aether-ipc",
  "aether-ntlayout",
@@ -79,6 +81,7 @@ dependencies = [
  "aether-refdirector",
  "aether-registry",
  "aether-rpc",
+ "aether-testkit",
  "aether-win",
  "retour",
  "windows-sys 0.61.2",
@@ -120,6 +123,7 @@ dependencies = [
  "aether-ipc",
  "aether-protocol",
  "aether-registry",
+ "aether-testkit",
  "bitflags 2.13.0",
  "proptest",
  "serde_json",
@@ -160,6 +164,7 @@ dependencies = [
  "aether-ipc",
  "aether-protocol",
  "aether-registry",
+ "aether-testkit",
 ]
 
 [[package]]

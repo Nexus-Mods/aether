@@ -36,10 +36,22 @@ windows-sys = { workspace = true, features = [
   "Win32_Storage_FileSystem",
 ] }
 
+[features]
+# Entry points for this crate's own tests (`director::install_global`,
+# `director::connect_from_env`). Off in the shipped shim: only the
+# dev-dependency below turns it on.
+test-support = []
+
 [dev-dependencies]
+# The crate's own tests use the `test-support` entry points.
+aether-hooks = { path = ".", features = ["test-support"] }
 # The director the shim's tests serve (`tests/fakedirector`); its serve loop is
 # `aether-rpc`'s, a normal dependency above.
 aether-refdirector.workspace = true
+# `tests/fakedirector`'s file ring (`RingKind::File`).
+aether-filering.workspace = true
+# The counting allocator (`tests/harness`) and temp folders.
+aether-testkit.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

@@ -22,6 +22,8 @@ proptest = { workspace = true, optional = true }
 aether-ipc.workspace = true
 # The crate's own tests use the `testing` strategies.
 aether-protocol = { path = ".", features = ["testing"] }
+# The shared allocation counter (`tests/alloc.rs`).
+aether-testkit.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 

@@ -129,6 +129,34 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
             aether_env::TEST_FUSE_INIT_FAIL
         )));
     }
+    let client = client_from_env()?;
+    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
+    let _ = FUSE.set(client);
+    Ok(())
+}
+
+/// The process's client, set once, for a test that builds its own (one with
+/// [`FuseClient::with_deadline`], say). `Err` gives `client` back when one is
+/// already set. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+// `OnceLock::set`'s shape: the client comes back whole, once, in a test.
+#[allow(clippy::result_large_err)]
+pub fn install_global(client: FuseClient) -> Result<(), FuseClient> {
+    FUSE.set(client)
+}
+
+/// A client connected from the environment [`try_init_from_env`] reads, not
+/// yet asked for a heartbeat and not installed. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn connect_from_env() -> Result<FuseClient, FuseInitError> {
+    client_from_env()
+}
+
+/// What [`try_init_from_env`] connects: the ring and roots the environment
+/// names.
+fn client_from_env() -> Result<FuseClient, FuseInitError> {
     let source = ring_source_from_env().ok_or(FuseInitError::NotConfigured)?;
     let ring_bytes: usize = aether_env::text(aether_env::RING_BYTES)
         .and_then(|s| s.parse().ok())
@@ -152,11 +180,8 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
         )
     })?;
     let roots = roots_from_env(&root);
-    let client = FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
-        .map_err(FuseInitError::ConnectFailed)?;
-    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
-    let _ = FUSE.set(client);
-    Ok(())
+    FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
+        .map_err(FuseInitError::ConnectFailed)
 }
 
 /// Concurrent bulk READs in flight (each uses its own arena bank via slot id).

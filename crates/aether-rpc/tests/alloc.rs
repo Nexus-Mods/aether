@@ -1,7 +1,6 @@
 //! `Client::call` adds no allocation of its own: with a reply buffer that
 //! has room, a call allocates nothing on the calling thread. The director
 //! runs on another thread, which is not counted.
-#![allow(unsafe_code)] // a GlobalAlloc impl is unsafe by definition
 
 use aether_ipc::ring;
 use aether_ipc::{OwnedSeg, RingClient, RingServer, SpinNotifier};
@@ -10,59 +9,14 @@ use aether_protocol::{
     RequestFlags, RootId, Status,
 };
 use aether_rpc::{serve, Client, Director, Listing, ReadSlot};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-struct Counting;
-
-thread_local! {
-    // Const-initialised and without a destructor, so reading them from the
-    // allocator never allocates.
-    static ARMED: Cell<bool> = const { Cell::new(false) };
-    static COUNT: Cell<usize> = const { Cell::new(0) };
-}
-
-fn note() {
-    if ARMED.try_with(Cell::get).unwrap_or(false) {
-        let _ = COUNT.try_with(|c| c.set(c.get() + 1));
-    }
-}
-
-// SAFETY: every call is forwarded to `System` unchanged; the counting
-// touches only thread-local cells.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note();
-        // SAFETY: the caller's contract is passed on as is.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note();
-        // SAFETY: as above.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note();
-        // SAFETY: as above.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: as above.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static A: aether_testkit::alloc::Counting = aether_testkit::alloc::Counting;
 
 /// The allocations `f` makes on this thread.
 fn allocations(f: impl FnOnce()) -> usize {
-    COUNT.with(|c| c.set(0));
-    ARMED.with(|a| a.set(true));
-    f();
-    ARMED.with(|a| a.set(false));
-    COUNT.with(Cell::get)
+    aether_testkit::alloc::allocations(f).1
 }
 
 /// Answers everything with fixed values.

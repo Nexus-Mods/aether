@@ -117,6 +117,12 @@ jobs:
             & $exe run --director "$exe reference-adapter --ring $ring" --scenarios contract\scenarios
             if ($LASTEXITCODE) { throw "aether-conform's smoke run over a $ring ring failed (exit $LASTEXITCODE)" }
           }
+      # The key leaves out the test crates; this checks that no native
+      # depends on one of them, so a key never misses a native change
+      - name: Natives key (dependency check)
+        run: |
+          .\bin\natives-key.tests.ps1
+          if ($LASTEXITCODE) { throw 'natives-key.tests.ps1 failed' }
       - name: Natives key
         id: key
         run: |

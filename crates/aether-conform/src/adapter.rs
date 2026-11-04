@@ -390,8 +390,8 @@ impl ProcessTree {
             return Ok(());
         }
         self.group_done = true;
-        // There is no libc here (the crate forbids unsafe), so kill(1)
-        // sends it.
+        // There is no libc here (the crate denies unsafe code outside its
+        // Windows job module), so kill(1) sends it.
         let group = format!("-{}", self.group);
         match Command::new("kill")
             .args(["-KILL", "--", &group])

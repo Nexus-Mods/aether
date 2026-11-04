@@ -756,6 +756,27 @@ mod tests {
         );
     }
 
+    /// wire.md 2.10: "`VFS_RING_PATH` wins over `VFS_RING_SECTION` when both
+    /// are set". A mount naming its ring file and a section that does not
+    /// exist attaches to the file, as the shim does.
+    #[test]
+    fn a_ring_path_wins_over_a_section() {
+        let dir = aether_testkit::tempdir().unwrap();
+        let path = ring_file(dir.path(), 64 * 1024, 2, 4096);
+        let e = file_env(
+            &path,
+            64 * 1024,
+            4096,
+            &[(
+                aether_env::RING_SECTION,
+                r"Local\aether-conform-no-such-section",
+            )],
+        );
+        if let Err(m) = Attached::from_env(&e, DEADLINE) {
+            panic!("{m}");
+        }
+    }
+
     /// wire.md 2.6: bank `b` is `bank_size` bytes at `arena_offset + b *
     /// bank_size`, `bank_size = max(arena_len / slot_count, 4096)`.
     #[test]

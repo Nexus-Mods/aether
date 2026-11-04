@@ -28,8 +28,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, DeleteFileW, MoveFileExW, ReadFile, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, DeleteFileW, MoveFileExW, ReadFile, RemoveDirectoryW, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 
 const KIB: usize = 1024;
@@ -64,6 +64,7 @@ fn fake() -> Fake {
         .writable_under("saves/")
         .with_dir("mods")
         .with_dir("mods/dir")
+        .with_dir("mods/gone")
         .with("mods/m.esp", pattern(MIB), ReadStyle::Whole)
         .with("mods/n.esp", pattern(MIB), ReadStyle::Whole)
         .with("mods/dir/x.bin", pattern(MIB), ReadStyle::Whole)
@@ -586,5 +587,61 @@ fn a_failed_block_fetch_falls_back_to_an_uncached_read_with_the_same_bytes() {
     // the block, and the one after hits.
     assert_read(served, h, SMALL, &want, &[fetch(0)]);
     assert_read(served, h, 2 * SMALL, &want, &[]);
+    close(h);
+}
+
+#[test]
+fn no_file_under_a_renamed_or_deleted_directory_is_cached_again() {
+    isolate!();
+    let (root, served) = serve(fake());
+    immutable_mods(served);
+    let want = pattern(MIB);
+    let mods = root.join("mods");
+
+    // Nothing under `mods/dir` is opened before the rename.
+    let (from, to) = (wide(&mods.join("dir")), wide(&mods.join("moved")));
+    // SAFETY: NUL-terminated names.
+    assert_ne!(
+        unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) },
+        0,
+        "{}",
+        last_error()
+    );
+    // A file the director now puts under the old name, and the one that
+    // moved under the new: both answered immutable, neither cached.
+    served.fake.replace_content("mods/dir/y.bin", want.clone());
+    for p in [
+        mods.join("dir").join("y.bin"),
+        mods.join("moved").join("x.bin"),
+    ] {
+        let mark = served.recorder.mark();
+        let h = open_read(&p);
+        assert_eq!(opens(served, mark), [(true, 0, MIB as u64)], "{p:?}");
+        for at in [0, 0, SMALL] {
+            assert_read(served, h, at, &want, &[through(at)]);
+        }
+        close(h);
+    }
+
+    // A deleted directory: a file the director later serves under it.
+    let gone = wide(&mods.join("gone"));
+    // SAFETY: a NUL-terminated name.
+    assert_ne!(
+        unsafe { RemoveDirectoryW(gone.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    served.fake.replace_content("mods/gone/z.bin", want.clone());
+    let h = open_read(&mods.join("gone").join("z.bin"));
+    for at in [0, 0] {
+        assert_read(served, h, at, &want, &[through(at)]);
+    }
+    close(h);
+
+    // Elsewhere under `mods/` the cache still serves.
+    let h = open_read(&mods.join("m.esp"));
+    assert_read(served, h, 0, &want, &[fetch(0)]);
+    assert_read(served, h, SMALL, &want, &[]);
     close(h);
 }

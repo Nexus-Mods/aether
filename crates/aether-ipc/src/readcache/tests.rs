@@ -845,6 +845,32 @@ fn a_delete_or_rename_drops_the_path_and_everything_under_it() {
 }
 
 #[test]
+fn nothing_under_a_deleted_or_renamed_path_is_cached_again_opened_before_or_not() {
+    let c = tiny();
+    let s = Source::new(content(100));
+    assert!(
+        !c.any_blocked.load(Ordering::Relaxed),
+        "empty until a change"
+    );
+    c.invalidate_path(0, "/mods/dir/");
+    for p in ["mods/dir", "mods/dir/y.bin", "mods/dir/deep/z.bin"] {
+        assert!(!c.register(0, p, 100, 0, true, false).cacheable(), "{p}");
+    }
+    for (root, p) in [
+        (0, "mods/dir2/y.bin"),
+        (0, "mods/di"),
+        (1, "mods/dir/y.bin"),
+    ] {
+        let f = c.register(root, p, 100, 0, true, false);
+        assert!(f.cacheable(), "{root} {p}");
+        assert!(read(&c, &f, &s, 0, 4).is_some());
+    }
+    c.invalidate_path(1, ".");
+    assert!(!c.register(1, "any/where", 100, 0, true, false).cacheable());
+    assert!(c.register(0, "mods/other", 100, 0, true, false).cacheable());
+}
+
+#[test]
 fn a_remount_with_other_content_at_the_path_is_another_file() {
     let c = tiny();
     let old = Source::new(content(100));

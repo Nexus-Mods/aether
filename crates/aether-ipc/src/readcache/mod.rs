@@ -72,8 +72,8 @@
 //! without the cache. So a cache answer is always the bytes the director
 //! would have returned, or no answer at all.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 mod config;
@@ -107,6 +107,15 @@ struct FileTable {
 
 const SWEEP_MIN: usize = 1024;
 
+/// One root's deleted and renamed paths, folded: a file at or under any of
+/// them is never cached again.
+#[derive(Default)]
+struct Blocked {
+    /// The whole root ([`ReadCache::invalidate_path`] of `""` or `"."`).
+    whole: bool,
+    prefixes: HashSet<String>,
+}
+
 /// How a read came by one of its units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Got {
@@ -136,6 +145,12 @@ pub struct ReadCache {
     /// Diagnostics of files swept out of the file table, so the per-file
     /// table covers the whole run.
     retired: Mutex<HashMap<Name, FileDiag>>,
+    /// Paths deleted or renamed through this process, per root: nothing at
+    /// or under one is cached again ([`ReadCache::invalidate_path`]).
+    blocked: Mutex<HashMap<u32, Blocked>>,
+    /// Whether `blocked` holds anything: until it does, an open looks at
+    /// nothing more than this.
+    any_blocked: AtomicBool,
 }
 
 impl Default for ReadCache {
@@ -165,6 +180,8 @@ impl ReadCache {
             tick: AtomicU64::new(1),
             counters: Counters::default(),
             retired: Mutex::new(HashMap::new()),
+            blocked: Mutex::new(HashMap::new()),
+            any_blocked: AtomicBool::new(false),
         }
     }
 
@@ -182,14 +199,36 @@ impl ReadCache {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Whether `path` (folded, under `root`) is at or under a path this
+    /// process deleted or renamed. One relaxed load while nothing has been;
+    /// after that a lookup per component of `path`, borrowing slices of it,
+    /// so nothing is allocated.
+    fn is_blocked(&self, root: u32, path: &str) -> bool {
+        if !self.any_blocked.load(Ordering::Relaxed) {
+            return false;
+        }
+        let b = lock(&self.blocked);
+        let Some(r) = b.get(&root) else {
+            return false;
+        };
+        let path = path.trim_matches('/');
+        r.whole
+            || r.prefixes.contains(path)
+            || path
+                .match_indices('/')
+                .any(|(i, _)| r.prefixes.contains(&path[..i]))
+    }
+
     /// A handle on `path` (folded, under `root`) was opened, `size` bytes,
     /// under the director's mount generation `mount_gen`. `immutable` is the
     /// director's word that the handle's bytes cannot change; `write` that
     /// the handle was opened for writing.
     ///
     /// A write open, or one the director does not call immutable, poisons
-    /// the file: its blocks go and it is not cached again. Otherwise the
-    /// returned ref is cacheable unless the file is already poisoned.
+    /// the file: its blocks go and it is not cached again. So does an open
+    /// of a path at or under one this process deleted or renamed
+    /// ([`ReadCache::invalidate_path`]). Otherwise the returned ref is
+    /// cacheable unless the file is already poisoned.
     pub fn register(
         &self,
         root: u32,
@@ -199,6 +238,8 @@ impl ReadCache {
         immutable: bool,
         write: bool,
     ) -> FileRef {
+        // Before the file table: `blocked` is never held with another lock.
+        let blocked = !write && immutable && self.is_blocked(root, path);
         let name = Name {
             root,
             path: path.to_string(),
@@ -217,7 +258,7 @@ impl ReadCache {
         };
         let version = Version { size, mount_gen };
         let mut st = lock(&entry.state);
-        if write || !immutable {
+        if write || !immutable || blocked {
             self.poison(&mut st);
             drop(st);
             return FileRef {
@@ -342,10 +383,21 @@ impl ReadCache {
 
     /// `path` (folded, under `root`) was deleted or renamed, or something was
     /// renamed onto it: drop it and everything under it, and never cache any
-    /// of it again. An empty path or `"."` is the whole root.
+    /// of it again, a file under it this process has not opened yet
+    /// included. An empty path or `"."` is the whole root.
     pub fn invalidate_path(&self, root: u32, path: &str) {
         let path = path.trim_matches('/');
         let whole_root = path.is_empty() || path == ".";
+        {
+            let mut b = lock(&self.blocked);
+            let r = b.entry(root).or_default();
+            if whole_root {
+                r.whole = true;
+            } else if !r.prefixes.contains(path) {
+                r.prefixes.insert(path.to_string());
+            }
+            self.any_blocked.store(true, Ordering::Release);
+        }
         let mut reg = lock(&self.files);
         let hit: Vec<Arc<Entry>> = reg
             .by_name

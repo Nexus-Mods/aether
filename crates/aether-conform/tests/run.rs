@@ -112,6 +112,19 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
+/// Adds `--failures <failures>` to `args` when they generate cases or
+/// rounds (`--generate`, `--concurrent`) and name no folder: the default is
+/// a folder in the temporary directory named by the seed alone, which tests
+/// with one seed would share.
+fn own_failures<'a>(args: &mut Vec<&'a str>, failures: &'a Path) {
+    let generates = args
+        .iter()
+        .any(|a| *a == "--generate" || *a == "--concurrent");
+    if generates && !args.contains(&"--failures") {
+        args.extend(["--failures", failures.to_str().unwrap()]);
+    }
+}
+
 fn run_reference(dir: &Path, adapter_args: &str, extra: &[&str]) -> Output {
     let director = format!("{} reference-adapter{adapter_args}", quoted_exe());
     let scenarios = dir.to_str().unwrap();
@@ -125,6 +138,8 @@ fn run_reference(dir: &Path, adapter_args: &str, extra: &[&str]) -> Output {
         "20",
     ];
     args.extend_from_slice(extra);
+    let failures = aether_testkit::tempdir().unwrap();
+    own_failures(&mut args, failures.path());
     conform(&args)
 }
 
@@ -525,7 +540,8 @@ type Entry = (String, bool, Option<String>, Vec<String>);
 /// `run` against `director` (the arguments after the binary) over the
 /// scenarios in `dir`, with `extra` arguments, as a JSON report: its exit
 /// code, its entries, the `file` of the `concurrent` entry (if any), and
-/// everything the run printed.
+/// everything the run printed. A run that generates is given `--failures`
+/// in a folder of its own unless `extra` names one ([`own_failures`]).
 fn run_json(
     director: &str,
     dir: &Path,
@@ -535,6 +551,7 @@ fn run_json(
     let out = aether_testkit::tempdir().unwrap();
     let report = out.path().join("report.json");
     let director = format!("{} {director}", quoted_exe());
+    let failures = out.path().join("failures");
     let mut args = vec![
         "run",
         "--director",
@@ -549,6 +566,7 @@ fn run_json(
         report.to_str().unwrap(),
     ];
     args.extend_from_slice(extra);
+    own_failures(&mut args, &failures);
     let o = conform(&args);
     let all = all_output(&o);
     let v: Value = match std::fs::read(&report) {
@@ -655,6 +673,32 @@ fn committed_with(how: &str, timeout: &str) -> (Vec<Entry>, String) {
     );
     assert_eq!(code, Some(1), "{entries:?}\n{all}");
     (entries, all)
+}
+
+/// A failing concurrent round is written inside the test's own folder,
+/// never to the run's default (`aether-conform-failures-<seed>` in the
+/// temporary directory), which every test with that seed would share.
+#[test]
+fn a_failing_round_is_written_inside_the_tests_own_folder() {
+    let dir = multi_scenarios();
+    let (code, entries, file, all) = run_json(
+        "test-adapter --misbehave per-slot-fh",
+        dir.path(),
+        "20",
+        &CONCURRENT_FEW,
+    );
+    assert_eq!(code, Some(1), "{all}");
+    assert!(!entry(&entries, "concurrent").1, "{entries:?}");
+    let shared = std::env::temp_dir().join("aether-conform-failures-11");
+    assert!(
+        !Path::new(&file).starts_with(&shared),
+        "written to the shared {}: {file}",
+        shared.display()
+    );
+    assert!(
+        Path::new(&file).starts_with(aether_testkit::scratch_root()),
+        "{file}"
+    );
 }
 
 fn failed(entries: &[Entry]) -> Vec<&str> {

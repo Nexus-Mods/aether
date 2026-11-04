@@ -88,7 +88,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     unsafe { tramp(oa) }
 }
 
-/// The NT status for a director `OP_DELETE` refusal. Flattening every refusal to
+/// The NT status for a director `Opcode::Delete` refusal. Flattening every refusal to
 /// `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) would stop delete-then-create
 /// callers, which tolerate only `ERROR_FILE_NOT_FOUND`; this is the same mapping as
 /// `try_fuse_create`'s `Err` arms, kept in one function so the two cannot drift:
@@ -175,8 +175,8 @@ unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
-/// A delete or rename through `handle`, whose path is `nt`, answered by the director: `OP_DELETE`,
-/// `OP_RENAME` when the target lands under the same root, or `OP_RENAME_X` when it lands under
+/// A delete or rename through `handle`, whose path is `nt`, answered by the director: `Opcode::Delete`,
+/// `Opcode::Rename` when the target lands under the same root, or `Opcode::RenameX` when it lands under
 /// another root (a root and one nested in its location). `None` when `nt` is under no root, so
 /// the caller decides; otherwise the caller's answer.
 ///
@@ -296,7 +296,7 @@ pub(super) unsafe fn setinfo_hook_body(
             }
             return STATUS_SUCCESS;
         }
-        // Truncate (`File::set_len`) → ring OP_SETATTR on the virtual write handle.
+        // Truncate (`File::set_len`) → ring Opcode::SetAttr on the virtual write handle.
         if class == FILE_END_OF_FILE_INFORMATION
             && !info.is_null()
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
@@ -326,7 +326,7 @@ pub(super) unsafe fn setinfo_hook_body(
             crate::hookstats::note_link_refused(src.as_deref().unwrap_or("<synthetic handle>"));
             return STATUS_ACCESS_DENIED;
         }
-        // Delete / rename of a virtual handle → ring OP_DELETE / OP_RENAME, keyed
+        // Delete / rename of a virtual handle → ring Opcode::Delete / Opcode::Rename, keyed
         // by the NT path recorded (record_path) when the handle was opened.
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let is_delete = unsafe { is_delete_request(info, length, class) };
@@ -391,7 +391,7 @@ pub(super) unsafe fn setinfo_hook_body(
         // graph does not serve. Refused with `STATUS_ACCESS_DENIED`; the cross-root arm's
         // `STATUS_UNSUCCESSFUL` is a different answer ("the graph cannot express this
         // move", against "the destination will not accept content by this route").
-        // `OP_RENAME` carries one root, so there is no import operation to route it to.
+        // `Opcode::Rename` carries one root, so there is no import operation to route it to.
         //
         // NOTE: `parse_rename_target` discards `parent_dir_of_handle`'s OS-consulted
         // provenance bit, so a target named against a directory handle the shim never saw

@@ -36,7 +36,7 @@ pub const FILE_OVERWRITTEN: usize = 3;
 /// `FILE_CREATE`/`FILE_SUPERSEDE` in that respect), so a caller that asks
 /// for it with only read access must still route through the write path —
 /// otherwise a create-if-absent read open is treated as a plain read, which
-/// reports `ST_NOT_FOUND` instead of creating the file, on an absent path.
+/// reports `Status::NotFound` instead of creating the file, on an absent path.
 /// (Before gate 4's Task 5 that miss also *fell through* to the shim-local
 /// overlay, so the misclassification silently "worked"; now it is a sealed
 /// failure, which is the same reason getting this predicate right matters
@@ -75,10 +75,10 @@ pub fn is_append_only(access: u32) -> bool {
     access & FILE_APPEND_DATA != 0 && access & (FILE_WRITE_DATA | GENERIC_WRITE) == 0
 }
 
-/// Map an NT create-disposition to the ring's `OPEN_CREATE`/`OPEN_EXCL`/
-/// `OPEN_TRUNC` bits (`OPEN_WRITE` itself is added by the caller). Forwarding
+/// Map an NT create-disposition to the ring's `OpenFlags::CREATE`/`OpenFlags::EXCL`/
+/// `OpenFlags::TRUNC` bits (`OpenFlags::WRITE` itself is added by the caller). Forwarding
 /// this is what closes the gap Task 6 found: without it every brand-new file
-/// gets `ST_NOT_FOUND` from the director regardless of disposition. That used
+/// gets `Status::NotFound` from the director regardless of disposition. That used
 /// to fall through to the shim-local overlay redirect and so merely misplace
 /// the bytes; since gate 4's Task 5 sealed that fall-through it would instead
 /// fail every create outright, so a mistake in this mapping is now a game that
@@ -87,17 +87,17 @@ pub fn is_append_only(access: u32) -> bool {
 /// Verified against NT `CreateDisposition` semantics one value at a time
 /// (a prior draft of this mapping under-specified two of the six):
 /// - `FILE_SUPERSEDE` (0): create if absent, replace if present -> needs
-///   **both** `OPEN_CREATE` and `OPEN_TRUNC` — a `OPEN_TRUNC`-only mapping
-///   fails `ST_NOT_FOUND` on an absent file, which is exactly the bug this
+///   **both** `OpenFlags::CREATE` and `OpenFlags::TRUNC` — a `OpenFlags::TRUNC`-only mapping
+///   fails `Status::NotFound` on an absent file, which is exactly the bug this
 ///   function exists to close.
 /// - `FILE_OPEN` (1): open only, must fail if absent -> no flags.
-/// - `FILE_CREATE` (2): create only, must fail if present -> `OPEN_CREATE |
-///   OPEN_EXCL`.
+/// - `FILE_CREATE` (2): create only, must fail if present -> `OpenFlags::CREATE |
+///   OpenFlags::EXCL`.
 /// - `FILE_OPEN_IF` (3): open if present (no data loss), create if absent ->
-///   `OPEN_CREATE` alone (the provider's `OPEN_CREATE` is a no-op on an
+///   `OpenFlags::CREATE` alone (the provider's `OpenFlags::CREATE` is a no-op on an
 ///   existing file — it does not also truncate).
-/// - `FILE_OVERWRITE` (4): must already exist, truncate -> `OPEN_TRUNC` alone
-///   (no `OPEN_CREATE`, so an absent file still fails `ST_NOT_FOUND`, matching
+/// - `FILE_OVERWRITE` (4): must already exist, truncate -> `OpenFlags::TRUNC` alone
+///   (no `OpenFlags::CREATE`, so an absent file still fails `Status::NotFound`, matching
 ///   "fail if it does not exist").
 /// - `FILE_OVERWRITE_IF` (5): overwrite if present, create if absent -> needs
 ///   **both**, same as `FILE_SUPERSEDE` — this is the case the brief already
@@ -126,7 +126,7 @@ pub fn open_create_flags(disposition: u32) -> OpenFlags {
 /// `FILE_WRITE_DATA`/`FILE_APPEND_DATA`. The bits are identical and nothing
 /// in the mask distinguishes them, so every `FILE_FLAG_BACKUP_SEMANTICS` open
 /// asking for write access on a directory arrives as a write, gets routed to
-/// `Provider::open(OPEN_WRITE)`, and fails: `DiskProvider::open` opens
+/// `Provider::open(OpenFlags::WRITE)`, and fails: `DiskProvider::open` opens
 /// read+write, which a directory refuses. Since gate 4's Task 5 that failure
 /// is no longer papered over by the fall-through — the caller now gets
 /// `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) for an operation NTFS answers
@@ -169,7 +169,7 @@ pub fn disposition_needs_existence_probe(disposition: u32) -> bool {
 /// NT's own table:
 /// - `FILE_OPEN` (1): always `FILE_OPENED` — must already exist.
 /// - `FILE_CREATE` (2): always `FILE_CREATED` — must not have existed
-///   (`OPEN_EXCL` already enforces this; success implies "created").
+///   (`OpenFlags::EXCL` already enforces this; success implies "created").
 /// - `FILE_OVERWRITE` (4): always `FILE_OVERWRITTEN` — must already exist.
 /// - `FILE_SUPERSEDE` (0), `FILE_OPEN_IF` (3), `FILE_OVERWRITE_IF` (5):
 ///   outcome depends on whether the path existed — this is exactly why

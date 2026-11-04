@@ -195,7 +195,7 @@ pub(crate) fn grow_size(handle: isize, end: u64) {
 
 /// Record whether closing `handle` deletes its path: set when it was opened with
 /// `FILE_DELETE_ON_CLOSE`, cleared once a set-info delete through it has already deleted the
-/// path (a second `OP_DELETE` at close could delete a file recreated under the same name). A
+/// path (a second `Opcode::Delete` at close could delete a file recreated under the same name). A
 /// no-op for a handle that is not in the table.
 pub(crate) fn set_delete_on_close(handle: isize, on: bool) {
     if let Ok(mut g) = TABLE.lock() {

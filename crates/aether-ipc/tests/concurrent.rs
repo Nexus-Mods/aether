@@ -20,15 +20,15 @@ use aether_ipc::{
 use aether_protocol::{Opcode, ReadReply, Reply, Request, RequestFlags, Status};
 
 /// Echo the payload back at once.
-const OP_ECHO: u32 = 900;
+const ECHO: u32 = 900;
 
 /// Block until the test opens the latch ([`Fixture::open_latch`]), then
 /// answer `b"released"`.
-const OP_HOLD: u32 = 902;
+const HOLD: u32 = 902;
 /// Once the client has published (see [`NapClock`]), add the payload's `u64`
 /// milliseconds to [`Fixture::napped_ms`], then answer `b"napped"`. Time that
 /// passes for a [`NapClock`] client and for nothing else.
-const OP_NAP: u32 = 903;
+const NAP: u32 = 903;
 
 /// Reads of this handle block until the test opens the latch: a provider
 /// that has stopped answering, for exactly as long as the test says.
@@ -63,7 +63,7 @@ struct Fixture {
     /// Requests inside the handler waiting on the latch, and the most ever.
     held_now: AtomicU32,
     held_peak: AtomicU32,
-    /// What the `OP_NAP` requests have added up to, and whether a
+    /// What the `NAP` requests have added up to, and whether a
     /// [`NapClock`] client has published (the server naps only after).
     napped_ms: AtomicU64,
     client_notified: AtomicBool,
@@ -144,7 +144,7 @@ impl Fixture {
     /// processors and two tests at once a round trip can wait for the
     /// scheduler for a long time; 200 echoes once took longer than the 60 s
     /// the held reads waiting on them had, and every read failed with
-    /// `ST_IO_ERROR` before the test opened the latch.
+    /// `Status::IoError` before the test opened the latch.
     fn client(&self) -> RingClient<'_, SpinNotifier> {
         RingClient::with_geom(self.seg(), self.geom, SpinNotifier).with_deadline(PATIENT)
     }
@@ -177,8 +177,8 @@ impl Fixture {
         );
         while !self.stop.load(Ordering::Relaxed) {
             ring.serve_one(|req| match req.opcode {
-                OP_ECHO => (Status::Ok.code(), req.payload.clone()),
-                OP_NAP => {
+                ECHO => (Status::Ok.code(), req.payload.clone()),
+                NAP => {
                     self.until("the client published", || {
                         self.client_published.load(Ordering::SeqCst)
                     });
@@ -186,7 +186,7 @@ impl Fixture {
                     self.napped_ms.fetch_add(ms, Ordering::SeqCst);
                     (Status::Ok.code(), b"napped".to_vec())
                 }
-                OP_HOLD => {
+                HOLD => {
                     self.hold();
                     (Status::Ok.code(), b"released".to_vec())
                 }
@@ -312,7 +312,7 @@ const LONG_AFTER: Duration = Duration::from_secs(3600);
 ///
 /// A batch is published, the server told (`notify_server`), and then the clock
 /// read once for the batch's deadline. This notes that read as the moment the
-/// batch was published, and `OP_NAP` waits for it: so the deadline is always
+/// batch was published, and `NAP` waits for it: so the deadline is always
 /// counted from no time at all, however late the client thread runs.
 struct NapClock<'a>(&'a Fixture, Instant);
 
@@ -374,12 +374,12 @@ fn a_slow_request_does_not_hold_up_a_fast_one() {
     let fx = Fixture::new(8);
     fx.with_workers(4, || {
         thread::scope(|s| {
-            let slow = s.spawn(|| fx.client().submit(OP_HOLD, 0, b"").unwrap().payload);
+            let slow = s.spawn(|| fx.client().submit(HOLD, 0, b"").unwrap().payload);
             fx.until("the held request reached the server", || fx.held() == 1);
             let c = fx.client();
             for i in 0..500u32 {
                 let payload = i.to_le_bytes();
-                assert_eq!(c.submit(OP_ECHO, 0, &payload).unwrap().payload, payload);
+                assert_eq!(c.submit(ECHO, 0, &payload).unwrap().payload, payload);
             }
             assert_eq!(fx.held(), 1, "the held request is still held");
             assert!(!slow.is_finished());
@@ -419,7 +419,7 @@ fn reads_held_at_the_gate_leave_a_worker_for_other_requests() {
             let c = fx.client();
             for i in 0..200u32 {
                 let payload = i.to_le_bytes();
-                assert_eq!(c.submit(OP_ECHO, 0, &payload).unwrap().payload, payload);
+                assert_eq!(c.submit(ECHO, 0, &payload).unwrap().payload, payload);
             }
             assert_eq!(fx.held(), 3, "the reads are all still blocked");
             fx.open_latch();
@@ -483,7 +483,7 @@ fn reads_that_timed_out_keep_their_permits_until_the_director_is_done() {
 
         // So the fourth worker is free, with the provider still stuck.
         let c = fx.client().with_deadline(GIVE_UP);
-        assert_eq!(c.submit(OP_ECHO, 0, b"stat").unwrap().payload, b"stat");
+        assert_eq!(c.submit(ECHO, 0, b"stat").unwrap().payload, b"stat");
         assert_eq!(fx.held(), 3);
 
         // The provider answers at last. The director drains the three slots,
@@ -639,10 +639,7 @@ fn a_timed_out_request_retires_its_slot_until_the_late_reply_is_drained() {
         // The server finished and drained it: free, and usable.
         fx.await_state(retired, ST_FREE);
         let (resps, held) = c
-            .submit_many_held(&[
-                (OP_ECHO, 0, b"first".to_vec()),
-                (OP_ECHO, 0, b"second".to_vec()),
-            ])
+            .submit_many_held(&[(ECHO, 0, b"first".to_vec()), (ECHO, 0, b"second".to_vec())])
             .unwrap();
         assert!(held.contains(&retired), "both slots are in use again");
         assert_eq!(resps[0].payload, b"first");
@@ -662,10 +659,7 @@ fn a_request_nobody_serves_times_out_and_frees_its_slot() {
     let fx = Fixture::new(2);
     let c = fx.client().with_deadline(Duration::from_millis(30));
     for _ in 0..5 {
-        assert_eq!(
-            c.submit(OP_ECHO, 0, b"hello").err(),
-            Some(IpcError::Timeout)
-        );
+        assert_eq!(c.submit(ECHO, 0, b"hello").err(), Some(IpcError::Timeout));
     }
     assert_eq!(fx.state(0), ST_FREE);
     assert_eq!(fx.state(1), ST_FREE);
@@ -694,9 +688,9 @@ fn a_batch_that_times_out_gives_every_slot_back() {
             })
             .with_deadline(Duration::from_millis(40));
         let r = c.submit_many_held(&[
-            (OP_ECHO, 0, b"a".to_vec()),
-            (OP_HOLD, 0, Vec::new()),
-            (OP_ECHO, 0, b"c".to_vec()),
+            (ECHO, 0, b"a".to_vec()),
+            (HOLD, 0, Vec::new()),
+            (ECHO, 0, b"c".to_vec()),
         ]);
         assert_eq!(r.err(), Some(IpcError::Timeout));
         let states: Vec<u32> = (0..4).map(|s| fx.state(s)).collect();
@@ -760,7 +754,7 @@ fn a_late_response_is_waited_for_off_the_processor() {
             });
             let c = RingClient::with_geom(fx.seg(), fx.geom, &w);
             let t = Instant::now();
-            let r = c.submit(OP_HOLD, 0, b"").unwrap();
+            let r = c.submit(HOLD, 0, b"").unwrap();
             let waited = t.elapsed();
             assert_eq!(r.payload, b"released");
             waited
@@ -793,8 +787,8 @@ fn a_full_ring_is_waited_for_off_the_processor_and_not_for_ever() {
         least_waited_us: AtomicU32::new(u32::MAX),
     };
     let c = RingClient::with_geom(fx.seg(), fx.geom, &w).with_deadline(Duration::from_millis(30));
-    assert_eq!(c.submit(OP_ECHO, 0, b"x").err(), Some(IpcError::RingFull));
-    let batch = c.submit_many_held(&[(OP_ECHO, 0, b"x".to_vec())]);
+    assert_eq!(c.submit(ECHO, 0, b"x").err(), Some(IpcError::RingFull));
+    let batch = c.submit_many_held(&[(ECHO, 0, b"x".to_vec())]);
     assert_eq!(batch.err(), Some(IpcError::RingFull));
     assert!(
         w.idle_calls.load(Ordering::Relaxed) > 0,
@@ -827,9 +821,9 @@ fn a_batch_has_one_deadline_not_one_per_request() {
                 fx.open_latch();
             });
             let r = c.submit_many_held(&[
-                (OP_NAP, 0, 30u64.to_le_bytes().to_vec()),
-                (OP_NAP, 0, 35u64.to_le_bytes().to_vec()),
-                (OP_HOLD, 0, Vec::new()),
+                (NAP, 0, 30u64.to_le_bytes().to_vec()),
+                (NAP, 0, 35u64.to_le_bytes().to_vec()),
+                (HOLD, 0, Vec::new()),
             ]);
             done.store(true, Ordering::SeqCst);
             r
@@ -857,7 +851,7 @@ fn slots_are_reused_across_threads_without_crosstalk() {
                     let c = fx.client();
                     for i in 0..3_000u32 {
                         let payload = [t.to_le_bytes(), i.to_le_bytes()].concat();
-                        let r = c.submit(OP_ECHO, 0, &payload).unwrap();
+                        let r = c.submit(ECHO, 0, &payload).unwrap();
                         assert_eq!(r.status, Status::Ok.code());
                         assert_eq!(r.payload, payload, "thread {t} request {i}");
                     }

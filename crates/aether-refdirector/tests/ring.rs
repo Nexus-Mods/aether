@@ -162,7 +162,7 @@ fn an_inline_read_reaches_the_client_as_the_fake_sent_it() {
 }
 
 #[test]
-/// wire.md 3.3: any other opcode is ST_BAD_REQUEST with an empty payload.
+/// wire.md 3.3: any other opcode is Status::BadRequest with an empty payload.
 fn opcodes_outside_the_table_are_bad_requests() {
     with_ring(Reference::new(), |c, _| {
         for op in [0, 4, 12, 25, 1000] {
@@ -177,7 +177,7 @@ fn opcodes_outside_the_table_are_bad_requests() {
 }
 
 #[test]
-/// wire.md 3.5: a payload that does not decode is ST_BAD_REQUEST, whatever
+/// wire.md 3.5: a payload that does not decode is Status::BadRequest, whatever
 /// the opcode; 3.2: file-op decoders ignore trailing bytes, so a HEARTBEAT
 /// carrying some is still OK.
 fn undecodable_requests_are_bad_requests() {

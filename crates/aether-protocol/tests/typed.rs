@@ -6,7 +6,7 @@ mod common;
 
 use aether_protocol::{
     any_reply_for, any_request, any_request_for, Opcode, Reply, Request, RequestFlags, RootId,
-    Status, OPCODES, STATUSES,
+    Status,
 };
 use common::Msg;
 use proptest::prelude::*;
@@ -60,7 +60,6 @@ fn opcodes_are_the_historical_table() {
         .map(|&op| (op.name(), op as u32))
         .collect();
     assert_eq!(typed, HISTORICAL_OPCODES);
-    assert_eq!(OPCODES, HISTORICAL_OPCODES);
 }
 
 #[test]
@@ -70,7 +69,6 @@ fn statuses_are_the_historical_table() {
         .map(|&st| (st.name(), st.code()))
         .collect();
     assert_eq!(typed, HISTORICAL_STATUSES);
-    assert_eq!(STATUSES, HISTORICAL_STATUSES);
 }
 
 #[test]

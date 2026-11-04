@@ -10,7 +10,7 @@
 //! them.
 //!
 //! So the shim classified those opens as writes and asked the director for
-//! `OPEN_WRITE`, which no provider can give for a directory —
+//! `OpenFlags::WRITE`, which no provider can give for a directory —
 //! `DiskProvider::open` runs `OpenOptions::new().read(true).write(true)` on
 //! it. Until gate 4's Task 5 the resulting refusal fell through to real disk
 //! and the caller never noticed. Now it is the caller's answer:
@@ -18,9 +18,9 @@
 //! read-only one, for an operation NTFS answers without complaint.
 //!
 //! All three refusals a real graph produces are covered, because the fix must
-//! not be a patch for one provider's error code: `ST_READ_ONLY`,
-//! `ST_IO_ERROR`, and — for `OPEN_ALWAYS`, which reaches the ring as
-//! `FILE_OPEN_IF` carrying `OPEN_CREATE` — the `ST_IS_DIR` that
+//! not be a patch for one provider's error code: `Status::ReadOnly`,
+//! `Status::IoError`, and — for `OPEN_ALWAYS`, which reaches the ring as
+//! `FILE_OPEN_IF` carrying `OpenFlags::CREATE` — the `Status::IsDir` that
 //! `OverlayProvider` now returns instead of letting a `DiskProvider` upper
 //! create a file named after the directory. `CREATE_ALWAYS` is the control:
 //! it genuinely asks to replace the path with a file, and must still fail.
@@ -99,8 +99,8 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
     std::fs::create_dir_all(&overlay).unwrap();
 
     // `data` sits outside every writable prefix (read-only mount:
-    // `ST_READ_ONLY`); `write/sub` sits inside one (writable mount, which
-    // still cannot open a directory read+write: `ST_IO_ERROR`). One fix has
+    // `Status::ReadOnly`); `write/sub` sits inside one (writable mount, which
+    // still cannot open a directory read+write: `Status::IoError`). One fix has
     // to cover both, or it is a patch for one provider's error code.
     fakedirector::install(
         &root,
@@ -116,8 +116,8 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
     let read_only_dir = open_directory_for_write(&root.join("Data"), OPEN_EXISTING);
     let writable_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_EXISTING);
     // `OPEN_ALWAYS` is the case the review flagged: it reaches the ring as
-    // `FILE_OPEN_IF` *carrying* `OPEN_CREATE`, so the provider graph is being
-    // asked to create. `OverlayProvider` refuses with `ST_IS_DIR` rather than
+    // `FILE_OPEN_IF` *carrying* `OpenFlags::CREATE`, so the provider graph is being
+    // asked to create. `OverlayProvider` refuses with `Status::IsDir` rather than
     // letting a `DiskProvider` upper create a file named after the directory
     // — and the downgrade has to turn that refusal back into the directory
     // open the caller meant.

@@ -430,7 +430,7 @@ fn the_ops_it_does_not_serve_are_not_supported() {
 
 #[test]
 fn opcodes_outside_the_table_are_bad_requests() {
-    // wire.md 3.3: any other opcode is ST_BAD_REQUEST.
+    // wire.md 3.3: any other opcode is Status::BadRequest.
     let mut d = Reference::new();
     for op in [0, 4, 12, 25, 1000, u32::MAX] {
         assert_eq!(d.unknown(op), Status::BadRequest, "opcode {op}");
@@ -439,7 +439,7 @@ fn opcodes_outside_the_table_are_bad_requests() {
 
 #[test]
 fn an_undecodable_request_is_a_bad_request() {
-    // wire.md 3.5 and 3.5.1: a payload that does not decode is ST_BAD_REQUEST.
+    // wire.md 3.5 and 3.5.1: a payload that does not decode is Status::BadRequest.
     for registry in [false, true] {
         let mut d = Reference::new();
         if registry {

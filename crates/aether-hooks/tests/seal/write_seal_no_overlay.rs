@@ -26,7 +26,7 @@ fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
     std::fs::create_dir_all(root.join("data")).unwrap();
 
     // A graph with no writable mount at all: every write open under the root
-    // is refused with `ST_READ_ONLY` (docs/wire.md 3.4.3).
+    // is refused with `Status::ReadOnly` (docs/wire.md 3.4.3).
     fakedirector::install(&root, fakedirector::Fake::new(), 0);
 
     let hooks = install().expect("install");
@@ -49,7 +49,7 @@ fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
          both an escape and a silent data loss"
     );
     let err = result.expect_err("a write under a managed root that no provider serves must fail");
-    // `ST_READ_ONLY` on a write is `STATUS_ACCESS_DENIED`
+    // `Status::ReadOnly` on a write is `STATUS_ACCESS_DENIED`
     // (`hook/file_open.rs`, `try_fuse_create`), which Win32 reports as
     // ERROR_ACCESS_DENIED.
     assert_eq!(

@@ -10,7 +10,7 @@
 //! left, a director error on the write open itself:
 //!
 //! - **Fails closed.** `VFS_ALLOW_DISK_FALLTHROUGH` relaxes "the director does not have this"
-//!   (`ST_NOT_FOUND`), never "the director failed" (`hook/file_open.rs::try_fuse_create`). A
+//!   (`Status::NotFound`), never "the director failed" (`hook/file_open.rs::try_fuse_create`). A
 //!   provider I/O error on a write is `ERROR_GEN_FAILURE`, and nothing appears on the real
 //!   filesystem under the root. The switch is on here, which is what makes this the strong form
 //!   of the claim.
@@ -44,8 +44,8 @@ fn a_director_failure_on_a_write_fails_closed_even_with_disk_fallthrough_on() {
     std::env::set_var(aether_env::ALLOW_DISK_FALLTHROUGH, "1");
 
     // A writable mount elsewhere on the root makes the control's create a
-    // genuine miss (`ST_NOT_FOUND`: nothing writable covers that path) rather
-    // than a root with no writable provider, which is `ST_READ_ONLY`
+    // genuine miss (`Status::NotFound`: nothing writable covers that path) rather
+    // than a root with no writable provider, which is `Status::ReadOnly`
     // (docs/wire.md 3.4.3) and would not fall through.
     fakedirector::install(
         &root,

@@ -224,7 +224,7 @@ pub(super) fn render_fills(snap: &Snapshot) -> String {
 pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
 
 /// Deletes on close the director refused: a handle opened with `FILE_DELETE_ON_CLOSE` was
-/// closed, `OP_DELETE` for its path failed (a read-only layer, a provider error, a director that
+/// closed, `Opcode::Delete` for its path failed (a read-only layer, a provider error, a director that
 /// is gone), and the file stayed. `NtClose` cannot report it — Wine's `DeleteFileW` returns
 /// TRUE regardless — so this is the only record. The total is counted whether or not stats are
 /// on; the paths only when they are.
@@ -406,7 +406,7 @@ pub(super) static READDIRS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// visible in the report rather than only in the bytes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReadDirSource {
-    /// The director's own `OP_READDIR` answered. Authoritative and unmerged:
+    /// The director's own `Opcode::ReadDir` answered. Authoritative and unmerged:
     /// nothing from the real filesystem can appear in it.
     Director,
     /// A tracked directory the director could not be asked about: its client

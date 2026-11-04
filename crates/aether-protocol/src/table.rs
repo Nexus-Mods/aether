@@ -227,9 +227,6 @@ macro_rules! protocol {
             }
         }
 
-        /// Every opcode with its name, in number order.
-        pub const OPCODES: &[(&str, u32)] = &[$( ($name, $num) ),*];
-
         /// A request: one variant per opcode. Paths and data borrow from the
         /// payload it was decoded from.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,7 +416,7 @@ protocol! {
             /// The bytes behind `fh` cannot change while it is open (the
             /// director's layer that serves it says so). A client may cache
             /// what it reads through such a handle. Always `false` for a
-            /// write open. Bit 0 of the flags byte (`OPEN_RESP_IMMUTABLE`).
+            /// write open. Bit 0 of the flags byte.
             immutable: bool as LowBit,
             /// The director's mount generation when it opened `fh`: bumped
             /// whenever a root's provider is replaced. Two immutable opens of

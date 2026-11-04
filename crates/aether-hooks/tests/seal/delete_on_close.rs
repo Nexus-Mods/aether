@@ -104,7 +104,7 @@ fn a_delete_on_close_open_deletes_at_the_director_when_closed() {
     assert_eq!(
         fake.tally.deletes("data/temp.esp"),
         1,
-        "closing a FILE_DELETE_ON_CLOSE handle must send one OP_DELETE"
+        "closing a FILE_DELETE_ON_CLOSE handle must send one Opcode::Delete"
     );
     assert_eq!(
         fake.contents("data/temp.esp"),
@@ -147,7 +147,7 @@ fn a_refused_delete_on_close_is_counted_and_the_handle_still_closes() {
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");
     std::fs::create_dir_all(root.join("data")).unwrap();
-    // Served, but by no writable layer: `OP_DELETE` answers `ST_READ_ONLY`.
+    // Served, but by no writable layer: `Opcode::Delete` answers `Status::ReadOnly`.
     let fake = fakedirector::install(
         &root,
         Fake::new()
@@ -231,7 +231,7 @@ fn a_set_info_delete_clears_delete_on_close_so_the_close_does_not_delete_again()
     assert_eq!(
         fake.tally.deletes("data/again.esp"),
         1,
-        "the close sent a second OP_DELETE after the disposition had already deleted the file"
+        "the close sent a second Opcode::Delete after the disposition had already deleted the file"
     );
     assert_eq!(
         after.ok().as_deref(),

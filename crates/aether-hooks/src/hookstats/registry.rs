@@ -7,7 +7,7 @@ use super::*;
 ///
 /// Each can cost a director round trip, so how many a launch makes is what
 /// decides whether that matters. `cached` were answered from what the shim
-/// already knew; `lookups` asked the director (one `OP_STORED_NAMES` each).
+/// already knew; `lookups` asked the director (one `Opcode::StoredNames` each).
 pub(super) static NAME_QUERIES: AtomicU64 = AtomicU64::new(0);
 pub(super) static NAME_QUERIES_CACHED: AtomicU64 = AtomicU64::new(0);
 pub(super) static NAME_LOOKUPS: AtomicU64 = AtomicU64::new(0);

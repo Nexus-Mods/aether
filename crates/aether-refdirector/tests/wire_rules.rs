@@ -25,7 +25,7 @@ const ABSENT: AttrResp = AttrResp {
 };
 
 /// wire.md 3.2: "a path that would leave its root (`..` above the root)" is
-/// an error; 3.5.1: a new director answers it ST_BAD_REQUEST.
+/// an error; 3.5.1: a new director answers it Status::BadRequest.
 #[test]
 fn a_path_that_leaves_its_root_is_a_bad_request() {
     let mut d = Reference::new()
@@ -74,7 +74,7 @@ fn an_unknown_root_is_not_found_and_getattr_finds_nothing() {
     let r9 = RootId(9);
     // 3.4.1: GETATTR on a root the director does not serve is OK, found 0.
     assert_eq!(d.get_attr(r9, "a"), Ok(ABSENT));
-    // 3.4.2, 3.4.3, 3.4.8: unknown root ST_NOT_FOUND.
+    // 3.4.2, 3.4.3, 3.4.8: unknown root Status::NotFound.
     assert_eq!(
         d.read_dir(r9, ".", &mut Listing::default()),
         Err(Status::NotFound)
@@ -89,7 +89,7 @@ fn an_unknown_root_is_not_found_and_getattr_finds_nothing() {
         "a writable prefix of every root does not serve an unknown one"
     );
     assert_eq!(d.delete(r9, "a"), Err(Status::NotFound));
-    // 3.5.1: a new director answers an unknown root ST_NOT_FOUND.
+    // 3.5.1: a new director answers an unknown root Status::NotFound.
     assert_eq!(d.rename(r9, "a", "b"), Err(Status::NotFound));
     assert_eq!(d.mkdir(r9, 0o755, "a"), Err(Status::NotFound));
     assert_eq!(d.stored_names(r9, 0, "a"), Err(Status::NotFound));
@@ -122,9 +122,9 @@ fn names_match_by_the_wires_fold() {
     d.close(fh).unwrap();
 }
 
-/// 3.4.3: OPEN_WRITE on a root with no writable provider is ST_READ_ONLY,
+/// 3.4.3: OpenFlags::WRITE on a root with no writable provider is Status::ReadOnly,
 /// whether or not the path exists; a missing path on a root that has one,
-/// but not over this path, stays ST_NOT_FOUND.
+/// but not over this path, stays Status::NotFound.
 #[test]
 fn a_write_open_on_a_root_with_no_writable_provider_is_read_only() {
     let mut d = Reference::new()
@@ -150,7 +150,7 @@ fn a_write_open_on_a_root_with_no_writable_provider_is_read_only() {
     assert!(d.open(r1, RW | OpenFlags::CREATE, "saves/new").is_ok());
 }
 
-/// 3.4.3: on an OPEN_APPEND handle the director ignores WRITE offsets.
+/// 3.4.3: on an OpenFlags::APPEND handle the director ignores WRITE offsets.
 #[test]
 fn writes_through_an_append_handle_go_to_the_end() {
     let mut d = Reference::new()
@@ -165,7 +165,7 @@ fn writes_through_an_append_handle_go_to_the_end() {
     assert_eq!(d.contents("log"), Some(b"Xbcdef".to_vec()));
 }
 
-/// 3.4.4: READ of a directory handle is ST_IS_DIR; 3.5: ST_IS_DIR is "a file
+/// 3.4.4: READ of a directory handle is Status::IsDir; 3.5: Status::IsDir is "a file
 /// operation on a directory handle", so WRITE and SETATTR answer it too.
 #[test]
 fn file_operations_on_a_directory_handle_are_is_dir() {
@@ -185,7 +185,7 @@ fn file_operations_on_a_directory_handle_are_is_dir() {
     assert_eq!(d.tally.reads("data"), 1);
 }
 
-/// 3.5: ST_NO_SPACE, "storage full", for a write or a length past what the
+/// 3.5: Status::NoSpace, "storage full", for a write or a length past what the
 /// reference holds ([`MAX_FILE_LEN`]), arithmetic overflow included. The
 /// file is left as it was and the reference keeps answering.
 #[test]

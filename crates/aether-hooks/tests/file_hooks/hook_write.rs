@@ -114,7 +114,7 @@ fn writes_land_in_overlay_with_cow() {
     assert_eq!(
         fake.tally.deletes("to_delete.txt"),
         1,
-        "the delete must reach the director as one OP_DELETE"
+        "the delete must reach the director as one Opcode::Delete"
     );
     assert_eq!(
         fake.contents("to_delete.txt"),
@@ -134,7 +134,7 @@ fn writes_land_in_overlay_with_cow() {
     assert_eq!(
         fake.tally.renames("rename_src.txt"),
         1,
-        "the rename must reach the director as one OP_RENAME"
+        "the rename must reach the director as one Opcode::Rename"
     );
     assert_eq!(fake.contents("rename_src.txt"), None);
     assert_eq!(

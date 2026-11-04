@@ -8,7 +8,7 @@ use aether_filering::FileRing;
 use aether_ipc::ring;
 use aether_ipc::{RingBacking, RingClient, RingServer, SpinNotifier};
 
-const OP_ECHO: u32 = 900;
+const ECHO: u32 = 900;
 
 #[test]
 fn a_client_and_a_server_on_two_mappings_round_trip() {
@@ -30,7 +30,7 @@ fn a_client_and_a_server_on_two_mappings_round_trip() {
             while !stop.load(Ordering::SeqCst) {
                 server
                     .serve_one(|req| {
-                        assert_eq!(req.opcode, OP_ECHO);
+                        assert_eq!(req.opcode, ECHO);
                         (0, req.payload.clone())
                     })
                     .unwrap();
@@ -41,7 +41,7 @@ fn a_client_and_a_server_on_two_mappings_round_trip() {
             .unwrap()
             .with_deadline(Duration::from_secs(20));
         for i in 0..50u8 {
-            let r = client.submit(OP_ECHO, 0, &[i, 1, 2, 3]).unwrap();
+            let r = client.submit(ECHO, 0, &[i, 1, 2, 3]).unwrap();
             assert_eq!(r.status, 0);
             assert_eq!(r.payload, vec![i, 1, 2, 3]);
         }

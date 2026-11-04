@@ -83,7 +83,7 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
 
     // --- A rename ACROSS roots fails, and moves nothing (gate 4, Task 5) ---
     //
-    // `OP_RENAME` carries one root for both sides and the provider contract has no cross-root
+    // `Opcode::Rename` carries one root for both sides and the provider contract has no cross-root
     // move, so the shim refuses. It must never fall to the real `NtSetInformationFile`, which
     // would move whatever the handle is on onto real disk under root 0.
     let escape_target = root0.join("escaped-across-roots.txt");

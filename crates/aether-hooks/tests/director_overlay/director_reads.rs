@@ -4,7 +4,7 @@
 //! These were the copy-up tests (`cow_seed_reads_through_director.rs`): the shim-local overlay
 //! materialised a file's existing content through the director before a preserving write, and
 //! each test drove that loop through the removed shim-local `Engine::decide_open` directly. Task C8 removed the overlay,
-//! and with it the shim's own copy loop: a preserving write is now the director's (`OPEN_WRITE`
+//! and with it the shim's own copy loop: a preserving write is now the director's (`OpenFlags::WRITE`
 //! without truncation, copy-up inside the provider graph). What the tests were really about —
 //! the client's fragmented read over awkward answers, and where the bytes come from — is the
 //! same code a read hook uses (`NtReadFile` → `FuseClient::read_fragmented`), so each claim is
@@ -379,8 +379,8 @@ fn a_preserving_write_to_a_file_only_on_real_disk_never_seeds_from_it() {
     );
 }
 
-/// **Known issue, pinned.** The director serves 9 000 bytes of a file its `OP_OPEN` and
-/// `OP_GETATTR` call 50 000 bytes long. The read hook answers the read at offset 9 000 with
+/// **Known issue, pinned.** The director serves 9 000 bytes of a file its `Opcode::Open` and
+/// `Opcode::GetAttr` call 50 000 bytes long. The read hook answers the read at offset 9 000 with
 /// `STATUS_SUCCESS` and 0 bytes, which every caller takes for the end of the file, so the read
 /// succeeds, silently truncated. (Copy-up, removed by task C8, failed this case instead.) This
 /// test records the behaviour so a change to it is noticed; when the read hook is made to fail a

@@ -1,7 +1,7 @@
 //! `contract/protocol.json`, the protocol table as data for directors in other
 //! languages, is what the code generates, and agrees with the table.
 
-use aether_protocol::{contract_json, Opcode, Status, OPCODES, STATUSES};
+use aether_protocol::{contract_json, Opcode, Status};
 
 const PROTOCOL_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../contract/protocol.json");
 
@@ -33,21 +33,19 @@ fn wire_version_is_the_rings() {
 fn the_json_lists_the_table() {
     let v: serde_json::Value = serde_json::from_str(&contract_json()).unwrap();
     let ops = v["opcodes"].as_array().unwrap();
-    assert_eq!(ops.len(), OPCODES.len());
-    for (o, (name, number)) in ops.iter().zip(OPCODES) {
-        assert_eq!(o["name"].as_str(), Some(*name));
-        assert_eq!(o["number"].as_u64(), Some(u64::from(*number)));
+    assert_eq!(ops.len(), Opcode::ALL.len());
+    for (o, op) in ops.iter().zip(Opcode::ALL) {
+        assert_eq!(o["name"].as_str(), Some(op.name()));
+        assert_eq!(o["number"].as_u64(), Some(u64::from(*op as u32)));
         assert!(o["request"].is_array() && o["reply"].is_array());
     }
-    assert_eq!(ops.len(), Opcode::ALL.len());
     assert_eq!(v["reserved_opcodes"], serde_json::json!([4, 12]));
     let sts = v["statuses"].as_array().unwrap();
-    assert_eq!(sts.len(), STATUSES.len());
-    for (s, (name, code)) in sts.iter().zip(STATUSES) {
-        assert_eq!(s["name"].as_str(), Some(*name));
-        assert_eq!(s["number"].as_i64(), Some(i64::from(*code)));
-    }
     assert_eq!(sts.len(), Status::ALL.len());
+    for (s, st) in sts.iter().zip(Status::ALL) {
+        assert_eq!(s["name"].as_str(), Some(st.name()));
+        assert_eq!(s["number"].as_i64(), Some(i64::from(st.code())));
+    }
 }
 
 #[test]

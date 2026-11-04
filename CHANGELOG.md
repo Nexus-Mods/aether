@@ -5,6 +5,27 @@ since), `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (the wire is one typed table)
+
+The wire does not change: every golden vector, the wire version (4),
+`contract/env.json` and `contract/artifacts.json` are as they were. What
+changes is the Rust API over it. `aether-protocol`'s numeric API is gone: the
+`OP_*`, `ST_*`, `OPEN_*` and `FLAG_READ_BULK` constants, `OPEN_RESP_IMMUTABLE`,
+the `OPCODES` and `STATUSES` tables, the `DirEntryWire`, `ReadReq`, `WriteReq`
+and `SetattrReq` structs and every `encode_*`/`decode_*` free function for a
+ring message (the shim configuration keeps `shimcfg::encode_config` and
+`decode_config`). In their place are `Opcode`, `Status`, `OpenFlags` and
+`RequestFlags` (`Opcode::ALL`, `Status::ALL`, `name()`, `code()`, `TryFrom`),
+and `Request` and `Reply`, which encode into any `Buf` and decode borrowing
+from a payload; `contract/protocol.json` publishes the same table as data.
+`aether-rpc` is the typed client (`Client::call`, which refuses a bulk READ:
+those hold their slot through `aether-ipc`'s held-slot calls) and the
+`Director` trait a director in Rust implements; `aether-refdirector` is the
+reference director the shim's tests run against. `aether_ipc::layout`
+re-exports `Opcode` instead of the `OP_*` constants, and
+`aether_ntlayout::open_create_flags` returns `OpenFlags`. The shim's
+`FuseClient` and `RegClient` return `Status` as their error, not an `i32`.
+
 ## Unreleased (the shim DLL is `aether_shim.dll`)
 
 The shim DLL is `aether_shim.dll` (x64) and `aether_shim32.dll` (x86), was

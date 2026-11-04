@@ -133,7 +133,7 @@ fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
             fake.contents(&format!("data/{name}")),
             None,
             "data/{name} is in the director's table: the shim invented an import the \
-             provider contract has no operation for (OP_RENAME carries one root and two \
+             provider contract has no operation for (Opcode::Rename carries one root and two \
              vpaths, both inside it)"
         );
     }

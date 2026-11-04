@@ -10,9 +10,11 @@
 
 mod common;
 
-use aether_protocol as P;
 use aether_protocol::shimcfg::{decode_config, StaticImport};
-use aether_protocol::{AttrResp, OpenResp, ReadReq, Reply, Request};
+use aether_protocol::{
+    AttrResp, Lookup, LookupReply, Opcode, OpenFlags, OpenResp, ReadReply, Reply, Request,
+    RequestFlags, RootId,
+};
 use common::{sample_node, Msg};
 use std::fmt::Write as _;
 
@@ -89,46 +91,59 @@ fn golden_bytes_decode_to_their_inputs() {
             .map(|i| u8::from_str_radix(&l[2 * i..2 * i + 2], 16).unwrap())
             .collect()
     };
+    let req =
+        |op: Opcode, name: &str| Request::decode(op, 0, &line(name)).map(|r| format!("{r:?}"));
+    let rep = |op: Opcode, name: &str| Reply::decode(op, 0, &line(name)).map(|r| format!("{r:?}"));
+    let dbg = |v: &dyn std::fmt::Debug| Ok(format!("{v:?}"));
     assert_eq!(
-        P::decode_open_req(&line("open-req-read-skyrim")),
-        Some((0, P::OPEN_READ, "Data/Skyrim.esm".to_string()))
+        req(Opcode::Open, "open-req-read-skyrim"),
+        dbg(&Request::Open {
+            root: RootId(0),
+            flags: OpenFlags::READ,
+            path: "Data/Skyrim.esm"
+        })
     );
     assert_eq!(
-        P::decode_getattr_resp(&line("getattr-resp-file-123")),
-        Some(AttrResp {
+        rep(Opcode::GetAttr, "getattr-resp-file-123"),
+        dbg(&Reply::GetAttr(AttrResp {
             found: true,
             is_dir: false,
             size: 123,
             mtime: -7
-        })
+        }))
     );
     assert_eq!(
-        P::decode_read_req(&line("read-req-fh7-off10-len4")),
-        Some(ReadReq {
+        req(Opcode::Read, "read-req-fh7-off10-len4"),
+        dbg(&Request::Read {
+            slot_flags: RequestFlags::empty(),
             fh: 7,
             offset: 10,
             len: 4
         })
     );
     assert_eq!(
-        P::decode_read_resp(&line("read-resp-abcd")),
-        Some(b"abcd".to_vec())
+        rep(Opcode::Read, "read-resp-abcd"),
+        dbg(&Reply::Read(ReadReply::Inline(b"abcd")))
     );
+    let two = line("readdir-resp-two");
+    assert!(matches!(
+        Reply::decode(Opcode::ReadDir, 0, &two),
+        Ok(Reply::ReadDir(l)) if l.len() == 2
+    ));
     assert_eq!(
-        P::decode_readdir_resp(&line("readdir-resp-two")).map(|v| v.len()),
-        Some(2)
+        req(Opcode::Close, "close-req-99"),
+        dbg(&Request::Close { fh: 99 })
     );
-    assert_eq!(P::decode_close_req(&line("close-req-99")), Some(99));
-    assert_eq!(P::decode_write_resp(&line("write-resp-3")), Some(3));
+    assert_eq!(rep(Opcode::Write, "write-resp-3"), dbg(&Reply::Write(3)));
     assert_eq!(
-        P::decode_open_resp(&line("open-resp-immutable-gen-0xa1b2c3d4")),
-        Some(OpenResp {
+        rep(Opcode::Open, "open-resp-immutable-gen-0xa1b2c3d4"),
+        dbg(&Reply::Open(OpenResp {
             fh: 42,
             size: 1000,
             is_dir: false,
             immutable: true,
             mount_gen: 0xA1B2_C3D4
-        })
+        }))
     );
     let cfg = decode_config(&line("shim-config-v2-one-static-import")).unwrap();
     assert_eq!(cfg.root, r"C:\GameLayers\runtime");
@@ -140,23 +155,44 @@ fn golden_bytes_decode_to_their_inputs() {
         }]
     );
     assert_eq!(
-        P::decode_names_req(&line("names-req-root2-skip1")),
-        Some((2, 1, "Data/Textures".to_string()))
+        req(Opcode::StoredNames, "names-req-root2-skip1"),
+        dbg(&Request::StoredNames {
+            root: RootId(2),
+            skip: 1,
+            path: "Data/Textures"
+        })
     );
     assert_eq!(
-        P::decode_reg_set_value(&line("reg-set-value")),
-        Some((r"\Registry\Machine\Software", "Name", 3, &[9u8, 8, 7][..]))
+        req(Opcode::RegSetValue, "reg-set-value"),
+        dbg(&Request::RegSetValue {
+            path: r"\Registry\Machine\Software",
+            name: "Name",
+            ty: 3,
+            data: &[9, 8, 7]
+        })
+    );
+    let key = line("reg-key-reply-sample-node-12");
+    let Ok(Reply::RegKey(k)) = Reply::decode(Opcode::RegKey, 0, &key) else {
+        panic!("a REG_KEY reply");
+    };
+    assert_eq!(
+        (k.node.map(std::borrow::Cow::into_owned), k.version),
+        (Some(sample_node()), 12)
     );
     assert_eq!(
-        P::decode_reg_key_reply(&line("reg-key-reply-sample-node-12")),
-        Some((Some(sample_node()), 12))
+        rep(Opcode::RegLookup, "reg-lookup-reply-state1-below-42"),
+        dbg(&Reply::RegLookup(LookupReply {
+            version: 42,
+            state: Lookup::Present { created: false },
+            below: true
+        }))
     );
     assert_eq!(
-        P::decode_reg_lookup_reply(&line("reg-lookup-reply-state1-below-42")),
-        Some((1, true, 42))
-    );
-    assert_eq!(
-        P::decode_reg_changed(&line("reg-changed-subtree-since77")),
-        Some((r"\Registry\Machine", true, 77))
+        req(Opcode::RegChanged, "reg-changed-subtree-since77"),
+        dbg(&Request::RegChanged {
+            path: r"\Registry\Machine",
+            subtree: true,
+            since: 77
+        })
     );
 }

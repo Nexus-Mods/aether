@@ -27,7 +27,7 @@
 //! | `inline_or_bulk` | a READ reply: bit 31 of the first word picks `bulk`, else `inline` |
 
 use crate::status::{OpenFlags, RequestFlags, Status};
-use crate::table::{Opcode, OPCODES};
+use crate::table::Opcode;
 
 /// One field of a message as the table describes it.
 #[derive(Debug, Clone, PartialEq)]
@@ -241,9 +241,9 @@ pub fn contract_json() -> String {
         })
         .collect();
     // The numbers below the highest opcode that no opcode has are reserved.
-    let top = OPCODES.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    let top = Opcode::ALL.iter().map(|&op| op as u32).max().unwrap_or(0);
     let reserved = (1..top)
-        .filter(|n| OPCODES.iter().all(|(_, o)| o != n))
+        .filter(|&n| Opcode::try_from(n).is_err())
         .map(|n| J::Num(i64::from(n)))
         .collect();
     let statuses = Status::ALL

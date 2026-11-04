@@ -71,7 +71,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     // --- 1. A write the director CAN serve still succeeds ------------------
     //
     // Nothing pre-exists at this vpath: the create itself is what brings it
-    // into the graph, through `OP_OPEN` with the disposition bits forwarded.
+    // into the graph, through `Opcode::Open` with the disposition bits forwarded.
     let served = root.join("write").join("served.bin");
     {
         let mut f = std::fs::File::create(&served).expect(
@@ -90,7 +90,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     // --- 3. A create against a path no provider serves fails ---------------
     //
     // `data/` has no writable mount over it, so the director answers
-    // `ST_NOT_FOUND` to a create there. The name is not what is missing — the
+    // `Status::NotFound` to a create there. The name is not what is missing — the
     // caller was about to supply it — so this is ERROR_PATH_NOT_FOUND.
     let unserved = root.join("data").join("unserved.bin");
     let err = std::fs::File::create(&unserved).expect_err(
@@ -101,8 +101,8 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
 
     // --- 4. A write open that did NOT ask to create is a plain not-found ---
     //
-    // Same director status (`ST_NOT_FOUND`), inside the writable mount this
-    // time, but with no `OPEN_CREATE`: the file itself is simply absent, and
+    // Same director status (`Status::NotFound`), inside the writable mount this
+    // time, but with no `OpenFlags::CREATE`: the file itself is simply absent, and
     // the honest answer is the ordinary ERROR_FILE_NOT_FOUND — the answer the
     // "open for write, and on file-not-found create it" idiom needs.
     let absent = root.join("write").join("absent.bin");
@@ -145,7 +145,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     assert_eq!(
         fake.tally.writes("write/served.bin"),
         1,
-        "the payload must have crossed the ring as an OP_WRITE; zero here with the right \
+        "the payload must have crossed the ring as an Opcode::Write; zero here with the right \
          bytes on disk means something else wrote them"
     );
     assert!(
@@ -176,7 +176,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     assert_eq!(
         ro_errno,
         Some(ERROR_ACCESS_DENIED),
-        "a write refused by a read-only mount (ST_READ_ONLY) must report \
+        "a write refused by a read-only mount (Status::ReadOnly) must report \
          ERROR_ACCESS_DENIED ({ERROR_ACCESS_DENIED}) — what a real read-only filesystem \
          answers — rather than the generic failure the other director errors get; got \
          {ro_errno:?}"

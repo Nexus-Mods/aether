@@ -27,7 +27,7 @@
 //!   it. That is the sealing half: the director's not-found is the caller's
 //!   not-found, and the perfectly good file sitting right there stays.
 //! - `readonly/locked.esp` is served, but by a layer outside every writable
-//!   mount, so the director refuses with `ST_READ_ONLY`.
+//!   mount, so the director refuses with `Status::ReadOnly`.
 //! - The managed root directory itself: its remainder is the root (`"."` on the
 //!   wire), which no provider deletes. The delete must fail and the real
 //!   directory must stay — a root that resolves with an empty remainder is still
@@ -208,7 +208,7 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
     assert_eq!(
         fake.tally.deletes("data/served.esp"),
         1,
-        "the delete must have crossed the ring as an OP_DELETE"
+        "the delete must have crossed the ring as an Opcode::Delete"
     );
 
     // **By exact status, not by "it failed".** `STATUS_UNSUCCESSFUL` would

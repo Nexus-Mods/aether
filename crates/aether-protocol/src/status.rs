@@ -30,9 +30,6 @@ macro_rules! statuses {
             }
         }
 
-        /// Every status code with its name, in number order.
-        pub const STATUSES: &[(&str, i32)] = &[$( ($name, $num) ),*];
-
         impl TryFrom<i32> for Status {
             type Error = DecodeError;
             fn try_from(n: i32) -> Result<Status, DecodeError> {
@@ -120,27 +117,3 @@ bitflags::bitflags! {
         const READ_BULK = 0x1;
     }
 }
-
-// The numeric API the workspace still uses, kept until its callers move to
-// the typed one.
-
-pub const ST_OK: i32 = Status::Ok.code();
-pub const ST_NOT_FOUND: i32 = Status::NotFound.code();
-pub const ST_NOT_A_DIRECTORY: i32 = Status::NotADirectory.code();
-pub const ST_BAD_REQUEST: i32 = Status::BadRequest.code();
-pub const ST_IO_ERROR: i32 = Status::IoError.code();
-pub const ST_IS_DIR: i32 = Status::IsDir.code();
-pub const ST_BAD_FH: i32 = Status::BadFh.code();
-pub const ST_NO_SPACE: i32 = Status::NoSpace.code();
-pub const ST_NOT_SUPPORTED: i32 = Status::NotSupported.code();
-pub const ST_READ_ONLY: i32 = Status::ReadOnly.code();
-pub const ST_EXISTS: i32 = Status::Exists.code();
-pub const ST_REPLY_TOO_LARGE: i32 = Status::ReplyTooLarge.code();
-pub const ST_CROSS_ROOT: i32 = Status::CrossRoot.code();
-
-pub const OPEN_READ: u32 = OpenFlags::READ.bits();
-pub const OPEN_WRITE: u32 = OpenFlags::WRITE.bits();
-pub const OPEN_CREATE: u32 = OpenFlags::CREATE.bits();
-pub const OPEN_EXCL: u32 = OpenFlags::EXCL.bits();
-pub const OPEN_TRUNC: u32 = OpenFlags::TRUNC.bits();
-pub const OPEN_APPEND: u32 = OpenFlags::APPEND.bits();

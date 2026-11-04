@@ -773,7 +773,7 @@ impl FuseClient {
     /// of `canonical(dir/file)` whatever case either was opened in.
     ///
     /// The spellings come from the director's one-name lookup
-    /// (`OP_STORED_NAMES`): at most one round trip per query, asking only
+    /// (`Opcode::StoredNames`): at most one round trip per query, asking only
     /// about the components this client does not already know, and none at
     /// all when it knows them all ([`Self::names`]). No directory is listed
     /// on this side of the ring. If the director cannot be asked, the

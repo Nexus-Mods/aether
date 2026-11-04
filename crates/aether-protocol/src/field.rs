@@ -175,7 +175,7 @@ impl<'a> Field<'a> for Bool {
 }
 
 /// A byte whose bit 0 is the value; the other bits are written zero and
-/// ignored on read (OPEN's reply flags, bit 0 `OPEN_RESP_IMMUTABLE`).
+/// ignored on read (OPEN's reply flags, bit 0 `OpenResp::immutable`).
 pub(crate) struct LowBit;
 
 impl<'a> Field<'a> for LowBit {

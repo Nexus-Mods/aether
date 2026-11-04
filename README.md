@@ -116,7 +116,7 @@ builds for i686. [CHANGELOG.md](CHANGELOG.md) is the host-facing API history.
 A tag `v<semver>` makes a release ([`release.yml`](.github/workflows/release.yml))
 with `natives.zip` (the four natives), `fixtures.zip` (the test fixtures and
 the host-target injector and shim), `contract.zip` (`contract/artifacts.json`,
-`contract/env.json` and the protocol's golden vectors), `natives-key.txt` and
+`contract/env.json`, `contract/protocol.json` and the protocol's golden vectors), `natives-key.txt` and
 `SHA256SUMS`. Check a download with `sha256sum -c SHA256SUMS`, and the
 natives' signatures with `bin\check-signatures.ps1 -Path <files> -Signer
 'CN=Black Tree Gaming Ltd, O=Black Tree Gaming Ltd, L=Exeter, C=GB'`.

@@ -19,6 +19,7 @@
 //! inside [`KeyReply`] (`field.rs`, `OptNode`).
 
 use crate::buf::Buf;
+use crate::describe::{Attr, Entry, Message};
 use crate::field::{
     Bool, Bytes, Field, Flag, LenPadBytes, LowBit, OptNode, PadAfter, PadBefore, RestStr, Str,
     StrMax,
@@ -55,6 +56,26 @@ macro_rules! finish {
         $r.done()?;
     };
     (lenient, $r:ident) => {};
+}
+
+/// Whether a message is `strict`.
+macro_rules! is_strict {
+    (strict) => {
+        true
+    };
+    (lenient) => {
+        false
+    };
+}
+
+/// Whether a request lists a `[slot_flags]` field.
+macro_rules! has_slot_flags {
+    () => {
+        false
+    };
+    ($f:ident) => {
+        true
+    };
 }
 
 /// A request's slot flags word: 0 unless it has a `[slot_flags]` field.
@@ -102,7 +123,7 @@ macro_rules! protocol {
         replies {
             $(
                 $(#[$pmeta:meta])*
-                $pstrict:ident $pname:ident ( $pty:ty $(as $pc:ty)? )
+                $pstrict:ident $pname:ident $pfield:literal ( $pty:ty $(as $pc:ty)? )
             ),* $(,)?
         }
     ) => {
@@ -122,6 +143,9 @@ macro_rules! protocol {
                     Ok($sname {
                         $( $sf: <codec!($sfty $(, $sfc)?) as Field<'a>>::decode(r)?, )*
                     })
+                }
+                fn describe(_name: &'static str, out: &mut Vec<Entry>) {
+                    $( <codec!($sfty $(, $sfc)?) as Field<'a>>::describe(stringify!($sf), out); )*
                 }
             }
 
@@ -156,6 +180,33 @@ macro_rules! protocol {
             pub const fn name(self) -> &'static str {
                 match self {
                     $( Opcode::$op => $name, )*
+                }
+            }
+
+            /// This opcode's request and reply layouts, from the same field
+            /// lists the codecs are built from.
+            // 'a names the borrowed types in the table's field lists; clippy cannot see
+            // through the macro.
+            #[allow(clippy::extra_unused_lifetimes)]
+            pub(crate) fn describe<'a>(self) -> Message {
+                let mut request = Vec::new();
+                let (reply_strict, reply) = self.shape().describe();
+                match self {
+                    $(
+                        Opcode::$op => {
+                            $( <codec!($qfty $(, $qfc)?) as Field<'a>>::describe(
+                                stringify!($qf),
+                                &mut request,
+                            ); )*
+                            Message {
+                                request,
+                                request_strict: is_strict!($qstrict),
+                                slot_flags: has_slot_flags!($($flagf)?),
+                                reply,
+                                reply_strict,
+                            }
+                        }
+                    )*
                 }
             }
 
@@ -262,6 +313,25 @@ macro_rules! protocol {
         enum Shape {
             $( $pname, )*
             Empty,
+        }
+
+        impl Shape {
+            /// Whether the reply is strict, and its fields.
+            // 'a names the borrowed types in the table's field lists; clippy cannot see
+            // through the macro.
+            #[allow(clippy::extra_unused_lifetimes)]
+            fn describe<'a>(self) -> (bool, Vec<Entry>) {
+                let mut out = Vec::new();
+                match self {
+                    $(
+                        Shape::$pname => {
+                            <codec!($pty $(, $pc)?) as Field<'a>>::describe($pfield, &mut out);
+                            (is_strict!($pstrict), out)
+                        }
+                    )*
+                    Shape::Empty => (false, out),
+                }
+            }
         }
 
         /// A reply payload on [`Status::Ok`](crate::Status). Its shape is
@@ -522,23 +592,23 @@ protocol! {
     }
 
     replies {
-        lenient GetAttr(AttrResp),
-        lenient ReadDir(DirEntries<'a>),
-        lenient Open(OpenResp),
-        lenient Read(ReadReply<'a>),
+        lenient GetAttr "attr" (AttrResp),
+        lenient ReadDir "entries" (DirEntries<'a>),
+        lenient Open "open" (OpenResp),
+        lenient Read "data" (ReadReply<'a>),
         /// `written:u32 | pad:u32`; a reader needs only the first word.
-        lenient Write(u32 as PadAfter<u32, 4>),
+        lenient Write "written" (u32 as PadAfter<u32, 4>),
         /// The stored names joined by `/` (a name has no `/` in it), no
         /// length prefix.
-        lenient StoredNames(&'a str as RestStr),
+        lenient StoredNames "names" (&'a str as RestStr),
         /// The real, on-disk path to start the program from.
-        lenient StageExec(&'a str as RestStr),
-        strict RegLookup(LookupReply),
-        strict RegKey(KeyReply<'a>),
+        lenient StageExec "path" (&'a str as RestStr),
+        strict RegLookup "lookup" (LookupReply),
+        strict RegKey "key" (KeyReply<'a>),
         /// The overlay version after a write (REG_SET_VALUE,
         /// REG_DELETE_VALUE, REG_CREATE_KEY, REG_DELETE_KEY, REG_RENAME_KEY).
-        strict RegVersion(u64),
-        strict RegChanged(ChangedReply),
+        strict RegVersion "version" (u64),
+        strict RegChanged "changed" (ChangedReply),
     }
 }
 
@@ -579,6 +649,21 @@ impl<'a> Field<'a> for ReadReply<'a> {
         } else {
             Ok(ReadReply::Inline(r.take(raw as usize)?))
         }
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        let mut inline = Vec::new();
+        LenPadBytes::describe("data", &mut inline);
+        let bulk = vec![
+            Entry::new("len", "u32").with("bit31", Attr::Bool(true)),
+            Entry::pad(4, false),
+            Entry::new("arena_offset", "u64"),
+        ];
+        out.push(
+            Entry::new(name, "inline_or_bulk")
+                .with("bulk_bit", Attr::Num(u64::from(READ_RESP_BULK_BIT)))
+                .with("inline", Attr::Fields(inline))
+                .with("bulk", Attr::Fields(bulk)),
+        );
     }
 }
 
@@ -709,6 +794,11 @@ impl<'a> Field<'a> for DirEntries<'a> {
         }
         let bytes = &start[..start.len() - r.0.len()];
         Ok(DirEntries(Entries::Wire { count, bytes }))
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        let mut of = Vec::new();
+        DirEntry::describe("entry", &mut of);
+        out.push(Entry::new(name, "list_u32").with("of", Attr::Fields(of)));
     }
 }
 

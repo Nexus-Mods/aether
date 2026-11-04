@@ -99,6 +99,7 @@ dependencies = [
  "aether-registry",
  "bitflags 2.13.0",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]

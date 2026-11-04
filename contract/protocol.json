@@ -1,0 +1,398 @@
+{
+  "wire_version": 4,
+  "opcodes": [
+    {
+      "name": "getattr",
+      "number": 1,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {"name": "found", "type": "bool_lenient"},
+        {"name": "is_dir", "type": "bool_lenient"},
+        {"name": "size", "type": "u64"},
+        {"name": "mtime", "type": "i64"}
+      ]
+    },
+    {
+      "name": "readdir",
+      "number": 2,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {
+          "name": "entries",
+          "type": "list_u32",
+          "of": [
+            {"name": "name", "type": "str_u32"},
+            {"name": "is_dir", "type": "bool_lenient"},
+            {"name": "size", "type": "u64"},
+            {"name": "mtime", "type": "i64"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "open",
+      "number": 3,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "flags", "type": "open_flags"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {"name": "fh", "type": "u64"},
+        {"name": "size", "type": "u64"},
+        {"name": "is_dir", "type": "bool_lenient"},
+        {"name": "immutable", "type": "bool_bit0"},
+        {"name": "pad", "type": "pad", "size": 2},
+        {"name": "mount_gen", "type": "u32"}
+      ]
+    },
+    {
+      "name": "read",
+      "number": 5,
+      "request_strict": false,
+      "slot_flags": true,
+      "request": [
+        {"name": "fh", "type": "u64"},
+        {"name": "offset", "type": "u64"},
+        {"name": "len", "type": "u32"},
+        {"name": "pad", "type": "pad", "size": 4, "optional": true}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {
+          "name": "data",
+          "type": "inline_or_bulk",
+          "bulk_bit": 2147483648,
+          "inline": [
+            {"name": "data", "type": "bytes_u32", "pad_after_len": 4}
+          ],
+          "bulk": [
+            {"name": "len", "type": "u32", "bit31": true},
+            {"name": "pad", "type": "pad", "size": 4},
+            {"name": "arena_offset", "type": "u64"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "write",
+      "number": 6,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "fh", "type": "u64"},
+        {"name": "offset", "type": "u64"},
+        {"name": "data", "type": "bytes_u32", "pad_after_len": 4}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {"name": "written", "type": "u32"},
+        {"name": "pad", "type": "pad", "size": 4, "optional": true}
+      ]
+    },
+    {
+      "name": "setattr",
+      "number": 7,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "fh", "type": "u64"},
+        {"name": "size", "type": "u64"}
+      ],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "rename",
+      "number": 8,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "from", "type": "str_u32"},
+        {"name": "to", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "delete",
+      "number": 9,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "mkdir",
+      "number": 10,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "mode", "type": "u32"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "close",
+      "number": 11,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "fh", "type": "u64"}
+      ],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "heartbeat",
+      "number": 13,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "stored-names",
+      "number": 14,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "skip", "type": "u32"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {"name": "names", "type": "str_rest"}
+      ]
+    },
+    {
+      "name": "reg-lookup",
+      "number": 15,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"},
+        {"name": "state", "type": "lookup_state", "values": "0 absent, 1 present, 2 present and created in the overlay, 3 tombstoned"},
+        {"name": "below", "type": "bool"}
+      ]
+    },
+    {
+      "name": "reg-key",
+      "number": 16,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"},
+        {
+          "name": "node",
+          "type": "optional_node",
+          "node": [
+            {"name": "created", "type": "bool"},
+            {"name": "volatile", "type": "bool"},
+            {"name": "last_write", "type": "u64"},
+            {
+              "name": "values",
+              "type": "list_u32",
+              "of": [
+                {"name": "name", "type": "str_u32", "max_utf16": 16383},
+                {"name": "ty", "type": "u32"},
+                {"name": "data", "type": "bytes_u32", "max": 1048576}
+              ]
+            },
+            {
+              "name": "value_tombstones",
+              "type": "list_u32",
+              "of": [
+                {"name": "name", "type": "str_u32", "max_utf16": 16383}
+              ]
+            },
+            {
+              "name": "children",
+              "type": "list_u32",
+              "of": [
+                {"name": "folded", "type": "str_u32", "max_utf16": 255},
+                {"name": "spelling", "type": "str_u32", "max_utf16": 255},
+                {"name": "state", "type": "child_state", "values": "0 present, 1 tombstone"}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "reg-set-value",
+      "number": 17,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"},
+        {"name": "name", "type": "str_u32", "max_utf16": 16383},
+        {"name": "ty", "type": "u32"},
+        {"name": "data", "type": "bytes_u32", "max": 1048576}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"}
+      ]
+    },
+    {
+      "name": "reg-delete-value",
+      "number": 18,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"},
+        {"name": "name", "type": "str_u32", "max_utf16": 16383}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"}
+      ]
+    },
+    {
+      "name": "reg-create-key",
+      "number": 19,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"},
+        {"name": "volatile", "type": "bool"}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"}
+      ]
+    },
+    {
+      "name": "reg-delete-key",
+      "number": 20,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"}
+      ]
+    },
+    {
+      "name": "reg-rename-key",
+      "number": 21,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"},
+        {"name": "new_leaf", "type": "str_u32", "max_utf16": 255}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"}
+      ]
+    },
+    {
+      "name": "reg-changed",
+      "number": 22,
+      "request_strict": true,
+      "slot_flags": false,
+      "request": [
+        {"name": "path", "type": "str_u32"},
+        {"name": "subtree", "type": "bool"},
+        {"name": "since", "type": "u64"}
+      ],
+      "reply_strict": true,
+      "reply": [
+        {"name": "version", "type": "u64"},
+        {"name": "changed", "type": "bool"}
+      ]
+    },
+    {
+      "name": "rename-x",
+      "number": 23,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "from_root", "type": "root_id"},
+        {"name": "to_root", "type": "root_id"},
+        {"name": "from", "type": "str_u32"},
+        {"name": "to", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": []
+    },
+    {
+      "name": "stage-exec",
+      "number": 24,
+      "request_strict": false,
+      "slot_flags": false,
+      "request": [
+        {"name": "root", "type": "root_id"},
+        {"name": "path", "type": "str_rest"}
+      ],
+      "reply_strict": false,
+      "reply": [
+        {"name": "path", "type": "str_rest"}
+      ]
+    }
+  ],
+  "reserved_opcodes": [4, 12],
+  "statuses": [
+    {"name": "ok", "number": 0},
+    {"name": "not-found", "number": -1},
+    {"name": "not-a-directory", "number": -2},
+    {"name": "bad-request", "number": -3},
+    {"name": "io-error", "number": -4},
+    {"name": "is-dir", "number": -5},
+    {"name": "bad-fh", "number": -6},
+    {"name": "no-space", "number": -7},
+    {"name": "not-supported", "number": -8},
+    {"name": "read-only", "number": -9},
+    {"name": "exists", "number": -10},
+    {"name": "reply-too-large", "number": -11},
+    {"name": "cross-root", "number": -12}
+  ],
+  "open_flags": [
+    {"name": "read", "bit": 1},
+    {"name": "write", "bit": 2},
+    {"name": "create", "bit": 4},
+    {"name": "excl", "bit": 8},
+    {"name": "trunc", "bit": 16},
+    {"name": "append", "bit": 32}
+  ],
+  "request_flags": [
+    {"name": "read_bulk", "bit": 1}
+  ]
+}

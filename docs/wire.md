@@ -567,8 +567,14 @@ means "no time" and the shim substitutes 2024-01-01T00:00:00Z
 
 ### 3.3 Opcode table
 
-Source: `crates/aether-protocol/src/lib.rs` (`OP_*`, `OPCODES`,
-`wire_numbers_are_the_historical_ones`). Numbers are never renumbered.
+Source: the protocol table in `crates/aether-protocol/src/table.rs` (`Opcode`,
+`OPCODES`). Numbers are never renumbered. The table is also published as data,
+`contract/protocol.json`: every opcode with its request and reply fields in
+wire order (padding included, as `pad` entries), strictness, the statuses and
+the flag bits, generated from the table by `aether_protocol::contract_json()`
+and checked equal by `crates/aether-protocol/tests/contract.rs`
+(`UPDATE_CONTRACT=1` rewrites it). It is the machine-readable form of the
+layouts below, for building a director's tables in another language.
 
 | # | Name | Request | Reply (on ST_OK) | Shim sends flags |
 |---:|---|---|---|---|
@@ -1354,6 +1360,10 @@ Rules:
 Until a director conformance harness exists, **the code is normative**: where
 this document and `crates/aether-ipc`, `crates/aether-protocol` or the shim
 disagree, the code is right and this document is wrong.
+
+`contract/protocol.json` is the machine-readable form of the protocol table
+(3.3): a director in another language builds its opcode, status and field
+tables from it instead of from the prose.
 
 The executable part of the contract is
 `crates/aether-protocol/tests/golden/vectors.txt`: one `name hex` line per

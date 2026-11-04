@@ -118,7 +118,7 @@ jobs:
           Compress-Archive -LiteralPath $natives -DestinationPath "$out\natives.zip" -Force
           $fixtures = @($contract.fixtures) | ForEach-Object { Join-Path 'target\release' $_ }
           Compress-Archive -LiteralPath $fixtures -DestinationPath "$out\fixtures.zip" -Force
-          Compress-Archive -LiteralPath contract\artifacts.json, contract\env.json, crates\aether-protocol\tests\golden\vectors.txt -DestinationPath "$out\contract.zip" -Force
+          Compress-Archive -LiteralPath contract\artifacts.json, contract\env.json, contract\protocol.json, crates\aether-protocol\tests\golden\vectors.txt -DestinationPath "$out\contract.zip" -Force
           $sums = Get-ChildItem -LiteralPath $out -File | Sort-Object Name | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower())  $($_.Name)"
           }

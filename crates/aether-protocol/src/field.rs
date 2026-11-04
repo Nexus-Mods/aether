@@ -11,6 +11,7 @@
 //! so a count beyond it fails on the way.
 
 use crate::buf::Buf;
+use crate::describe::{Attr, Entry};
 use crate::root::RootId;
 use crate::status::OpenFlags;
 use crate::wire::{DecodeError, Rd};
@@ -25,6 +26,9 @@ pub(crate) trait Field<'a> {
     type Value;
     fn encode<B: Buf + ?Sized>(v: &Self::Value, out: &mut B);
     fn decode(r: &mut Rd<'a>) -> Result<Self::Value, DecodeError>;
+    /// Appends what this field puts on the wire, named `name`, to `out`: one
+    /// entry, or several where the codec folds padding or a struct's fields.
+    fn describe(name: &'static str, out: &mut Vec<Entry>);
 }
 
 /// A proptest strategy for a codec's values, borrowing nothing (strings and
@@ -73,6 +77,9 @@ macro_rules! le_int {
             fn decode(r: &mut Rd<'a>) -> Result<$t, DecodeError> {
                 Ok(<$t>::from_le_bytes(r.array()?))
             }
+            fn describe(name: &'static str, out: &mut Vec<Entry>) {
+                out.push(Entry::new(name, stringify!($t)));
+            }
         }
 
         #[cfg(feature = "testing")]
@@ -97,6 +104,9 @@ impl<'a> Field<'a> for RootId {
     fn decode(r: &mut Rd<'a>) -> Result<RootId, DecodeError> {
         Ok(RootId(r.u32()?))
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "root_id"));
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -114,6 +124,9 @@ impl<'a> Field<'a> for OpenFlags {
     }
     fn decode(r: &mut Rd<'a>) -> Result<OpenFlags, DecodeError> {
         Ok(OpenFlags::from_bits_retain(r.u32()?))
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "open_flags"));
     }
 }
 
@@ -136,6 +149,9 @@ impl<'a> Field<'a> for Flag {
     fn decode(r: &mut Rd<'a>) -> Result<bool, DecodeError> {
         Ok(r.u8()? != 0)
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "bool_lenient"));
+    }
 }
 
 /// A registry boolean: one byte, exactly 0 or 1.
@@ -153,6 +169,9 @@ impl<'a> Field<'a> for Bool {
             _ => Err(DecodeError::new("boolean not 0 or 1")),
         }
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "bool"));
+    }
 }
 
 /// A byte whose bit 0 is the value; the other bits are written zero and
@@ -166,6 +185,9 @@ impl<'a> Field<'a> for LowBit {
     }
     fn decode(r: &mut Rd<'a>) -> Result<bool, DecodeError> {
         Ok(r.u8()? & 1 != 0)
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "bool_bit0"));
     }
 }
 
@@ -196,6 +218,9 @@ impl<'a> Field<'a> for Str {
     fn decode(r: &mut Rd<'a>) -> Result<&'a str, DecodeError> {
         Rd::utf8(r.bytes(usize::MAX)?)
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "str_u32"));
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -218,6 +243,9 @@ impl<'a, const MAX: usize> Field<'a> for StrMax<MAX> {
         let s = Str::decode(r)?;
         Rd::check_utf16(s, MAX)?;
         Ok(s)
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "str_u32").with("max_utf16", Attr::Num(MAX as u64)));
     }
 }
 
@@ -242,6 +270,9 @@ impl<'a> Field<'a> for RestStr {
     fn decode(r: &mut Rd<'a>) -> Result<&'a str, DecodeError> {
         Rd::utf8(r.rest())
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "str_rest"));
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -263,6 +294,9 @@ impl<'a, const MAX: usize> Field<'a> for Bytes<MAX> {
     }
     fn decode(r: &mut Rd<'a>) -> Result<&'a [u8], DecodeError> {
         r.bytes(MAX)
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "bytes_u32").with("max", Attr::Num(MAX as u64)));
     }
 }
 
@@ -290,6 +324,9 @@ impl<'a> Field<'a> for LenPadBytes {
         r.take(4)?;
         r.take(n)
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "bytes_u32").with("pad_after_len", Attr::Num(4)));
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -313,6 +350,10 @@ impl<'a, const N: usize, C: Field<'a>> Field<'a> for PadBefore<N, C> {
         r.take(N)?;
         C::decode(r)
     }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::pad(N as u64, false));
+        C::describe(name, out);
+    }
 }
 
 /// `C`, then `N` bytes written zero that a reader may find missing: READ's
@@ -330,6 +371,10 @@ impl<'a, C: Field<'a>, const N: usize> Field<'a> for PadAfter<C, N> {
         let pad = r.0.len().min(N);
         r.take(pad)?;
         Ok(v)
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        C::describe(name, out);
+        out.push(Entry::pad(N as u64, true));
     }
 }
 
@@ -369,6 +414,12 @@ impl<'a> Field<'a> for Lookup {
             3 => Ok(Lookup::Tombstoned),
             _ => Err(DecodeError::new("lookup state out of range")),
         }
+    }
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        out.push(Entry::new(name, "lookup_state").with(
+            "values",
+            Attr::Text("0 absent, 1 present, 2 present and created in the overlay, 3 tombstoned"),
+        ));
     }
 }
 
@@ -460,6 +511,30 @@ impl<'a> Field<'a> for OptNode {
             n.children.insert(folded, (spelling, state));
         }
         Ok(Some(Cow::Owned(n)))
+    }
+
+    fn describe(name: &'static str, out: &mut Vec<Entry>) {
+        let mut value = Vec::new();
+        StrMax::<MAX_VALUE_NAME>::describe("name", &mut value);
+        u32::describe("ty", &mut value);
+        Bytes::<MAX_DATA>::describe("data", &mut value);
+        let mut tombstone = Vec::new();
+        StrMax::<MAX_VALUE_NAME>::describe("name", &mut tombstone);
+        let mut child = Vec::new();
+        StrMax::<MAX_KEY_NAME>::describe("folded", &mut child);
+        StrMax::<MAX_KEY_NAME>::describe("spelling", &mut child);
+        child.push(
+            Entry::new("state", "child_state").with("values", Attr::Text("0 present, 1 tombstone")),
+        );
+        let list = |name, of| Entry::new(name, "list_u32").with("of", Attr::Fields(of));
+        let mut node = Vec::new();
+        Bool::describe("created", &mut node);
+        Bool::describe("volatile", &mut node);
+        u64::describe("last_write", &mut node);
+        node.push(list("values", value));
+        node.push(list("value_tombstones", tombstone));
+        node.push(list("children", child));
+        out.push(Entry::new(name, "optional_node").with("node", Attr::Fields(node)));
     }
 }
 

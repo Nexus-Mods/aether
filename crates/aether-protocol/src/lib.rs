@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod buf;
+mod describe;
 mod field;
 mod root;
 pub mod shimcfg;
@@ -20,6 +21,7 @@ mod wire;
 
 pub use aether_registry::Lookup;
 pub use buf::{Buf, Overflow, SliceBuf};
+pub use describe::contract_json;
 pub use root::RootId;
 pub use status::{
     OpenFlags, RequestFlags, Status, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC,
@@ -37,6 +39,12 @@ pub use wire::DecodeError;
 
 use aether_registry::Node;
 use std::borrow::Cow;
+
+/// The ring's wire version, as `contract/protocol.json` records it. It is the
+/// ring header's `version` word (`aether_ipc::layout::VERSION`, which this
+/// crate cannot name: that crate depends on this one), and
+/// `tests/contract.rs` checks the two equal.
+pub const WIRE_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // The numeric API, on top of the table. Every function here encodes or

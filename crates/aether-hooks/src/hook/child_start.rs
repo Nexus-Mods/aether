@@ -173,7 +173,13 @@ pub(super) unsafe fn plan(
     if let Some(dir) = cur_dir.or_else(current_dir) {
         if let Some((root, _)) = routed(client, &dir) {
             if let Some((_, backing)) = backings.iter().find(|(id, _)| *id == root) {
-                let _ = std::fs::create_dir_all(backing);
+                // A real folder: made on disk by the shim's own I/O. Through the
+                // hooks the backing routes to the root itself, so the director
+                // would be asked about it and a missing folder never made.
+                {
+                    let _io = super::ShimIoGuard::enter();
+                    let _ = std::fs::create_dir_all(backing);
+                }
                 out.cwd = Some(nul(backing));
                 out.virtual_cwd = Some(dir);
             }

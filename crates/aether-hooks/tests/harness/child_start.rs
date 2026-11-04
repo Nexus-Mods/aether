@@ -142,6 +142,8 @@ pub(crate) struct Setup {
     pub(crate) root: PathBuf,
     /// Where the director staged its copy.
     pub(crate) staged: PathBuf,
+    /// Root 0's backing directory, on disk.
+    pub(crate) backing: PathBuf,
     pub(crate) served: &'static fakedirector::Served,
     pub(crate) _hooks: aether_hooks::HookGuard,
 }
@@ -152,6 +154,8 @@ pub(crate) struct Given {
     pub(crate) stages: bool,
     /// Root 0 has a backing directory.
     pub(crate) backed: bool,
+    /// The backing directory is not on disk when the hooks go in.
+    pub(crate) missing_backing: bool,
     /// Faults armed on STAGE_EXEC.
     pub(crate) fault: Option<Fault>,
 }
@@ -168,6 +172,9 @@ pub(crate) fn setup(
     let stage = base.join("stage");
     for d in [&root, &backing, &stage] {
         std::fs::create_dir_all(d).unwrap();
+    }
+    if given.missing_backing {
+        std::fs::remove_dir(&backing).unwrap();
     }
     std::fs::copy(probe, root.join(IMAGE)).unwrap();
     let staged = stage.join(IMAGE);
@@ -206,6 +213,7 @@ pub(crate) fn setup(
         Setup {
             root,
             staged,
+            backing,
             served,
             _hooks: hooks,
         },
@@ -292,6 +300,7 @@ fn a_child_started_under_a_root_runs_the_staged_copy() {
         Given {
             stages: true,
             backed: true,
+            missing_backing: false,
             fault: None,
         },
     );
@@ -316,6 +325,42 @@ fn a_child_started_under_a_root_runs_the_staged_copy() {
         "the child runs {:?}, not the staged copy {:?}",
         images[0],
         s.staged
+    );
+}
+
+/// A child under a root starts in the root's backing directory, a real
+/// folder. One that is missing is made on disk, by the shim's own I/O: the
+/// director is not asked about it, so only the image's GETATTR and
+/// STAGE_EXEC cross the ring.
+#[test]
+fn a_missing_backing_directory_is_made_on_disk() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let (s, _) = setup(
+        &probe,
+        Given {
+            stages: true,
+            backed: true,
+            missing_backing: true,
+            fault: None,
+        },
+    );
+    let mark = s.served.recorder.mark();
+    let r = create(&s.root.join(IMAGE));
+    assert!(
+        matches!(r, Ok(_) | Err(ERROR_PROCESS_ABORTED)),
+        "started, then refused only for its injection: {r:?}"
+    );
+    let images = created();
+    assert_eq!(images.len(), 1, "one child: {images:?}");
+    assert!(
+        aether_hooks::as_shim_io_for_tests(|| s.backing.is_dir()),
+        "{} is not on disk",
+        s.backing.display()
+    );
+    assert_eq!(
+        s.served.recorder.ops_since(mark),
+        [Some(Opcode::GetAttr), Some(Opcode::StageExec)]
     );
 }
 
@@ -345,6 +390,7 @@ fn stage_exec_not_found_refuses_the_start() {
         Given {
             stages: true,
             backed: true,
+            missing_backing: false,
             fault: Some(Fault::Status(Status::NotFound)),
         },
     );
@@ -364,6 +410,7 @@ fn no_stager_refuses_an_image_under_a_root_with_no_staged_copy() {
         Given {
             stages: false,
             backed: true,
+            missing_backing: false,
             fault: None,
         },
     );
@@ -383,6 +430,7 @@ fn an_undecodable_stage_exec_reply_refuses_the_start() {
         Given {
             stages: true,
             backed: true,
+            missing_backing: false,
             fault: Some(Fault::Garbage(garbage.clone())),
         },
     );
@@ -411,6 +459,7 @@ fn without_root_backings_a_child_under_a_root_starts_as_named() {
         Given {
             stages: true,
             backed: false,
+            missing_backing: false,
             fault: None,
         },
     );

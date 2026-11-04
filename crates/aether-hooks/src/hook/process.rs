@@ -114,6 +114,15 @@ pub(super) unsafe fn cpiw_hook_body(
         .map_or(env, |v| v.as_ptr().cast());
 
     let forced = super::child_start::flags_for(plan.as_ref(), child_creation_flags(flags));
+    // A child started in a backing directory: the host checks that folder
+    // (`GetFileAttributesW` of the working directory), and it is a real one.
+    // Through the hooks it routes to the root itself and the director would
+    // be asked, so the start runs as the shim's own I/O. Every path the plan
+    // hands the host is real (the staged image, the backing).
+    let own_io = plan
+        .as_ref()
+        .is_some_and(|p| p.cwd.is_some())
+        .then(super::ShimIoGuard::enter);
     // SAFETY: the original NT function, called with valid NT arguments.
     let r = unsafe {
         tramp(
@@ -131,6 +140,7 @@ pub(super) unsafe fn cpiw_hook_body(
             ptok,
         )
     };
+    drop(own_io);
     if r != 0 && !pi.is_null() {
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
         let pid = unsafe { (*pi).dwProcessId };

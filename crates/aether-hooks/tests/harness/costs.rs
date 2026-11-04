@@ -77,13 +77,12 @@
 //! - `section_lazy_page_fill`: the fill runs on the shim's fill thread, so
 //!   its allocations are not counted; the faulting thread's are (it hands
 //!   the job over and waits).
-//! - `create_process`: GETATTR and STAGE_EXEC for the image, then GETATTR,
-//!   OPEN, CLOSE and GETATTR of the root itself: the child starts in the
-//!   root, so the shim makes sure of its backing directory
-//!   (`create_dir_all`), and that call goes through the shim's own hooks to
-//!   the director. The STAGE_EXEC reply is the staged copy's real path,
-//!   whose length is the machine's (its temporary folder); that length is
-//!   left out of the case's `ring_bytes`.
+//! - `create_process`: GETATTR and STAGE_EXEC for the image. The child
+//!   starts in the root's backing directory, which the shim makes and the
+//!   host checks on disk, never through the director. The STAGE_EXEC reply
+//!   is the staged copy's real path, whose length is the machine's (its
+//!   temporary folder); that length is left out of the case's
+//!   `ring_bytes`.
 //! - `reg_*`: the overlay key's name carries the process id, zero-padded to
 //!   ten digits so that its length is the same in every process.
 #![allow(unsafe_code)] // Win32 and ntdll calls
@@ -1092,6 +1091,7 @@ fn create_process() {
         Given {
             stages: true,
             backed: true,
+            missing_backing: false,
             fault: None,
         },
     );

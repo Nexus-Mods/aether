@@ -119,6 +119,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-rpc"
+version = "0.1.0"
+dependencies = [
+ "aether-ipc",
+ "aether-protocol",
+ "aether-registry",
+]
+
+[[package]]
 name = "aether-shim"
 version = "0.1.0"
 dependencies = [

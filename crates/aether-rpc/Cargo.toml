@@ -1,0 +1,18 @@
+[package]
+name = "aether-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-ipc.workspace = true
+aether-protocol.workspace = true
+
+[dev-dependencies]
+# The registry node a REG_KEY reply carries, for the tests' large replies.
+aether-registry.workspace = true
+
+[lints]
+workspace = true

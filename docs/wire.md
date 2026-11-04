@@ -298,8 +298,10 @@ Sizing rules a director must meet, from what the shim sends:
   READs stay below 65 536 bytes so that no director answers them in bulk
   (`arena_rule` in `crates/aether-hooks/src/director.rs`).
 - Every arena byte must lie inside the first `VFS_RING_BYTES` bytes of the
-  mapping: the shim bounds-checks the copy and fails the read with
-  `ST_IO_ERROR` otherwise.
+  mapping. The shim copies a bulk reply's data only from inside the
+  slot's own bank, and only as many bytes as the request asked for; with
+  no arena in use (`VFS_ARENA_LEN` unset, 0, or below the rule above),
+  only from inside the mapping. It fails the read otherwise (section 3.7).
 - With `VFS_ARENA_LEN` unset or 0, the shim never sets `FLAG_READ_BULK` and
   sends inline reads of up to `payload_cap - 8` bytes; a director with an
   arena may still answer those in bulk (section 3.4.4), and the shim accepts
@@ -1040,7 +1042,8 @@ from index `skip` on, joined by `/`, no length prefix, exactly
 `components - skip` names. A component the director has no entry for SHOULD
 come back as it was sent, as the old Rust director's did. A director MAY
 instead answer `ST_NOT_FOUND` for a path it does not have (Cairn does, `ring.clj`, `op-stored-names`). The shim
-discards a reply with the wrong number of names, and on any non-OK status or
+discards a reply with the wrong number of names, or with a name that does
+not fold to the component it answers (section 3.7), and on any non-OK status or
 discarded reply uses the caller's own spelling (`FuseClient::stored_names`).
 Used for `GetFinalPathNameByHandle`.
 
@@ -1155,6 +1158,128 @@ decodes it with replacement characters and carries on.
 
 The slot `flags` word is ignored for every opcode but READ, and bits other
 than bit 0 are ignored for READ, by both directors.
+
+### 3.7 What the shim makes of a reply it cannot use
+
+A reply can be one the shim cannot use: a status that says the request
+failed, a status no table names, the ring's overflow status, an `ST_OK`
+payload that does not decode, a bulk READ reply whose data is not where
+section 2.6 puts it, or no reply within the shim's deadline (section 2.5,
+"Deadlines"). In every case the shim answers the program's call itself,
+never with bytes taken from the bad reply, and goes on serving: the next
+call goes to the director as before. A reply that arrives after its
+deadline lands in a slot the shim has given up, and answers nothing.
+
+The table gives what the program gets for each kind of bad reply, by the
+call it made. A cell names an NTSTATUS without its `STATUS_` prefix, or:
+
+- **success**: the call goes on as if the reply had been good.
+- **fallback**: the call succeeds without the director's answer. A
+  registry read serves the real key alone (section 4.4); a final name
+  keeps the program's own spelling of every component the director did
+  not answer (3.4.12).
+- **load fails**: the shim does not attach; its ready file says
+  `fuse-failed:` (section 6.2), and the injector kills the target.
+- **refused**: `CreateProcessW` fails with `ERROR_FILE_NOT_FOUND` and no
+  process starts.
+- **n/a**: the fault cannot reach the call.
+
+The columns:
+
+- A named status (`ST_NOT_FOUND` to `ST_CROSS_ROOT`): that status, with an
+  empty payload, for a request the director never carried out.
+- **any other status**: `ST_NOT_A_DIRECTORY`, `ST_IO_ERROR`, `ST_BAD_FH`,
+  `ST_NOT_SUPPORTED`, `ST_REPLY_TOO_LARGE`, a negative status no table
+  names, or a positive status.
+- **overflow**: the ring's overflow status, -2147483648 (section 2.5): the
+  director carried out the request and its reply did not fit.
+- **truncated**: an `ST_OK` payload one byte short.
+- **trailing bytes**: an `ST_OK` payload with bytes after it. A file reply
+  ignores them (section 3.2); a registry reply refuses them. The reply of
+  STORED_NAMES or STAGE_EXEC is all text, so they are part of it; the
+  table's trailing bytes are not UTF-8.
+- **garbage**: `ST_OK` with a payload shorter than any fixed reply and not
+  UTF-8.
+- **bulk reply out of place**: an `ST_OK` bulk READ reply whose data does
+  not lie inside the slot's own bank (another slot's bank, past the arena,
+  or an `arena_offset + n` that overflows), or whose `n` is more than the
+  request's `len`. An inline READ reply with more than `len` bytes is
+  refused the same way.
+- **no reply in time**: the deadline passes while the director holds the
+  reply.
+- **the call after a late reply**: the same call made again once the late
+  reply has landed.
+
+The calls, each the first of its kind on a handle or name:
+
+- **attach**: the shim's one HEARTBEAT (3.4.11). An `ST_OK` reply's
+  payload is not read.
+- **open to read** and **open to write**: `NtCreateFile` or `NtOpenFile` of
+  a file, for reading, or for writing with `FILE_OPEN` (3.4.3).
+- **attributes by name**: `NtQueryFullAttributesFile` and the other calls
+  answered by GETATTR (3.4.1).
+- **read, inline** and **read, bulk**: `NtReadFile` of a file that may
+  change, of 100 bytes (one inline READ) and of 128 KiB (one bulk READ).
+  A read the read cache serves crosses the ring only to fill a block; a
+  failed fill is read again uncached.
+- **section filled at creation**: `NtCreateSection` over a file of up to
+  256 MiB, whose READs fill it at once (3.4.4). A page of a larger section,
+  filled on first touch, is asked again up to three times and then raises
+  `STATUS_IN_PAGE_ERROR` (3.4.4); that ends the program, so it is not in
+  the table.
+- **write, first chunk** and **write, a later chunk**: `NtWriteFile`. When
+  a later chunk fails, `IoStatus.Information` carries what the chunks
+  before it wrote (3.4.5). The shim reads only the first word of a WRITE
+  reply, so one cut short in its padding still succeeds.
+- **set the size**: `FileEndOfFileInformation` (SETATTR, 3.4.6).
+- **list a directory**: the first `NtQueryDirectoryFile` on a directory
+  handle (READDIR, 3.4.2). A listing that failed is asked for again by the
+  next query.
+- **rename**: `FileRenameInformation` within one root (RENAME, 3.4.7). A
+  rename between two roots (RENAME_X, 3.4.13) answers the same.
+- **delete by name**: `NtDeleteFile`. **delete through a handle**:
+  `FileDispositionInformation` (DELETE, 3.4.8).
+- **create a directory**: `NtCreateFile` with `FILE_CREATE` and
+  `FILE_DIRECTORY_FILE` (MKDIR, 3.4.9). After a failed MKDIR the shim asks
+  GETATTR; a directory found there is a name collision. So a director that
+  made the directory and then answered too late, or too large, gives
+  `OBJECT_NAME_COLLISION`.
+- **final name**: `GetFinalPathNameByHandleW` (STORED_NAMES, 3.4.12). A
+  reply with a name that is not a spelling of the component asked about
+  (it folds to another name) is not used either.
+- **start a child**: `CreateProcessW` of an image under a root with a
+  backing (STAGE_EXEC, 3.4.14).
+- **registry read**: `RegQueryValueExW` and the other calls answered by
+  REG_LOOKUP and REG_KEY (section 4.4).
+- **registry write**: `NtSetValueKey` and the other calls answered by
+  REG_SET_VALUE to REG_RENAME_KEY (section 4.4; a key create answered
+  `ST_EXISTS` is asked about again, as 4.4 says).
+
+A reply that comes too late or too large does not undo what the director
+did: a rename, delete or write it carried out is still done, though the
+program was told the call failed.
+
+| Operation | `ST_NOT_FOUND` | `ST_EXISTS` | `ST_READ_ONLY` | `ST_IS_DIR` | `ST_NO_SPACE` | `ST_BAD_REQUEST` | `ST_CROSS_ROOT` | any other status | overflow | truncated | trailing bytes | garbage | bulk reply out of place | no reply in time | the call after a late reply |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| attach (HEARTBEAT) | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | load fails | success | success | success | n/a | load fails | n/a |
+| open to read (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| open to write (OPEN) | OBJECT_NAME_NOT_FOUND | OBJECT_NAME_COLLISION | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| attributes by name (GETATTR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| read, inline (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| read, bulk (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| section filled at creation (READ) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success |
+| write, first chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| write, a later chunk (WRITE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | DISK_FULL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| set the size (SETATTR) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| list a directory (READDIR) | NO_MORE_FILES | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
+| rename (RENAME) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | NOT_SAME_DEVICE | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| delete by name (DELETE) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | FILE_IS_A_DIRECTORY | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| delete through a handle (DELETE) | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | success | success | success | n/a | UNSUCCESSFUL | success |
+| create a directory (MKDIR) | OBJECT_NAME_NOT_FOUND | UNSUCCESSFUL | ACCESS_DENIED | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | OBJECT_NAME_COLLISION | success | success | success | n/a | OBJECT_NAME_COLLISION | success |
+| final name (STORED_NAMES) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | n/a | fallback | success |
+| start a child (STAGE_EXEC) | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | refused | n/a | refused | success |
+| registry read (REG_KEY) | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | fallback | n/a | fallback | success |
+| registry write (REG_SET_VALUE) | KEY_DELETED | CANNOT_DELETE | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | INVALID_PARAMETER | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | UNSUCCESSFUL | n/a | UNSUCCESSFUL | success |
 
 ---
 
@@ -1284,6 +1409,9 @@ it. The persisted file format (`crates/aether-registry/src/format.rs`,
 `AEREG`) is the director's own business and is not on the wire.
 
 ### 4.4 Shim handling of registry replies
+
+Section 3.7 gives what every kind of bad reply does, registry calls among
+them.
 
 `crates/aether-hooks/src/regclient.rs`: a read (REG_LOOKUP, REG_KEY) that fails
 for any reason is a fallback: the hook serves the real key alone. A write that

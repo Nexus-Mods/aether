@@ -252,6 +252,10 @@ pub enum Misbehave {
     Garbage,
     /// Reads a request and never answers.
     Hang,
+    /// Starts a second test adapter that hangs (the same binary, holding
+    /// this one's stdout and stderr), reports its pid on stderr, then hangs
+    /// itself.
+    HangGrandchild,
     /// Refuses every mount; answers unmount.
     Refuse,
 }
@@ -281,6 +285,27 @@ pub fn test_adapter(how: Misbehave) -> i32 {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
+        }
+        Misbehave::HangGrandchild => {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("test adapter: no current exe: {e}");
+                    return 2;
+                }
+            };
+            match std::process::Command::new(exe)
+                .args(["test-adapter", "--misbehave", "hang"])
+                .stdin(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(g) => eprintln!("test adapter: grandchild pid {}", g.id()),
+                Err(e) => {
+                    eprintln!("test adapter: cannot start the grandchild: {e}");
+                    return 2;
+                }
+            }
+            test_adapter(Misbehave::Hang)
         }
         Misbehave::Refuse => {
             answer_requests(|req| -> Value {

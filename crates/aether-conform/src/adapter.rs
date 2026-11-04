@@ -70,6 +70,8 @@ impl std::error::Error for AdapterError {}
 /// A running adapter.
 pub struct Adapter {
     child: Child,
+    /// The child and every process it starts, killed together.
+    tree: ProcessTree,
     stdin: Option<ChildStdin>,
     lines: Receiver<Option<std::io::Result<String>>>,
     stderr: Arc<Mutex<VecDeque<String>>>,
@@ -87,23 +89,24 @@ impl Adapter {
                 stderr: Vec::new(),
             });
         };
-        let mut child = Command::new(program)
-            .args(args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| AdapterError {
-                what: format!("cannot start {program:?}: {e}"),
-                stderr: Vec::new(),
-            })?;
+            .stderr(Stdio::piped());
+        let (mut child, tree) = ProcessTree::spawn(&mut cmd).map_err(|e| AdapterError {
+            what: format!("cannot start {program:?}: {e}"),
+            stderr: Vec::new(),
+        })?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr_pipe = child.stderr.take().expect("piped stderr");
 
         // Both pipes are drained on threads of their own, so an adapter that
         // writes a lot on one is never blocked while the run reads the other,
-        // and a read of stdout can time out.
+        // and a read of stdout can time out. Neither thread is ever joined:
+        // a process the adapter started may hold the pipes open, and the run
+        // must not wait for it. Killing the tree closes them.
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -128,6 +131,7 @@ impl Adapter {
         });
         Ok(Adapter {
             child,
+            tree,
             stdin,
             lines,
             stderr,
@@ -179,18 +183,23 @@ impl Adapter {
     }
 
     /// Ends the session: EOF on the adapter's stdin, then up to the timeout
-    /// for it to exit, after which it is killed.
+    /// for it to exit. Then whatever is left of its process tree, the
+    /// adapter included if it has not exited, is killed.
     pub fn finish(mut self) {
         self.stdin = None;
         let deadline = std::time::Instant::now() + self.timeout;
         while std::time::Instant::now() < deadline {
             if let Ok(Some(_)) = self.child.try_wait() {
-                return;
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Drop kills the tree.
+    }
+
+    /// Kills the adapter and every process it started.
+    fn kill(&mut self) {
+        self.tree.kill(&mut self.child);
     }
 
     fn ask(&mut self, request: &Value) -> Result<Value, AdapterError> {
@@ -212,7 +221,7 @@ impl Adapter {
             }
             Err(RecvTimeoutError::Timeout) => {
                 let secs = self.timeout.as_secs_f64();
-                let _ = self.child.kill();
+                self.kill();
                 return Err(self.error(format!("no answer within {secs} s to {request}")));
             }
         };
@@ -258,10 +267,65 @@ impl Adapter {
 
 impl Drop for Adapter {
     fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        // Even an adapter that exited may have left processes behind.
+        self.kill();
+    }
+}
+
+/// The adapter's process tree.
+///
+/// On Windows it is a Job Object that kills its members when closed
+/// (`aether_win::KillOnCloseJob`); the adapter is created suspended and
+/// assigned before it runs, so every process it starts is in the job. On
+/// Unix the adapter leads a new process group, and the group is sent
+/// `SIGKILL`. A process that leaves the group (`setsid`) is not followed.
+struct ProcessTree {
+    #[cfg(windows)]
+    job: aether_win::KillOnCloseJob,
+    #[cfg(unix)]
+    group: u32,
+}
+
+impl ProcessTree {
+    #[cfg(windows)]
+    fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
+        let job = aether_win::KillOnCloseJob::new()?;
+        let child = job.spawn(cmd)?;
+        Ok((child, ProcessTree { job }))
+    }
+
+    #[cfg(unix)]
+    fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
+        use std::os::unix::process::CommandExt;
+        let child = cmd.process_group(0).spawn()?;
+        let group = child.id();
+        Ok((child, ProcessTree { group }))
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    fn spawn(cmd: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
+        Ok((cmd.spawn()?, ProcessTree {}))
+    }
+
+    /// Kills every process in the tree, and reaps `child`.
+    fn kill(&mut self, child: &mut Child) {
+        #[cfg(windows)]
+        self.job.terminate();
+        #[cfg(unix)]
+        {
+            // The group outlives its leader while any member is alive. There
+            // is no libc here (the crate forbids unsafe), so kill(1) sends it.
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", self.group)])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
+        if let Ok(None) = child.try_wait() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
     }
 }
 

@@ -16,7 +16,10 @@ For every scenario:
   could attach to (wire.md 2.4, 2.9, 2.10, 5.3): a ring file or, on
   Windows, a named section; a header with the right magic, version and
   stride whose slots fit in `VFS_RING_BYTES`; a ring file at least
-  `VFS_RING_BYTES` long; `VFS_VIRTUAL_DIR` set. Two further rules a
+  `VFS_RING_BYTES` long; `VFS_VIRTUAL_DIR` set, and the roots the shim
+  builds from it, `VFS_VIRTUAL_ROOTS`, `VFS_LAUNCH_IMAGE` and
+  `VFS_ROOT_BACKINGS` usable (the shim refuses, for example, an empty
+  `VFS_VIRTUAL_DIR`: "managed root is not a usable path"). Two further rules a
   director must meet are checked too: the header's `payload_cap` equals
   `VFS_RING_PAYLOAD_CAP` (5.3: "Must equal the header's `payload_cap`"),
   and when `VFS_ARENA_OFFSET` is given the arena lies inside the mapping
@@ -93,6 +96,12 @@ its stdout, never two requests at once.
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed
   if it has not exited within the timeout.
+- Whenever the run kills the adapter (a timeout, an error, the end of the
+  run), it kills every process the adapter started too, so an adapter may be
+  a launcher (a `.cmd` file, a shell script, `clojure`) that starts the real
+  director. On Windows the adapter runs in a Job Object that kills its
+  members when closed; on Unix it leads a process group, which is sent
+  `SIGKILL`. A process that leaves the group (`setsid`) is not followed.
 - Anything the adapter writes on stderr is kept; its last lines are shown
   when something goes wrong.
 

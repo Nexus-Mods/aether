@@ -12,15 +12,20 @@
 //!   `VFS_RING_BYTES`.
 //! - **Numbers.** `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP` and
 //!   `VFS_ARENA_LEN` are read with the shim's defaults when unparsable
-//!   (2 097 152, 1 048 576, 0). `VFS_VIRTUAL_DIR` must be set, as the shim
-//!   requires. The header is checked as 2.4 says, and beyond what the shim
+//!   (2 097 152, 1 048 576, 0).
+//! - **Roots.** The roots must be ones the shim accepts ([`shim_roots`]):
+//!   `VFS_VIRTUAL_DIR` set, and every root the shim builds from it,
+//!   `VFS_VIRTUAL_ROOTS`, `VFS_LAUNCH_IMAGE` and `VFS_ROOT_BACKINGS` usable
+//!   by `aether_redirect::RootMap::with_roots`, the call the shim makes. The
+//!   header is checked as 2.4 says, and beyond what the shim
 //!   checks, two rules a director must meet: the header's `payload_cap`
 //!   equals `VFS_RING_PAYLOAD_CAP` (5.3: "Must equal the header's
 //!   `payload_cap`") and, when `VFS_ARENA_OFFSET` is given, the arena lies
 //!   inside the first `VFS_RING_BYTES` bytes (2.6).
 //! - **Waking** (2.11). On a file ring nothing is signalled: the client
 //!   spins, as the shim does, and the director must not sleep on an event.
-//!   On a section the client opens `VFS_SERVER_EV` and sets it after
+//!   On a section the client opens `VFS_SERVER_EV` with the shim's rights
+//!   (`EVENT_MODIFY_STATE`, `aether_win::WakeEvent`) and sets it after
 //!   publishing a request and after freeing a slot, as the shim does; a
 //!   failed open is tolerated (no wake), as it is in the shim. Either way a
 //!   reply that has not come within the ring's spin budget is waited for by
@@ -30,6 +35,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use aether_ipc::{ring, Geom, Notifier, RingBacking, RingClient, SharedSeg};
+use aether_protocol::RootId;
+use aether_redirect::{RootMap, VolumeMap};
 use aether_rpc::Client;
 
 use crate::adapter::Env;
@@ -65,7 +72,7 @@ pub struct Attached {
     ring_bytes: usize,
     arena_len: usize,
     #[cfg(windows)]
-    server_ev: Option<aether_win::EventNotifier>,
+    server_ev: Option<aether_win::WakeEvent>,
     deadline: Duration,
     what: String,
 }
@@ -83,12 +90,7 @@ impl Attached {
         let arena_len: usize = get(aether_env::ARENA_LEN)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        if get(aether_env::VIRTUAL_DIR).is_none() {
-            return Err(format!(
-                "{} is not set: the shim fails its load without it (wire.md 5.3)",
-                aether_env::VIRTUAL_DIR
-            ));
-        }
+        shim_roots(env)?;
         let path = get(aether_env::RING_PATH).filter(|p| !p.is_empty());
         let section = get(aether_env::RING_SECTION);
         let (backing, what) = match (path, section) {
@@ -205,14 +207,113 @@ fn open_section(name: &str, _ring_bytes: usize) -> Result<(Backing, String), Str
     ))
 }
 
-/// The director's wake event, if `VFS_SERVER_EV` names one that opens. The
-/// client event is not needed (the shim does not open it); when it is not
-/// named, the server event is opened in its place.
+/// The director's wake event, if `VFS_SERVER_EV` names one that opens with
+/// `EVENT_MODIFY_STATE`, the rights the shim asks for
+/// (`crates/aether-hooks/src/director.rs`, `connect_source`). The client
+/// event is not opened, as the shim does not open it.
 #[cfg(windows)]
-fn open_server_event(env: &Env) -> Option<aether_win::EventNotifier> {
-    let server = env.get(aether_env::SERVER_EV)?;
-    let client = env.get(aether_env::CLIENT_EV).unwrap_or(server);
-    aether_win::EventNotifier::open(server, client).ok()
+fn open_server_event(env: &Env) -> Option<aether_win::WakeEvent> {
+    aether_win::WakeEvent::open(env.get(aether_env::SERVER_EV)?).ok()
+}
+
+/// Whether the shim would accept the roots `env` declares, checked as the
+/// shim checks them (`crates/aether-hooks/src/director.rs`):
+/// `try_init_from_env` refuses an unset `VFS_VIRTUAL_DIR`; `roots_from_env`
+/// (`merge_extra_roots`) adds `VFS_VIRTUAL_ROOTS`; `connect_source` adds the
+/// staged launch directory (`stage_root_from_env`) and the backings
+/// (`backings_from_env`, `parse_backings`) and hands them all to
+/// `RootMap::with_roots`, whose error fails the load ("managed root is not a
+/// usable path"). That last call is the shim's own, from `aether-redirect`;
+/// the parsing before it is copied from `director.rs`, which lives in a
+/// Windows-only crate. The volume map is left empty: it adds aliases, never
+/// refuses a root.
+pub fn shim_roots(env: &Env) -> Result<(), String> {
+    let get = |k: &str| env.get(k).map(String::as_str);
+    let Some(virtual_dir) = get(aether_env::VIRTUAL_DIR) else {
+        return Err(format!(
+            "{} is not set: the shim fails its load without it (wire.md 5.3)",
+            aether_env::VIRTUAL_DIR
+        ));
+    };
+    let mut routing = merge_extra_roots(virtual_dir, get(aether_env::VIRTUAL_ROOTS));
+    if let Some(stage) = get(aether_env::LAUNCH_IMAGE).and_then(stage_root) {
+        routing.push((RootId::DEFAULT, stage));
+    }
+    routing.extend(parse_backings(get(aether_env::ROOT_BACKINGS)));
+    let refs: Vec<(RootId, &str)> = routing.iter().map(|(id, p)| (*id, p.as_str())).collect();
+    RootMap::with_roots(&refs, VolumeMap::empty())
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+            "the shim refuses these roots (managed root is not a usable path: {e:?}): {routing:?}"
+        )
+        })
+}
+
+/// `director.rs`, `merge_extra_roots`.
+fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
+    let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];
+    let Some(extra) = spec else {
+        return out;
+    };
+    for entry in extra.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((id, path)) = entry.split_once('=') else {
+            continue;
+        };
+        let (Ok(id), path) = (id.trim().parse::<u32>(), path.trim()) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        match out.iter_mut().find(|(r, _)| r.0 == id) {
+            Some(slot) => slot.1 = path.to_string(),
+            None => out.push((RootId(id), path.to_string())),
+        }
+    }
+    out
+}
+
+/// `director.rs`, `parse_backings`.
+fn parse_backings(spec: Option<&str>) -> Vec<(RootId, String)> {
+    spec.unwrap_or_default()
+        .split(';')
+        .filter_map(|entry| {
+            let (id, path) = entry.trim().split_once('=')?;
+            let id = id.trim().parse::<u32>().ok()?;
+            let path = path.trim();
+            (!path.is_empty()).then(|| (RootId(id), normalize_path_for_root(path)))
+        })
+        .collect()
+}
+
+/// `director.rs`, `stage_root_from_env`: the launch image's directory. The
+/// shim takes it with a Windows `Path::parent`, which this reproduces on
+/// every OS for the absolute paths a director gives (`C:\dir\game.exe`
+/// gives `C:\dir`, `C:\game.exe` gives `C:\`).
+fn stage_root(image: &str) -> Option<String> {
+    let cut = image.rfind(['\\', '/'])?;
+    let mut dir = image[..cut].to_string();
+    if dir.is_empty() {
+        return None;
+    }
+    if dir.len() == 2 && dir.ends_with(':') {
+        dir.push('\\');
+    }
+    Some(normalize_path_for_root(&dir))
+}
+
+/// `director.rs`, `normalize_path_for_root` (with `strip_nt_device`).
+fn normalize_path_for_root(p: &str) -> String {
+    let p = p
+        .strip_prefix(r"\??\")
+        .or_else(|| p.strip_prefix(r"\\?\"))
+        .unwrap_or(p);
+    p.replace('/', "\\").to_ascii_lowercase()
 }
 
 /// The client's notifier: wakes the director's event on a section, nothing
@@ -220,7 +321,7 @@ fn open_server_event(env: &Env) -> Option<aether_win::EventNotifier> {
 /// sleeping.
 pub struct Wake<'a> {
     #[cfg(windows)]
-    server_ev: Option<&'a aether_win::EventNotifier>,
+    server_ev: Option<&'a aether_win::WakeEvent>,
     _seg: std::marker::PhantomData<&'a ()>,
 }
 
@@ -228,7 +329,7 @@ impl Notifier for Wake<'_> {
     fn notify_server(&self) {
         #[cfg(windows)]
         if let Some(ev) = self.server_ev {
-            ev.notify_server();
+            ev.set();
         }
     }
     fn wait_client(&self, _slot: u32) {
@@ -244,7 +345,62 @@ impl Notifier for Wake<'_> {
     fn notify_slot_free(&self) {
         #[cfg(windows)]
         if let Some(ev) = self.server_ev {
-            ev.notify_slot_free();
+            ev.set();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Env {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn roots_the_shim_accepts_pass() {
+        for e in [
+            env(&[(aether_env::VIRTUAL_DIR, r"C:\game")]),
+            env(&[(aether_env::VIRTUAL_DIR, r"C:\")]),
+            env(&[
+                (aether_env::VIRTUAL_DIR, r"C:\game"),
+                (aether_env::VIRTUAL_ROOTS, r"1=C:\saves; 2= ;junk;x=C:\y"),
+                (aether_env::ROOT_BACKINGS, r"1=D:\real\saves;3="),
+                (aether_env::LAUNCH_IMAGE, r"C:\stage\game.exe"),
+            ]),
+        ] {
+            assert_eq!(shim_roots(&e), Ok(()), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn roots_the_shim_refuses_fail() {
+        for e in [
+            env(&[]),
+            env(&[(aether_env::VIRTUAL_DIR, "")]),
+            env(&[(aether_env::VIRTUAL_DIR, r"\")]),
+            env(&[(aether_env::VIRTUAL_DIR, ".")]),
+            env(&[(aether_env::VIRTUAL_DIR, "..")]),
+            // An entry for root 0 replaces VFS_VIRTUAL_DIR.
+            env(&[
+                (aether_env::VIRTUAL_DIR, r"C:\game"),
+                (aether_env::VIRTUAL_ROOTS, r"0=\"),
+            ]),
+            env(&[
+                (aether_env::VIRTUAL_DIR, r"C:\game"),
+                (aether_env::VIRTUAL_ROOTS, r"1=/"),
+            ]),
+            env(&[
+                (aether_env::VIRTUAL_DIR, r"C:\game"),
+                // The NT prefix is stripped, which leaves nothing.
+                (aether_env::ROOT_BACKINGS, r"1=\\?\"),
+            ]),
+        ] {
+            assert!(shim_roots(&e).is_err(), "{e:?}");
         }
     }
 }

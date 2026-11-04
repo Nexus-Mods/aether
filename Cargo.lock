@@ -15,6 +15,7 @@ dependencies = [
  "aether-filering",
  "aether-ipc",
  "aether-protocol",
+ "aether-redirect",
  "aether-refdirector",
  "aether-registry",
  "aether-rpc",

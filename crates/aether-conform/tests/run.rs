@@ -312,3 +312,45 @@ fn usage_errors_exit_2() {
     assert_eq!(o.status.code(), Some(2), "an empty folder is not a pass");
     assert!(stderr(&o).contains("no scenarios"), "{}", stderr(&o));
 }
+
+/// Whether process `pid` is still running (a zombie counts as gone).
+fn alive(pid: u32) -> bool {
+    if cfg!(windows) {
+        let o = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).contains("aether-conform")
+    } else {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // The state follows the command name, which is in parentheses.
+            Ok(stat) => !stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+            Err(_) => Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|s| s.success()),
+        }
+    }
+}
+
+#[test]
+fn a_hung_adapter_is_killed_with_the_processes_it_started() {
+    let (o, took) = misbehaving("hang-grandchild");
+    let all = all_output(&o);
+    assert_eq!(o.status.code(), Some(2), "{all}");
+    assert!(all.contains("no answer within 2 s"), "{all}");
+    assert!(took < Duration::from_secs(15), "{took:?}: {all}");
+    let pid: u32 = all
+        .split("test adapter: grandchild pid ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no grandchild pid in: {all}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(pid), "the grandchild {pid} outlived the run: {all}");
+}

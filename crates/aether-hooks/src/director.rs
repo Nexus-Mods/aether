@@ -800,6 +800,7 @@ impl FuseClient {
             depth: PIPELINE_DEPTH,
             depth_stream: PIPELINE_DEPTH_STREAM,
             stream_bytes: STREAM_BYTES,
+            arena_len: self.arena_len,
         };
         aether_ipc::read_fragmented(&self.client(), &self.gate, &plan, fh, offset, buf)
     }

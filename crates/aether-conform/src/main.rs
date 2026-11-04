@@ -20,7 +20,7 @@ usage:
                      [--steps M] [--failures DIR]]
                      [--concurrent N [--concurrent-cases C]]
                      [--report tap|json] [--out FILE] [--timeout SECS]
-  aether-conform reference-adapter [--ring file|section]
+  aether-conform reference-adapter [--ring file|section] [--no-arena]
 
 run       starts the director's adapter (the command line) and plays every
           scenario in DIR (default contract/scenarios) against it. The report
@@ -47,7 +47,8 @@ run       starts the director's adapter (the command line) and plays every
 reference-adapter
           an adapter serving each scenario's tree from the reference
           director, over a ring file (default) or, on Windows, a named
-          section.";
+          section. --no-arena gives the ring no bulk arena, so every READ
+          is answered inline.";
 
 fn usage(msg: &str) -> ExitCode {
     eprintln!("aether-conform: {msg}\n\n{USAGE}");
@@ -62,7 +63,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "run" => cmd_run(rest),
         // `--break` is test-only (`adapters::Break`) and not in the usage.
-        "reference-adapter" => match flags(rest, &["--ring", "--break"]) {
+        "reference-adapter" => match switches(rest, &["--ring", "--break"], &["--no-arena"]) {
             Ok(f) => {
                 let get = |k: &str| {
                     f.iter()
@@ -84,7 +85,8 @@ fn main() -> ExitCode {
                         None => return usage(&format!("unknown --break {b:?}")),
                     },
                 };
-                code(reference_adapter(kind, broken))
+                let arena = get("--no-arena").is_none();
+                code(reference_adapter(kind, arena, broken))
             }
             Err(e) => usage(&e),
         },

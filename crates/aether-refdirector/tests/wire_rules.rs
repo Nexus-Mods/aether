@@ -14,6 +14,7 @@ fn inline_slot() -> ReadSlot<'static> {
     ReadSlot {
         slot: 0,
         arena: None,
+        inline_cap: usize::MAX,
     }
 }
 

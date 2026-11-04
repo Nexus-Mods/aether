@@ -976,6 +976,45 @@ fn the_reference_passes_the_limits_on_a_named_section() {
     assert_eq!(code, Some(0), "{all}");
 }
 
+/// The same on a ring with no bulk arena, where every READ is answered
+/// inline: one longer than `payload_cap - 8` is answered with that many
+/// bytes (wire.md 3.4.4), never overflowing the reply.
+#[test]
+fn the_reference_passes_the_limits_without_an_arena() {
+    let (code, limits, all) = limits_against("reference-adapter --no-arena");
+    assert!(
+        limits.1,
+        "{limits:?}
+{all}"
+    );
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// The committed scenarios, the malformed requests and the generated cases
+/// pass on a ring with no bulk arena too.
+#[test]
+fn the_committed_scenarios_pass_without_an_arena() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let failures = aether_testkit::tempdir().unwrap();
+    let (code, entries, _, all) = run_json(
+        "reference-adapter --no-arena",
+        &dir,
+        "20",
+        &[
+            "--malformed",
+            "--generate",
+            "--cases",
+            "32",
+            "--seed",
+            "5",
+            "--failures",
+            failures.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
 /// `run --limits` against `test-adapter --misbehave <how>`: the failing
 /// steps' notes, the run having failed.
 fn limits_failing(how: &str) -> Vec<String> {

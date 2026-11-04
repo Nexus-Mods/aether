@@ -287,13 +287,18 @@ fn scenario(g: Geometry) -> Scenario {
     );
     let bank = g.bank();
     // The answer to a READ of `len` at `offset`: all of it to the end of the
-    // file, or, where a bulk answer cannot hold it, at most a bank.
+    // file, or, where a bulk answer cannot hold it, at most a bank. An inline
+    // answer holds at most `payload_cap - 8` bytes, and holds that many when
+    // the file has them (3.4.4).
     let read = |offset: u64, len: u32, bulk: bool| -> Expect {
-        let end = (offset + u64::from(len)).min(g.big());
+        let may_be_bulk = g.arena > 0 && (bulk || len >= BULK_THRESHOLD);
+        let mut end = (offset + u64::from(len)).min(g.big());
+        if !may_be_bulk {
+            end = end.min(offset + u64::from(g.cap - 8));
+        }
         let whole = Expect::Reply(OwnedReply::Read(
             big[offset as usize..end as usize].to_vec(),
         ));
-        let may_be_bulk = g.arena > 0 && (bulk || len >= BULK_THRESHOLD);
         let banked = (offset + bank).min(end);
         if may_be_bulk && banked < end {
             Expect::OneOf(vec![
@@ -337,6 +342,12 @@ fn scenario(g: Geometry) -> Scenario {
         (u64::from(inline), inline, false, "the next inline chunk".into()),
         (17, inline - 1, false, "payload_cap - 9 bytes".into()),
     ]);
+    if g.arena == 0 {
+        reads.extend([
+            (0, inline + 1, false, format!("a byte over payload_cap - 8 with no arena: inline, {inline} bytes (3.4.4: n <= min(len, payload_cap - 8))")),
+            (5, 2 * g.cap, false, format!("2 x payload_cap with no arena: inline, {inline} bytes (3.4.4)")),
+        ]);
+    }
     for (offset, len, bulk, note) in reads {
         add(
             OwnedRequest::Read {

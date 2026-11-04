@@ -203,10 +203,11 @@ impl Break {
     }
 }
 
-/// Runs the reference adapter until EOF on stdin. The exit code. `broken`
-/// is the test-only rule to break ([`Break`]); `None` serves the reference
-/// as it is.
-pub fn reference_adapter(kind: RingKind, broken: Option<Break>) -> i32 {
+/// Runs the reference adapter until EOF on stdin. The exit code. `arena`
+/// false serves rings without a bulk arena (`VFS_ARENA_LEN` unset, every
+/// READ inline: wire.md 2.6, 3.4.4). `broken` is the test-only rule to break
+/// ([`Break`]); `None` serves the reference as it is.
+pub fn reference_adapter(kind: RingKind, arena: bool, broken: Option<Break>) -> i32 {
     if kind == RingKind::Section && !cfg!(windows) {
         eprintln!("reference-adapter: --ring section needs Windows");
         return 2;
@@ -217,7 +218,7 @@ pub fn reference_adapter(kind: RingKind, broken: Option<Break>) -> i32 {
             if mounted.is_some() {
                 return json!({"ok": false, "error": "a tree is already mounted"});
             }
-            match mount(Path::new(&scenario), kind, broken) {
+            match mount(Path::new(&scenario), kind, arena, broken) {
                 Ok(m) => {
                     let env = m.env.clone();
                     mounted = Some(m);
@@ -292,7 +293,12 @@ fn unique(tag: &str) -> String {
     format!("aether-conform-{tag}-{}-{n}-{t}", std::process::id())
 }
 
-fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mounted, String> {
+fn mount(
+    scenario: &Path,
+    kind: RingKind,
+    arena: bool,
+    broken: Option<Break>,
+) -> Result<Mounted, String> {
     let s = crate::scenario::load(scenario).map_err(|e| e.to_string())?;
     let staged = Arc::new(Mutex::new(Vec::new()));
     let d = Served {
@@ -307,7 +313,7 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
 
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
     let arena_offset = aether_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
-    let arena_len = SLOTS as usize * BANK;
+    let arena_len = if arena { SLOTS as usize * BANK } else { 0 };
     let ring_bytes = (arena_offset + arena_len)
         .next_multiple_of(65536)
         .max(2 * 1024 * 1024);
@@ -339,8 +345,10 @@ fn mount(scenario: &Path, kind: RingKind, broken: Option<Break>) -> Result<Mount
     };
     env.insert(aether_env::RING_BYTES.into(), ring_bytes.to_string());
     env.insert(aether_env::RING_PAYLOAD_CAP.into(), PAYLOAD_CAP.to_string());
-    env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
-    env.insert(aether_env::ARENA_LEN.into(), arena_len.to_string());
+    if arena_len > 0 {
+        env.insert(aether_env::ARENA_OFFSET.into(), arena_offset.to_string());
+        env.insert(aether_env::ARENA_LEN.into(), arena_len.to_string());
+    }
     // Where the program would see each root. Nothing on the ring names
     // them; they are here because a shim needs them (wire.md 5.3).
     let root = |id: u32| format!(r"C:\aether-conform\root{id}");
@@ -497,8 +505,9 @@ fn serve<N: Notifier + Send + Sync + 'static>(
                         | Break::OpenFlagBits),
                     ) => interposed(seg, &notifier, &mut d, b, &handles, &stop),
                     _ => RingServer::new(seg, notifier).and_then(|server| {
-                        let arena = DataArena::new(seg, arena_offset, arena_len, SLOTS as usize);
-                        aether_rpc::serve_with_arena(&server, Some(&arena), &mut d, &stop)
+                        let arena = (arena_len > 0)
+                            .then(|| DataArena::new(seg, arena_offset, arena_len, SLOTS as usize));
+                        aether_rpc::serve_with_arena(&server, arena.as_ref(), &mut d, &stop)
                     }),
                 };
                 // The reference holds the generation callback, and with it
@@ -548,8 +557,9 @@ struct SlotHandles {
 /// A serve loop for the breaks that need the slot a request came in on.
 /// Each request is taken off the ring by hand, answered by the reference
 /// through a ring of one slot held in memory ([`Inner`], so the answers are
-/// the serve loop's, and every READ is answered inline, which wire.md 3.4.4
-/// allows), and completed with `ring::server_complete` as a director
+/// the serve loop's, and every READ is answered inline, at most
+/// `payload_cap - 8` bytes, as wire.md 3.4.4 has a director with no arena
+/// answer), and completed with `ring::server_complete` as a director
 /// completes it (2.5), except for what `how` breaks.
 fn interposed(
     seg: &aether_ipc::SharedSeg,
@@ -828,6 +838,7 @@ impl Served {
         let at = ReadSlot {
             slot: 0,
             arena: None,
+            inline_cap: usize::MAX,
         };
         match self
             .reference
@@ -1077,6 +1088,7 @@ impl Director for Served {
         let at = ReadSlot {
             slot: 0,
             arena: None,
+            inline_cap: usize::MAX,
         };
         let read = self
             .reference
@@ -1191,7 +1203,7 @@ pub fn test_adapter(how: Misbehave) -> i32 {
             }
             test_adapter(Misbehave::Hang)
         }
-        Misbehave::Director(b) => reference_adapter(RingKind::File, Some(b)),
+        Misbehave::Director(b) => reference_adapter(RingKind::File, true, Some(b)),
         Misbehave::Refuse => {
             answer_requests(|req| -> Value {
                 match req {

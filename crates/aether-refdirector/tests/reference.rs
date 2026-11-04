@@ -21,6 +21,7 @@ fn inline_slot() -> ReadSlot<'static> {
     ReadSlot {
         slot: 0,
         arena: None,
+        inline_cap: usize::MAX,
     }
 }
 
@@ -310,6 +311,7 @@ fn a_bulk_read_fills_the_slots_bank_and_answers_its_offset() {
     let at = |slot| ReadSlot {
         slot,
         arena: Some(&arena),
+        inline_cap: usize::MAX,
     };
 
     // Asked for in the slot flags.
@@ -359,6 +361,45 @@ fn a_bulk_read_fills_the_slots_bank_and_answers_its_offset() {
 
     assert_eq!(d.tally.reads("big"), 4);
     assert_eq!(d.tally.bulk_reads("big"), 2);
+}
+
+/// wire.md 3.4.4: an inline reply holds `n <= min(len, payload_cap - 8)`
+/// bytes, so a READ longer than that is answered with that many, flag or no
+/// flag, when there is no arena; with one, the bulk answer is not capped.
+#[test]
+fn an_inline_read_answers_at_most_what_the_reply_holds() {
+    let bytes = pattern(5000);
+    let mut d = Reference::new().with("f", bytes.clone(), ReadStyle::Whole);
+    let fh = open_read(&mut d, "f").fh;
+    let capped = ReadSlot {
+        slot: 0,
+        arena: None,
+        inline_cap: 1000,
+    };
+    for flags in [RequestFlags::empty(), RequestFlags::READ_BULK] {
+        let r = d.read(capped, flags, fh, 10, 4000).unwrap();
+        assert_eq!(r, ReadReply::Inline(&bytes[10..1010]), "{flags:?}");
+    }
+    // Shorter than the cap: the READ's own length, or the end of the file.
+    let r = d
+        .read(capped, RequestFlags::empty(), fh, 4500, 999)
+        .unwrap();
+    assert_eq!(r, ReadReply::Inline(&bytes[4500..]));
+
+    let owned = arena_seg();
+    let arena = DataArena::new(owned.seg(), 4096, 2 * 256 * 1024, 2);
+    let bulk = ReadSlot {
+        arena: Some(&arena),
+        ..capped
+    };
+    let r = d.read(bulk, RequestFlags::READ_BULK, fh, 0, 4000).unwrap();
+    assert_eq!(
+        r,
+        ReadReply::Bulk {
+            len: 4000,
+            arena_offset: 4096
+        }
+    );
 }
 
 #[test]

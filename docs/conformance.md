@@ -339,6 +339,7 @@ comparison rule applies), then the checks a step cannot say.
 |---|---|---|
 | READs of the shim's bulk chunk `clamp(VFS_ARENA_LEN / slot_count, 256 KiB, 1 MiB)` with `FLAG_READ_BULK`, at the start, inside, at the last whole chunk and at the end; remainders of 64 KiB and of a chunk less a byte; the read cache's run of 16 blocks of 64 KiB; 65 535 bytes inline; `payload_cap - 8` and `payload_cap - 9` without the flag | the bytes, all of them to the end of the file | 2.6, 3.4.4: `n < len` means end of file, so a READ comes back whole when its form can hold it; a director with an arena answers a flagged READ over `payload_cap - 8` in bulk |
 | A READ of the chunk plus one byte | all of it, or at most a bank | 3.4.4: a bulk reply's `n <= min(len, bank_size)` |
+| With no arena, READs of `payload_cap - 7` bytes and of `2 * payload_cap` | `payload_cap - 8` bytes, inline | 3.4.4: an inline reply's `n <= min(len, payload_cap - 8)`, whole whenever its form can hold it |
 | Two WRITEs of `payload_cap - 24` bytes (requests of exactly `payload_cap`), then GETATTR and READs back | `written` = the length; the size and bytes of both | 3.4.5 |
 | READDIR of a listing of exactly `payload_cap` bytes | the whole listing | 3.4.2 |
 | READDIR of a listing a byte longer | status `i32::MIN`, payload length 0 | 3.4.2, 2.5 step 3 |
@@ -643,18 +644,22 @@ error, a scenario that does not load, an adapter error, or a generator error
 CI runs the committed scenarios, `--malformed`, `--limits`, `--generate --cases 1024`
 and `--concurrent 4 --concurrent-cases 256` against the reference, over a
 file ring on Linux and Windows and over a section on Windows, with the
-workflow run's id as the seed. The concurrent rounds take about 15 s per
+workflow run's id as the seed; and the committed scenarios, `--malformed`,
+`--limits` and `--generate --cases 256` over a ring file with no arena
+(`--no-arena`), on Windows. The concurrent rounds take about 15 s per
 ring with a debug build on a 16-thread Windows machine. Measured on a
 16-thread Windows machine with a debug build, 1024 cases take about 19 s over
 a file ring (each mount creates a 16 MiB ring file) and 8 s over a section;
 pinned to two cores, 512 take 8.4 s and 3.5 s. At two to three times slower
 on CI's 2-vCPU runners that is about one minute for the Windows step.
 
-`aether-conform reference-adapter [--ring file|section]` is an adapter for
-the reference director (`aether_refdirector::Reference`, built with
-`Reference::from_tree`), served with the same loop a Rust director runs
+`aether-conform reference-adapter [--ring file|section] [--no-arena]` is an
+adapter for the reference director (`aether_refdirector::Reference`, built
+with `Reference::from_tree`), served with the same loop a Rust director runs
 (`aether_rpc::serve_with_arena`) on four threads, each with its own handle
-on the reference (`Reference::share`), with `worker_hint` 4. It is what a run is
+on the reference (`Reference::share`), with `worker_hint` 4. Its ring has a
+bulk arena of 1 MiB per slot, or, with `--no-arena`, none (`VFS_ARENA_LEN`
+unset, every READ answered inline). It is what a run is
 checked against in this repository's tests, and an example of what an
 adapter does. Its hidden `--break <rule>` switch, for this repository's tests
 only, makes it break one rule on purpose (`aether_conform::adapters::Break`),

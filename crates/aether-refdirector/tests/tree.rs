@@ -21,6 +21,7 @@ fn read_all(d: &mut Reference, root: u32, path: &str) -> Vec<u8> {
     let slot = ReadSlot {
         slot: 0,
         arena: None,
+        inline_cap: usize::MAX,
     };
     match d
         .read(slot, RequestFlags::empty(), o.fh, 0, 4096)

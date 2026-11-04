@@ -661,7 +661,12 @@ directors). The shim treats `ST_NOT_FOUND` the same as `found = 0`; any other
 non-OK status fails the hooked call with `STATUS_UNSUCCESSFUL`
 (`crates/aether-hooks/src/hook/file_attr.rs`).
 
-The `size` of a directory is 0, as in a READDIR entry (3.4.2).
+The `size` of a directory is 0, as in a READDIR entry (3.4.2). A file's
+`size` is its length now, WRITEs and SETATTRs through handles still open
+included (both directors: Cairn's write layer reports the live length,
+`provider/layer.clj`, `stat-of`; its disk provider reads the file's
+attributes, `provider/disk.clj`, `attrs`). The same holds for READDIR entries
+and OPEN replies.
 
 #### 3.4.2 READDIR (2)
 
@@ -803,7 +808,10 @@ Request (`Request::Write`):
 
 A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`. The
 shim sends at most `VFS_RING_PAYLOAD_CAP - 24` bytes per WRITE and repeats
-until done or a short write.
+until done or a short write. A director writes every byte of a WRITE or
+fails it: on `ST_OK`, `written` is `len` (both directors: Cairn's write layer
+and disk provider loop to the end, `provider/layer.clj` and
+`provider/disk.clj`, `write-from`).
 
 Reply (`Reply::Write`), 8 bytes: `written:u32 | zero:u32`. The shim reads
 only the first 4 bytes.
@@ -840,7 +848,8 @@ directory moves with everything under it. A file or an empty directory at
 `ST_IO_ERROR`, and nothing moves. The root itself at either end, or a `to`
 inside `from`, is `ST_BAD_REQUEST`. A missing `from` is `ST_NOT_FOUND`; either
 end outside every writable provider `ST_READ_ONLY`. (Cairn's writable layer,
-`provider/layer.clj`, `rename!`; the reference director.)
+`provider/layer.clj`, `rename!`; the reference director.) A file with open
+handles is renamed like any other.
 
 #### 3.4.8 DELETE (9)
 
@@ -852,7 +861,12 @@ read-only layer beneath it, see "Names only in a read-only lower" after
 with anything under it is `ST_IO_ERROR`, and nothing is deleted. The root itself
 is `ST_BAD_REQUEST`. A missing path is `ST_NOT_FOUND`; a path outside every
 writable provider `ST_READ_ONLY`. (Cairn's writable layer,
-`provider/layer.clj`, `delete!`; the reference director.)
+`provider/layer.clj`, `delete!`; the reference director.) A file with open
+handles is deleted like any other: Cairn's write layer drops its data at the
+last close (`release!`), and its disk provider's files are opened with
+`FILE_SHARE_DELETE` (Java NIO's default share mode), so the delete or rename
+of an open file succeeds there too. What a handle reads after its file was
+deleted or renamed is the director's.
 
 #### 3.4.9 MKDIR (10)
 
@@ -949,7 +963,9 @@ status only.
 Request: path request (the image the program is starting). Reply: the real,
 on-disk Windows path to start it from, UTF-8, the whole payload. The director
 puts the program on real disk first (a child's image is opened by the kernel
-before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing.
+before any hook runs). `ST_NOT_SUPPORTED` when the director stages nothing;
+a director with a stager answers `ST_NOT_FOUND` for a file it does not stage
+(Cairn, `ring.clj`, `op-stage-exec`).
 
 How the shim uses it (`crates/aether-hooks/src/hook/child_start.rs`): for each
 candidate image path that routes under a root it first sends GETATTR, and

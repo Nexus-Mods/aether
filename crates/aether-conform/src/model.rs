@@ -39,7 +39,7 @@ use aether_casefold::fold;
 use aether_ipc::{ring, DataArena, Geom, OwnedSeg, RingServer, SpinNotifier};
 use aether_protocol::{OpenFlags, Reply, RequestFlags, RootId, Status};
 use aether_refdirector::tree::{fill, Contents, File, RegKey, RegValue, Registry, Root, Tree};
-use aether_refdirector::Reference;
+use aether_refdirector::{Reference, BULK_THRESHOLD};
 use aether_rpc::Scratch;
 use proptest::prelude::*;
 
@@ -624,8 +624,8 @@ enum Want {
     /// STORED_NAMES of a name the director does not have: the components as
     /// sent (SHOULD) or `ST_NOT_FOUND` (MAY), 3.4.12.
     NamesOrNotFound,
-    /// STAGE_EXEC: `ST_NOT_SUPPORTED`, or a path that is not compared
-    /// (3.4.14).
+    /// STAGE_EXEC: `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` from a stager that
+    /// does not stage the file, or a path that is not compared (3.4.14).
     StageExec,
     /// An unknown root on RENAME or RENAME_X: `ST_NOT_FOUND` or
     /// `ST_BAD_REQUEST` (3.5.1's table).
@@ -715,10 +715,43 @@ struct Target {
     parent_dir: bool,
 }
 
+/// What the director's ring holds, which bounds the requests sent: inline
+/// READ data is at most `payload_cap - 8` bytes (wire.md 3.4.4) and WRITE
+/// data at most `payload_cap - 24` (3.4.5); without an arena every READ is
+/// inline (2.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The longest READ answered inline: `payload_cap - 8`.
+    pub inline_read: u32,
+    /// The most data in a WRITE: `payload_cap - 24`.
+    pub write: usize,
+    /// Whether the ring has a bulk arena (`VFS_ARENA_LEN` above 0).
+    pub arena: bool,
+}
+
+impl Limits {
+    /// The limits of a ring with this payload cap and arena length.
+    pub fn of(payload_cap: u32, arena_len: usize) -> Limits {
+        Limits {
+            inline_read: payload_cap.saturating_sub(8),
+            write: payload_cap.saturating_sub(24) as usize,
+            arena: arena_len > 0,
+        }
+    }
+}
+
+impl Default for Limits {
+    /// The reference adapter's ring: the default payload cap and an arena.
+    fn default() -> Limits {
+        Limits::of(aether_ipc::DEFAULT_PAYLOAD_CAP, 1)
+    }
+}
+
 /// The state the ops are read against: the oracle and what the generator
 /// knows of it.
 struct Gen {
     oracle: Oracle,
+    limits: Limits,
     roots: Vec<RootInfo>,
     registry: bool,
     /// Every entry of every root, from the oracle's listings, with the root
@@ -750,28 +783,20 @@ fn pick<T>(v: &[T], n: u32) -> Option<&T> {
 /// answer. An `Err` when the reference answers a request otherwise than
 /// wire.md says (the generator names the section).
 pub fn build(input: &CaseInput, name: &str, description: &str) -> Result<Scenario, String> {
+    build_with(input, name, description, Limits::default())
+}
+
+/// [`build`] for a director whose ring has `limits`.
+pub fn build_with(
+    input: &CaseInput,
+    name: &str,
+    description: &str,
+    limits: Limits,
+) -> Result<Scenario, String> {
     let (tree, roots) = build_tree(&input.tree);
     tree.validate()
         .map_err(|e| format!("generator: an invalid tree: {e}"))?;
-    let oracle = Oracle::new(&tree)?;
-    let keys = tree
-        .registry
-        .as_ref()
-        .map(|r| r.keys.iter().map(|k| k.path.clone()).collect())
-        .unwrap_or_default();
-    let mut g = Gen {
-        oracle,
-        roots,
-        registry: tree.registry.is_some(),
-        nodes: BTreeMap::new(),
-        known: BTreeMap::new(),
-        handles: BTreeMap::new(),
-        closed: Vec::new(),
-        versions: Vec::new(),
-        keys,
-        steps: Vec::new(),
-    };
-    g.refresh();
+    let mut g = Gen::new(&tree, roots, limits)?;
     for op in &input.ops {
         if let Some(plan) = g.plan(op) {
             g.step(plan)?;
@@ -786,6 +811,30 @@ pub fn build(input: &CaseInput, name: &str, description: &str) -> Result<Scenari
 }
 
 impl Gen {
+    /// The generator for `tree`, mounted in a fresh oracle.
+    fn new(tree: &Tree, roots: Vec<RootInfo>, limits: Limits) -> Result<Gen, String> {
+        let keys = tree
+            .registry
+            .as_ref()
+            .map(|r| r.keys.iter().map(|k| k.path.clone()).collect())
+            .unwrap_or_default();
+        let mut g = Gen {
+            oracle: Oracle::new(tree)?,
+            limits,
+            roots,
+            registry: tree.registry.is_some(),
+            nodes: BTreeMap::new(),
+            known: BTreeMap::new(),
+            handles: BTreeMap::new(),
+            closed: Vec::new(),
+            versions: Vec::new(),
+            keys,
+            steps: Vec::new(),
+        };
+        g.refresh();
+        Ok(g)
+    }
+
     // --- What is there.
 
     fn info(&self, root: u32) -> Option<&RootInfo> {
@@ -1359,6 +1408,13 @@ impl Gen {
             _ => u64::from(n % 300),
         };
         len = len.min(70_000);
+        // A READ the director answers inline fits its slot (3.4.4); without
+        // an arena every READ is inline (2.6).
+        let inline =
+            !self.limits.arena || (slot_flags.is_empty() && len < u64::from(BULK_THRESHOLD));
+        if inline {
+            len = len.min(u64::from(self.limits.inline_read));
+        }
         if known < size {
             // Only the bytes wire.md fixes.
             offset = offset.min(known);
@@ -1411,7 +1467,8 @@ impl Gen {
             5 => 17 + c % 284,
             6 => 4096,
             _ => 20_000,
-        } as usize;
+        }
+        .min(self.limits.write as u32) as usize;
         let data = fill(n, u64::from(d));
         Some(Plan {
             req: OwnedRequest::Write {
@@ -1694,9 +1751,12 @@ impl Gen {
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
                 self.missing_held(to_root, b >> 4, d)?,
             ),
+            // Onto an existing file the stored spelling is sent: Cairn
+            // opens the destination for writing (`copy-across!`) and keeps
+            // its name, and 3.4.13 does not say whose spelling wins.
             1 => (
                 self.existing(from_root, a >> 8, c, |n| !n.dir && held_from(n))?,
-                self.existing_to(to_root, b >> 4, d, |n| {
+                self.existing(to_root, b >> 4, 0, |n| {
                     !n.dir && self.held(to_root, &n.folded)
                 })?,
             ),
@@ -2090,12 +2150,14 @@ impl Gen {
             (Want::NamesOrNotFound, Ok(r @ OwnedReply::StoredNames(_))) => {
                 Expect::OneOf(vec![reply(r), Expect::Status(Status::NotFound)])
             }
-            (Want::StageExec, Err(Status::NotSupported) | Ok(OwnedReply::StageExec(_))) => {
-                Expect::OneOf(vec![
-                    Expect::Status(Status::NotSupported),
-                    Expect::Reply(OwnedReply::StageExec(String::new())),
-                ])
-            }
+            (
+                Want::StageExec,
+                Err(Status::NotSupported | Status::NotFound) | Ok(OwnedReply::StageExec(_)),
+            ) => Expect::OneOf(vec![
+                Expect::Status(Status::NotSupported),
+                Expect::Status(Status::NotFound),
+                Expect::Reply(OwnedReply::StageExec(String::new())),
+            ]),
             (Want::NotFoundOrBadRequest, Err(Status::NotFound | Status::BadRequest)) => {
                 Expect::OneOf(vec![
                     Expect::Status(Status::NotFound),
@@ -2313,6 +2375,119 @@ mod tests {
             let (tree, _) = build_tree(&spec);
             tree.validate().unwrap();
             Reference::from_tree(&tree).unwrap();
+        }
+    }
+
+    /// Two roots writable as a whole, each with files spelled oddly.
+    fn two_roots() -> TreeSpec {
+        let file = |name: u8, case: u8| EntrySpec {
+            parent: 0,
+            name,
+            case,
+            file: Some(FileSpec::Text(2)),
+        };
+        TreeSpec {
+            whole: true,
+            roots: vec![
+                RootSpec {
+                    writable: None,
+                    entries: vec![file(1, 0b1010), file(5, 0b0101)],
+                },
+                RootSpec {
+                    writable: None,
+                    entries: vec![file(1, 0b0110), file(11, 0b1001)],
+                },
+            ],
+            registry: None,
+        }
+    }
+
+    /// Cairn's RENAME_X opens an existing destination write|create|trunc and
+    /// keeps its stored name, and wire.md 3.4.13 does not say whose spelling
+    /// wins, so onto an existing file the stored spelling is sent.
+    #[test]
+    fn a_rename_x_onto_a_file_sends_its_stored_spelling() {
+        let (tree, roots) = build_tree(&two_roots());
+        let g = Gen::new(&tree, roots, Limits::default()).unwrap();
+        let mut seen = 0;
+        for a in 0..64u32 {
+            for b in (1..200u32).step_by(5) {
+                for d in [0, 1, 0xFF, 0x1234_5678] {
+                    let Some(p) = g.plan_rename_x(a, b, 0x5555, d) else {
+                        continue;
+                    };
+                    if p.note != "replacing a file there" {
+                        continue;
+                    }
+                    let OwnedRequest::RenameX { to_root, to, .. } = &p.req else {
+                        panic!("{:?}", p.req)
+                    };
+                    let stored = g.node(to_root.0, &fold(to)).unwrap().path.clone();
+                    assert_eq!(to, &stored);
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 0, "no RENAME_X onto a file was planned");
+    }
+
+    /// A director with a stager answers ST_NOT_FOUND for a file it does not
+    /// stage (Cairn, wire.md 3.4.14).
+    #[test]
+    fn stage_exec_allows_not_found() {
+        let mut checked = 0;
+        for s in crate::generate::cases(5, 64, 32).unwrap() {
+            for st in &s.steps {
+                if let OwnedRequest::StageExec { .. } = st.request {
+                    let Expect::OneOf(alts) = &st.expect else {
+                        panic!("{:?}", st.expect)
+                    };
+                    assert!(alts.contains(&Expect::Status(Status::NotFound)), "{alts:?}");
+                    assert!(alts.contains(&Expect::Status(Status::NotSupported)));
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    /// Inline READs and WRITEs fit the director's slot: `payload_cap - 8`
+    /// bytes of read data, `payload_cap - 24` of write data (wire.md 3.4.4,
+    /// 3.4.5).
+    #[test]
+    fn reads_and_writes_fit_the_limits() {
+        use proptest::strategy::ValueTree;
+        for arena in [false, true] {
+            let limits = Limits {
+                inline_read: 100,
+                write: 50,
+                arena,
+            };
+            let mut runner = proptest::test_runner::TestRunner::deterministic();
+            let (mut reads, mut writes) = (0, 0);
+            for i in 0..200 {
+                let input = case_strategy(32).new_tree(&mut runner).unwrap().current();
+                let s = build_with(&input, &format!("c{i}"), "", limits).unwrap();
+                for st in &s.steps {
+                    match &st.request {
+                        OwnedRequest::Read {
+                            slot_flags, len, ..
+                        } => {
+                            let inline = !arena || (slot_flags.is_empty() && *len < 65_536);
+                            if inline {
+                                assert!(*len <= 100, "{:?}", st.request);
+                            }
+                            reads += 1;
+                        }
+                        OwnedRequest::Write { data, .. } => {
+                            assert!(data.len() <= 50, "{}", data.len());
+                            writes += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(reads > 0 && writes > 0);
         }
     }
 }

@@ -84,12 +84,7 @@ impl Attached {
         let ring_bytes: usize = get(aether_env::RING_BYTES)
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_RING_BYTES);
-        let payload_cap: u32 = get(aether_env::RING_PAYLOAD_CAP)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_PAYLOAD_CAP);
-        let arena_len: usize = get(aether_env::ARENA_LEN)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let (payload_cap, arena_len) = payload_cap_and_arena(env);
         shim_roots(env)?;
         let path = get(aether_env::RING_PATH).filter(|p| !p.is_empty());
         let section = get(aether_env::RING_SECTION);
@@ -225,6 +220,20 @@ fn open_section(name: &str, _ring_bytes: usize) -> Result<(Backing, String), Str
         aether_env::RING_SECTION,
         aether_env::RING_PATH
     ))
+}
+
+/// `VFS_RING_PAYLOAD_CAP` and `VFS_ARENA_LEN` as the shim reads them: the
+/// shim's defaults (1 048 576 and 0) when they do not parse.
+pub fn payload_cap_and_arena(env: &Env) -> (u32, usize) {
+    let get = |k: &str| env.get(k).and_then(|s| s.parse().ok());
+    (
+        get(aether_env::RING_PAYLOAD_CAP)
+            .and_then(|n: u64| u32::try_from(n).ok())
+            .unwrap_or(DEFAULT_PAYLOAD_CAP),
+        get(aether_env::ARENA_LEN)
+            .and_then(|n: u64| usize::try_from(n).ok())
+            .unwrap_or(0),
+    )
 }
 
 /// The director's wake event, if `VFS_SERVER_EV` names one that opens with

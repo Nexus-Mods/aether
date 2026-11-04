@@ -36,10 +36,20 @@ use crate::scenario::{to_json_string, Expect, OwnedDirEntry, OwnedReply, OwnedRe
 /// The registry key the tree has.
 const KEY: &str = r"\Registry\Machine\Software\Conform";
 
-/// The tree the malformed requests are sent to: root 0 with `data/a.txt`
-/// (`abc`) and the writable entry `saves` holding `saves/s.txt` (`s`), root
-/// 1 with `r.txt`, and a registry layer with [`KEY`] and its value `v`.
-pub fn tree() -> Tree {
+/// The tree the file cases are sent to: root 0 with `data/a.txt` (`abc`)
+/// and the writable entry `saves` holding `saves/s.txt` (`s`), and root 1
+/// with `r.txt`. No registry layer, which a director need not have (wire.md
+/// 4), so a director without one is tested on the file cases too.
+pub fn file_tree() -> Tree {
+    Tree {
+        registry: None,
+        ..registry_tree()
+    }
+}
+
+/// The tree the registry cases are sent to: [`file_tree`]'s roots and a
+/// registry layer with [`KEY`] and its value `v`.
+pub fn registry_tree() -> Tree {
     let file = |path: &str, text: &str| File {
         path: path.into(),
         contents: Contents::Text(text.into()),
@@ -153,9 +163,157 @@ fn put_str(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-/// Every case, for a director whose handle `rfh` is `data/a.txt` open for
-/// reading and `wfh` is `saves/s.txt` open for writing.
-fn cases(rfh: u64, wfh: u64) -> Vec<Case> {
+/// Collects cases.
+fn adder(v: &mut Vec<Case>) -> impl FnMut(String, u32, u32, Vec<u8>, Expect) + '_ {
+    |what, opcode, flags, body, expect| {
+        v.push(Case {
+            what,
+            opcode,
+            flags,
+            body: Body::Bytes(body),
+            expect,
+        })
+    }
+}
+
+/// The registry cases, for [`registry_tree`].
+fn registry_cases() -> Vec<Case> {
+    let mut v = Vec::new();
+    let mut add = adder(&mut v);
+    // 3.5.1: the Rust decoders refuse a path that is not UTF-8; Cairn's
+    // registry reader decodes it with replacement characters and answers the
+    // path that gives (`registry.clj`, `get-str`).
+    let mut p = Vec::new();
+    put_str(&mut p, b"\\Registry\\Machine\\\xff");
+    let substituted = OwnedRequest::RegLookup {
+        path: "\\Registry\\Machine\\\u{FFFD}".into(),
+    };
+    let as_substituted =
+        match crate::model::Oracle::new(&registry_tree()).map(|mut o| o.ask(&substituted)) {
+            Ok(Ok(r)) => Expect::Reply(r),
+            Ok(Err(st)) => Expect::Status(st),
+            Err(e) => panic!("the registry tree mounts: {e}"),
+        };
+    add(
+        "wire.md 3.5.1: REG_LOOKUP of a key path that is not UTF-8: ST_BAD_REQUEST, or the \
+         lookup of the path with replacement characters"
+            .into(),
+        Opcode::RegLookup as u32,
+        0,
+        p,
+        either(bad(), as_substituted),
+    );
+
+    // 4.1: registry booleans are exactly 0 or 1.
+    let create = encode(&OwnedRequest::RegCreateKey {
+        path: format!(r"{KEY}\New"),
+        volatile: false,
+    });
+    for b in [2u8, 0xFF] {
+        let mut p = create.clone();
+        *p.last_mut().expect("a volatile byte") = b;
+        add(
+            format!("wire.md 4.1: REG_CREATE_KEY with volatile = {b}: ST_BAD_REQUEST"),
+            Opcode::RegCreateKey as u32,
+            0,
+            p,
+            bad(),
+        );
+    }
+    let changed = encode(&OwnedRequest::RegChanged {
+        path: KEY.into(),
+        subtree: false,
+        since: 0,
+    });
+    {
+        let mut p = changed.clone();
+        let at = p.len() - 9;
+        p[at] = 2;
+        add(
+            "wire.md 4.1: REG_CHANGED with subtree = 2: ST_BAD_REQUEST".into(),
+            Opcode::RegChanged as u32,
+            0,
+            p,
+            bad(),
+        );
+    }
+
+    // 4.1: a registry decoder consumes its input exactly, so trailing bytes
+    // are ST_BAD_REQUEST; 3.2, 3.5: a truncated one does not decode either.
+    let registry = [
+        OwnedRequest::RegLookup { path: KEY.into() },
+        OwnedRequest::RegKey { path: KEY.into() },
+        OwnedRequest::RegSetValue {
+            path: KEY.into(),
+            name: "w".into(),
+            ty: 4,
+            data: vec![1, 0, 0, 0],
+        },
+        OwnedRequest::RegDeleteValue {
+            path: KEY.into(),
+            name: "v".into(),
+        },
+        OwnedRequest::RegCreateKey {
+            path: format!(r"{KEY}\Made"),
+            volatile: false,
+        },
+        OwnedRequest::RegDeleteKey {
+            path: format!(r"{KEY}\Nope"),
+        },
+        OwnedRequest::RegRenameKey {
+            path: format!(r"{KEY}\Nope"),
+            new_leaf: "Other".into(),
+        },
+        OwnedRequest::RegChanged {
+            path: KEY.into(),
+            subtree: true,
+            since: 0,
+        },
+    ];
+    for r in &registry {
+        let op = r.opcode();
+        let full = encode(r);
+        let mut long = full.clone();
+        long.push(0);
+        add(
+            format!(
+                "wire.md 4.1: {} with a trailing byte: ST_BAD_REQUEST",
+                op.name()
+            ),
+            op as u32,
+            0,
+            long,
+            bad(),
+        );
+        add(
+            format!(
+                "wire.md 3.2, 3.5: {} cut by one byte: ST_BAD_REQUEST",
+                op.name()
+            ),
+            op as u32,
+            0,
+            full[..full.len() - 1].to_vec(),
+            bad(),
+        );
+    }
+    let mut p = Vec::new();
+    put_u32(&mut p, 100);
+    p.extend_from_slice(b"\\Regi");
+    add(
+        "wire.md 3.2, 3.5: REG_LOOKUP whose str len (100) runs past the payload: ST_BAD_REQUEST"
+            .into(),
+        Opcode::RegLookup as u32,
+        0,
+        p,
+        bad(),
+    );
+    drop(add);
+    v
+}
+
+/// The file cases, for a director whose handle `rfh` is `data/a.txt` open
+/// for reading and `wfh` is `saves/s.txt` open for writing ([`file_tree`]).
+fn file_cases(rfh: u64, wfh: u64) -> Vec<Case> {
     let mut v = Vec::new();
     let mut add = |what: String, op: u32, flags: u32, body: Vec<u8>, expect: Expect| {
         v.push(Case {
@@ -476,122 +634,6 @@ fn cases(rfh: u64, wfh: u64) -> Vec<Case> {
         p,
         either(bad(), Expect::Status(Status::NotFound)),
     );
-    let mut p = Vec::new();
-    put_str(&mut p, b"\\Registry\\Machine\\\xff");
-    add(
-        "wire.md 3.2, 4.1: REG_LOOKUP of a key path that is not UTF-8 (registry decoders \
-         reject bad UTF-8): ST_BAD_REQUEST"
-            .into(),
-        Opcode::RegLookup as u32,
-        0,
-        p,
-        bad(),
-    );
-
-    // 4.1: registry booleans are exactly 0 or 1.
-    let create = encode(&OwnedRequest::RegCreateKey {
-        path: format!(r"{KEY}\New"),
-        volatile: false,
-    });
-    for b in [2u8, 0xFF] {
-        let mut p = create.clone();
-        *p.last_mut().expect("a volatile byte") = b;
-        add(
-            format!("wire.md 4.1: REG_CREATE_KEY with volatile = {b}: ST_BAD_REQUEST"),
-            Opcode::RegCreateKey as u32,
-            0,
-            p,
-            bad(),
-        );
-    }
-    let changed = encode(&OwnedRequest::RegChanged {
-        path: KEY.into(),
-        subtree: false,
-        since: 0,
-    });
-    {
-        let mut p = changed.clone();
-        let at = p.len() - 9;
-        p[at] = 2;
-        add(
-            "wire.md 4.1: REG_CHANGED with subtree = 2: ST_BAD_REQUEST".into(),
-            Opcode::RegChanged as u32,
-            0,
-            p,
-            bad(),
-        );
-    }
-
-    // 4.1: a registry decoder consumes its input exactly, so trailing bytes
-    // are ST_BAD_REQUEST; 3.2, 3.5: a truncated one does not decode either.
-    let registry = [
-        OwnedRequest::RegLookup { path: KEY.into() },
-        OwnedRequest::RegKey { path: KEY.into() },
-        OwnedRequest::RegSetValue {
-            path: KEY.into(),
-            name: "w".into(),
-            ty: 4,
-            data: vec![1, 0, 0, 0],
-        },
-        OwnedRequest::RegDeleteValue {
-            path: KEY.into(),
-            name: "v".into(),
-        },
-        OwnedRequest::RegCreateKey {
-            path: format!(r"{KEY}\Made"),
-            volatile: false,
-        },
-        OwnedRequest::RegDeleteKey {
-            path: format!(r"{KEY}\Nope"),
-        },
-        OwnedRequest::RegRenameKey {
-            path: format!(r"{KEY}\Nope"),
-            new_leaf: "Other".into(),
-        },
-        OwnedRequest::RegChanged {
-            path: KEY.into(),
-            subtree: true,
-            since: 0,
-        },
-    ];
-    for r in &registry {
-        let op = r.opcode();
-        let full = encode(r);
-        let mut long = full.clone();
-        long.push(0);
-        add(
-            format!(
-                "wire.md 4.1: {} with a trailing byte: ST_BAD_REQUEST",
-                op.name()
-            ),
-            op as u32,
-            0,
-            long,
-            bad(),
-        );
-        add(
-            format!(
-                "wire.md 3.2, 3.5: {} cut by one byte: ST_BAD_REQUEST",
-                op.name()
-            ),
-            op as u32,
-            0,
-            full[..full.len() - 1].to_vec(),
-            bad(),
-        );
-    }
-    let mut p = Vec::new();
-    put_u32(&mut p, 100);
-    p.extend_from_slice(b"\\Regi");
-    add(
-        "wire.md 3.2, 3.5: REG_LOOKUP whose str len (100) runs past the payload: ST_BAD_REQUEST"
-            .into(),
-        Opcode::RegLookup as u32,
-        0,
-        p,
-        bad(),
-    );
-
     // 2.5: a header claiming more than the slot holds.
     v.push(Case {
         what: "wire.md 2.5: GETATTR whose header claims payload_cap + 1 bytes: ST_BAD_REQUEST, \
@@ -744,10 +786,49 @@ fn read_answer(c: &Case, a: &Answer) -> Result<Result<OwnedReply, Status>, Strin
     }
 }
 
-/// Mounts [`tree`], sends every case, and unmounts. The result is one
-/// scenario named `malformed`, a step per case. `Err` only for an adapter
-/// error.
+/// Which tree a mount has, and so which cases it is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mount {
+    Files,
+    Registry,
+}
+
+/// Mounts [`file_tree`] and sends the file cases, then [`registry_tree`] and
+/// the registry cases. The result is one scenario named `malformed`, a step
+/// per case, numbered across both. `Err` only for an adapter error.
 pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, AdapterError> {
+    let mut result = ScenarioResult {
+        name: "malformed".into(),
+        file: PathBuf::from("(built in: aether_conform::malformed)"),
+        passed: false,
+        steps: Vec::new(),
+        error: None,
+    };
+    for mount in [Mount::Files, Mount::Registry] {
+        if let Some(e) = one_mount(adapter, timeout, mount, &mut result.steps)? {
+            let what = match mount {
+                Mount::Files => "the file cases",
+                Mount::Registry => "the registry cases",
+            };
+            let e = format!("{what}: {e}");
+            result.error = Some(match result.error.take() {
+                Some(before) => format!("{before}; {e}"),
+                None => e,
+            });
+        }
+    }
+    result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
+    Ok(result)
+}
+
+/// Mounts `mount`'s tree, sends its cases onto `out`, and unmounts. What
+/// stopped it outside its cases, if anything.
+fn one_mount(
+    adapter: &mut Adapter,
+    timeout: Duration,
+    mount: Mount,
+    out: &mut Vec<StepResult>,
+) -> Result<Option<String>, AdapterError> {
     let file = std::env::temp_dir().join(format!(
         "aether-conform-malformed-{}-{}.json",
         std::process::id(),
@@ -756,44 +837,36 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let mut result = ScenarioResult {
-        name: "malformed".into(),
-        file: PathBuf::from("(built in: aether_conform::malformed)"),
-        passed: false,
-        steps: Vec::new(),
-        error: None,
-    };
     let s = Scenario {
         name: "malformed".into(),
         description: "The tree malformed requests are sent to".into(),
-        tree: tree(),
+        tree: match mount {
+            Mount::Files => file_tree(),
+            Mount::Registry => registry_tree(),
+        },
         steps: Vec::new(),
     };
     if let Err(e) = std::fs::write(&file, to_json_string(&s)) {
-        result.error = Some(format!("cannot write {}: {e}", file.display()));
-        return Ok(result);
+        return Ok(Some(format!("cannot write {}: {e}", file.display())));
     }
     let mounted = adapter.mount(&file);
     let _ = std::fs::remove_file(&file);
     let env = match mounted? {
         Ok(env) => env,
-        Err(why) => {
-            result.error = Some(format!("mount refused: {why}"));
-            return Ok(result);
-        }
+        Err(why) => return Ok(Some(format!("mount refused: {why}"))),
     };
-    match Attached::from_env(&env, timeout) {
+    let error = match Attached::from_env(&env, timeout) {
         Ok(ring) => {
-            if let Err(e) = play(&ring, &mut result.steps) {
-                result.error = Some(format!("{}: {e}", ring.describe()));
-            }
+            let e = play(&ring, mount, out)
+                .err()
+                .map(|e| format!("{}: {e}", ring.describe()));
             drop(ring);
+            e
         }
-        Err(e) => result.error = Some(format!("attach failed: {e}")),
-    }
+        Err(e) => Some(format!("attach failed: {e}")),
+    };
     adapter.unmount()?;
-    result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
-    Ok(result)
+    Ok(error)
 }
 
 /// A handle the director opens for `path` with `flags`.
@@ -814,15 +887,23 @@ fn open(ring: &Attached, flags: OpenFlags, path: &str) -> Result<u64, String> {
     }
 }
 
-fn play(ring: &Attached, out: &mut Vec<StepResult>) -> Result<(), String> {
+fn play(ring: &Attached, mount: Mount, out: &mut Vec<StepResult>) -> Result<(), String> {
     let client = ring.client();
     let mut scratch = Vec::new();
     let heartbeat =
         |scratch: &mut Vec<u8>| client.call(&Request::Heartbeat {}, scratch).map(|_| ());
     heartbeat(&mut scratch).map_err(|e| format!("the HEARTBEAT sent on attach failed: {e}"))?;
-    let rfh = open(ring, OpenFlags::READ, "data/a.txt")?;
-    let wfh = open(ring, OpenFlags::WRITE, "saves/s.txt")?;
-    for (i, c) in cases(rfh, wfh).iter().enumerate() {
+    let (cases, handles) = match mount {
+        Mount::Files => {
+            let rfh = open(ring, OpenFlags::READ, "data/a.txt")?;
+            let wfh = open(ring, OpenFlags::WRITE, "saves/s.txt")?;
+            (file_cases(rfh, wfh), vec![rfh, wfh])
+        }
+        Mount::Registry => (registry_cases(), Vec::new()),
+    };
+    let first = out.len();
+    for (i, c) in cases.iter().enumerate() {
+        let i = first + i;
         let request = format!(
             "{} [opcode {}, flags {:#x}, payload {}]",
             c.what,
@@ -910,7 +991,7 @@ fn play(ring: &Attached, out: &mut Vec<StepResult>) -> Result<(), String> {
         passed: note.is_none(),
         note,
     });
-    for fh in [rfh, wfh] {
+    for fh in handles {
         let _ = client.call(&Request::Close { fh }, &mut scratch);
     }
     Ok(())
@@ -920,20 +1001,62 @@ fn play(ring: &Attached, out: &mut Vec<StepResult>) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn is_registry(op: u32) -> bool {
+        (Opcode::RegLookup as u32..=Opcode::RegChanged as u32).contains(&op)
+    }
+
     #[test]
-    fn every_case_cites_a_section_and_the_tree_loads() {
-        let cs = cases(1, 2);
+    fn every_case_cites_a_section_and_the_trees_load() {
+        let cs: Vec<Case> = file_cases(1, 2)
+            .into_iter()
+            .chain(registry_cases())
+            .collect();
         assert!(cs.len() > 100, "{}", cs.len());
         for c in &cs {
             assert!(c.what.starts_with("wire.md "), "{}", c.what);
         }
-        aether_refdirector::Reference::from_tree(&tree()).unwrap();
-        tree().validate().unwrap();
+        for t in [file_tree(), registry_tree()] {
+            aether_refdirector::Reference::from_tree(&t).unwrap();
+            t.validate().unwrap();
+        }
+    }
+
+    /// The file cases go to a tree without a registry layer, which a
+    /// director need not have (wire.md 4), and the registry cases to one with.
+    #[test]
+    fn file_cases_need_no_registry_layer() {
+        assert!(file_tree().registry.is_none());
+        assert!(registry_tree().registry.is_some());
+        assert!(file_cases(1, 2).iter().all(|c| !is_registry(c.opcode)));
+        let reg = registry_cases();
+        assert!(!reg.is_empty());
+        assert!(reg.iter().all(|c| is_registry(c.opcode)));
+    }
+
+    /// Cairn's registry reader decodes a key path with replacement
+    /// characters and answers it (wire.md 3.5.1), so a path that is not
+    /// UTF-8 may get the answer the substituted path gets.
+    #[test]
+    fn a_registry_path_that_is_not_utf8_may_be_substituted() {
+        let c = registry_cases()
+            .into_iter()
+            .find(|c| c.what.contains("not UTF-8"))
+            .expect("the case");
+        assert!(c.what.contains("3.5.1"), "{}", c.what);
+        let Expect::OneOf(alts) = &c.expect else {
+            panic!("{:?}", c.expect)
+        };
+        assert!(alts.contains(&Expect::Status(Status::BadRequest)));
+        assert!(
+            alts.iter()
+                .any(|a| matches!(a, Expect::Reply(OwnedReply::RegLookup(_)))),
+            "{alts:?}"
+        );
     }
 
     #[test]
     fn an_error_status_with_a_payload_is_wrong_whatever_was_expected() {
-        let c = &cases(1, 2)[0];
+        let c = &file_cases(1, 2)[0];
         let a = Answer {
             status: Status::BadRequest.code(),
             payload: vec![1],

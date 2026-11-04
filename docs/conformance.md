@@ -158,12 +158,14 @@ Still left out of every part of a run:
 
 ## Malformed requests
 
-`run --malformed` mounts a built-in tree (`aether_conform::malformed::tree`:
-root 0 with `data/a.txt` = `abc` and the writable entry `saves` holding
-`saves/s.txt`, root 1 with `r.txt`, and a registry layer with
-`\Registry\Machine\Software\Conform` and its value `v`), opens `data/a.txt`
-for reading and `saves/s.txt` for writing, and sends each case below as raw
-slot fields, through the ring client's held-slot call (or, for the header
+`run --malformed` mounts two built-in trees in turn. The file cases go to
+`aether_conform::malformed::file_tree` (root 0 with `data/a.txt` = `abc` and
+the writable entry `saves` holding `saves/s.txt`, root 1 with `r.txt`), which
+has no registry layer, since a director need not have one (wire.md 4); for
+them `data/a.txt` is opened for reading and `saves/s.txt` for writing. The
+registry cases go to `registry_tree`, the same roots and a registry layer
+with `\Registry\Machine\Software\Conform` and its value `v`. Each case is
+sent as raw slot fields, through the ring client's held-slot call (or, for the header
 case, a header written by hand). Each case's payload is a valid request with
 one thing wrong, so the defect named is the only one. An error status must
 come with an empty payload (3.1, 3.3). After every case a HEARTBEAT must be
@@ -184,7 +186,7 @@ answered `ST_OK`: the director must keep serving. At the end a GETATTR of
 | DELETE cut to 0 to 3, MKDIR to 0 to 7, STORED_NAMES to 0 to 7 bytes | `ST_BAD_REQUEST` or `ST_NOT_FOUND` | 3.5.1 |
 | WRITE whose `len` is 10 with 3 data bytes | `ST_BAD_REQUEST` | 3.4.5: "A request whose payload is shorter than `24 + len` is `ST_BAD_REQUEST`" |
 | GETATTR, OPEN, RENAME (`from`) of a missing path that is not UTF-8 | `ST_BAD_REQUEST`, or the missing-path answer (found = 0, `ST_NOT_FOUND`) | 3.5.1: "`ST_BAD_REQUEST` in the Rust decoders; Cairn decodes it with replacement characters and carries on" |
-| REG_LOOKUP of a key path that is not UTF-8 | `ST_BAD_REQUEST` | 3.2: "The registry decoders reject trailing bytes, truncation, bad UTF-8"; 4.1 |
+| REG_LOOKUP of a key path that is not UTF-8 | `ST_BAD_REQUEST`, or the reference's answer for the path with replacement characters | 3.5.1: "Invalid UTF-8 in a path is `ST_BAD_REQUEST` in the Rust decoders; Cairn decodes it with replacement characters and carries on" (its registry reader too, `registry.clj`, `get-str`) |
 | REG_CREATE_KEY with `volatile` 2 and 255; REG_CHANGED with `subtree` 2 | `ST_BAD_REQUEST` | 4.1: "Booleans are one byte, exactly 0 or 1" |
 | Each of the eight registry requests with a trailing byte | `ST_BAD_REQUEST` | 4.1: "Every registry decoder consumes its input exactly; trailing bytes are `ST_BAD_REQUEST`" |
 | Each registry request cut by a byte; a REG_LOOKUP whose `len` runs past the payload | `ST_BAD_REQUEST` | 3.2 (truncation), 3.5 ("The payload did not decode") |
@@ -193,7 +195,7 @@ answered `ST_OK`: the director must keep serving. At the end a GETATTR of
 Not sent: a short STAGE_EXEC (3.5.1 names no answer for it), trailing bytes
 after a file request's fixed fields (3.2 describes the Rust decoders, which
 ignore them, not a rule for directors), a HEARTBEAT with a payload, and
-registry cases without a registry layer.
+registry cases to a tree without a registry layer.
 
 ## Generated cases
 
@@ -226,7 +228,11 @@ file is, so every comparison rule above applies.
 
 **Shrinking and replay.** The first case that fails is shrunk the way proptest
 shrinks (simplify while it still fails, complicate when it passes), each
-candidate played against the director, up to 2048 candidates. The smallest
+candidate played against the director, up to 2048 candidates. A candidate
+counts as failing only if it fails the same way: a mismatch whose first
+failing step has the same opcode, or an error of the same kind, so shrinking
+cannot drift to another failure. If shrinking stops on an error, the
+smallest failing case found so far is still written. The smallest
 failing case is written to `--failures DIR` (default a folder named after the
 seed in the temporary directory) as `generated-<seed>-<case>.json`, a scenario
 file whose expectations are the reference's answers; `run --scenarios DIR`
@@ -254,11 +260,11 @@ shrunk case valid and plays each through the adapter's own mount.
 | CLOSE | open handles, also ones whose file changed under them | `ST_OK` (3.4.10) |
 | READ, WRITE, SETATTR, CLOSE | closed handles and numbers never issued | `ST_BAD_FH` (3.5) |
 | RENAME, and RENAME_X with equal roots | files and directories moved, onto existing files, empty and non-empty directories, respelled (same fold), into themselves, from missing names, from or to read-only names, the root at an end (root writable as a whole); unserved roots | 3.4.7's answers; `one_of` `ST_NOT_FOUND`, `ST_BAD_REQUEST` (3.5.1) |
-| RENAME_X across roots | files to a missing name or onto a file; directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
+| RENAME_X across roots | files to a missing name (the caller's spelling) or onto a file (its stored spelling: 3.4.13 does not say whose spelling a replaced file keeps, and Cairn keeps the stored one); directories; missing names; an unserved root at one end | `ST_OK`; `ST_CROSS_ROOT`; `ST_NOT_FOUND` (3.4.13); `one_of` as above |
 | DELETE | files, empty and non-empty directories the writable provider holds; missing names; read-only names; the root (writable as a whole); unserved roots | 3.4.8's answers |
 | MKDIR | missing names; existing directories, files the writable provider holds, files a read-only one holds; missing names in a root with no writable provider; unserved roots | `ST_OK`; `one_of` `ST_OK`, `ST_EXISTS`; `ST_IO_ERROR`; `ST_EXISTS` (3.4.9); `ST_READ_ONLY` (3.5); `ST_NOT_FOUND` (3.5.1) |
 | STORED_NAMES | existing names in any spelling, `skip` below the number of components; missing names; unserved roots | the stored spellings; `one_of` the names as sent, `ST_NOT_FOUND` (3.4.12); `ST_NOT_FOUND` (3.5.1) |
-| STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, a path (3.4.14) |
+| STAGE_EXEC | existing files | `one_of` `ST_NOT_SUPPORTED`, `ST_NOT_FOUND` (a stager that does not stage it), a path (3.4.14) |
 | The eight registry requests | keys of the tree and below them in any spelling under `\Registry\Machine`, values from a fixed list, REG_CHANGED `since` a version an earlier reply gave; non-canonical key paths; `.` and `..` as a new leaf; every registry request without a registry layer | the overlay's answers (4.3, `overlay.rs` is normative); `ST_BAD_REQUEST` (4.2, 4.3); `ST_NOT_SUPPORTED` (4) |
 
 **What is not generated, and why:**
@@ -294,10 +300,19 @@ shrunk case valid and plays each through the adapter's own mount.
   the wire's fold (no final sigma, no dotted capital I), so a director that
   stores names on disk is not failed for its file system.
 
-Two assumptions go beyond the letter of wire.md, as the scenarios already
-make them: a WRITE of at most 20000 bytes writes all of them (3.4.5 lets the
-shim repeat after a short write), and GETATTR, READDIR and OPEN report a
-file's size as it is after a WRITE or SETATTR through a handle still open.
+Three rules the generator relies on are wire.md sentences, each checked
+against Cairn's providers: a director writes every byte of a WRITE or fails
+it (3.4.5); GETATTR, READDIR and OPEN report a file's size as it is now,
+writes through handles still open included (3.4.1); a file with open handles
+is deleted or renamed like any other (3.4.7, 3.4.8). What a handle reads after
+its file was deleted or renamed stays the director's, so such a handle is only
+closed. No other assumption beyond wire.md remains.
+
+Sizes follow the director's ring: the generator learns `VFS_RING_PAYLOAD_CAP`
+and `VFS_ARENA_LEN` from a mount of an empty tree before the first case, and
+keeps a READ the director answers inline (any READ without an arena; one
+without `read_bulk` below 65536 bytes otherwise) to `payload_cap - 8` bytes
+(3.4.4) and WRITE data to `payload_cap - 24` (3.4.5).
 
 ## The adapter protocol
 

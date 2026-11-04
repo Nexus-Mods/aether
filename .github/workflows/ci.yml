@@ -75,6 +75,8 @@ jobs:
       # ring file and over a named section. The seed is the run's id, so a
       # failure replays with --seed; the shrunk case is uploaded.
       - name: Director conformance (reference, file ring and section)
+        # About a minute measured (docs/conformance.md); generous headroom.
+        timeout-minutes: 15
         shell: bash
         run: |
           cargo build -p aether-conform
@@ -143,6 +145,8 @@ jobs:
       # (docs/conformance.md), played against the reference director over a
       # ring file. The seed is the run's id; the shrunk case is uploaded.
       - name: Director conformance (reference, file ring)
+        # About a minute measured (docs/conformance.md); generous headroom.
+        timeout-minutes: 15
         run: |
           cargo build -p aether-conform
           target/debug/aether-conform run --director "target/debug/aether-conform reference-adapter" --scenarios contract/scenarios --malformed --generate --cases 1024 --seed ${{ github.run_id }} --failures target/conform-failures

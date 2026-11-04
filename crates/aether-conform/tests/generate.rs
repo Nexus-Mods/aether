@@ -297,9 +297,16 @@ fn the_break_switch_is_not_reachable_without_the_flag() {
     // unknown --break value is a usage error, not a silent pass.
     let o = conform(&["reference-adapter", "--break", "everything"]);
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    // `help` prints the usage on stdout, a usage error on stderr: neither
+    // names the switch.
     let o = conform(&["help"]);
-    assert!(
-        !stdout(&o).contains("--break"),
-        "test-only, not in the usage"
-    );
+    assert!(stdout(&o).contains("reference-adapter"), "{}", stdout(&o));
+    let e = conform(&["frobnicate"]);
+    assert!(stderr(&e).contains("reference-adapter"), "{}", stderr(&e));
+    for text in [stdout(&o), stderr(&o), stderr(&e)] {
+        assert!(
+            !text.contains("--break"),
+            "test-only, not in the usage: {text}"
+        );
+    }
 }

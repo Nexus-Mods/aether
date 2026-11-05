@@ -250,7 +250,7 @@ pub mod mark_close {
 pub mod holder {
     /// Nobody holds it.
     pub const NOBODY: u32 = 0;
-    /// `tag_under_root`'s insert.
+    /// `record_open`'s insert.
     pub const TAG_UNDER_ROOT: u32 = 1;
     /// `path_of_handle`'s lookup.
     pub const PATH_OF_HANDLE: u32 = 2;

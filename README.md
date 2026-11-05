@@ -37,13 +37,16 @@ powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1 -Fixtures   # als
                                                                            # injector and shim, into target\release
 ```
 
-Options: `-Out <dir>` stages the natives elsewhere; `-RequireDumpbin` fails
-(rather than warns) when Visual Studio's `dumpbin` isn't found for the check
-that none of the four imports the VC++ runtime (on by default when `$env:CI`
-is set). `bin\natives-key.ps1` prints the natives key, the hash of what the
-four are built from; it leaves out the crates no native depends on (the
-fixtures, the test kit, `aether-conform`, `aether-refdirector`,
-`aether-filering`, `aether-fuzz`, `aether-shimbench`), and `bin\natives-key.tests.ps1` checks with `cargo tree`
+The four are built in `Cargo.toml`'s `natives-lto` profile (release with fat
+LTO and one codegen unit: smaller, and no slower per call); everything else,
+the fixtures among them, in `release`. Options: `-Out <dir>` stages the
+natives elsewhere; `-RequireDumpbin` fails (rather than warns) when Visual
+Studio's `dumpbin` isn't found for the check that none of the four imports
+the VC++ runtime (on by default when `$env:CI` is set). `bin\natives-key.ps1`
+prints the natives key, the hash of what the four are built from; it leaves
+out the crates no native depends on (the fixtures, the test kit,
+`aether-conform`, `aether-refdirector`, `aether-filering`, `aether-fuzz`,
+`aether-shimbench`), and `bin\natives-key.tests.ps1` checks with `cargo tree`
 that neither native's dependency tree holds any of them.
 
 On Linux and macOS, `bin/build-windows [--release]` cross-builds the same

@@ -3,9 +3,10 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::RwLock;
 
-use crate::RootHit;
+use crate::RootVpath;
 
 thread_local! {
     /// Depth counter behind [`UncachedScope`]. A counter rather than a bare
@@ -165,8 +166,70 @@ pub(crate) struct PathCache {
 
 #[derive(Default)]
 pub(crate) struct PathCacheState {
-    map: HashMap<String, Option<RootHit>>,
+    map: HashMap<String, Option<RootVpath>, BuildHasherDefault<FxHasher>>,
     order: VecDeque<String>,
+}
+
+/// The path cache's hash: rustc's FxHash, a word at a time, with its output
+/// laid out so the bits the table indexes and tags by are mixed ones
+/// ([`FxHasher::finish_for`]). Not resistant to chosen collisions, and it
+/// need not be: the keys are the paths this process opens, not input from
+/// across a trust boundary. SipHash, the default, costs several times as
+/// much per byte on every lookup, a hit included.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const K: u64 = 0xf135_7aea_2e62_a9c5;
+
+    fn add(&mut self, word: u64) {
+        self.hash = self.hash.wrapping_add(word).wrapping_mul(Self::K);
+    }
+
+    /// `hash` as the table wants it where a `usize` is `pointer_bits` wide.
+    ///
+    /// In a multiply chain a bit depends only on the bits at or below it of
+    /// each word, so the top bits are the mixed ones. hashbrown indexes by
+    /// the low bits of the hash as a `usize` and tags by that `usize`'s top 7.
+    /// 64-bit: a rotation brings mixed bits to both (as rustc-hash 2 does).
+    /// 32-bit: the `usize` is the low half, so the high half is the answer:
+    /// the tag is bits 57..63, the index bits 32 and up.
+    fn finish_for(hash: u64, pointer_bits: u32) -> u64 {
+        if pointer_bits == 64 {
+            hash.rotate_left(26)
+        } else {
+            hash >> 32
+        }
+    }
+}
+
+impl Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.add(u64::from_le_bytes(*w));
+        }
+        if !rest.is_empty() {
+            let mut last = [0u8; 8];
+            last[..rest.len()].copy_from_slice(rest);
+            // The length too, so a tail of zeros is not the same as no tail.
+            self.add(u64::from_le_bytes(last) ^ ((rest.len() as u64) << 59));
+        }
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        Self::finish_for(self.hash, usize::BITS)
+    }
 }
 
 impl PathCache {
@@ -180,7 +243,9 @@ impl PathCache {
     /// A lock-poisoning thread (one that panicked while holding the lock) must
     /// not wedge every future open in a long-running game session — recover
     /// the guard rather than propagating the poison.
-    pub(crate) fn get(&self, key: &str) -> Option<Option<RootHit>> {
+    /// The cached answer for `key`; a hit shares the cached vpath (one
+    /// reference count), and allocates nothing.
+    pub(crate) fn get(&self, key: &str) -> Option<Option<RootVpath>> {
         let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
         guard.map.get(key).cloned()
     }
@@ -191,7 +256,7 @@ impl PathCache {
         guard.map.get(key).map(Option::is_some)
     }
 
-    pub(crate) fn insert(&self, key: String, value: Option<RootHit>) {
+    pub(crate) fn insert(&self, key: String, value: Option<RootVpath>) {
         let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
         // Another thread may have raced this one to compute and insert the
         // same key; the first writer wins rather than double-counting it in
@@ -216,5 +281,62 @@ impl PathCache {
             .unwrap_or_else(|e| e.into_inner())
             .map
             .len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FxHasher;
+    use std::hash::Hash;
+
+    /// `s`'s hash as a build for `pointer_bits` answers it.
+    fn hash_for(s: &str, pointer_bits: u32) -> u64 {
+        let mut h = FxHasher::default();
+        s.hash(&mut h);
+        FxHasher::finish_for(h.hash, pointer_bits)
+    }
+
+    fn hash(s: &str) -> u64 {
+        hash_for(s, 64)
+    }
+
+    /// Paths that differ only in their tail, their length or one letter
+    /// hash apart, and the bits a hash table indexes and tags by spread.
+    #[test]
+    fn the_path_hash_tells_near_paths_apart() {
+        assert_eq!(hash(r"\??\C:\Games\a.esp"), hash(r"\??\C:\Games\a.esp"));
+        let mut paths = Vec::new();
+        for i in 0..20_000 {
+            paths.push(format!(r"\??\C:\Games\Skyrim\Data\Meshes\m{i}.nif"));
+        }
+        for tail in ["", "a", "a\0", "ab", "abcdefg", "abcdefgh", "abcdefghi"] {
+            paths.push(format!(r"\??\C:\x{tail}"));
+        }
+        paths.push(r"\??\C:\Games\A.esp".into());
+        paths.push(r"\??\C:\Games\a.esp".into());
+        let hashes: std::collections::HashSet<u64> = paths.iter().map(|p| hash(p)).collect();
+        assert_eq!(hashes.len(), paths.len(), "64-bit collisions");
+        // hashbrown's tag is the top 7 bits of a 64-bit hash; its bucket
+        // index the low ones.
+        let tags: std::collections::HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
+        let low: std::collections::HashSet<u64> = hashes.iter().map(|h| h & 0xfff).collect();
+        assert_eq!(tags.len(), 128, "64-bit tags used");
+        assert!(
+            low.len() > 3900,
+            "64-bit low 12 bits: {} of 4096 used",
+            low.len()
+        );
+        // On a 32-bit target hashbrown keeps the hash's low 32 bits (a
+        // `usize`): its tag is their top 7, bits 25..31, and its index their
+        // low ones. Computed here in u32 as an i686 build does.
+        let h32: Vec<u32> = paths.iter().map(|p| hash_for(p, 32) as u32).collect();
+        let tags: std::collections::HashSet<u32> = h32.iter().map(|h| h >> 25).collect();
+        let low: std::collections::HashSet<u32> = h32.iter().map(|h| h & 0xfff).collect();
+        assert_eq!(tags.len(), 128, "32-bit tags used");
+        assert!(
+            low.len() > 3900,
+            "32-bit low 12 bits: {} of 4096 used",
+            low.len()
+        );
     }
 }

@@ -101,7 +101,7 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     //    (case 2, above) is already free to answer from that table, whether
     //    or not it lies under the root — this branch is reached only for a
     //    handle the shim was not present to observe. Its cost is coupled to
-    //    `tag_under_root` recording *every* handle unconditionally (not just
+    //    `record_open` recording *every* handle unconditionally (not just
     //    ones under the root) — see that function's own doc comment.
     //
     //    SAFETY: `root_handle` is `OBJECT_ATTRIBUTES.RootDirectory` from an
@@ -249,15 +249,15 @@ pub(super) unsafe fn surely_outside(oa: *const ObjectAttributes) -> bool {
 /// Is this path one we are responsible for: under a root the director's client declared?
 ///
 /// The same question `FuseClient::route` answers, asked without building the wire vpath. Every
-/// caller must ask through here rather than test a root list of its own: when `tag_under_root`
-/// asked a narrower question, the enumeration of `<stage>\Data` (the staging alias of root 0)
-/// went untracked and fell through to the real staging folder, which returned nothing — and an
+/// caller must ask through here rather than test a root list of its own: a narrower question in
+/// `record_open` leaves the enumeration of `<stage>\Data` (the staging alias of root 0)
+/// untracked, and it falls through to the real staging folder, which returns nothing — and an
 /// empty `Data` listing is an empty load order.
 ///
 /// With no client attached (only a test that installs the detours without a ring) nothing is
 /// ours.
 pub(super) fn path_is_ours(path: &str) -> bool {
-    crate::director::global().is_some_and(|c| c.vpath_under_root(path).is_some())
+    crate::director::global().is_some_and(|c| c.is_under_root(path))
 }
 
 /// Parse the target path from a `FILE_RENAME_INFORMATION`(`_EX`) buffer. Only

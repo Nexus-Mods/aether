@@ -1041,28 +1041,30 @@ impl FuseClient {
     /// contract's case rule), so this changes what a new name is called and
     /// nothing about what an existing one resolves to. A path whose spelling
     /// cannot be read off it (a short name under the root) is sent folded.
-    pub fn vpath_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
-        let (root, folded) = self.vpath_under_root(path)?;
+    pub fn vpath_as_spelled(&self, path: &str) -> Option<(RootId, VPath)> {
         let (plain, stream) = aether_redirect::split_stream_suffix(path);
         if stream.is_some() {
-            return Some((root, folded));
+            return self.vpath_under_root(path);
         }
-        let (_, under) = self.roots.resolve(plain)?;
-        match aether_redirect::finalname::opened_tail(plain, &under) {
-            Some(tail) => Some((root, tail.join("/"))),
-            None => Some((root, folded)),
-        }
+        // No stream: `path` is `plain`, so one lookup gives both the folded
+        // vpath and the components to read the spelling against.
+        let (root, under) = self.roots.resolve(plain)?;
+        let vpath = match aether_redirect::finalname::opened_tail(plain, &under) {
+            Some(tail) => tail.join("/"),
+            None => under.join("/"),
+        };
+        Some((root, vpath.into()))
     }
 
     /// [`vpath_under_root`](Self::vpath_under_root) as the wire spells it: the root itself is
     /// `"."`, not the empty string.
-    pub fn route(&self, path: &str) -> Option<(RootId, String)> {
+    pub fn route(&self, path: &str) -> Option<(RootId, VPath)> {
         self.vpath_under_root(path)
             .map(|(root, vpath)| (root, wire_vpath(vpath)))
     }
 
     /// [`vpath_as_spelled`](Self::vpath_as_spelled) with the root as `"."`, like [`route`](Self::route).
-    pub fn route_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
+    pub fn route_as_spelled(&self, path: &str) -> Option<(RootId, VPath)> {
         self.vpath_as_spelled(path)
             .map(|(root, vpath)| (root, wire_vpath(vpath)))
     }
@@ -1104,20 +1106,25 @@ impl FuseClient {
     /// preserves that behaviour, so a stream nothing serves still comes back
     /// not-found. Verified by `aether-fixture-escape`'s vector 11, which flipped
     /// to `opened` the moment the suffix was dropped.
-    pub fn vpath_under_root(&self, path: &str) -> Option<(RootId, String)> {
+    ///
+    /// A path asked about before is answered from `RootMap`'s cache, the
+    /// vpath shared rather than built again: without a stream suffix this
+    /// allocates nothing.
+    pub fn vpath_under_root(&self, path: &str) -> Option<(RootId, VPath)> {
         let (_, stream) = aether_redirect::split_stream_suffix(path);
-        let (root, comps) = self.roots.resolve(path)?;
-        let mut vpath = comps.join("/");
-        if let Some(stream) = stream {
-            // `aether_casefold::fold`, matching the components `RootMap` already
-            // folded: one string on the wire, one fold. Behaviourally
-            // identical for the ASCII stream names anything real uses, but a
-            // second fold spelled differently inside the very function that
-            // builds the wire vpath is how the ring's two sides drifted apart
-            // in the first place.
-            vpath.push_str(&aether_casefold::fold(stream));
-        }
-        Some((root, vpath))
+        let (root, vpath) = self.roots.resolve_vpath(path)?;
+        let Some(stream) = stream else {
+            return Some((root, vpath));
+        };
+        // `aether_casefold::fold`, matching the components `RootMap` already
+        // folded: one string on the wire, one fold. Behaviourally identical
+        // for the ASCII stream names anything real uses, but a second fold
+        // spelled differently inside the very function that builds the wire
+        // vpath is how the ring's two sides drifted apart in the first place.
+        let mut with_stream = String::with_capacity(vpath.len() + stream.len());
+        with_stream.push_str(&vpath);
+        with_stream.push_str(&aether_casefold::fold(stream));
+        Some((root, with_stream.into()))
     }
 }
 
@@ -1155,10 +1162,15 @@ pub(crate) fn wire_code(e: &CallError) -> i32 {
     }
 }
 
+/// A vpath as [`FuseClient::route`] gives it: the folded path under a root,
+/// shared with the path cache where it came from there (a clone is a
+/// reference count, not a copy).
+pub type VPath = std::sync::Arc<str>;
+
 /// A directory open of the root itself has an empty remainder; on the wire that is `"."`.
-fn wire_vpath(vpath: String) -> String {
+fn wire_vpath(vpath: VPath) -> VPath {
     if vpath.is_empty() {
-        ".".to_string()
+        ".".into()
     } else {
         vpath
     }
@@ -1393,7 +1405,7 @@ mod tests {
     #[test]
     fn the_root_itself_is_spelled_as_a_dot_on_the_wire() {
         let m = FuseClient::roots_only(&[(RootId(0), r"C:\Games\Skyrim")]);
-        let routed = |p: &str| resolve(&m, p).map(|(r, v)| (r, wire_vpath(v)));
+        let routed = |p: &str| resolve(&m, p).map(|(r, v)| (r, wire_vpath(v.into()).to_string()));
         assert_eq!(
             routed(r"\??\C:\Games\Skyrim"),
             Some((RootId(0), ".".to_string()))
@@ -1403,8 +1415,8 @@ mod tests {
             Some((RootId(0), "data/a.esm".to_string()))
         );
         assert_eq!(routed(r"\??\C:\Windows\x.dll"), None);
-        assert_eq!(wire_vpath(String::new()), ".");
-        assert_eq!(wire_vpath("data".to_string()), "data");
+        assert_eq!(&*wire_vpath("".into()), ".");
+        assert_eq!(&*wire_vpath("data".into()), "data");
     }
 
     /// **One predicate, stated as a test.** The five alternate spellings

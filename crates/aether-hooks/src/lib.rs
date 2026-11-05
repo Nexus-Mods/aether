@@ -64,6 +64,28 @@ pub fn set_eager_section_max(bytes: u64) {
 pub fn fail_shared_lazy_reserve(on: bool) {
     lazy_section::fail_shared_reserve(on);
 }
+/// With `on`, the next demand-paged fill panics once its READ is done.
+/// Returns where the last such fill was writing (0: none has). Not in the
+/// shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn panic_next_lazy_fill(on: bool) -> usize {
+    lazy_section::panic_next_fill(on)
+}
+/// The most stack a demand-paged fill worker has committed (its deepest,
+/// within a page or two). Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn lazy_fill_worker_stack_peak() -> usize {
+    lazy_section::worker_stack_peak()
+}
+/// The stack a demand-paged fill worker is given where pointers are `bits`
+/// wide. Not in the shipped shim.
+#[doc(hidden)]
+#[cfg(feature = "test-support")]
+pub fn lazy_fill_worker_stack(bits: u32) -> usize {
+    lazy_section::fill_worker_stack(bits)
+}
 /// Call `observe` with the process handle and id of each child the process
 /// hook creates, before the child is injected: what a test reads of the
 /// child (its image, say) while it exists. `false` when one is already set.

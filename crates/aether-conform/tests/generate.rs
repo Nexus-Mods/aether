@@ -329,9 +329,10 @@ fn generator_catches(rule: &str, cases: u32, seed: u64, steps: usize, op: &str) 
             Err(e) => seen.push(format!("seed {seed}: {e}")),
         }
     }
-    panic!("{rule}: no seed of {SEEDS} caught it as asked:
-{}", seen.join("
-"));
+    panic!(
+        "{rule}: no seed of {SEEDS} caught it as asked:\n{}",
+        seen.join("\n")
+    );
 }
 
 /// How many seeds [`generator_catches`] tries.

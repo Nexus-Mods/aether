@@ -51,7 +51,7 @@ table lock is released.
 From `hook/dirquery.rs`.
 
 Phase 2 (unlocked): build the listing. The handle is tracked as a directory only because
-`tag_under_root` found `path_is_ours` true for it, so *every* listing built here is a listing
+`record_open` found `path_is_ours` true for it, so *every* listing built here is a listing
 under a managed root, and the governing invariant says the real filesystem beneath a managed
 root is unreachable by any spelling. A directory listing is a spelling. So exactly one thing may
 appear in one: what the director serves. When the director's client routes the directory, its
@@ -307,7 +307,7 @@ holds.
 wins wherever there is one:
 
 1. `under_root`: an intercepted open whose path was under a managed root.
-2. `opened_as`: every other intercepted open. A handle here but not in (1) is one `record_path`
+2. `opened_as`: every other intercepted open. A handle here but not in (1) is one `record_open`
    declined, i.e. outside every root, so this answers the common "delete a file that is none of
    our business" case without touching the OS.
 3. `GetFinalPathNameByHandleW`. Only reached for a handle the shim never saw opened, and only on a
@@ -386,7 +386,7 @@ with `STATUS_UNSUCCESSFUL`.
 From `hook/file_mutate.rs`.
 
 **A rename whose *target* lands under a managed root.** Everything above is keyed on the
-*source*, and for a source outside every root none of it runs: `record_path` records a handle as
+*source*, and for a source outside every root none of it runs: `record_open` records a handle as
 under a root only when `path_is_ours(path)`, so an outside handle is never recorded and the
 source-keyed arm is skipped. Without this check `tramp` would perform the move, physically
 creating a file under the destination root, where it would then read back as missing because that

@@ -334,7 +334,7 @@ pub(super) unsafe fn setinfo_hook_body(
             return STATUS_ACCESS_DENIED;
         }
         // Delete / rename of a virtual handle → ring Opcode::Delete / Opcode::Rename, keyed
-        // by the NT path recorded (record_path) when the handle was opened.
+        // by the NT path recorded (record_open) when the handle was opened.
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let is_delete = unsafe { is_delete_request(info, length, class) };
         let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);

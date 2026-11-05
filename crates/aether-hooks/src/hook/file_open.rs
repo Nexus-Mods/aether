@@ -3,8 +3,8 @@
 
 use super::{
     allow_disk_fallthrough, fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours,
-    path_of_tracked, record_path, reset_handle, reset_key, surely_outside, tag_under_root,
-    to_nt_path, ShimIoGuard, HANDLES, TRAMP_CREATE, TRAMP_OPEN,
+    path_of_tracked, record_director_open, record_open, reset_key, surely_outside, to_nt_path,
+    ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN,
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
@@ -37,7 +37,7 @@ const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 /// fall-through signal in background noise unrelated to any bypass. Under a root it is reached
 /// only behind `allow_disk_fallthrough`.
 ///
-/// Cheap when disabled: the caller passes an already-decoded `path` (see `tag_under_root`'s doc
+/// Cheap when disabled: the caller passes an already-decoded `path` (see `record_open`'s doc
 /// comment for why re-decoding per caller is the thing to avoid), and `note_open_outcome` is a
 /// no-op when stats are disabled.
 ///
@@ -63,7 +63,7 @@ unsafe fn try_fuse_create(
     oa: *const ObjectAttributes,
     // Already-decoded path for this same invocation (`create_hook`/`open_hook`
     // call `path_of_tracked` once and pass its `.path` down) — see
-    // `tag_under_root`'s doc comment for why this is threaded through rather
+    // `record_open`'s doc comment for why this is threaded through rather
     // than re-decoded here via `path_of(oa)`.
     path: Option<&str>,
     iosb: *mut c_void,
@@ -187,17 +187,9 @@ unsafe fn try_fuse_create(
             };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info) };
-            // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
-            reset_key(h, true);
-            if let Ok(mut t) = HANDLES.lock() {
-                t.set_under_root(h, path.clone());
-            }
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { record_path(file_handle, Some(&path), STATUS_SUCCESS) };
-            if resp.is_dir {
-                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                unsafe { tag_under_root(file_handle, Some(&path), STATUS_SUCCESS) };
-            }
+            // The absolute path (path_of may be relative OA), with the handle table locked
+            // once. A directory's fields are recorded only where the handle was handed out.
+            record_director_open(h, &path, resp.is_dir && !file_handle.is_null());
             director_open_trace(&path, resp.size);
             Some(STATUS_SUCCESS)
         }
@@ -361,7 +353,7 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
 /// a dir create, or no FUSE client) so the caller falls through.
 unsafe fn try_fuse_mkdir(
     file_handle: *mut HANDLE,
-    // Already-decoded path for this same invocation — see `tag_under_root`'s
+    // Already-decoded path for this same invocation — see `record_open`'s
     // doc comment for why callers thread this through rather than each
     // re-decoding via `path_of(oa)` independently.
     path: Option<&str>,
@@ -467,11 +459,7 @@ unsafe fn new_dir_handle(
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info) };
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { reset_handle(file_handle, Some(path), STATUS_SUCCESS) };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
+    unsafe { record_open(file_handle, Some(path), STATUS_SUCCESS) };
     STATUS_SUCCESS
 }
 
@@ -622,7 +610,7 @@ unsafe fn route_open(
     }
     // Decode once for the whole call and thread the result through every
     // function below rather than each calling `path_of(oa)` itself; see
-    // `tag_under_root`'s doc comment for the cost argument.
+    // `record_open`'s doc comment for the cost argument.
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     let decoded = match unsafe { path_of_tracked(oa) } {
         Ok(d) => d,
@@ -634,7 +622,7 @@ unsafe fn route_open(
     // a live OS query (an unseen handle's current target — `parent_dir_of_handle`
     // case 4) rather than a pure function of its own bytes: every
     // `RootMap`-backed decision made below with `path` (`FuseClient::route`, and
-    // `path_is_ours` via `tag_under_root`/`record_path`/
+    // `path_is_ours` via `record_open`/
     // `note_passthrough_outcome`) must not be cached under it. See
     // `aether_redirect::UncachedScope`'s doc comment.
     let _uncached_guard = os_consulted.then(aether_redirect::UncachedScope::enter);
@@ -719,22 +707,14 @@ unsafe fn route_open(
                 Err(st) => st,
             };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { reset_handle(file_handle, Some(path), status) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { tag_under_root(file_handle, Some(path), status) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { record_path(file_handle, Some(path), status) };
+            unsafe { record_open(file_handle, Some(path), status) };
             return status;
         }
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
     let status = real(oa);
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { reset_handle(file_handle, path, status) };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { tag_under_root(file_handle, path, status) };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { record_path(file_handle, path, status) };
+    unsafe { record_open(file_handle, path, status) };
     status
 }
 

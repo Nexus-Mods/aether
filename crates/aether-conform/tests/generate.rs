@@ -413,7 +413,7 @@ caught_by_the_generator! {
     // never reaches a file later at its old name.
     handles_hold_their_file: "handles-by-path", 256, 7, "write";
     // 3.4.3, 3.4.4: an append lands at the end other handles' changes left.
-    appends_land_at_the_shared_end: "append-own-end", 256, 2, "readdir";
+    appends_land_at_the_shared_end: "append-own-end", 256, 2, "getattr";
     // 3.4.5, 3.4.6: a WRITE past the end leaves zeros, cut bytes included.
     a_gap_past_the_end_reads_as_zeros: "truncate-keeps-bytes", 256, 1, "read";
     // 3.4.4: a handle opened without OPEN_READ is read.
@@ -466,6 +466,10 @@ caught_by_the_generator! {
     the_upper_wins_in_a_listing: "upper-loses-listing", 256, 7, "readdir";
     // 3.4.9, 3.4.2: a name made below a lower directory keeps its lower names listed.
     a_copy_up_keeps_the_lower_siblings: "copy-up-opaque-parent", 256, 7, "readdir";
+    // 3.4.9: no read open after a write open of a file is immutable.
+    no_immutable_open_after_a_copy_up: "immutable-after-copy-up", 256, 7, "open";
+    // 3.4.3: an immutable handle keeps its bytes across a copy-up.
+    an_immutable_handle_keeps_its_bytes: "immutable-sees-new-bytes", 256, 7, "read";
 }
 
 /// A concurrent run of `rounds` rounds of 4 clients against the reference

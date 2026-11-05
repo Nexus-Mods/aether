@@ -388,6 +388,7 @@ pub(crate) fn play(
     let mut others = Others::start(env, timeout, s)?;
     let mut session = Session::new();
     let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
+    let mut written: std::collections::BTreeSet<(u32, String)> = Default::default();
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
         // A literal handle is sent as written (`Step::literal_fh`).
@@ -467,16 +468,39 @@ pub(crate) fn play(
         if let (Sent::Answer(Ok(OwnedReply::Open(o))), OwnedRequest::Open { root, path, .. }) =
             (&sent, &req)
         {
-            if o.immutable && !o.is_dir && writable_holds(&s.tree, *root, path) {
+            let pinnable = lower_only_in_tree(&s.tree, *root, path)
+                && !written.contains(&(root.0, aether_casefold::fold(path)));
+            if o.immutable && !o.is_dir && writable_holds(&s.tree, *root, path) && !pinnable {
                 notes.insert(
                     0,
-                    "immutable set on a file a writable provider holds (wire.md 3.4.3: \"never set it for a file a writable provider holds\")"
+                    "immutable set on a file a writable provider holds (wire.md 3.4.3: \"never set it for a file a writable provider holds\"; only a file a lower layer alone holds may be, until a write open of it, 3.4.9)"
                         .into(),
                 );
                 passed = false;
             }
         }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
+        // The names a write reached: no read open of them may be immutable
+        // from then on (wire.md 3.4.9).
+        if succeeded {
+            match &req {
+                OwnedRequest::Open { root, flags, path }
+                    if flags.contains(aether_protocol::OpenFlags::WRITE) =>
+                {
+                    written.insert((root.0, aether_casefold::fold(path)));
+                }
+                OwnedRequest::Rename { root, to, .. } => {
+                    written.insert((root.0, aether_casefold::fold(to)));
+                }
+                OwnedRequest::RenameX { to_root, to, .. } => {
+                    written.insert((to_root.0, aether_casefold::fold(to)));
+                }
+                OwnedRequest::Mkdir { root, path, .. } => {
+                    written.insert((root.0, aether_casefold::fold(path)));
+                }
+                _ => {}
+            }
+        }
         let answer = match &sent {
             Sent::Answer(Ok(_)) => Some("ok".to_string()),
             Sent::Answer(Err(st)) => Some(st.name().to_string()),
@@ -498,6 +522,19 @@ pub(crate) fn play(
         });
     }
     Ok(())
+}
+
+/// Whether `path` in `root` is a file one of the tree's lower layers holds
+/// and its upper does not: one a read open may answer `immutable` until a
+/// write reaches it (wire.md 3.4.3, 3.4.9).
+fn lower_only_in_tree(tree: &crate::tree::Tree, root: aether_protocol::RootId, path: &str) -> bool {
+    let f = aether_casefold::fold(path);
+    tree.roots.iter().filter(|r| r.id == root.0).any(|r| {
+        !r.files.iter().any(|x| aether_casefold::fold(&x.path) == f)
+            && r.lower
+                .iter()
+                .any(|l| l.files.iter().any(|x| aether_casefold::fold(&x.path) == f))
+    })
 }
 
 /// Whether `path` in `root` lies under one of the tree's `writable`

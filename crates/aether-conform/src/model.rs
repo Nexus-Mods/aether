@@ -929,6 +929,11 @@ enum Want {
     Alts(Vec<Expect>),
 }
 
+/// The note of a READ through an immutable handle whose bytes and the file's
+/// differ ([`Gen::pinned_label`]).
+const PINNED_NOTE: &str =
+    "an immutable handle on a lower-only file: its bytes, or the file as it is now";
+
 /// A path below a file, to any opcode but GETATTR: `ST_NOT_FOUND` or
 /// `ST_NOT_A_DIRECTORY` (3.5).
 const BELOW_A_FILE: &[Status] = &[Status::NotFound, Status::NotADirectory];
@@ -1078,6 +1083,13 @@ struct Handle {
     /// a directory above it since it was opened (wire.md says nothing of
     /// such a handle's answers, so it is then only closed).
     clean: bool,
+    /// For a read handle the oracle opened `immutable` on a file only a
+    /// layer held, the layer's bytes: what it reads while its file is there
+    /// (wire.md 3.4.3). A director may have opened it without `immutable`,
+    /// and then it reads the file as it is now (3.4.4, 3.4.9), so once the
+    /// two differ a READ through it is a `one_of` of both, tied to its OPEN
+    /// by a choice label ([`Gen::pinned_label`]).
+    pinned: Option<Vec<u8>>,
 }
 
 /// A file handle whose file was deleted, or replaced by a RENAME or
@@ -1452,7 +1464,7 @@ impl Gen {
     /// bytes as they are now, the layer's while only a layer holds the file
     /// (wire.md 3.4.4); a STORED_NAMES component only a layer holds has
     /// the layer's spelling (3.2, 3.4.12); a read open of a file the
-    /// writable provider holds, a lower-only one included, is not immutable
+    /// writable provider holds is immutable exactly when only a layer holds it
     /// (3.4.3). A difference is the reference answering otherwise.
     fn check_prediction(
         &self,
@@ -1480,8 +1492,10 @@ impl Gen {
                 if h.dir || h.gone.is_some() {
                     return Ok(());
                 }
-                let bytes = match self.lower_only(h.root, &h.folded) {
-                    Some(true) => match self.lower_shows(h.root, &h.folded) {
+                let bytes = match (&h.pinned, self.lower_only(h.root, &h.folded)) {
+                    // An immutable handle keeps its bytes (wire.md 3.4.3).
+                    (Some(p), _) => p.clone(),
+                    (None, Some(true)) => match self.lower_shows(h.root, &h.folded) {
                         Some(n) => n.bytes.clone(),
                         None => return Ok(()),
                     },
@@ -1518,13 +1532,22 @@ impl Gen {
                     }
                 }
             }
+            // The reference opens a file only a layer holds immutable, and
+            // no other file the writable provider holds (wire.md 3.4.3,
+            // 3.4.9).
             (OwnedRequest::Open { root, flags, path }, Ok(OwnedReply::Open(o)))
                 if !flags.contains(OpenFlags::WRITE)
                     && !o.is_dir
-                    && o.immutable
                     && self.held(root.0, &fold(path)) =>
             {
-                return differ("a handle that is not immutable".into());
+                let pinned = self.lower_only(root.0, &fold(path)) == Some(true);
+                if o.immutable != pinned {
+                    return differ(if pinned {
+                        "an immutable handle on a file only a layer holds".into()
+                    } else {
+                        "a handle that is not immutable".into()
+                    });
+                }
             }
             _ => {}
         }
@@ -2475,21 +2498,45 @@ impl Gen {
             offset,
             len: len as u32,
         };
+        let slice = |b: &[u8]| {
+            let from = offset.min(b.len() as u64) as usize;
+            let to = (from as u64).saturating_add(len).min(b.len() as u64) as usize;
+            b[from..to].to_vec()
+        };
         if let Some(g) = &h.gone {
-            let from = offset.min(g.snap.len() as u64) as usize;
-            let to = (from as u64).saturating_add(len).min(g.snap.len() as u64) as usize;
+            let mut alts = vec![
+                Expect::Reply(OwnedReply::Read(slice(&g.snap))),
+                Expect::Status(Status::IoError),
+                Expect::Status(Status::NotFound),
+            ];
+            // An immutable handle may keep its own bytes (3.4.3).
+            if let Some(p) = h.pinned.as_ref().filter(|p| slice(p) != slice(&g.snap)) {
+                alts.insert(1, Expect::Reply(OwnedReply::Read(slice(p))));
+            }
             return Some(Plan {
                 req,
-                want: Want::Alts(vec![
-                    Expect::Reply(OwnedReply::Read(g.snap[from..to].to_vec())),
-                    Expect::Status(Status::IoError),
-                    Expect::Status(Status::NotFound),
-                ]),
+                want: Want::Alts(alts),
                 wire: "3.4.8",
                 note: "a handle whose file is gone: its last bytes, or a failure".into(),
                 effect: Effect::None,
                 then: Then::Nothing,
             });
+        }
+        if let Some(p) = &h.pinned {
+            let now = slice(&self.bytes_at(h.root, &h.folded));
+            if slice(p) != now {
+                return Some(Plan {
+                    req,
+                    want: Want::Alts(vec![
+                        Expect::Reply(OwnedReply::Read(slice(p))),
+                        Expect::Reply(OwnedReply::Read(now)),
+                    ]),
+                    wire: "3.4.3, 3.4.9",
+                    note: PINNED_NOTE.into(),
+                    effect: Effect::None,
+                    then: Then::Nothing,
+                });
+            }
         }
         Some(Plan {
             req,
@@ -2499,6 +2546,14 @@ impl Gen {
             effect: Effect::None,
             then: Then::Nothing,
         })
+    }
+
+    /// The choice label tying a READ through an immutable handle on a
+    /// lower-only file to its OPEN (wire.md 3.4.3, 3.4.9): the OPEN's
+    /// `one_of` is the handle immutable or not, each READ's the handle's own
+    /// bytes or the file as it is now, in that order.
+    fn pinned_label(fh: u64) -> String {
+        format!("pinned-{fh}")
     }
 
     /// What a WRITE or SETATTR through a handle whose file was deleted or
@@ -3738,7 +3793,34 @@ impl Gen {
             }
             _ => return Err(disagree()),
         };
-        let cite = matches!(expect, Expect::OneOf(_)).then(|| plan.wire.to_string());
+        // A read open the oracle answered immutable on a file only a layer
+        // holds may be answered either way (wire.md 3.4.3, 3.4.9); the READs
+        // whose answer depends on which share its label.
+        let (expect, choice, wire) = match (&plan.req, &got) {
+            (OwnedRequest::Open { root, flags, path }, Ok(OwnedReply::Open(o)))
+                if o.immutable
+                    && !o.is_dir
+                    && !flags.contains(OpenFlags::WRITE)
+                    && self.held(root.0, &fold(path)) =>
+            {
+                let mut mutable = o.clone();
+                mutable.immutable = false;
+                let alts = vec![
+                    Expect::Reply(OwnedReply::Open(o.clone())),
+                    Expect::Reply(OwnedReply::Open(mutable)),
+                ];
+                (
+                    Expect::OneOf(alts),
+                    Some(Gen::pinned_label(o.fh)),
+                    "3.4.3, 3.4.9",
+                )
+            }
+            (OwnedRequest::Read { fh, .. }, _) if plan.note == PINNED_NOTE => {
+                (expect, Some(Gen::pinned_label(*fh)), plan.wire)
+            }
+            _ => (expect, None, plan.wire),
+        };
+        let cite = matches!(expect, Expect::OneOf(_)).then(|| wire.to_string());
         let note = if plan.note.is_empty() {
             format!("wire.md {}", plan.wire)
         } else {
@@ -3751,7 +3833,7 @@ impl Gen {
             note: Some(note),
             client,
             literal_fh: false,
-            choice: None,
+            choice,
         });
         if let Ok(r) = &got {
             self.record_version(r);
@@ -3953,6 +4035,9 @@ impl Gen {
                 changed,
             } => {
                 let OwnedReply::Open(o) = r else { return };
+                let pinned = (o.immutable && !*dir && self.held(*root, path))
+                    .then(|| self.lower_shows(*root, path).map(|n| n.bytes.clone()))
+                    .flatten();
                 if *write && !*dir {
                     // A create is the upper's, and may put the layers'
                     // directories above it there; a write open of a
@@ -3988,6 +4073,7 @@ impl Gen {
                         file,
                         gone: None,
                         clean: true,
+                        pinned,
                     },
                 );
                 self.refresh();
@@ -4156,7 +4242,18 @@ const FILE_KINDS: [Kind; 12] = [
 /// name or handle it takes ([`NEAR_EXISTING`] and the rest; bits 8 and up,
 /// which of them, the latest first). The template's other numbers are the
 /// op's own ([`Gen::template`]).
-const TEMPLATES: [&[(Kind, u32, u32, u32)]; 7] = [
+const TEMPLATES: [&[(Kind, u32, u32, u32)]; 8] = [
+    // A file read, then opened for writing and written, and read again
+    // through the first handle: in a layered root, a lower-only file copied
+    // up under a handle that may be immutable (wire.md 3.4.3, 3.4.9).
+    &[
+        (Kind::OpenRead, 2, 0, 0),
+        (Kind::OpenWrite, 0, 0, NEAR_EXISTING),
+        (Kind::Write, 0, 0, NEAR_HANDLE),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Close, 0, 0, NEAR_HANDLE),
+        (Kind::Read, 0, 0, NEAR_HANDLE),
+    ],
     // A save: a new file written, renamed over a file with its handle
     // open, written again through that handle, closed and read back.
     &[
@@ -4522,6 +4619,7 @@ mod tests {
             "a lower-only name: hidden",
             "over a lower-only file: the directory hides it, or refused",
             "a directory only a lower holds",
+            PINNED_NOTE,
         ];
         let mut seen = vec![0; notes.len()];
         let mut others = 0;

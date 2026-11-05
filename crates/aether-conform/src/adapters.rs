@@ -403,10 +403,11 @@ pub enum Break {
     /// of its bytes (wire.md 3.4.3, 3.4.4: the open file is the file, as it
     /// is).
     CopyUpLosesBytes,
-    /// A handle opened for reading on a lower-only file reads the lower's
-    /// bytes for ever, whatever a write open and WRITEs did to the file
-    /// since (wire.md 3.4.4: "Every handle of a file reads the file as it is
-    /// now").
+    /// A handle opened for reading on a lower-only file without `immutable`
+    /// reads the lower's bytes for ever, whatever a write open and WRITEs
+    /// did to the file since (wire.md 3.4.4: "Every handle of a file reads
+    /// the file as it is now"; 3.4.9: a copy-up keeps the file's identity;
+    /// only an immutable handle keeps its bytes, 3.4.3).
     CopyUpOldHandleLower,
     /// A handle opened on a lower-only file whose name was then hidden (a
     /// DELETE, a RENAME onto it, MKDIR over it) reads the file made at that
@@ -444,6 +445,22 @@ pub enum Break {
     /// a directory up as a new, empty one would (wire.md 3.4.9: an upper
     /// over a read-only lower; 3.4.2).
     CopyUpOpaqueParent,
+    /// Not a broken rule: a read open of a lower-only file is answered
+    /// without `immutable`, so the handle reads the file as it is now across
+    /// a copy-up (wire.md 3.4.3 lets it be either; 3.4.9: a copy-up keeps
+    /// the file's identity; `Reference::mutable_lower_reads`). A run must
+    /// pass it.
+    MutableLowerReads,
+    /// A read open of a lower-only file a write open has reached is still
+    /// answered `immutable` (wire.md 3.4.9: once a write open of a file has
+    /// succeeded no read open of it is; the shim's read cache would keep the
+    /// file's old blocks).
+    ImmutableAfterCopyUp,
+    /// A read open of a lower-only file is answered `immutable`, but the
+    /// handle reads the file as it is now: a copy-up and WRITEs through
+    /// another handle change what it reads (wire.md 3.4.3: an immutable
+    /// handle's bytes cannot change while it is open).
+    ImmutableSeesNewBytes,
 }
 
 impl Break {
@@ -541,6 +558,9 @@ impl Break {
             "refuse-layered-dir-renames" => Some(Break::RefuseLayeredDirRenames),
             "no-layers" => Some(Break::NoLayers),
             "copy-up-opaque-parent" => Some(Break::CopyUpOpaqueParent),
+            "mutable-lower-reads" => Some(Break::MutableLowerReads),
+            "immutable-after-copy-up" => Some(Break::ImmutableAfterCopyUp),
+            "immutable-sees-new-bytes" => Some(Break::ImmutableSeesNewBytes),
             _ => None,
         }
     }
@@ -963,6 +983,11 @@ fn mount(
             Some(Break::RefuseLayeredDirRenames) => {
                 Reference::from_tree(&s.tree)?.refuse_layered_dir_renames()
             }
+            Some(
+                Break::MutableLowerReads
+                | Break::ImmutableSeesNewBytes
+                | Break::CopyUpOldHandleLower,
+            ) => Reference::from_tree(&s.tree)?.mutable_lower_reads(),
             _ => Reference::from_tree(&s.tree)?,
         },
         broken,
@@ -1780,6 +1805,12 @@ impl Served {
             return Ok(());
         }
         let first = !self.held().copied.contains(&key);
+        if !flags.contains(OpenFlags::WRITE)
+            && ((self.broken == Some(Break::ImmutableAfterCopyUp) && !first)
+                || (self.broken == Some(Break::ImmutableSeesNewBytes) && first))
+        {
+            o.immutable = true;
+        }
         if first && self.broken == Some(Break::HiddenHandleReadsNew) {
             self.held()
                 .lower_names

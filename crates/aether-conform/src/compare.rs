@@ -250,6 +250,14 @@ impl Session {
         let mut next = None;
         let mut matched = BTreeSet::new();
         for (n, alt) in alts.iter().enumerate().filter(|(n, _)| allowed.contains(n)) {
+            // Under a label an OPEN's `immutable` is compared: it is how a
+            // scenario ties what later READs through the handle may answer
+            // to whether the handle was opened immutable (wire.md 3.4.3).
+            if let (Expect::Reply(OwnedReply::Open(e)), Ok(OwnedReply::Open(g))) = (alt, got) {
+                if e.immutable != g.immutable {
+                    continue;
+                }
+            }
             let mut trial = self.clone();
             if trial.check_one(step, req, alt, got).is_ok() {
                 matched.insert(n);
@@ -770,6 +778,36 @@ mod tests {
         assert!(sess
             .check(2, &read(1), &Expect::Reply(abd.clone()), &Ok(abd))
             .is_err());
+    }
+
+    /// Under a `choice` label an OPEN's `immutable` is compared, so a READ
+    /// of the label answers as the handle's OPEN said it would.
+    #[test]
+    fn a_label_ties_reads_to_whether_the_open_was_immutable() {
+        let open_alts = Expect::OneOf(vec![
+            Expect::Reply(opened(1, 3, true, 0)),
+            Expect::Reply(opened(1, 3, false, 0)),
+        ]);
+        let old = OwnedReply::Read(b"old".to_vec());
+        let new = OwnedReply::Read(b"new".to_vec());
+        let read_alts = Expect::OneOf(vec![Expect::Reply(old.clone()), Expect::Reply(new.clone())]);
+        for (immutable, good, bad) in [(true, &old, &new), (false, &new, &old)] {
+            let mut sess = Session::new();
+            sess.check_chosen(
+                0,
+                &open("a"),
+                &open_alts,
+                &Ok(opened(9, 3, immutable, 0)),
+                Some("p"),
+            )
+            .unwrap();
+            assert!(sess
+                .clone()
+                .check_chosen(1, &read(1), &read_alts, &Ok(bad.clone()), Some("p"))
+                .is_err());
+            sess.check_chosen(1, &read(1), &read_alts, &Ok(good.clone()), Some("p"))
+                .unwrap();
+        }
     }
 
     #[test]

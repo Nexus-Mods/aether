@@ -445,7 +445,8 @@ fn round(
                 note: st.note.clone(),
                 client: k as u32,
                 literal_fh: false,
-                choice: None,
+                // Each client's labels its own.
+                choice: st.choice.as_ref().map(|c| format!("c{k}-{c}")),
             };
             mine.push((steps.len(), step.clone()));
             steps.push(step);

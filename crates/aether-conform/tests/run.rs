@@ -1344,6 +1344,7 @@ fn a_director_refusing_reads_through_write_only_handles_fails() {
             "handles-deleted-file",
             "handles-follow-rename",
             "overlay-copy-up-handles",
+            "overlay-truncate",
             "truncate-then-read",
             "write-only-read",
             "write-then-read"
@@ -1872,4 +1873,50 @@ fn a_director_serving_no_layers_skips_the_layered_scenarios_and_generates_none()
 #[test]
 fn a_director_whose_copy_up_makes_the_parent_opaque_fails() {
     caught_by("copy-up-opaque-parent", "overlay-spelling");
+}
+
+/// wire.md 3.4.3, 3.4.9: a read open of a lower-only file may be immutable
+/// or not. One that never is (its handles read the file as it is now across
+/// a copy-up) passes the committed suite and the generated cases.
+#[test]
+fn a_director_whose_lower_only_reads_are_mutable_passes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let failures = aether_testkit::tempdir().unwrap();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave mutable-lower-reads",
+        &dir,
+        "20",
+        &[
+            "--generate",
+            "--cases",
+            "512",
+            "--seed",
+            "3",
+            "--failures",
+            failures.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// wire.md 3.4.9: once a write open has reached a lower-only file, no read
+/// open of it is immutable. A director that goes on answering immutable
+/// fails, citing the rule.
+#[test]
+fn a_director_answering_immutable_after_a_copy_up_fails() {
+    let notes = caught_by("immutable-after-copy-up", "overlay-copy-up-handles");
+    assert!(
+        notes.iter().any(|n| n.contains("immutable set on a file")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.4.3: an immutable handle's bytes cannot change while it is
+/// open. A director whose immutable handle on a lower-only file reads the
+/// copy-up's new bytes fails.
+#[test]
+fn a_director_whose_immutable_handle_sees_new_bytes_fails() {
+    caught_by("immutable-sees-new-bytes", "overlay-copy-up-handles");
+    caught_by("immutable-sees-new-bytes", "overlay-truncate");
 }

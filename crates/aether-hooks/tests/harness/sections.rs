@@ -1238,3 +1238,47 @@ fn a_lazy_section_created_under_the_loader_lock_fills() {
     close(section.unwrap());
     close(file);
 }
+
+// ---- demand-paged: a fill that panics ------------------------------------
+
+/// A fill worker that panics mid-fill answers the fill as failed, and lets
+/// go of the second view it was writing through: the fault tries again
+/// and reads the file's bytes (READ, wire.md 3.4.4), and the view's
+/// address range is free.
+#[test]
+fn a_fill_that_panics_is_tried_again_and_releases_its_view() {
+    isolate!();
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE};
+    let want = pattern(LAZY);
+    let (root, served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section);
+    let mark = served.recorder.mark();
+    aether_hooks::panic_next_lazy_fill(true);
+    let got = bytes(v, TOUCH, PAGE);
+    let at = aether_hooks::panic_next_lazy_fill(false);
+    assert!(got == want[TOUCH..TOUCH + PAGE], "the chunk's bytes");
+    assert_eq!(
+        read_offsets(served, mark),
+        [TOUCH as u64, TOUCH as u64],
+        "the panicked fill and the one after it"
+    );
+    assert_ne!(at, 0, "no fill panicked");
+    assert_eq!(
+        aether_hooks::lazy_region_count("shared"),
+        1,
+        "the region is a section's view, so its fill wrote through a second view"
+    );
+    // SAFETY: a query; no memory is touched.
+    let mut m: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    let n = unsafe { VirtualQuery(at as _, &mut m, core::mem::size_of_val(&m)) };
+    assert_ne!(n, 0);
+    assert_eq!(
+        m.State, MEM_FREE,
+        "the panicked fill's second view is still mapped"
+    );
+    unmap(v);
+    close(section);
+    close(file);
+}

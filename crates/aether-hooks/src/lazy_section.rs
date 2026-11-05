@@ -372,22 +372,38 @@ unsafe fn fill_into(
     span: usize,
 ) -> Option<usize> {
     let client = crate::director::global()?;
-    let dest = match target {
-        Target::At(a) => a,
+    let (dest, _view) = match target {
+        Target::At(a) => (a, None),
         // SAFETY: an open section, mapped for this fill only.
-        Target::View { section, offset } => unsafe { second_view(section, offset, span) }?,
+        Target::View { section, offset } => {
+            let v = unsafe { second_view(section, offset, span) }?;
+            (v, Some(SecondView(v)))
+        }
     };
     // SAFETY: `span` writable bytes at `dest`, per the contract or the view.
     let out = unsafe { core::slice::from_raw_parts_mut(dest as *mut u8, span) };
     let n = client.read_fragmented(fh, file_off, &mut out[..len]).ok();
+    #[cfg(feature = "test-support")]
+    if PANIC_FILL.swap(false, Ordering::SeqCst) {
+        PANICKED_FILL_AT.store(dest, Ordering::SeqCst);
+        panic!("a test's panic mid-fill");
+    }
     if n == Some(len) {
         out[len..].fill(0);
     }
-    if let Target::View { .. } = target {
-        // SAFETY: the view mapped above, unmapped once.
-        unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: dest as _ }) };
-    }
     n
+}
+
+/// A fill's second view ([`second_view`]), unmapped when the fill ends,
+/// however it ends: a panic mid-fill too, which the worker answers as a
+/// failed fill and survives.
+struct SecondView(usize);
+
+impl Drop for SecondView {
+    fn drop(&mut self) {
+        // SAFETY: a view `second_view` mapped for one fill, unmapped once.
+        unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.0 as _ }) };
+    }
 }
 
 /// A writable view of `span` bytes of `section` at `offset`, only where
@@ -471,6 +487,22 @@ fn second_view_fills() -> Option<bool> {
     }?;
     SECOND_VIEW.store(if answer { 1 } else { 2 }, Ordering::Release);
     Some(answer)
+}
+
+/// A test's panic in the next fill, once its bytes are read ([`panic_next_fill`]).
+#[cfg(feature = "test-support")]
+static PANIC_FILL: AtomicBool = AtomicBool::new(false);
+/// Where that fill was writing: its second view, for a demand-paged region
+/// over a section.
+#[cfg(feature = "test-support")]
+static PANICKED_FILL_AT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Make the next fill panic once its READ is done; returns where the last
+/// such fill was writing (0: none yet).
+#[cfg(feature = "test-support")]
+pub(crate) fn panic_next_fill(on: bool) -> usize {
+    PANIC_FILL.store(on, Ordering::SeqCst);
+    PANICKED_FILL_AT.load(Ordering::SeqCst)
 }
 
 /// A test's "no pagefile section can be had" ([`fail_shared_reserve`]).

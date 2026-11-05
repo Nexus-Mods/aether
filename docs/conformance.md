@@ -241,6 +241,8 @@ director gave, unless the answers leave the same state:
 | A request naming a named stream | `ST_NOT_FOUND`, `ST_BAD_REQUEST`, or the stream a director holds | 3.2 | `names-stream`, `names-stream-writable` |
 | A create of a name a director's store would make one with another | created, `ST_EXISTS` | 3.2 | `case-fold-created` |
 | MKDIR of a directory only a lower layer holds | `ST_OK`, `ST_EXISTS` | 3.4.9 | `overlay-mkdir` |
+| DELETE of a lower-only directory with children; RENAME of a lower-only directory to another name; a case-only RENAME of a lower-only name; MKDIR over a lower-only file | 3.4.9's list's answer, or the general rules' (`ST_IO_ERROR`, moved whole, respelled, `ST_IO_ERROR`), later steps sharing a `choice` | 3.4.9 | `overlay-delete-dir`, `overlay-rename-dir`, `overlay-spelling`, `overlay-mkdir`, `overlay-written-file` |
+| A case-only RENAME of a directory the upper and a lower both hold | `ST_OK` (respelled), `ST_IO_ERROR` | 3.4.7 | `overlay-rename-dir` |
 | RENAME of a directory the upper and a lower both hold | `ST_IO_ERROR` with nothing moved, or the whole of it moved; each step that shows the outcome shares one `choice` | 3.4.7 | `overlay-rename-both` |
 | READ through a handle on a lower-only file that a DELETE, a RENAME onto it or a MKDIR over it hid | the hidden file's last bytes, `ST_IO_ERROR`, `ST_NOT_FOUND` | 3.4.8 | `overlay-delete-recreate`, `overlay-rename-file`, `overlay-mkdir`, `overlay-delete-dir` |
 
@@ -291,7 +293,9 @@ director serving a writable root as an overlay has them (wire.md 3.4.9,
 "Names only in a read-only lower"). The reference serves such a root as an
 overlay, the scenarios `overlay-*` play its rules, the generator makes
 layered roots in about half its cases and predicts their answers, and a run
-fails a director that breaks them.
+fails a director that breaks them. A director that serves no root as an
+overlay says so ("The adapter protocol"), and the run then skips the layered
+scenarios and generates no layered root.
 
 **What wire.md fixes, and where.** The upper is over the lower, so at a name
 both hold the upper's entry is the one served, its kind, size, bytes and
@@ -303,27 +307,39 @@ Every rule below is checked by the scenario named and by generated cases.
 |---|---|---|
 | One listing of the upper and the layers, each name once, as the highest layer holding it has it; a name a DELETE or RENAME hid is not listed | 3.2, 3.4.2, 3.4.9 | `overlay-listing`, `overlay-delete-recreate`, `overlay-delete-dir` |
 | A name keeps the spelling of the layer that shows it; a create keeps its parents' stored spelling, a lower's too | 3.2, 3.4.12 | `overlay-spelling` |
-| A read open of a lower-only file is never immutable: a write open can change the file | 3.4.3 | every `overlay-*` OPEN, by the run's immutable check |
-| A write open of a lower-only file opens it with its bytes; every handle of it, those opened before the write open included, reads WRITEs, SETATTRs and truncating OPENs at once | 3.4.3, 3.4.4, 3.4.6 | `overlay-copy-up-handles`, `overlay-truncate` |
-| DELETE of a lower-only name, a directory with children included, hides it (nothing a farther layer holds there shows); a DELETE of a name the upper holds leaves it missing, the lower's entry under it included | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-listing` |
+| A read open of a lower-only file is never immutable: a write open can change the file | 3.4.3, 3.4.9 | every `overlay-*` OPEN, by the run's immutable check |
+| A copy-up keeps a file's identity: a write open of a lower-only file opens it with its bytes, and every handle of it, those opened before the copy-up included, reads WRITEs, SETATTRs and truncating OPENs at once | 3.4.3, 3.4.4, 3.4.6, 3.4.9 | `overlay-copy-up-handles`, `overlay-truncate` |
+| DELETE of a lower-only file hides it (nothing a farther layer holds there shows); DELETE of a lower-only directory with children hides it, or is `ST_IO_ERROR` by the general rule; a DELETE of a name the upper holds leaves it missing, the lower's entry under it included | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-listing` |
 | A name made where a DELETE hid one is new: an empty file, an empty directory; a handle on the hidden file never reaches it | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir` |
 | RENAME of a lower-only file copies it up and renames it; its handles follow it | 3.4.7, 3.4.9 | `overlay-rename-file` |
-| RENAME of a lower-only directory to another name is `ST_IO_ERROR`; to another case of itself `ST_OK`, the lower's spelling kept, for a file too | 3.4.9 | `overlay-rename-dir`, `overlay-spelling` |
+| RENAME of a lower-only directory to another name is `ST_IO_ERROR`, or by the general rule moves it whole; to another case of itself `ST_OK`, the lower's spelling kept or (the general rule) respelled, for a file too | 3.4.7, 3.4.9 | `overlay-rename-dir`, `overlay-spelling`, `overlay-written-file` |
 | RENAME onto a lower-only file replaces it; RENAME_X of a lower-only file moves it, of a lower-only directory is `ST_CROSS_ROOT` | 3.4.7, 3.4.13 | `overlay-rename-file`, `overlay-rename-dir` |
-| RENAME of a directory the upper and a lower both hold is `ST_IO_ERROR` with nothing moved, or moves the whole of it, every name under it from every layer; never part of it | 3.4.7 | `overlay-rename-both` |
+| RENAME of a directory the upper and a lower both hold is `ST_IO_ERROR` with nothing moved, or moves the whole of it, every name under it from every layer; never part of it. A case-only RENAME of it respells it, or is refused | 3.4.7 | `overlay-rename-both`, `overlay-rename-dir` |
 | MKDIR of a directory only a lower holds is `ST_OK` or `ST_EXISTS`, and its listing is unchanged | 3.4.9 | `overlay-mkdir` |
-| MKDIR over a lower-only file makes the directory, which hides the file | 3.4.9 | `overlay-mkdir`, `overlay-written-file` |
+| MKDIR over a lower-only file makes the directory, which hides the file, or by the general rule is `ST_IO_ERROR` | 3.4.9 | `overlay-mkdir`, `overlay-written-file` |
 | A lower-only file a WRITE or a truncating OPEN changed is the upper's (the lower is read-only): MKDIR over it is `ST_IO_ERROR`, a case-only RENAME respells it | 3.4.7, 3.4.9 | `overlay-written-file` |
 | DELETE of a directory the upper holds with a lower's names under it is `ST_IO_ERROR` | 3.4.8 | `overlay-delete-dir` |
 
 **Where wire.md lets an overlay answer otherwise**, the step accepts every
-answer: MKDIR of a directory only a lower holds is `ST_OK` or `ST_EXISTS`
-(3.4.9); RENAME of a directory the upper and a lower both hold is
-`ST_IO_ERROR` or the whole move (3.4.7), which `overlay-rename-both` checks
-with steps that share a `choice`, so that a director that moves part of the
-directory fails; a handle on a lower-only file that was hidden answers as
-3.4.8 says of a deleted file. The `one_of` table above lists them. The
-reference answers `ST_EXISTS`, `ST_IO_ERROR` and `ST_IO_ERROR`.
+answer. 3.4.9 says an overlay "may" answer a lower-only name by its list, and
+the answers the general rules give stay allowed, so for each of four
+requests on a lower-only name either is accepted: DELETE of a directory with
+children (hidden, or `ST_IO_ERROR`), RENAME of a directory to another name
+(`ST_IO_ERROR`, or moved whole), RENAME to another case of itself (the
+lower's spelling kept, or respelled) and MKDIR over a file (the directory
+made, or `ST_IO_ERROR`). MKDIR of a directory only a lower holds is `ST_OK`
+or `ST_EXISTS` (3.4.9). RENAME of a directory the upper and a lower both hold
+is `ST_IO_ERROR` or the whole move (3.4.7), and a case-only RENAME of it is
+respelled or refused. A handle on a lower-only file that was hidden answers
+as 3.4.8 says of a deleted file. Where the answers leave different trees, the
+step and every later step whose answer depends on it share a `choice`, so a
+director must keep to the answer it gave (and one that moves part of a
+directory fails `overlay-rename-both`); a generated case ends after such a
+step. The `one_of` table above lists them. The reference answers by 3.4.9's
+list, `ST_EXISTS` and `ST_IO_ERROR`; the test-only adapter modes
+`lower-general-rules` (the general rules, and whole moves) and
+`refuse-layered-dir-renames` (every RENAME of a directory both layers hold
+refused) pass the suite and generated cases.
 
 **Where wire.md is silent.** One layered question is left to the director,
 and the reference's answer to it is its own choice: *when is a lower-only
@@ -349,9 +365,11 @@ listing: each name the reference lists is the upper's or one a layer shows,
 with the layer's spelling, kind and size, and each name only a layer shows is
 listed. A reference that answers otherwise is a generator error. It does not
 send DELETE, case-only RENAME or MKDIR of a name the question left to the
-director leaves open, RENAME of a directory a layer holds too (the scenario
-`overlay-rename-both` plays it), or anything after a MKDIR of a lower-only
-directory that depends on the answer it chose.
+director leaves open, RENAME of a directory a layer holds too to another
+name (the scenario `overlay-rename-both` plays it), or anything after a
+MKDIR of a lower-only directory that depends on the answer it chose; a
+request wire.md lets an overlay answer two ways that leave different trees
+(above) is the case's last step.
 
 **Proof it bites.** Test-only breaks of the reference adapter each make one
 mistake a layered director plausibly makes, and the tests show the scenario
@@ -732,6 +750,7 @@ its stdout, never two requests at once.
 {"op":"mount","scenario":"/abs/path/contract/scenarios/files.json"}
     -> {"ok":true,"env":{"VFS_RING_PATH":"/tmp/x.ring","VFS_RING_BYTES":"16777216",...}}
     or {"ok":false,"error":"why not"}
+    either may carry "layers":false (the director serves no layered roots)
 {"op":"unmount"}
     -> {"ok":true}
 ```
@@ -753,6 +772,17 @@ its stdout, never two requests at once.
   its environment (every name of 5.2's table but `VFS_REGISTRY`, with values
   like `aether-conform-stale-VFS_RING_SECTION` and `7`). A mount answer that holds one passed it
   on, as a launch built on the director's own environment would.
+- A director that serves no root as an overlay (no `lower` layers,
+  `contract/scenarios/README.md`) says so in its mount answers with
+  `"layers": false` beside `ok`, and refuses (`"ok":false`) the mount of a
+  tree that has lower layers; it never mounts one and ignores the layers.
+  Without the field, a director serves them (`"layers": true`). Once a mount
+  answer has said `false`, the run reports each scenario whose tree has
+  lower layers as skipped (TAP `# SKIP`, JSON `"skipped"` with the reason,
+  `"passed": false`, failing nothing) without mounting it, and the generated
+  cases and concurrent rounds, which learn it from their first mount of an
+  empty tree, make no layered root. A skipped scenario is not a passed one:
+  such a director has not shown it serves overlays.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed

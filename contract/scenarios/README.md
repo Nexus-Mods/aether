@@ -70,11 +70,13 @@ directory's ancestors, and a file's, are directories of the layer too):
             "dirs": ["Data/Empty"]}]}
 ```
 
-The root's own `files` and `dirs` are then its upper. Every file and listed
-directory of a layer lies strictly below one of the root's `writable`
-entries (anywhere, in a root writable as a whole), and within one layer a
-name is there once and of one kind; two layers, or a layer and the upper,
-may hold one name, in any spelling. The root is served as one tree, an
+The root's own `files` and `dirs`, its `writable` entries and every
+directory above them are then its upper. Every file and listed directory of
+a layer lies strictly below one of the root's `writable` entries (anywhere,
+in a root writable as a whole); the directories a layer's names imply above
+them may lie outside the writable part (they are the upper's names too, so
+the two merge). Within one layer a name is there once and of one kind; two
+layers, or a layer and the upper, may hold one name, in any spelling. The root is served as one tree, an
 overlay (wire.md 3.4.9, "Names only in a read-only lower"):
 
 - At a name the upper holds, the upper's entry is served (its kind, size,
@@ -89,10 +91,13 @@ overlay (wire.md 3.4.9, "Names only in a read-only lower"):
   or changed in the session.
 
 An adapter mounts the layers as its director's read-only lowers in this
-order and the root's own entries as the upper (as the reference does). A
-director that has no layers cannot mount such a tree, and fails the
-scenarios that use one: they are the contract for directors that serve
-overlays. `docs/conformance.md` ("Layered roots") lists the rules they
+order and the root's own entries as the upper (as the reference does). An
+adapter whose director serves no root as an overlay refuses such a mount
+and says `"layers": false` in its mount answers; it never ignores `lower`.
+The run then skips the scenarios with layers (`docs/conformance.md`, "The
+adapter protocol"). wire.md 3.4.9 lets an overlay answer four requests on a
+lower-only name by its list or by the general rules, and the scenarios
+accept both. `docs/conformance.md` ("Layered roots") lists the rules they
 check and the questions wire.md leaves open.
 
 **Who holds what.** Everything under a `writable` entry that the root's own
@@ -213,6 +218,8 @@ state):
 | A request naming a named stream (`x.sav:s`) | `not-found`, `bad-request`, or the stream a director holds | 3.2 |
 | A create of a name a director's store would make one with another (`ας` beside `ασ`) | created, or `exists` | 3.2 |
 | MKDIR of a directory only a lower layer holds | `ok` or `exists` | 3.4.9 |
+| DELETE of a lower-only directory with children; RENAME of a lower-only directory to another name; a case-only RENAME of a lower-only name; MKDIR over a lower-only file | the answer 3.4.9's list gives, or the general rules' (`io-error`, moved whole, respelled, `io-error`), the steps after it sharing a `choice` | 3.4.9 |
+| A case-only RENAME of a directory the upper and a lower both hold | `ok` (respelled) or `io-error` | 3.4.7 |
 
 An error answer must carry no payload (wire.md 3.1: "A director answers
 every error with an empty payload"); one that does fails its step whatever

@@ -114,6 +114,14 @@ foreach ($builder in @('bin/build-natives.ps1', 'bin/build-windows')) {
   $text = Get-Content -Raw -LiteralPath (Join-Path $root $builder)
   Check "$builder builds the natives in the natives-lto profile" (Test-NativeBuilds $text) ((Get-NativeBuilds $text) -join ' | ')
 }
+# The fixtures keep their profile on both: build-natives.ps1 -Fixtures builds
+# the host injector and shim in release, and build-windows builds them with
+# the fixtures and copies them, under the x64 natives' names, from there,
+# not from the natives' build.
+$bw = (Get-Content -Raw -LiteralPath (Join-Path $root 'bin/build-windows')) -replace '\\\r?\n', ' '
+$fixtureBuild = @($bw -split "`n" | Where-Object { $_ -match 'cargo (xwin )?build' -and $_ -match '-p aether-fixtures' -and $_ -match '-p aether-inject\b' -and $_ -match '-p aether-shim\b' -and $_ -notmatch 'natives_flags' })
+Check 'bin/build-windows builds the host pair with the fixtures' ($fixtureBuild.Count -eq 1)
+Check 'bin/build-windows copies the host pair from the fixtures'' build' ($bw -notmatch '"\$(injector64|shim64)"\) from=')
 
 if ($failed.Count) { Write-Host "$($failed.Count) failed: $($failed -join '; ')"; exit 1 }
 Write-Host 'all passed'

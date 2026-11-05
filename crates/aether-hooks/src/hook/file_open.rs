@@ -81,7 +81,7 @@ unsafe fn try_fuse_create(
     let client = crate::director::global()?;
     let path = path?.to_string();
     let (root, vp) = client.route(&path)?;
-    let vp = vp.as_str();
+    let vp = &*vp;
 
     // No basename exceptions: `steam_appid.txt`, `SkyrimSELauncher.exe`,
     // `steam_api{,64}.dll` and `SkyrimSE.exe` are served or sealed like any other path
@@ -381,7 +381,7 @@ unsafe fn try_fuse_mkdir(
     // A directory is named as it is created: the caller's spelling, not the
     // folded path. See `FuseClient::vpath_as_spelled`.
     let (root, vp) = client.route_as_spelled(path)?;
-    let vp = vp.as_str();
+    let vp = &*vp;
     // Every request about the name but MKDIR, which creates it, sends it
     // folded (docs/wire.md 3.2).
     let folded = aether_casefold::fold(vp);

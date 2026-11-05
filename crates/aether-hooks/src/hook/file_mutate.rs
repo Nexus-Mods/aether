@@ -66,7 +66,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
 
     if let Some(client) = crate::director::global() {
         if let Some((root, vp)) = client.route(path) {
-            let vp = vp.as_str();
+            let vp = &*vp;
             client.names_changed(root, vp);
             crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {

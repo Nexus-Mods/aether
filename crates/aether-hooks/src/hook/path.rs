@@ -257,7 +257,7 @@ pub(super) unsafe fn surely_outside(oa: *const ObjectAttributes) -> bool {
 /// With no client attached (only a test that installs the detours without a ring) nothing is
 /// ours.
 pub(super) fn path_is_ours(path: &str) -> bool {
-    crate::director::global().is_some_and(|c| c.vpath_under_root(path).is_some())
+    crate::director::global().is_some_and(|c| c.is_under_root(path))
 }
 
 /// Parse the target path from a `FILE_RENAME_INFORMATION`(`_EX`) buffer. Only

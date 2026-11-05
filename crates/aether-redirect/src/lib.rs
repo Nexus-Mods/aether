@@ -32,3 +32,8 @@ pub use wildcard::wildcard_match;
 /// What a [`RootMap`] lookup answers with: which declared root the path fell
 /// under, and its folded remainder components beneath that root.
 pub type RootHit = (RootId, Vec<String>);
+
+/// [`RootHit`] with its components joined by `/`: the folded vpath under the
+/// root (empty for the root itself), shared with [`RootMap`]'s cache, so a
+/// path asked about before costs no allocation ([`RootMap::resolve_vpath`]).
+pub type RootVpath = (RootId, std::sync::Arc<str>);

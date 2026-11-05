@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 
-use crate::RootHit;
+use crate::RootVpath;
 
 thread_local! {
     /// Depth counter behind [`UncachedScope`]. A counter rather than a bare
@@ -165,7 +165,7 @@ pub(crate) struct PathCache {
 
 #[derive(Default)]
 pub(crate) struct PathCacheState {
-    map: HashMap<String, Option<RootHit>>,
+    map: HashMap<String, Option<RootVpath>>,
     order: VecDeque<String>,
 }
 
@@ -180,7 +180,9 @@ impl PathCache {
     /// A lock-poisoning thread (one that panicked while holding the lock) must
     /// not wedge every future open in a long-running game session — recover
     /// the guard rather than propagating the poison.
-    pub(crate) fn get(&self, key: &str) -> Option<Option<RootHit>> {
+    /// The cached answer for `key`; a hit shares the cached vpath (one
+    /// reference count), and allocates nothing.
+    pub(crate) fn get(&self, key: &str) -> Option<Option<RootVpath>> {
         let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
         guard.map.get(key).cloned()
     }
@@ -191,7 +193,7 @@ impl PathCache {
         guard.map.get(key).map(Option::is_some)
     }
 
-    pub(crate) fn insert(&self, key: String, value: Option<RootHit>) {
+    pub(crate) fn insert(&self, key: String, value: Option<RootVpath>) {
         let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
         // Another thread may have raced this one to compute and insert the
         // same key; the first writer wins rather than double-counting it in

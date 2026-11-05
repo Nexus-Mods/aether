@@ -147,6 +147,11 @@ pub fn ready_timeout_secs() -> u64 {
 /// it (`C:\…`). Set by the Proton launch; unset, the target inherits the
 /// injector's own directory.
 pub const INJECT_CWD: &str = "VFS_INJECT_CWD";
+/// Set (`1`) when the target is to get a console of its own
+/// (`CREATE_NEW_CONSOLE`): a console program that sets its title or reads
+/// keys fails without one, and the injector's, under Wine with its output
+/// piped, is no console. Unset, the target shares the injector's.
+pub const INJECT_NEW_CONSOLE: &str = "VFS_INJECT_NEW_CONSOLE";
 /// The command line of Proton's Steam helper, as `aether-injector` runs it
 /// (`C:\windows\system32\steam.exe <a program>`), or
 /// [`INJECT_STEAM_HELPER_OFF`]. Set by the Proton launch: with a command
@@ -627,6 +632,11 @@ pub const ALL: &[Var] = &[
         name: INJECT_STEAM_HELPER,
         kind: Kind::Handshake,
         default: "no Steam helper",
+    },
+    Var {
+        name: INJECT_NEW_CONSOLE,
+        kind: Kind::Handshake,
+        default: "the injector's own console",
     },
     Var {
         name: SHIM_CONFIG,
@@ -1119,7 +1129,7 @@ pub mod handshake {
     /// The names only the injector reads. A Wine launch sets or clears them
     /// like [`TRANSPORT`]; the Windows in-process serve leaves them alone,
     /// because there the host may have set them for its own injector.
-    pub const INJECT: &[&str] = &[INJECT_CWD, INJECT_STEAM_HELPER];
+    pub const INJECT: &[&str] = &[INJECT_CWD, INJECT_STEAM_HELPER, INJECT_NEW_CONSOLE];
 
     /// The remaining handshake names: configuration the host hands the shim,
     /// or the staging step. A launch does not set them, but
@@ -1199,7 +1209,13 @@ pub mod handshake {
 
         #[test]
         fn registry_and_fuse_cfg_are_launch_cleared_handshake_names() {
-            for n in [REGISTRY, FUSE_CFG, RING_PATH, INJECT_CWD] {
+            for n in [
+                REGISTRY,
+                FUSE_CFG,
+                RING_PATH,
+                INJECT_CWD,
+                INJECT_NEW_CONSOLE,
+            ] {
                 assert!(is_handshake(n), "{n}");
                 assert!(stale(|_| false).any(|s| s == n), "{n} not cleared");
             }

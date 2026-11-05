@@ -51,6 +51,7 @@ fn a_shim_that_never_reports_ready_gets_the_process_killed() {
         env_remove: Vec::new(),
         virtual_image: None,
         virtual_cwd: None,
+        new_console: false,
     });
 
     assert!(

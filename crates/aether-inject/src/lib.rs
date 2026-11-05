@@ -56,6 +56,9 @@ pub struct RunConfig {
     pub virtual_cwd: Option<String>,
     /// Variables the target does not inherit from this process.
     pub env_remove: Vec<String>,
+    /// Start the target with a console of its own (`CREATE_NEW_CONSOLE`),
+    /// not this process's: see [`aether_env::INJECT_NEW_CONSOLE`].
+    pub new_console: bool,
 }
 
 /// Failure points in launch + inject + run.

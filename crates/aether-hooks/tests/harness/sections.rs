@@ -710,6 +710,96 @@ fn a_second_thread_never_reads_a_chunk_before_its_fill_is_done() {
     close(file);
 }
 
+// ---- demand-paged: fills of different chunks ----------------------------
+
+/// Where the other-chunk touches land: outside the warm window and outside
+/// [`TOUCH`]'s chunk.
+const OTHER_TOUCH: usize = 4 * MIB;
+
+/// While one chunk's fill READ is held, a fault on another chunk of the
+/// same section, and one on a chunk of another section, are filled: only a
+/// thread on the held chunk waits for it.
+#[test]
+fn a_held_fill_does_not_hold_fills_of_other_chunks() {
+    isolate!();
+    use std::time::Duration;
+    const OTHER: &str = "data/other.bin";
+    let want = pattern(LAZY);
+    let other_want: Vec<u8> = pattern(LAZY).iter().map(|b| b ^ 0x5A).collect();
+    let (root, served) = serve(
+        Fake::new().with(FILE, want.clone(), ReadStyle::Whole).with(
+            OTHER,
+            other_want.clone(),
+            ReadStyle::Whole,
+        ),
+        true,
+    );
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section) as usize;
+    let other_file = open(&root.join(OTHER), GENERIC_READ);
+    let other_section = mapping(other_file, PAGE_READONLY).expect("CreateFileMappingW");
+    let ov = view(other_section) as usize;
+    // The first thread's fill READ is held until released (or MAX_DELAY).
+    let id = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..reads(Opcode::Read)
+        },
+        Fault::Delay(Duration::from_secs(10)),
+    );
+    let first = std::thread::spawn(move || bytes(v as *const u8, TOUCH, PAGE));
+    assert!(
+        served.faults.wait_applied(id, 1, Duration::from_secs(10)),
+        "the first touch's READ never reached the director"
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let same_tx = tx.clone();
+    let same = std::thread::spawn(move || {
+        let _ = same_tx.send(("same", bytes(v as *const u8, OTHER_TOUCH, PAGE)));
+    });
+    let other = std::thread::spawn(move || {
+        let _ = tx.send(("other", bytes(ov as *const u8, OTHER_TOUCH, PAGE)));
+    });
+    // Both while the first fill is still held.
+    let mut early = Vec::new();
+    for _ in 0..2 {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(got) => early.push(got),
+            Err(_) => break,
+        }
+    }
+    let held = !first.is_finished();
+    served.faults.release();
+    let first_got = first.join().unwrap();
+    same.join().unwrap();
+    other.join().unwrap();
+    assert!(
+        held,
+        "the first fill was not held while the others were filled"
+    );
+    assert_eq!(
+        early.len(),
+        2,
+        "fills that finished while another chunk's fill was held: {:?}",
+        early.iter().map(|(w, _)| *w).collect::<Vec<_>>()
+    );
+    for (which, got) in early {
+        let src = if which == "same" { &want } else { &other_want };
+        assert!(
+            got == src[OTHER_TOUCH..OTHER_TOUCH + PAGE],
+            "the {which} chunk's bytes are not the file's"
+        );
+    }
+    assert!(first_got == want[TOUCH..TOUCH + PAGE]);
+    unmap(ov as *const u8);
+    close(other_section);
+    close(other_file);
+    unmap(v as *const u8);
+    close(section);
+    close(file);
+}
+
 // ---- unmapping: real views, and the process an unmap names ---------------
 
 /// A view of a real file (outside every root) unmaps through the hooks: its
@@ -915,4 +1005,352 @@ fn threads_on_a_chunk_whose_fill_keeps_failing_all_raise_after_one_bounded_try()
             },
         )
     };
+}
+
+// ---- demand-paged: a fault while the process exits -----------------------
+
+/// Set in [`lazy_exit_child`]'s process: the folder its handshake files are
+/// in. Absent in an ordinary run, so the child test is a no-op then.
+const EXIT_CHILD_DIR: &str = "AETHER_LAZY_EXIT_CHILD_DIR";
+/// The child's exit codes: its exit-time reads saw the file's bytes, saw
+/// other bytes, or never ran (the process ended by its `ExitProcess`).
+const EXIT_FILLED: u32 = 0x0E0F_0001;
+const EXIT_WRONG: u32 = 0x0E0F_0002;
+const EXIT_NOT_READ: u32 = 0x0E0F_0003;
+/// Bytes compared at each exit-time read.
+const EXIT_READ: usize = 16;
+
+/// The child's view, once it is about to exit: its process-detach TLS
+/// callback reads through it. 0 in every other process.
+static EXIT_VIEW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// What those reads should see: the file's bytes at the chunk a killed
+/// thread was filling, and at a chunk nobody touched.
+static EXIT_WANT: std::sync::OnceLock<[[u8; EXIT_READ]; 2]> = std::sync::OnceLock::new();
+/// The two places read at exit.
+const EXIT_AT: [usize; 2] = [TOUCH + PAGE, OTHER_TOUCH];
+
+/// This binary's TLS callback. The loader calls it with
+/// `DLL_PROCESS_DETACH` from `LdrShutdownProcess`: after `ExitProcess` has
+/// ended every other thread (the fill workers among them), with the loader
+/// lock held, where a DLL's detach or its CRT's `atexit` handlers run.
+#[used]
+#[link_section = ".CRT$XLY"]
+static ON_TLS: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) =
+    on_tls;
+
+unsafe extern "system" fn on_tls(
+    _: *mut core::ffi::c_void,
+    reason: u32,
+    _: *mut core::ffi::c_void,
+) {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    const DLL_PROCESS_DETACH: u32 = 0;
+    let v = EXIT_VIEW.load(Ordering::SeqCst);
+    let Some(want) = EXIT_WANT.get() else {
+        return;
+    };
+    if reason != DLL_PROCESS_DETACH || v == 0 {
+        return;
+    }
+    // No allocation: a killed thread may have held the heap's lock.
+    let ok = EXIT_AT.iter().zip(want).all(|(&at, want)| {
+        (0..EXIT_READ).all(|i| core::ptr::read_volatile((v + at + i) as *const u8) == want[i])
+    });
+    TerminateProcess(
+        GetCurrentProcess(),
+        if ok { EXIT_FILLED } else { EXIT_WRONG },
+    );
+}
+
+/// The handshake between the test and its child: a file appearing in `dir`.
+fn wait_for_file(dir: &Path, name: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !dir.join(name).exists() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+/// The process the test watches exit: it maps a demand-paged section of the
+/// test's director, has a thread start a fill of [`TOUCH`]'s chunk (whose
+/// READ the test holds), and exits; at exit its TLS callback reads that
+/// chunk and an untouched one.
+#[test]
+#[ignore = "the child of a_fault_while_the_process_exits_is_filled; inert on its own"]
+fn lazy_exit_child() {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    };
+    let Some(dir) = std::env::var_os(EXIT_CHILD_DIR).map(PathBuf::from) else {
+        return;
+    };
+    // SAFETY: sets this process's error mode; no pointers.
+    unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+    aether_hooks::director::try_init_from_env().expect("attach to the test's director");
+    aether_hooks::set_eager_section_max(EAGER_MAX);
+    std::mem::forget(aether_hooks::install().expect("install"));
+    let root = PathBuf::from(std::env::var_os(aether_env::VIRTUAL_DIR).expect("root"));
+    let want = pattern(LAZY);
+    let _ = EXIT_WANT.set(EXIT_AT.map(|at| want[at..at + EXIT_READ].try_into().unwrap()));
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section) as usize;
+    std::fs::write(dir.join("mapped"), b"").unwrap();
+    assert!(wait_for_file(&dir, "armed"), "the test never held the READ");
+    // Ended by the exit mid-fill: the chunk stays marked as filling.
+    std::thread::spawn(move || bytes(v as *const u8, TOUCH, 1));
+    assert!(
+        wait_for_file(&dir, "go"),
+        "the test never saw the held READ"
+    );
+    EXIT_VIEW.store(v, std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: plain FFI.
+    unsafe { ExitProcess(EXIT_NOT_READ) };
+}
+
+/// A fault in a demand-paged section during process exit is filled, and the
+/// process ends: once `ExitProcess` has ended the fill workers, and the
+/// thread that was filling a chunk, no fill waits on them. At exit the
+/// child reads the chunk the killed thread was filling and one nobody
+/// touched, from its TLS callback's `DLL_PROCESS_DETACH`, and sees the
+/// file's bytes (READ, wire.md 3.4.4).
+#[test]
+fn a_fault_while_the_process_exits_is_filled() {
+    isolate!();
+    use std::time::{Duration, Instant};
+    let root = root();
+    let dir = aether_testkit::tempdir().expect("handshake folder");
+    let served = fakedirector::install_with(
+        &root,
+        Fake::new().with(FILE, pattern(LAZY), ReadStyle::Whole),
+        fakedirector::Options::default(),
+    );
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sections::lazy_exit_child",
+            "--include-ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(EXIT_CHILD_DIR, dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the child");
+    let end = |child: &mut std::process::Child, why: &str| -> ! {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("{why}");
+    };
+    if !wait_for_file(dir.path(), "mapped") {
+        end(&mut child, "the child never mapped the section");
+    }
+    // The next READ, the thread's fill of TOUCH's chunk, is held.
+    let hold = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..reads(Opcode::Read)
+        },
+        Fault::Delay(Duration::from_secs(10)),
+    );
+    std::fs::write(dir.path().join("armed"), b"").unwrap();
+    if !served.faults.wait_applied(hold, 1, Duration::from_secs(10)) {
+        end(&mut child, "the child's fill READ never came");
+    }
+    std::fs::write(dir.path().join("go"), b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break s,
+            None if Instant::now() >= deadline => {
+                end(&mut child, "the child never exited: a fault at exit hung")
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    served.faults.release();
+    assert_eq!(
+        status.code().map(|c| c as u32),
+        Some(EXIT_FILLED),
+        "the child's exit-time reads ({status})"
+    );
+}
+
+// ---- demand-paged: under the loader lock ---------------------------------
+
+/// Exit code of the loader-lock test when its section never came back.
+const HUNG_UNDER_LOADER_LOCK: u32 = 0x0E0F_0004;
+
+/// The first demand-paged section is created, and a chunk of it faulted in,
+/// by a thread holding the loader lock, as a `DllMain` would: both are
+/// filled (READ, wire.md 3.4.4) and return. The fill workers start with
+/// that section, and a thread started under the loader lock cannot run
+/// until it is released, so no fill there may wait on one.
+#[test]
+fn a_lazy_section_created_under_the_loader_lock_fills() {
+    isolate!();
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    type Lock = unsafe extern "system" fn(u32, *mut u32, *mut usize) -> i32;
+    type Unlock = unsafe extern "system" fn(u32, usize) -> i32;
+    type Export = unsafe extern "system" fn() -> isize;
+    let want = pattern(LAZY);
+    let (root, _served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
+    // SAFETY: ntdll exports cast to their signatures.
+    let (lock, unlock) = unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        let f = |n: &core::ffi::CStr| GetProcAddress(ntdll, n.as_ptr().cast()).expect("export");
+        (
+            core::mem::transmute::<Export, Lock>(f(c"LdrLockLoaderLock")),
+            core::mem::transmute::<Export, Unlock>(f(c"LdrUnlockLoaderLock")),
+        )
+    };
+    // Started before the lock is taken: a hang ends the process, without
+    // `ExitProcess`, which would wait for the lock.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        // SAFETY: plain FFI.
+        unsafe { TerminateProcess(GetCurrentProcess(), HUNG_UNDER_LOADER_LOCK) };
+    });
+    let mut cookie = 0usize;
+    // SAFETY: takes the loader lock, released below on this thread.
+    assert_eq!(unsafe { lock(0, core::ptr::null_mut(), &mut cookie) }, 0);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY);
+    let read = section.map(|s| {
+        let v = view(s);
+        (bytes(v, 0, PAGE), bytes(v, TOUCH, PAGE), v)
+    });
+    // SAFETY: the cookie the lock gave.
+    assert_eq!(unsafe { unlock(0, cookie) }, 0);
+    let (warm, touched, v) = read.expect("CreateFileMappingW");
+    assert!(warm == want[..PAGE], "the warm window's bytes");
+    assert!(
+        touched == want[TOUCH..TOUCH + PAGE],
+        "the faulted chunk's bytes"
+    );
+    unmap(v);
+    close(section.unwrap());
+    close(file);
+}
+
+// ---- demand-paged: a fill that panics ------------------------------------
+
+/// A fill worker that panics mid-fill answers the fill as failed, and lets
+/// go of the second view it was writing through: the fault tries again
+/// and reads the file's bytes (READ, wire.md 3.4.4), and the view's
+/// address range is free.
+#[test]
+fn a_fill_that_panics_is_tried_again_and_releases_its_view() {
+    isolate!();
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE};
+    let want = pattern(LAZY);
+    let (root, served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section);
+    let mark = served.recorder.mark();
+    aether_hooks::panic_next_lazy_fill(true);
+    let got = bytes(v, TOUCH, PAGE);
+    let at = aether_hooks::panic_next_lazy_fill(false);
+    assert!(got == want[TOUCH..TOUCH + PAGE], "the chunk's bytes");
+    assert_eq!(
+        read_offsets(served, mark),
+        [TOUCH as u64, TOUCH as u64],
+        "the panicked fill and the one after it"
+    );
+    assert_ne!(at, 0, "no fill panicked");
+    assert_eq!(
+        aether_hooks::lazy_region_count("shared"),
+        1,
+        "the region is a section's view, so its fill wrote through a second view"
+    );
+    // SAFETY: a query; no memory is touched.
+    let mut m: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    let n = unsafe { VirtualQuery(at as _, &mut m, core::mem::size_of_val(&m)) };
+    assert_ne!(n, 0);
+    assert_eq!(
+        m.State, MEM_FREE,
+        "the panicked fill's second view is still mapped"
+    );
+    unmap(v);
+    close(section);
+    close(file);
+}
+
+// ---- demand-paged: the fill workers' stack -------------------------------
+
+/// Which fills [`a_fill_worker_s_deepest_is_a_fraction_of_the_32_bit_stack`]
+/// runs, in a process of its own each.
+const STACK_CASE: &str = "AETHER_FILL_STACK_CASE";
+
+/// The fill workers' stack is sized to what a fill uses: the deepest a
+/// worker goes (READ, wire.md 3.4.4) is at most a quarter of the 32-bit
+/// workers' stack, measured here on x64, whose frames are the larger, in
+/// a test build, whose frames are larger than a release's. Over the bulk
+/// arena into a section's second view; inline READs over the file ring into
+/// private memory; and a fill that panics, with `RUST_BACKTRACE=full`, so
+/// the panic hook symbolises a backtrace on the worker.
+#[test]
+fn a_fill_worker_s_deepest_is_a_fraction_of_the_32_bit_stack() {
+    fn f() {}
+    let name = std::any::type_name_of_val(&f);
+    let case = std::env::var(STACK_CASE).ok();
+    let Some(case) = case else {
+        for (case, backtrace) in [("bulk", "0"), ("inline", "0"), ("panic", "full")] {
+            crate::common::run_isolated_output_with(
+                name,
+                None,
+                &[(STACK_CASE, case), ("RUST_BACKTRACE", backtrace)],
+            );
+        }
+        return;
+    };
+    if crate::common::run_isolated_output_with(name, None, &[]).is_some() {
+        return;
+    }
+    let want = pattern(LAZY);
+    let fake = Fake::new().with(FILE, want.clone(), ReadStyle::Whole);
+    let opts = match case.as_str() {
+        "inline" => {
+            aether_hooks::fail_shared_lazy_reserve(true);
+            fakedirector::Options {
+                arena_len: 0,
+                ring: fakedirector::RingKind::File,
+                ..fakedirector::Options::default()
+            }
+        }
+        _ => fakedirector::Options::default(),
+    };
+    aether_hooks::set_eager_section_max(EAGER_MAX);
+    let root = root();
+    let _served = fakedirector::install_with(&root, fake, opts);
+    std::mem::forget(aether_hooks::install().expect("install"));
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section);
+    for at in (0..LAZY).step_by(CHUNK) {
+        if case == "panic" {
+            aether_hooks::panic_next_lazy_fill(true);
+        }
+        assert!(
+            bytes(v, at, 1) == want[at..at + 1],
+            "{case}: the bytes at {at}"
+        );
+    }
+    let peak = aether_hooks::lazy_fill_worker_stack_peak();
+    let stack = aether_hooks::lazy_fill_worker_stack(32);
+    assert!(peak > 0, "{case}: no fill ran on a worker");
+    assert!(
+        peak * 4 <= stack,
+        "{case}: a fill worker committed {peak} bytes of stack, over a quarter of the 32-bit workers' {stack}"
+    );
+    unmap(v);
+    close(section);
+    close(file);
 }

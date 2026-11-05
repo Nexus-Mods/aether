@@ -204,7 +204,7 @@ unsafe fn serve_dir_query(
         let routed = crate::director::global().and_then(|c| c.route(&dir_path).map(|hit| (c, hit)));
         match routed {
             Some((client, (root, vp))) => {
-                let vp = vp.as_str();
+                let vp = &*vp;
                 let listed = client.readdir(root, vp, |e| DirItem {
                     name: e.name.to_string(),
                     is_dir: e.is_dir,

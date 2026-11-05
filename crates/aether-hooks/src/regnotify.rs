@@ -332,40 +332,11 @@ unsafe fn duplicate(real: &Real, h: isize, access: u32, options: u32) -> Result<
     }
 }
 
-/// Whether this thread holds the loader lock (`PEB->LoaderLock`). A synchronous wait there
-/// could never end if the notifier has to be started: a new thread cannot run until the lock is
-/// released.
-fn holds_loader_lock() -> bool {
-    type Locked = unsafe extern "system" fn(*mut c_void) -> u32;
-    static F: OnceLock<Option<Locked>> = OnceLock::new();
-    let f = F.get_or_init(|| {
-        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-        // SAFETY: an ntdll export cast to its documented signature.
-        unsafe {
-            let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
-            GetProcAddress(ntdll, c"RtlIsCriticalSectionLockedByThread".as_ptr().cast())
-                .map(|p| core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p))
-        }
-    });
-    let Some(f) = f else {
-        return false;
-    };
-    let peb = crate::peb::peb();
-    if peb == 0 {
-        return false;
-    }
-    // SAFETY: the PEB's `LoaderLock` is the loader's critical section; both are valid for the
-    // life of the process.
-    unsafe {
-        let lock = *((peb + crate::peb::PEB_LOADER_LOCK) as *const *mut c_void);
-        !lock.is_null() && f(lock) != 0
-    }
-}
-
 /// A synchronous notification: block until the waiter completes, and answer its status.
 unsafe fn wait_sync(real: &Real, h: isize, path: String, a: &Args, since: Option<u64>) -> NTSTATUS {
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-    if holds_loader_lock() {
+    // A wait there could never end if the notifier has to be started.
+    if crate::peb::holds_loader_lock() {
         return STATUS_POSSIBLE_DEADLOCK;
     }
     let event = CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()) as isize;

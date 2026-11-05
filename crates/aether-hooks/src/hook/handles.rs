@@ -10,11 +10,11 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 /// all of them go when the handle is closed.
 #[derive(Default)]
 pub(super) struct HandleInfo {
-    /// The NT path the handle was opened as, for *every* successful open (`tag_under_root`).
+    /// The NT path the handle was opened as, for *every* successful open (`record_open`).
     /// Bounded by [`HANDLE_PATHS_MAX`] so a handle leak cannot grow it without end.
     pub(super) opened_as: Option<String>,
     /// An under-root open's NT path, so a later handle-based delete/rename (`NtSetInformationFile`)
-    /// can act by path (`record_path`).
+    /// can act by path (`record_open`).
     pub(super) under_root: Option<String>,
     /// A candidate directory for enumeration virtualisation: an under-root open's cursor state.
     /// Harmless for file handles (they never receive a dir-enum call).
@@ -134,30 +134,24 @@ pub(super) fn reset_key(key: isize, blocking: bool) {
     }
 }
 
-/// [`reset_key`] for the handle a successful `NtCreateFile`/`NtOpenFile` returned. `path` is
-/// the decoded path the open will record: with one, the open takes the lock anyway
-/// (`tag_under_root`), so the clear blocks like it does; without one (nothing is recorded) it
-/// is a `try_lock`, so a pass-through open that took no lock before still takes none that can
-/// block. The residual window: a path-less open whose clear loses the `try_lock` keeps a stale
-/// record, but nothing reads a record for it except by its own handle value.
-pub(super) unsafe fn reset_handle(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
-    if status < 0 || file_handle.is_null() {
-        return;
-    }
-    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-    reset_key(unsafe { *file_handle } as isize, path.is_some());
-}
-
-/// Record a freshly-opened handle as a candidate directory for enumeration
-/// virtualization: only when the open succeeded and its path is under the
-/// managed root. Harmless for file handles (they never receive a dir-enum call)
-/// and reclaimed by `NtClose`. Shared by the `NtCreateFile` and `NtOpenFile`
-/// pass-through paths.
+/// Record what a successful `NtCreateFile`/`NtOpenFile` that issued `*file_handle` leaves
+/// behind, with the table locked once: the handle value's stale record cleared ([`reset_key`]),
+/// the path it was opened as, and for a path under a root its directory cursor (a candidate
+/// for enumeration virtualization, harmless for a file handle, which never receives a dir-enum
+/// call) and its under-root path (so a later handle-based delete/rename can act by path).
+/// Reclaimed by `NtClose`. Shared by every branch of both open hooks that the host answered,
+/// and by a directory create the director answered.
+///
+/// Without a path nothing is recorded, and the clear is a `try_lock`, so a pass-through open
+/// that takes no lock that can block still takes none. The residual window: a path-less open
+/// whose clear loses the `try_lock` keeps a stale record, but nothing reads a record for it
+/// except by its own handle value. With one, whether it is ours is asked before the lock is
+/// taken (the lookup may compute, and allocate).
 ///
 /// Takes the already-decoded `path` rather than `oa`: `create_hook`/
 /// `open_hook` decode once per invocation (`path_of_tracked`) and thread the
 /// result through every function rather than each calling `path_of(oa)`
-/// itself, this one, `record_path` and `note_passthrough_outcome` included. Otherwise a
+/// itself, this one and `note_passthrough_outcome` included. Otherwise a
 /// single hooked `NtCreateFile` would re-run the decode 2-5 times over; for
 /// an unresolved handle-relative open that decode is `parent_dir_of_handle`'s
 /// OS-consulted case 4 (a `GetFinalPathNameByHandleW` call), so re-running it
@@ -171,39 +165,64 @@ pub(super) unsafe fn reset_handle(file_handle: *mut HANDLE, path: Option<&str>, 
 /// Caller's responsibility: hold a `aether_redirect::UncachedScope` around this
 /// call if `path` came from an OS-consulted decode — `path_is_ours` below
 /// is `RootMap`-backed and cached.
-pub(super) unsafe fn tag_under_root(
-    file_handle: *mut HANDLE,
-    path: Option<&str>,
-    status: NTSTATUS,
-) {
+pub(super) unsafe fn record_open(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
     // NT_SUCCESS is status >= 0.
     if status < 0 || file_handle.is_null() {
         return;
     }
-    let Some(path) = path else { return };
     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
     let key = unsafe { *file_handle } as isize;
-    // Remember every handle's path, not just the ones under the root. NT lets a
-    // caller open a file as (directory handle + leaf name), and without the
-    // parent's path such an open cannot be decoded at all -- it is invisible to
-    // every decision we make and reaches the real directory behind the mount.
-    // The parent is often outside the root while the child is under it.
-    //
-    // Load-bearing for cost, not just correctness: `parent_dir_of_handle`'s
-    // case 4 (OS-consulted fallback for a handle unseen by the shim) reasons
-    // that it fires rarely *because* every handle the shim does see reach a
-    // hooked create/open lands here unconditionally. Narrowing this insert to
-    // only under-root handles (matching the `DIR_TABLE` insert just below)
-    // would make case 4 fire for every outside-root ancestor handle too,
-    // changing that branch from a rare safety net into a per-open cost.
+    let Some(path) = path else {
+        reset_key(key, false);
+        return;
+    };
+    let ours = path_is_ours(path);
     if let Ok(mut t) = HANDLES.lock() {
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::TAG_UNDER_ROOT);
+        t.remove(key);
+        // Remember every handle's path, not just the ones under the root. NT lets a
+        // caller open a file as (directory handle + leaf name), and without the
+        // parent's path such an open cannot be decoded at all -- it is invisible to
+        // every decision we make and reaches the real directory behind the mount.
+        // The parent is often outside the root while the child is under it.
+        //
+        // Load-bearing for cost, not just correctness: `parent_dir_of_handle`'s
+        // case 4 (OS-consulted fallback for a handle unseen by the shim) reasons
+        // that it fires rarely *because* every handle the shim does see reach a
+        // hooked create/open lands here unconditionally. Narrowing this insert to
+        // only under-root handles (matching the cursor insert just below)
+        // would make case 4 fire for every outside-root ancestor handle too,
+        // changing that branch from a rare safety net into a per-open cost.
         t.set_opened_as(key, path.to_string());
+        if ours {
+            t.set_dir(
+                key,
+                DirTracked {
+                    dir_nt_path: path.to_string(),
+                    state: None,
+                },
+            );
+            t.set_under_root(key, path.to_string());
+        }
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
     }
-    if path_is_ours(path) {
-        if let Ok(mut table) = HANDLES.lock() {
-            table.set_dir(
+}
+
+/// [`record_open`] for an open the director answered with the synthetic handle `key`: the
+/// stale record cleared and the under-root path recorded, and for a directory (`is_dir`, when
+/// the handle was handed out) the path it was opened as and, when the path is ours, its
+/// cursor. With the table locked once.
+pub(super) fn record_director_open(key: isize, path: &str, is_dir: bool) {
+    let ours_dir = is_dir && path_is_ours(path);
+    if let Ok(mut t) = HANDLES.lock() {
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::TAG_UNDER_ROOT);
+        t.remove(key);
+        t.set_under_root(key, path.to_string());
+        if is_dir {
+            t.set_opened_as(key, path.to_string());
+        }
+        if ours_dir {
+            t.set_dir(
                 key,
                 DirTracked {
                     dir_nt_path: path.to_string(),
@@ -211,6 +230,7 @@ pub(super) unsafe fn tag_under_root(
                 },
             );
         }
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
     }
 }
 
@@ -222,32 +242,9 @@ pub(super) fn path_of_handle(handle: HANDLE) -> Option<String> {
     r
 }
 
-/// The NT path an under-root open recorded for `handle` (`record_path`), if any.
+/// The NT path an under-root open recorded for `handle` (`record_open`), if any.
 pub(super) fn under_root_path(handle: isize) -> Option<String> {
     HANDLES.lock().ok()?.under_root(handle).cloned()
-}
-
-/// Record a successful under-root open's handle -> folded vpath components, so
-/// a later handle-based delete/rename can act by vpath. Shared by both open
-/// hooks across all decision branches.
-///
-/// Takes the already-decoded `path` — see `tag_under_root`'s doc comment for
-/// why callers thread this through rather than re-decoding independently.
-/// Caller's responsibility: hold a `aether_redirect::UncachedScope` around this
-/// call if `path` came from an OS-consulted decode (`path_is_ours` below
-/// is `RootMap`-backed and cached).
-pub(super) unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
-    if status < 0 || file_handle.is_null() {
-        return;
-    }
-    if let Some(path) = path {
-        if path_is_ours(path) {
-            if let Ok(mut t) = HANDLES.lock() {
-                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                t.set_under_root(unsafe { *file_handle } as isize, path.to_string());
-            }
-        }
-    }
 }
 
 /// Whether `handle` is a synthetic handle **that is currently open**.
@@ -318,21 +315,39 @@ mod tests {
         }
         let mut slot = h as HANDLE;
         // A failed open issued no handle: nothing is cleared.
-        unsafe { reset_handle(&mut slot, Some("p"), -1) };
+        unsafe { record_open(&mut slot, Some("p"), -1) };
         assert!(HANDLES.lock().unwrap().under_root(h).is_some());
-        // A successful one did (with and without a path to record).
-        unsafe { reset_handle(&mut slot, Some("p"), 0) };
+        // A successful one did (with and without a path to record), and
+        // recorded only what it knows: the path it was opened as (no client,
+        // so no path is under a root).
+        unsafe { record_open(&mut slot, Some("p"), 0) };
         {
             let t = HANDLES.lock().unwrap();
-            assert!(t.under_root(h).is_none() && t.opened_as(h).is_none());
+            assert!(t.under_root(h).is_none());
+            assert_eq!(t.opened_as(h).map(String::as_str), Some("p"));
             assert!(t.dir(h).is_none());
+        }
+        // A director open records its under-root path, and a directory's
+        // opened-as path, over whatever the value held.
+        HANDLES.lock().unwrap().set_opened_as(h, "stale".into());
+        record_director_open(h, "file", false);
+        {
+            let t = HANDLES.lock().unwrap();
+            assert_eq!(t.under_root(h).map(String::as_str), Some("file"));
+            assert!(t.opened_as(h).is_none() && t.dir(h).is_none());
+        }
+        record_director_open(h, "dir", true);
+        {
+            let t = HANDLES.lock().unwrap();
+            assert_eq!(t.under_root(h).map(String::as_str), Some("dir"));
+            assert_eq!(t.opened_as(h).map(String::as_str), Some("dir"));
         }
         HANDLES.lock().unwrap().set_under_root(h, "stale".into());
         // Without a path the clear is a try_lock, which loses while another
         // test in this binary holds the global table: it clears once it gets
         // the lock, so it is retried until it does.
         let cleared = (0..10_000).any(|_| {
-            unsafe { reset_handle(&mut slot, None, 0) };
+            unsafe { record_open(&mut slot, None, 0) };
             let gone = HANDLES.lock().unwrap().under_root(h).is_none();
             if !gone {
                 std::thread::yield_now();

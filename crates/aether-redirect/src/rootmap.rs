@@ -6,7 +6,7 @@ use crate::{normalize_vpath, PathError};
 use aether_casefold::{eq_folded, fold};
 
 use crate::cache::{cache_suppressed, OsConsultGuard, PathCache, DEFAULT_CACHE_CAPACITY};
-use crate::{canonicalise, expand_short_component, RootHit, RootId, VolumeMap};
+use crate::{canonicalise, expand_short_component, RootHit, RootId, RootVpath, VolumeMap};
 
 /// One declared root: the [`RootId`] it answers with and its normalized path
 /// components in original case, e.g. `["C:", "Games", "Skyrim"]`.
@@ -176,6 +176,14 @@ impl RootMap {
     /// the ring needs and the remainder alone cannot supply.
     pub fn resolve(&self, nt_path: &str) -> Option<RootHit> {
         self.under_root(nt_path)
+            .map(|(root, vpath)| (root, components(&vpath)))
+    }
+
+    /// [`Self::resolve`] with the remainder joined by `/` (empty for the root
+    /// itself): the folded vpath, shared with the cache. A path asked about
+    /// before allocates nothing, so this is the lookup for routing a call.
+    pub fn resolve_vpath(&self, nt_path: &str) -> Option<RootVpath> {
+        self.under_root(nt_path)
     }
 
     /// Whether `nt_path` lies under any managed root (well-formed, not escaping).
@@ -194,7 +202,7 @@ impl RootMap {
     /// matched, or `None` if it is outside/malformed. Callers that need to know *which* root want
     /// [`Self::resolve`].
     pub fn remainder(&self, nt_path: &str) -> Option<Vec<String>> {
-        self.under_root(nt_path).map(|(_, rest)| rest)
+        self.resolve(nt_path).map(|(_, rest)| rest)
     }
 
     /// Folded remainder components if `nt_path` is under the managed root, else
@@ -204,7 +212,7 @@ impl RootMap {
     /// an OS-consulted answer is deliberately excluded. Also skipped, for
     /// *either* variant, while an [`UncachedScope`] is held on this thread —
     /// see its doc comment for the caller-side half of this same rule.
-    fn under_root(&self, nt_path: &str) -> Option<RootHit> {
+    fn under_root(&self, nt_path: &str) -> Option<RootVpath> {
         let suppressed = cache_suppressed();
         if !suppressed {
             if let Some(cached) = self.cache.get(nt_path) {
@@ -340,13 +348,13 @@ impl RootMap {
     }
 
     /// [`Self::under_root`]'s match: the first root (deepest first) whose
-    /// components begin `canon`'s, case apart, and the folded rest. The
-    /// root's components are compared in place (`eq_folded`), never
-    /// collected or folded into new strings: what this allocates is the
-    /// remainder it returns, so a lookup costs the same however deep the
+    /// components begin `canon`'s, case apart, and the folded rest, joined
+    /// by `/`. The root's components are compared in place (`eq_folded`),
+    /// never collected or folded into new strings: what this allocates is
+    /// the remainder it returns, so a lookup costs the same however deep the
     /// root sits on the real disk (aether-hooks' harness,
     /// `costs::allocations_do_not_follow_the_roots_depth`).
-    fn match_canonical(&self, canon: &str) -> Option<RootHit> {
+    fn match_canonical(&self, canon: &str) -> Option<RootVpath> {
         let comps = || canon.split('/').filter(|_| !canon.is_empty());
         'roots: for root in &self.roots {
             let mut given = comps();
@@ -356,7 +364,23 @@ impl RootMap {
                     _ => continue 'roots,
                 }
             }
-            return Some((root.id, given.map(fold).collect()));
+            let mut vpath = String::new();
+            for (i, c) in given.enumerate() {
+                if i > 0 {
+                    vpath.push('/');
+                }
+                // `fold`, appended: an ASCII component (nearly every one)
+                // is lowered in place rather than folded into a string of
+                // its own.
+                if c.is_ascii() {
+                    let start = vpath.len();
+                    vpath.push_str(c);
+                    vpath[start..].make_ascii_lowercase();
+                } else {
+                    vpath.push_str(&fold(c));
+                }
+            }
+            return Some((root.id, vpath.into()));
         }
         None
     }
@@ -372,8 +396,17 @@ impl RootMap {
 enum Resolution {
     /// A pure function of the raw input string (and the session-frozen
     /// `VolumeMap`) — safe to cache indefinitely.
-    Deterministic(Option<RootHit>),
+    Deterministic(Option<RootVpath>),
     /// Reached by asking the OS what the path currently names (8.3 short-name
     /// / junction resolution). Never cached.
-    OsConsulted(Option<RootHit>),
+    OsConsulted(Option<RootVpath>),
+}
+
+/// A joined vpath's components: none for the root itself.
+fn components(vpath: &str) -> Vec<String> {
+    if vpath.is_empty() {
+        Vec::new()
+    } else {
+        vpath.split('/').map(str::to_string).collect()
+    }
 }

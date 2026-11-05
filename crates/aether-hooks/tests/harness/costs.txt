@@ -4,22 +4,22 @@
 # allocs may not go up. To rewrite it after a deliberate change, in the same
 # commit:
 #   AETHER_COSTS_UPDATE=1 cargo test -p aether-hooks --test harness costs::
-attributes_in_root round_trips=1 ring_bytes=32 allocs<=7
+attributes_in_root round_trips=1 ring_bytes=32 allocs<=3
 attributes_outside_root round_trips=0 ring_bytes=0 allocs<=0
 close round_trips=1 ring_bytes=8 allocs<=0
-create_directory round_trips=2 ring_bytes=50 allocs<=37
-create_process round_trips=2 ring_bytes=58 allocs<=130
-delete round_trips=3 ring_bytes=68 allocs<=37
+create_directory round_trips=2 ring_bytes=50 allocs<=26
+create_process round_trips=2 ring_bytes=58 allocs<=127
+delete round_trips=3 ring_bytes=68 allocs<=24
 final_path_name_cold round_trips=1 ring_bytes=36 allocs<=23
 final_path_name_not_stored round_trips=1 ring_bytes=22 allocs<=8
 final_path_name_warm round_trips=0 ring_bytes=0 allocs<=7
-list_100_entries round_trips=3 ring_bytes=2966 allocs<=131
+list_100_entries round_trips=3 ring_bytes=2966 allocs<=114
 list_next_entry round_trips=0 ring_bytes=0 allocs<=1
-move round_trips=3 ring_bytes=85 allocs<=71
-open_missing round_trips=1 ring_bytes=24 allocs<=7
+move round_trips=3 ring_bytes=85 allocs<=55
+open_missing round_trips=1 ring_bytes=24 allocs<=3
 open_outside_root round_trips=0 ring_bytes=0 allocs<=0
-open_read_root round_trips=1 ring_bytes=42 allocs<=17
-open_write_writable round_trips=1 ring_bytes=43 allocs<=28
+open_read_root round_trips=1 ring_bytes=42 allocs<=8
+open_write_writable round_trips=1 ring_bytes=43 allocs<=16
 query_key_not_a_key round_trips=0 ring_bytes=0 allocs<=0
 query_size_class round_trips=0 ring_bytes=0 allocs<=0
 read_bulk_1_mib round_trips=4 ring_bytes=1048736 allocs<=26

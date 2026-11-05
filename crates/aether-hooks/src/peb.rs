@@ -77,6 +77,81 @@ pub(crate) fn process_parameters() -> usize {
     unsafe { *((peb + PEB_PROCESS_PARAMETERS) as *const usize) }
 }
 
+/// How much of this thread's stack is committed: `NT_TIB.StackBase` less
+/// `NT_TIB.StackLimit`, which the guard page moves down as the stack grows,
+/// so the deepest the thread has been (and a page or two).
+#[cfg(feature = "test-support")]
+pub(crate) fn stack_committed() -> usize {
+    let (base, limit): (usize, usize);
+    // SAFETY: reads two fields of the current thread's TEB through its
+    // segment register; no memory is written.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x08]", "mov {}, gs:[0x10]", out(reg) base, out(reg) limit, options(nostack, readonly, preserves_flags))
+    };
+    #[cfg(target_arch = "x86")]
+    unsafe {
+        core::arch::asm!("mov {}, fs:[0x04]", "mov {}, fs:[0x08]", out(reg) base, out(reg) limit, options(nostack, readonly, preserves_flags))
+    };
+    base - limit
+}
+
+/// An ntdll export, looked up once.
+fn ntdll_export(name: &core::ffi::CStr) -> Option<unsafe extern "system" fn() -> isize> {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    // SAFETY: ntdll is loaded in every process; a NUL-terminated name.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        GetProcAddress(ntdll, name.as_ptr().cast())
+    }
+}
+
+/// Whether this thread holds the loader lock (`PEB.LoaderLock`). A thread
+/// started meanwhile cannot run until it is released (its
+/// `DLL_THREAD_ATTACH` waits for the lock), so the holder must not wait for
+/// one.
+pub(crate) fn holds_loader_lock() -> bool {
+    type Locked = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+    static F: std::sync::OnceLock<Option<Locked>> = std::sync::OnceLock::new();
+    let f = F.get_or_init(|| {
+        ntdll_export(c"RtlIsCriticalSectionLockedByThread").map(|p| {
+            // SAFETY: the export's documented signature.
+            unsafe { core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p) }
+        })
+    });
+    let Some(f) = f else {
+        return false;
+    };
+    let peb = peb();
+    if peb == 0 {
+        return false;
+    }
+    // SAFETY: the PEB's `LoaderLock` is the loader's critical section; both
+    // are valid for the life of the process.
+    unsafe {
+        let lock = *((peb + PEB_LOADER_LOCK) as *const *mut core::ffi::c_void);
+        !lock.is_null() && f(lock) != 0
+    }
+}
+
+/// Whether the process is ending: `LdrShutdownProcess` has begun
+/// (`RtlDllShutdownInProgress`). `ExitProcess` has then ended every other
+/// thread, and this one, holding the loader lock, runs the DLLs' detach (a
+/// DLL's CRT runs its `atexit` handlers there). No other thread will answer
+/// anything this one waits for.
+pub(crate) fn process_ending() -> bool {
+    type InProgress = unsafe extern "system" fn() -> u8;
+    static F: std::sync::OnceLock<Option<InProgress>> = std::sync::OnceLock::new();
+    let f = F.get_or_init(|| {
+        ntdll_export(c"RtlDllShutdownInProgress").map(|p| {
+            // SAFETY: the export's documented signature, `BOOLEAN (void)`.
+            unsafe { core::mem::transmute::<unsafe extern "system" fn() -> isize, InProgress>(p) }
+        })
+    });
+    // SAFETY: takes no arguments; reads a loader flag.
+    f.is_some_and(|f| unsafe { f() } != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

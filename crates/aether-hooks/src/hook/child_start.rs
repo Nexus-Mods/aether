@@ -145,7 +145,7 @@ fn join(dir: &str, name: &str) -> String {
 }
 
 /// `path`'s root and vpath when it is under one.
-fn routed(client: &FuseClient, path: &str) -> Option<(RootId, String)> {
+fn routed(client: &FuseClient, path: &str) -> Option<(RootId, crate::director::VPath)> {
     client.route(&format!(r"\??\{path}"))
 }
 

@@ -8,7 +8,10 @@
 #
 # Run from anywhere (it changes into the repository root itself). The four
 # natives are staged into target/natives, under the names a director looks
-# for; the fixtures go to target/<profile>/.
+# for; the fixtures go to target/<profile>/. With --release the natives are
+# built in Cargo.toml's `natives-lto` profile (release with fat LTO), as
+# bin/build-natives.ps1 builds them, and the fixtures in the release profile,
+# the host injector and shim among them (as -Fixtures builds them there).
 #
 # Needs: rustup targets x86_64- and i686-pc-windows-msvc, cargo-xwin, and
 # clang, lld and llvm 19 or later.
@@ -29,7 +32,8 @@ Cross-builds the Windows half of the Proton path with cargo-xwin and copies
 the natives into target/natives/ and the fixtures into
 target/<profile>/ (debug by default).
 
-  --release   build with the release profile
+  --release   build with the release profile (the natives: the natives-lto
+              profile, which adds fat LTO)
   -h, --help  show this help
 
 Needs: rustup targets x86_64- and i686-pc-windows-msvc, cargo-xwin, and
@@ -44,11 +48,15 @@ die() {
 
 profile=debug
 flags=()
+natives_profile=debug
+natives_flags=()
 for arg in "$@"; do
   case "$arg" in
     --release)
       profile=release
       flags=(--release)
+      natives_profile=natives-lto
+      natives_flags=(--profile natives-lto)
       ;;
     -h | --help)
       usage
@@ -128,6 +136,11 @@ export XWIN_ARCH=x86,x86_64
 cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration"
   "CFLAGS_i686-pc-windows-msvc=-Wno-error=implicit-function-declaration")
 # `${flags[@]+…}`: macOS's bash 3.2 calls an empty array unbound under `set -u`.
+"${cross[@]}" cargo xwin build ${natives_flags[@]+"${natives_flags[@]}"} --target "$target" \
+  -p aether-inject -p aether-shim
+# aether-inject and aether-shim again, in the fixtures' profile: aether-probe
+# and the host injector and shim are fixtures (as bin/build-natives.ps1
+# -Fixtures builds them)
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
   -p aether-inject -p aether-shim -p aether-fixtures -p aether-fixture-vproxy
 # staticimp links vproxy.dll.lib through its build.rs, with no Cargo edge to
@@ -135,12 +148,13 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
   -p aether-fixture-staticimp
 
-"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" \
+"${cross[@]}" cargo xwin build ${natives_flags[@]+"${natives_flags[@]}"} --target "$target32" \
   -p aether-inject --bin aether-injector
-"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" -p aether-shim
+"${cross[@]}" cargo xwin build ${natives_flags[@]+"${natives_flags[@]}"} --target "$target32" -p aether-shim
 
 src="target/$target/$profile"
-src32="target/$target32/$profile"
+natives_src="target/$target/$natives_profile"
+natives_src32="target/$target32/$natives_profile"
 # the four natives under target/natives (as bin/build-natives.ps1 stages them),
 # and everything beside the host binaries in target/<profile>/, where the
 # tests look
@@ -148,20 +162,26 @@ natives_dst="target/natives"
 dst="target/$profile"
 mkdir -p "$natives_dst" "$dst"
 for f in "${ARTIFACTS[@]}"; do
+  # target/<profile>/: the fixtures' build, the host injector and shim
+  # among them; the 32-bit pair, which is no fixture, from its natives' build
   case "$f" in
-    "$injector64") from="$src/aether-injector.exe" ;;
-    "$shim64") from="$src/aether_shim.dll" ;;
-    "$injector32") from="$src32/aether-injector.exe" ;;
-    "$shim32") from="$src32/aether_shim.dll" ;;
+    "$injector32") from="$natives_src32/aether-injector.exe" ;;
+    "$shim32") from="$natives_src32/aether_shim.dll" ;;
     *) from="$src/$f" ;;
   esac
   [[ -f "$from" ]] || die "the build succeeded but did not produce $from"
   cp -f "$from" "$dst/$f"
   echo "  $dst/$f"
+  # target/natives/: the four, from the natives' build
   case "$f" in
-    "$injector64" | "$shim64" | "$injector32" | "$shim32")
-      cp -f "$from" "$natives_dst/$f"
-      echo "  $natives_dst/$f"
-      ;;
+    "$injector64") native="$natives_src/aether-injector.exe" ;;
+    "$shim64") native="$natives_src/aether_shim.dll" ;;
+    "$injector32" | "$shim32") native="$from" ;;
+    *) native="" ;;
   esac
+  if [[ -n "$native" ]]; then
+    [[ -f "$native" ]] || die "the build succeeded but did not produce $native"
+    cp -f "$native" "$natives_dst/$f"
+    echo "  $natives_dst/$f"
+  fi
 done

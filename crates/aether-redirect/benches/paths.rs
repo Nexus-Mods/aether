@@ -1,8 +1,9 @@
 //! What an open's path costs before it can cross the ring: which root a path
 //! is under (`RootMap::resolve`, answered from the cache and recomputed under
 //! an `UncachedScope`, for a path inside the root, one outside it and an 8.3
-//! spelling the OS has to expand), the stream-suffix split, the vpath
-//! normalization, and the spelling cache's lookups.
+//! spelling the OS has to expand; `contains` and `resolve_vpath` from the
+//! cache), the stream-suffix split, the vpath normalization, and the
+//! spelling cache's lookups.
 //! Run by hand with `cargo bench -p aether-redirect`.
 
 use aether_redirect::finalname::NameCache;
@@ -55,6 +56,15 @@ fn under_root(c: &mut Criterion) {
     group.bench_function("inside/contains-cached", |b| {
         black_box(map.contains(INSIDE));
         b.iter(|| black_box(map.contains(black_box(INSIDE))))
+    });
+    group.bench_function("outside/contains-cached", |b| {
+        black_box(map.contains(OUTSIDE));
+        b.iter(|| black_box(map.contains(black_box(OUTSIDE))))
+    });
+    // What the shim routes a call with: the joined vpath, shared.
+    group.bench_function("inside/vpath-cached", |b| {
+        black_box(map.resolve_vpath(INSIDE));
+        b.iter(|| black_box(map.resolve_vpath(black_box(INSIDE))))
     });
     group.finish();
 }

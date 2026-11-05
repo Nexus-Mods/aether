@@ -66,7 +66,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
 
     if let Some(client) = crate::director::global() {
         if let Some((root, vp)) = client.route(path) {
-            let vp = vp.as_str();
+            let vp = &*vp;
             client.names_changed(root, vp);
             crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {
@@ -334,7 +334,7 @@ pub(super) unsafe fn setinfo_hook_body(
             return STATUS_ACCESS_DENIED;
         }
         // Delete / rename of a virtual handle → ring Opcode::Delete / Opcode::Rename, keyed
-        // by the NT path recorded (record_path) when the handle was opened.
+        // by the NT path recorded (record_open) when the handle was opened.
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let is_delete = unsafe { is_delete_request(info, length, class) };
         let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);

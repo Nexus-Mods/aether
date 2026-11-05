@@ -37,7 +37,9 @@ powershell -ExecutionPolicy Bypass -File bin\build-natives.ps1 -Fixtures   # als
                                                                            # injector and shim, into target\release
 ```
 
-Options: `-Out <dir>` stages the natives elsewhere; `-RequireDumpbin` fails
+The four are built in `Cargo.toml`'s `natives-lto` profile (release with fat
+LTO and one codegen unit: smaller, and no slower per call); everything else,
+the fixtures among them, in `release`. Options: `-Out <dir>` stages the natives elsewhere; `-RequireDumpbin` fails
 (rather than warns) when Visual Studio's `dumpbin` isn't found for the check
 that none of the four imports the VC++ runtime (on by default when `$env:CI`
 is set). `bin\natives-key.ps1` prints the natives key, the hash of what the

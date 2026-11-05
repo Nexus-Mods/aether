@@ -4,7 +4,8 @@
 # dependencies, x64 and i686, by cargo tree), and none of their files is among
 # the key's inputs. A native that came to depend on an excluded crate would
 # otherwise keep an old key, and a release would reuse natives built without
-# the change.
+# the change. It also checks that both builders (build-natives.ps1 and
+# build-windows) build the four in the one profile, natives-lto.
 #
 #   powershell -ExecutionPolicy Bypass -File bin\natives-key.tests.ps1
 #
@@ -77,6 +78,18 @@ Check 'aether-rpc is an input' (@($inputs | Where-Object { $_ -like 'crates/aeth
 
 $key = & powershell -NoProfile -ExecutionPolicy Bypass -File $keyScript
 Check 'the key is a SHA-256 in hex' ("$key" -match '^[0-9a-f]{64}$') "$key"
+
+# One key, one build: both builders make the four (their --target builds; the
+# -Fixtures host pair stays release) in Cargo.toml's natives-lto profile, so a
+# release built on either has the same natives.
+$cargoToml = Get-Content -Raw -LiteralPath (Join-Path $root 'Cargo.toml')
+Check 'Cargo.toml has the natives-lto profile, with fat LTO' ($cargoToml -match '(?ms)^\[profile\.natives-lto\]\s*\r?\n(?:[^\[]*\r?\n)?lto = "fat"')
+foreach ($builder in @('bin/build-natives.ps1', 'bin/build-windows')) {
+  # a command continued over lines (bash's trailing backslash) is one line here
+  $text = (Get-Content -Raw -LiteralPath (Join-Path $root $builder)) -replace '\\\r?\n', ' '
+  $lines = @($text -split "`n" | Where-Object { $_ -match 'cargo (xwin )?build' -and $_ -match '--target' -and $_ -match '-p aether-shim|--bin aether-injector' })
+  Check "$builder builds the natives in the natives-lto profile" ($lines.Count -eq 3 -and @($lines | Where-Object { $_ -notmatch '--profile natives-lto|natives_flags' }).Count -eq 0 -and $text -match 'natives_flags=\(--profile natives-lto\)|--profile natives-lto') ($lines -join ' | ')
+}
 
 if ($failed.Count) { Write-Host "$($failed.Count) failed: $($failed -join '; ')"; exit 1 }
 Write-Host 'all passed'

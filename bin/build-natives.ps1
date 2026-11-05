@@ -14,6 +14,9 @@
 #                    tools) isn't there for the VC++ runtime import check; on
 #                    by default when $env:CI is true or 1 (CI must not skip it)
 #
+# They are built in Cargo.toml's `natives-lto` profile (release with fat LTO), and
+# land in target/<triple>/natives-lto.
+#
 # The C runtime is linked in because the shim loads inside the game, where
 # Windows doesn't look beside it for vcruntime140.dll, and a PC that never
 # installed the game through its store may have no VC++ runtime.
@@ -49,13 +52,13 @@ try {
   $env:RUSTFLAGS = '-C target-feature=+crt-static'
   try {
     Invoke-Step 'build x64 injector and shim' {
-      cargo build --release --target x86_64-pc-windows-msvc -p aether-inject -p aether-shim
+      cargo build --profile natives-lto --target x86_64-pc-windows-msvc -p aether-inject -p aether-shim
     }
     Invoke-Step 'build i686 injector' {
-      cargo build --release --target i686-pc-windows-msvc -p aether-inject --bin aether-injector
+      cargo build --profile natives-lto --target i686-pc-windows-msvc -p aether-inject --bin aether-injector
     }
     Invoke-Step 'build i686 shim' {
-      cargo build --release --target i686-pc-windows-msvc -p aether-shim
+      cargo build --profile natives-lto --target i686-pc-windows-msvc -p aether-shim
     }
   } finally {
     $env:RUSTFLAGS = $old
@@ -64,10 +67,10 @@ try {
   # staged name (contract/artifacts.json) -> what the build produced
   $t = Join-Path $root 'target'
   $natives = [ordered]@{}
-  $natives[$contract.natives.x64.injector] = "$t\x86_64-pc-windows-msvc\release\aether-injector.exe"
-  $natives[$contract.natives.x64.shim] = "$t\x86_64-pc-windows-msvc\release\aether_shim.dll"
-  $natives[$contract.natives.x86.injector] = "$t\i686-pc-windows-msvc\release\aether-injector.exe"
-  $natives[$contract.natives.x86.shim] = "$t\i686-pc-windows-msvc\release\aether_shim.dll"
+  $natives[$contract.natives.x64.injector] = "$t\x86_64-pc-windows-msvc\natives-lto\aether-injector.exe"
+  $natives[$contract.natives.x64.shim] = "$t\x86_64-pc-windows-msvc\natives-lto\aether_shim.dll"
+  $natives[$contract.natives.x86.injector] = "$t\i686-pc-windows-msvc\natives-lto\aether-injector.exe"
+  $natives[$contract.natives.x86.shim] = "$t\i686-pc-windows-msvc\natives-lto\aether_shim.dll"
 
   # Checked where they were built, before anything is staged: a failed check
   # leaves the staged set as it was.

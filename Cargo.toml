@@ -135,6 +135,17 @@ panic = "unwind"
 # to the generated code.
 debug = "line-tables-only"
 
+# The four shipped natives (bin/build-natives.ps1, bin/build-windows --release):
+# release with whole-program LTO in one codegen unit, about 4-5% smaller at the
+# same speed per call. A profile of its own because `lto` cannot be set per
+# package, and the tests, fixtures and tools gain nothing from the longer build.
+# Not named `natives`: its host output folder would be target/natives, where
+# the natives are staged.
+[profile.natives-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
 [patch.crates-io]
 # retour 0.3.1 (the latest release) with its "win64" hooks limited to x86-64,
 # so the shim builds for i686: see vendor/retour/src/macros.rs.

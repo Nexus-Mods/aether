@@ -249,6 +249,7 @@ fn scenario(g: Geometry) -> Scenario {
             files,
             dirs: vec!["w".into()],
             writable: vec!["w".into()],
+            lower: vec![],
         }],
         registry: Some(Registry {
             keys: vec![RegKey {

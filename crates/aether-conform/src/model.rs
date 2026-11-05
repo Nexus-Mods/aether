@@ -603,6 +603,7 @@ fn build_tree(spec: &TreeSpec) -> (Tree, Vec<RootInfo>) {
             files,
             dirs,
             writable,
+            lower: Vec::new(),
         });
     }
     let registry = spec.registry.as_ref().map(|keys| {
@@ -3574,6 +3575,7 @@ mod tests {
                 }],
                 dirs: vec![],
                 writable: vec![],
+                lower: vec![],
             }],
             registry: None,
         };

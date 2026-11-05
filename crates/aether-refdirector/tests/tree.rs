@@ -44,12 +44,14 @@ fn tree() -> Tree {
                 ],
                 dirs: vec!["empty".into()],
                 writable: vec!["saves".into()],
+                lower: vec![],
             },
             Root {
                 id: 2,
                 files: vec![file("x.txt", Contents::Text("two".into()))],
                 dirs: vec![],
                 writable: vec![],
+                lower: vec![],
             },
         ],
         registry: None,
@@ -103,6 +105,7 @@ fn directories_of_a_tree_keep_their_spelling() {
             files: vec![file("Data/Textures/Sky.DDS", Contents::Text("s".into()))],
             dirs: vec!["Data/Empty Dir".into()],
             writable: vec!["Saves".into()],
+            lower: vec![],
         }],
         registry: None,
     };

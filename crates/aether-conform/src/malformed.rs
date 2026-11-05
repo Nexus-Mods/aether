@@ -61,12 +61,14 @@ pub fn registry_tree() -> Tree {
                 files: vec![file("data/a.txt", "abc"), file("saves/s.txt", "s")],
                 dirs: vec![],
                 writable: vec!["saves".into()],
+                lower: vec![],
             },
             Root {
                 id: 1,
                 files: vec![file("r.txt", "r")],
                 dirs: vec![],
                 writable: vec![],
+                lower: vec![],
             },
         ],
         registry: Some(Registry {

@@ -16,10 +16,23 @@
 //!
 //! **Test knobs.** [`Reference::set_mount_gen`] and
 //! [`Reference::replace_content`] act as a remount would, and the builder
-//! methods from [`Reference::with_fh_base`] to [`Reference::with_lower_dir`]
+//! methods from [`Reference::with_fh_base`] to [`Reference::with_mtime`]
 //! give answers other directors give and `docs/wire.md` allows (each names
 //! its section). Each is off until a test sets it; with none set, every
 //! answer below is as described, and conformance never sets one.
+//!
+//! **Layers.** A root may be served as an overlay: the graph's own files
+//! and directories are its writable upper, over read-only layers (a tree's
+//! `lower`, [`crate::tree::Layer`], or [`Reference::with_lower`]). Every
+//! request is answered from the one tree they make ([`View`]): the upper
+//! wins at a name, then the nearest layer; a DELETE or RENAME of a name a
+//! layer holds leaves a whiteout that hides it, and a lower-only name is
+//! answered as `docs/wire.md` 3.4.9's "Names only in a read-only lower"
+//! says. A write open copies a lower-only file up, keeping its identity, so
+//! every handle of it reads it as it is now (3.4.4). Where wire.md leaves
+//! an overlay's answer open the reference answers as `docs/conformance.md`
+//! ("Layered roots") proposes, and says so where it does. With no layers
+//! every answer is the upper's alone, as before.
 //!
 //! A name keeps the spelling it was created with (a fixture's vpath, a
 //! creating OPEN, MKDIR, a RENAME or RENAME_X target), and READDIR
@@ -324,9 +337,15 @@ struct Graph {
     /// [`Reference::with_mtime`]: the mtime GETATTR and READDIR report, by
     /// table key.
     mtimes: HashMap<String, i64>,
-    /// The table keys held only in a read-only lower
-    /// ([`Reference::with_lower`]). Locked after `dirs` and `files`.
-    lower: Mutex<HashSet<String>>,
+    /// The read-only layers beneath the upper (`dirs` and `files`), the
+    /// nearest first: a tree's `lower` layers ([`crate::tree::Layer`]) and
+    /// [`Reference::with_lower`]'s. Fixed once built.
+    layers: Vec<LowerLayer>,
+    /// Table keys at which, and below which, the upper hides the layers: a
+    /// whiteout left by a DELETE or RENAME of a name a layer holds, or the
+    /// name an upper entry replaced one at (`docs/wire.md` 3.4.9, "Names
+    /// only in a read-only lower"). Locked after `dirs` and `files`.
+    masked: Mutex<HashSet<String>>,
     /// [`Reference::reissue_fh`]: the closed handles to issue again, lowest
     /// first; `None` when off.
     reissue: Option<Mutex<BTreeSet<u64>>>,
@@ -335,7 +354,13 @@ struct Graph {
 impl Graph {
     /// A root itself (`"."` on the wire) is always a directory.
     fn is_dir(&self, vpath: &str) -> bool {
-        is_dir_in(&self.dirs.lock().unwrap(), vpath)
+        let dirs = self.dirs.lock().unwrap();
+        if self.layers.is_empty() {
+            return is_dir_in(&dirs, vpath);
+        }
+        let files = self.files.lock().unwrap();
+        let masked = self.masked.lock().unwrap();
+        self.view(&dirs, &files, &masked).is_dir(vpath)
     }
 
     fn is_writable(&self, vpath: &str) -> bool {
@@ -356,17 +381,111 @@ impl Graph {
         self.mtimes.get(k).copied().unwrap_or(0)
     }
 
-    /// Whether table key `k` is held only in the read-only lower.
-    fn is_lower(&self, k: &str) -> bool {
-        self.lower.lock().unwrap().contains(k)
+    /// The names the upper `dirs` and `files` show, with the layers beneath
+    /// them and what `masked` hides of those.
+    fn view<'a>(
+        &'a self,
+        dirs: &'a HashMap<String, String>,
+        files: &'a HashMap<String, Entry>,
+        masked: &'a HashSet<String>,
+    ) -> View<'a> {
+        View {
+            dirs,
+            files,
+            layers: &self.layers,
+            masked,
+        }
     }
 
-    /// `k` and every directory above it are in the upper now (a copy-up, or
-    /// a name created under them): no longer lower-only.
-    fn copy_up(&self, k: &str) {
-        let mut lower = self.lower.lock().unwrap();
-        if !lower.is_empty() {
-            lower.retain(|l| l != k && !k.starts_with(&format!("{l}/")));
+    /// The directories above table key `k` that only a layer holds, put in
+    /// the upper with their stored spellings: a name made below a lower-only
+    /// directory puts the directory in the upper (the reference's answer to
+    /// a question wire.md leaves open, `docs/conformance.md`, "Layered
+    /// roots").
+    fn copy_up_parents(
+        &self,
+        dirs: &mut HashMap<String, String>,
+        files: &HashMap<String, Entry>,
+        masked: &HashSet<String>,
+        k: &str,
+    ) {
+        if self.layers.is_empty() {
+            return;
+        }
+        let up: Vec<(String, String)> = {
+            let v = self.view(dirs, files, masked);
+            ancestors(k)
+                .filter(|a| !dirs.contains_key(a) && matches!(v.lower_at(a), Some(Low::Dir(_))))
+                .map(|a| {
+                    let name = v.stored(&a);
+                    (a, name)
+                })
+                .collect()
+        };
+        dirs.extend(up);
+    }
+
+    /// The file only a layer holds at table key `k`, put in the upper with
+    /// its bytes, its identity (its handles go on reading it, wire.md
+    /// 3.4.4) and its stored spelling, and the directories above it with
+    /// it; nothing when the upper holds `k`. A write open copies a file up
+    /// (wire.md leaves open when; `docs/conformance.md`, "Layered roots"),
+    /// as does a RENAME of it and a WRITE or SETATTR through a read handle.
+    fn copy_up_file(
+        &self,
+        dirs: &mut HashMap<String, String>,
+        files: &mut HashMap<String, Entry>,
+        masked: &HashSet<String>,
+        k: &str,
+    ) {
+        let copy = {
+            let v = self.view(dirs, files, masked);
+            match v.lower_only(k) {
+                Some(Low::File(i)) => {
+                    let e = &self.layers[i].files[k];
+                    Some(Entry {
+                        id: e.id,
+                        bytes: e.bytes.clone(),
+                        style: e.style,
+                        name: v.stored(k),
+                    })
+                }
+                _ => None,
+            }
+        };
+        if let Some(e) = copy {
+            files.insert(k.to_string(), e);
+            self.copy_up_parents(dirs, files, masked, k);
+        }
+    }
+
+    /// The upper's key of the file with identity `id`, copied up first if a
+    /// layer still shows it (a WRITE or SETATTR through a read handle,
+    /// which wire.md 3.4.5 lets a director honour); `None` once the file is
+    /// gone (3.4.8).
+    fn upper_file(
+        &self,
+        dirs: &mut HashMap<String, String>,
+        files: &mut HashMap<String, Entry>,
+        hint: &str,
+        id: u64,
+    ) -> Option<String> {
+        let masked = self.masked.lock().unwrap();
+        match locate_in(&self.view(dirs, files, &masked), hint, id)? {
+            Loc::Upper(k) => Some(k),
+            Loc::Lower(_, k) => {
+                self.copy_up_file(dirs, files, &masked, &k);
+                Some(k)
+            }
+        }
+    }
+
+    /// Hides what the layers hold at and below table key `k` once the upper
+    /// has removed or replaced its own entry there (wire.md 3.4.8, 3.4.9: a
+    /// deleted name is missing, a lower-only one hidden by a whiteout).
+    fn hide_lower(&self, masked: &mut HashSet<String>, k: &str) {
+        if lower_holds(&self.layers, k) {
+            masked.insert(k.to_string());
         }
     }
 
@@ -440,27 +559,23 @@ impl Graph {
     /// (`docs/wire.md` 3.4.3, 3.4.7, 3.4.9, 3.4.13): a root, a directory the
     /// table holds, or one it implies (something below it, or a writable
     /// prefix inside it). A file there is a missing directory too.
-    fn parent_exists(
-        &self,
-        dirs: &HashMap<String, String>,
-        files: &HashMap<String, Entry>,
-        k: &str,
-    ) -> Result<(), Status> {
-        let (root, rest) = match k.strip_prefix('@').and_then(|r| r.split_once('/')) {
-            Some((id, rest)) => (&k[..id.len() + 2], rest),
-            None => ("", k),
-        };
+    /// A directory a layer holds is one too, unless the upper's file hides
+    /// it, and a layer's file there is a missing directory as the upper's is.
+    fn parent_exists(&self, v: &View<'_>, k: &str) -> Result<(), Status> {
+        let (root, rest) = split_root(k);
         let Some((parent, _)) = rest.rsplit_once('/') else {
             return Ok(());
         };
         let parent = format!("{root}{parent}");
+        let (dirs, files) = (v.dirs, v.files);
         if files.contains_key(&parent) {
             return Err(Status::NotFound);
         }
         let below = format!("{parent}/");
         let implied = dirs.contains_key(&parent)
             || has_children(dirs, files, &parent)
-            || self.writable.iter().any(|w| w.starts_with(&below));
+            || self.writable.iter().any(|w| w.starts_with(&below))
+            || matches!(v.lower_at(&parent), Some(Low::Dir(_)));
         if implied {
             Ok(())
         } else {
@@ -480,6 +595,212 @@ fn locate(files: &HashMap<String, Entry>, hint: &str, id: u64) -> Option<String>
         .iter()
         .find(|(_, e)| e.id == id)
         .map(|(k, _)| k.clone())
+}
+
+/// Where the file with identity `id` is shown now: in the upper
+/// ([`locate`]), or, until a copy-up, in the layer that shows it at its
+/// key; `None` once it was deleted, replaced or hidden.
+fn locate_in(v: &View<'_>, hint: &str, id: u64) -> Option<Loc> {
+    if let Some(k) = locate(v.files, hint, id) {
+        return Some(Loc::Upper(k));
+    }
+    v.layers.iter().enumerate().find_map(|(i, l)| {
+        l.files
+            .iter()
+            .find(|(k, e)| e.id == id && v.lower_only(k) == Some(Low::File(i)))
+            .map(|(k, _)| Loc::Lower(i, k.clone()))
+    })
+}
+
+/// Where a handle's file is: the upper's key, or a layer and its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Loc {
+    Upper(String),
+    Lower(usize, String),
+}
+
+/// A read-only layer beneath the upper: files and directories by table key,
+/// as the graph's own (`Graph::layers`).
+#[derive(Default)]
+struct LowerLayer {
+    files: HashMap<String, Entry>,
+    dirs: HashMap<String, String>,
+}
+
+/// What a layer shows at a key: a directory or a file, and which layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Low {
+    Dir(usize),
+    File(usize),
+}
+
+/// The upper's entries and the layers beneath them, as one tree: what
+/// every request is answered from. The upper wins at a name; below it the
+/// nearest layer holding the name. A file hides what farther layers hold
+/// at and below its name; a directory over a directory merges with it, a
+/// directory over a file hides the file; a masked key hides every layer at
+/// and below it. With no layers it is the upper alone.
+struct View<'a> {
+    dirs: &'a HashMap<String, String>,
+    files: &'a HashMap<String, Entry>,
+    layers: &'a [LowerLayer],
+    masked: &'a HashSet<String>,
+}
+
+impl<'a> View<'a> {
+    /// The layers whose directories make up directory `k`, nearest first.
+    fn lower_dirs(&self, k: &str) -> Vec<usize> {
+        if self.layers.is_empty() {
+            return Vec::new();
+        }
+        if is_root_key(k) {
+            return (0..self.layers.len()).collect();
+        }
+        if self.files.contains_key(k) || self.masked.contains(k) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for i in self.lower_dirs(&parent_key(k)) {
+            let l = &self.layers[i];
+            if l.dirs.contains_key(k) {
+                out.push(i);
+            } else if l.files.contains_key(k) {
+                break;
+            }
+        }
+        out
+    }
+
+    /// What the layers show at `k` beneath the upper, if anything: the
+    /// nearest layer holding `k` of those making up its parent, unless the
+    /// upper's file or a mask hides it.
+    fn lower_at(&self, k: &str) -> Option<Low> {
+        if self.layers.is_empty()
+            || is_root_key(k)
+            || self.files.contains_key(k)
+            || self.masked.contains(k)
+        {
+            return None;
+        }
+        self.lower_dirs(&parent_key(k)).into_iter().find_map(|i| {
+            let l = &self.layers[i];
+            if l.dirs.contains_key(k) {
+                Some(Low::Dir(i))
+            } else {
+                l.files.contains_key(k).then_some(Low::File(i))
+            }
+        })
+    }
+
+    /// What the layers show at `k` when the upper holds nothing there.
+    fn lower_only(&self, k: &str) -> Option<Low> {
+        if self.dirs.contains_key(k) || self.files.contains_key(k) {
+            return None;
+        }
+        self.lower_at(k)
+    }
+
+    /// Whether `k` is a directory: the upper's, or a layer's the upper's
+    /// file does not hide. A root itself is.
+    fn is_dir(&self, k: &str) -> bool {
+        is_dir_in(self.dirs, k) || matches!(self.lower_at(k), Some(Low::Dir(_)))
+    }
+
+    /// The file shown at `k`: the upper's, or a layer's.
+    fn file(&self, k: &str) -> Option<&'a Entry> {
+        if let Some(e) = self.files.get(k) {
+            return Some(e);
+        }
+        match self.lower_only(k)? {
+            Low::File(i) => self.layers[i].files.get(k),
+            Low::Dir(_) => None,
+        }
+    }
+
+    /// The stored spelling of the entry shown at `k`, as its full path.
+    fn name(&self, k: &str) -> Option<&'a str> {
+        if let Some(n) = self.dirs.get(k) {
+            return Some(n);
+        }
+        if let Some(e) = self.files.get(k) {
+            return Some(&e.name);
+        }
+        match self.lower_at(k)? {
+            Low::Dir(i) => self.layers[i].dirs.get(k).map(String::as_str),
+            Low::File(i) => self.layers[i].files.get(k).map(|e| e.name.as_str()),
+        }
+    }
+
+    /// Whether anything is shown below directory `k`.
+    fn has_children(&self, k: &str) -> bool {
+        has_children(self.dirs, self.files, k)
+            || self.lower_dirs(k).into_iter().any(|i| {
+                self.lower_children(i, k)
+                    .any(|c| self.lower_at(c).is_some())
+            })
+    }
+
+    /// The keys layer `i` holds directly below directory `k`.
+    fn lower_children(&self, i: usize, k: &str) -> impl Iterator<Item = &'a String> {
+        let prefix = if is_root_key(k) {
+            split_root(k).0.to_string()
+        } else {
+            format!("{k}/")
+        };
+        let l: &'a LowerLayer = &self.layers[i];
+        l.dirs.keys().chain(l.files.keys()).filter(move |c| {
+            c.strip_prefix(prefix.as_str())
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+        })
+    }
+
+    /// The stored spelling of every component of key `k`, joined: what a
+    /// copy-up stores ([`stored_components`]).
+    fn stored(&self, k: &str) -> String {
+        let root = Graph::root_of(k).unwrap_or(0);
+        stored_components(self, root, split_root(k).1).join("/")
+    }
+}
+
+/// Whether any layer holds anything at or below table key `k`, shown or
+/// not.
+fn lower_holds(layers: &[LowerLayer], k: &str) -> bool {
+    if layers.is_empty() {
+        return false;
+    }
+    let below = format!("{k}/");
+    layers.iter().any(|l| {
+        l.dirs
+            .keys()
+            .chain(l.files.keys())
+            .any(|p| p == k || p.starts_with(&below))
+    })
+}
+
+/// A table key's root prefix (`""` for root 0, `@<id>/` for another) and
+/// the path after it.
+fn split_root(k: &str) -> (&str, &str) {
+    match k.strip_prefix('@').and_then(|r| r.split_once('/')) {
+        Some((id, rest)) => (&k[..id.len() + 2], rest),
+        None => ("", k),
+    }
+}
+
+/// The key of `k`'s parent directory: its root's (`.` after the prefix)
+/// for a name directly under it.
+fn parent_key(k: &str) -> String {
+    let (root, rest) = split_root(k);
+    match rest.rsplit_once('/') {
+        Some((p, _)) => format!("{root}{p}"),
+        None => format!("{root}."),
+    }
+}
+
+/// The keys of the directories above `k`, the root aside, outermost first.
+fn ancestors(k: &str) -> impl Iterator<Item = String> + '_ {
+    let (root, rest) = split_root(k);
+    rest.match_indices('/')
+        .map(move |(i, _)| format!("{root}{}", &rest[..i]))
 }
 
 /// Whether table key `k` names a root itself (`"."` on the wire).
@@ -504,21 +825,14 @@ fn is_dir_in(dirs: &HashMap<String, String>, vpath: &str) -> bool {
 /// (`docs/wire.md` 3.2, 3.4.12): taken from the entry the component names,
 /// else from any entry below it (a directory the graph implies but does not
 /// hold), else as `path` spells it.
-fn stored_components(
-    dirs: &HashMap<String, String>,
-    files: &HashMap<String, Entry>,
-    root: u32,
-    path: &str,
-) -> Vec<String> {
+fn stored_components(v: &View<'_>, root: u32, path: &str) -> Vec<String> {
+    let (dirs, files) = (v.dirs, v.files);
     let sent: Vec<&str> = path.split('/').collect();
     (0..sent.len())
         .map(|i| {
             let k = key(root, &sent[..=i].join("/"));
             let below = format!("{k}/");
-            let exact = dirs
-                .get(&k)
-                .map(String::as_str)
-                .or_else(|| files.get(&k).map(|e| e.name.as_str()));
+            let exact = v.name(&k);
             let under = || {
                 dirs.iter()
                     .map(|(k, n)| (k, n.as_str()))
@@ -541,16 +855,11 @@ fn stored_components(
 /// The spelling a name created at `path` is stored with: the components
 /// above it as they are stored, its own as the request spells it (3.2,
 /// "Keep the spelling a name was created with").
-fn created_spelling(
-    dirs: &HashMap<String, String>,
-    files: &HashMap<String, Entry>,
-    root: u32,
-    path: &str,
-) -> String {
+fn created_spelling(v: &View<'_>, root: u32, path: &str) -> String {
     match path.rsplit_once('/') {
         None => path.to_string(),
         Some((parent, leaf)) => {
-            let mut c = stored_components(dirs, files, root, parent);
+            let mut c = stored_components(v, root, parent);
             c.push(leaf.to_string());
             c.join("/")
         }
@@ -625,7 +934,8 @@ impl Reference {
                 inline_cap: None,
                 staging: HashMap::new(),
                 mtimes: HashMap::new(),
-                lower: Mutex::new(HashSet::new()),
+                layers: Vec::new(),
+                masked: Mutex::new(HashSet::new()),
                 reissue: None,
             }),
             tally: Arc::new(Tally::default()),
@@ -860,37 +1170,98 @@ impl Reference {
         self
     }
 
-    /// An answer other directors give: a file held only in a read-only
-    /// lower under a writable prefix, answered as `docs/wire.md` 3.4.9's
+    /// A file held only in a read-only lower beneath the graph (layer 0, a
+    /// tree's first `lower` layer), answered as `docs/wire.md` 3.4.9's
     /// "Names only in a read-only lower" says an overlay may answer: DELETE
     /// hides it, RENAME copies it up (to another case of itself, `Status::Ok`
     /// with the lower's spelling kept), MKDIR over it makes the directory. A
-    /// write open copies it up, after which it is an ordinary file. Meant
-    /// under a [`Reference::writable_under`] prefix. Off by default;
-    /// conformance never sets it.
+    /// write open copies it up, after which it is an ordinary file. The
+    /// directories above it are the layer's too. Meant under a
+    /// [`Reference::writable_under`] prefix, as a tree's layers are.
     pub fn with_lower(self, vpath: &str, bytes: Vec<u8>) -> Reference {
-        let mut r = self.with(vpath, bytes, ReadStyle::Whole);
-        r.building().lower.get_mut().unwrap().insert(fold(vpath));
-        r
+        self.with_layer_file(0, vpath, bytes)
     }
 
     /// [`Reference::with_lower`] for a directory: DELETE hides it and
     /// everything under it, and RENAME to another name is
     /// `Status::IoError` (lower directories do not move).
     pub fn with_lower_dir(self, vpath: &str) -> Reference {
-        let mut r = self.with_dir(vpath);
-        r.building().lower.get_mut().unwrap().insert(fold(vpath));
-        r
+        self.with_layer_dir(0, vpath)
+    }
+
+    /// Layer `layer` (0 the nearest the upper), made with the ones before it
+    /// if they are missing.
+    fn layer(&mut self, layer: usize) -> &mut LowerLayer {
+        let g = self.building();
+        if g.layers.len() <= layer {
+            g.layers.resize_with(layer + 1, LowerLayer::default);
+        }
+        &mut g.layers[layer]
+    }
+
+    /// A directory, and the ones above it, in read-only layer `layer`,
+    /// spelled as `vpath` spells them unless the layer spells them already.
+    pub(crate) fn with_layer_dir(mut self, layer: usize, vpath: &str) -> Reference {
+        self.note_root(vpath);
+        let k = fold(vpath);
+        let name = spelling(vpath);
+        let l = self.layer(layer);
+        let mut at = Vec::new();
+        for (i, c) in name.split('/').enumerate() {
+            at.push(c);
+            let up = ancestors(&k).nth(i).unwrap_or_else(|| k.clone());
+            l.dirs.entry(up).or_insert_with(|| at.join("/"));
+        }
+        self
+    }
+
+    /// A file in read-only layer `layer`, its directories with it.
+    pub(crate) fn with_layer_file(
+        mut self,
+        layer: usize,
+        vpath: &str,
+        bytes: Vec<u8>,
+    ) -> Reference {
+        if split_root(&fold(vpath)).1.contains('/') {
+            if let Some((up, _)) = vpath.rsplit_once('/') {
+                self = self.with_layer_dir(layer, up);
+            }
+        }
+        self.note_root(vpath);
+        let id = self.graph.new_id();
+        let name = spelling(vpath);
+        self.layer(layer).files.insert(
+            fold(vpath),
+            Entry {
+                id,
+                bytes,
+                style: ReadStyle::Whole,
+                name,
+            },
+        );
+        self
+    }
+
+    /// The bytes read-only layer `layer` holds for `vpath`, shown or not:
+    /// what no request through the ring changes.
+    pub fn lower_contents(&self, layer: usize, vpath: &str) -> Option<Vec<u8>> {
+        self.graph
+            .layers
+            .get(layer)?
+            .files
+            .get(&fold(vpath))
+            .map(|e| e.bytes.clone())
     }
 
     /// The bytes the graph holds for `vpath` now: what a WRITE that crossed
     /// the ring left behind.
     pub fn contents(&self, vpath: &str) -> Option<Vec<u8>> {
-        self.graph
-            .files
-            .lock()
-            .unwrap()
-            .get(&fold(vpath))
+        let g = &self.graph;
+        let dirs = g.dirs.lock().unwrap();
+        let files = g.files.lock().unwrap();
+        let masked = g.masked.lock().unwrap();
+        g.view(&dirs, &files, &masked)
+            .file(&fold(vpath))
             .map(|e| e.bytes.clone())
     }
 
@@ -920,6 +1291,7 @@ impl Reference {
         let to_key = key(to_root.0, to);
         let mut dirs = g.dirs.lock().unwrap();
         let mut files = g.files.lock().unwrap();
+        let mut masked = g.masked.lock().unwrap();
         if !across
             && (is_root_key(&from)
                 || is_root_key(&to_key)
@@ -927,8 +1299,10 @@ impl Reference {
         {
             return Err(Status::BadRequest);
         }
-        let is_file = files.contains_key(&from);
-        if !is_file && !dirs.contains_key(&from) {
+        let v = g.view(&dirs, &files, &masked);
+        let lower = v.lower_only(&from);
+        let is_file = files.contains_key(&from) || matches!(lower, Some(Low::File(_)));
+        if !is_file && !dirs.contains_key(&from) && lower.is_none() {
             return Err(Status::NotFound);
         }
         if !g.is_writable(&from) || !g.is_writable(&to_key) {
@@ -937,7 +1311,7 @@ impl Reference {
         // A lower-only name (wire.md 3.4.9, "Names only in a read-only
         // lower"): another case of itself keeps the lower's spelling, a
         // directory does not move, a file is copied up and moves below.
-        if g.is_lower(&from) {
+        if lower.is_some() {
             if to_key == from {
                 return Ok(());
             }
@@ -945,31 +1319,48 @@ impl Reference {
                 return Err(Status::IoError);
             }
         }
-        g.parent_exists(&dirs, &files, &to_key)?;
+        // A directory a layer holds as well as the upper does not move
+        // either: the reference's answer where wire.md 3.4.9 speaks only of
+        // lower-only directories (`docs/conformance.md`, "Layered roots").
+        if !is_file && to_key != from && !v.lower_dirs(&from).is_empty() {
+            return Err(Status::IoError);
+        }
+        g.parent_exists(&v, &to_key)?;
         // A directory never replaces a file (wire.md 3.4.7).
-        if !is_file && to_key != from && files.contains_key(&to_key) {
+        if !is_file && to_key != from && v.file(&to_key).is_some() {
             return Err(Status::IoError);
         }
         // A root is a directory too, though `dirs` does not hold it: within a
         // root it was refused above, across roots it is `IsDir` here.
-        if to_key != from && (is_dir_in(&dirs, &to_key) || is_root_key(&to_key)) {
+        let onto_dir = to_key != from && (v.is_dir(&to_key) || is_root_key(&to_key));
+        if onto_dir {
             if across {
                 return Err(Status::IsDir);
             }
-            if has_children(&dirs, &files, &to_key) {
+            if v.has_children(&to_key) {
                 return Err(Status::IoError);
             }
+        }
+        // Nothing below fails. What is at `to` is replaced, a layer's too;
+        // the source, if lower-only, is copied up now and its name hidden
+        // once it has moved.
+        if onto_dir {
             dirs.remove(&to_key);
         }
         if to_key != from {
             files.remove(&to_key);
+            g.hide_lower(&mut masked, &to_key);
         }
-        // Nothing below fails: the source, if lower-only, is copied up now.
-        g.lower.lock().unwrap().remove(&from);
-        g.copy_up(&to_key);
+        g.copy_up_file(&mut dirs, &mut files, &masked, &from);
+        g.copy_up_parents(&mut dirs, &files, &masked, &to_key);
+        if to_key != from {
+            g.hide_lower(&mut masked, &from);
+        }
+        let v = g.view(&dirs, &files, &masked);
+        let name = created_spelling(&v, to_root.0, to);
         if is_file {
             let mut e = files.remove(&from).expect("just checked");
-            e.name = created_spelling(&dirs, &files, to_root.0, to);
+            e.name = name;
             files.insert(to_key, e);
             return Ok(());
         }
@@ -977,7 +1368,6 @@ impl Reference {
         // the new name.
         let old = dirs.remove(&from).expect("just checked");
         let depth = old.split('/').count();
-        let name = created_spelling(&dirs, &files, to_root.0, to);
         let below = format!("{from}/");
         let moved = |k: &str, n: &str| {
             let tail = n.splitn(depth + 1, '/').nth(depth).unwrap_or("");
@@ -1062,8 +1452,12 @@ impl Director for Reference {
                 mtime: self.graph.mtime(&vpath),
             });
         }
-        let files = self.graph.files.lock().unwrap();
-        let found = files.get(&vpath);
+        let g = &self.graph;
+        let dirs = g.dirs.lock().unwrap();
+        let files = g.files.lock().unwrap();
+        let masked = g.masked.lock().unwrap();
+        let v = g.view(&dirs, &files, &masked);
+        let found = v.file(&vpath);
         Ok(AttrResp {
             found: found.is_some(),
             is_dir: false,
@@ -1087,6 +1481,11 @@ impl Director for Reference {
         let dir = match path {
             "." | "" => self.graph.resolve(root, "")?,
             v => self.graph.resolve(root, v)?,
+        };
+        let dir_key = if is_root_key(&dir) {
+            format!("{}.", split_root(&dir).0)
+        } else {
+            dir.clone()
         };
         let prefix = if dir.is_empty() || dir.ends_with('/') {
             dir
@@ -1120,11 +1519,33 @@ impl Director for Reference {
                 push(name, stored, true, 0);
             }
         }
-        for (p, e) in self.graph.files.lock().unwrap().iter() {
+        let files = self.graph.files.lock().unwrap();
+        for (p, e) in files.iter() {
             if let Some(name) = child(p) {
                 push(name, &e.name, false, e.bytes.len() as u64);
             }
         }
+        // Then what the layers show below it, each name once, the upper's
+        // and the nearer layer's first (wire.md 3.4.9: an upper over a
+        // read-only lower).
+        let masked = self.graph.masked.lock().unwrap();
+        let v = self.graph.view(&dirs, &files, &masked);
+        for i in v.lower_dirs(&dir_key) {
+            for c in v.lower_children(i, &dir_key) {
+                let (Some(name), Some(hit)) = (child(c), v.lower_at(c)) else {
+                    continue;
+                };
+                match hit {
+                    Low::Dir(j) => push(name, &v.layers[j].dirs[c], true, 0),
+                    Low::File(j) => {
+                        let e = &v.layers[j].files[c];
+                        push(name, &e.name, false, e.bytes.len() as u64);
+                    }
+                }
+            }
+        }
+        drop(masked);
+        drop(files);
         drop(dirs);
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         for (folded, name, is_dir, size) in &rows {
@@ -1184,9 +1605,10 @@ impl Director for Reference {
                 ..Default::default()
             });
         }
-        let dirs = g.dirs.lock().unwrap();
+        let mut dirs = g.dirs.lock().unwrap();
         let mut files = g.files.lock().unwrap();
-        let exists = files.contains_key(&vpath);
+        let masked = g.masked.lock().unwrap();
+        let exists = g.view(&dirs, &files, &masked).file(&vpath).is_some();
         if write {
             // The access check first (a read-only mount refuses the write
             // whether or not the file is there, and so does a root with no
@@ -1205,9 +1627,11 @@ impl Director for Reference {
                 if !flags.contains(OpenFlags::CREATE) {
                     return Err(Status::NotFound);
                 }
-                g.parent_exists(&dirs, &files, &vpath)?;
+                let v = g.view(&dirs, &files, &masked);
+                g.parent_exists(&v, &vpath)?;
                 // A create keeps the caller's spelling (wire.md 3.2).
-                let name = created_spelling(&dirs, &files, root.0, path);
+                let name = created_spelling(&v, root.0, path);
+                g.copy_up_parents(&mut dirs, &files, &masked, &vpath);
                 files.insert(
                     vpath.clone(),
                     Entry {
@@ -1217,23 +1641,23 @@ impl Director for Reference {
                         name,
                     },
                 );
-            } else if flags.contains(OpenFlags::TRUNC) {
-                files.get_mut(&vpath).expect("just checked").bytes.clear();
+            } else {
+                // A lower-only file a write open reaches is in the upper now,
+                // with its bytes and its handles.
+                g.copy_up_file(&mut dirs, &mut files, &masked, &vpath);
+                if flags.contains(OpenFlags::TRUNC) {
+                    files.get_mut(&vpath).expect("just checked").bytes.clear();
+                }
             }
         }
-        let Some(e) = files.get(&vpath) else {
+        let Some(e) = g.view(&dirs, &files, &masked).file(&vpath) else {
             return Err(Status::NotFound);
         };
         let size = e.bytes.len() as u64;
         let id = e.id;
+        drop(masked);
         drop(files);
         drop(dirs);
-        if write {
-            // A lower-only file a write open reaches is in the upper now
-            // ([`Reference::with_lower`]), and so is a name created under a
-            // lower directory.
-            g.copy_up(&vpath);
-        }
         // A read open of a file a read-only provider holds is immutable
         // (wire.md 3.4.3): nothing the reference serves changes it (a write
         // open, DELETE, RENAME, RENAME_X and MKDIR of it are refused, and so
@@ -1270,11 +1694,17 @@ impl Director for Reference {
         let Some(id) = file else {
             return Err(Status::IsDir);
         };
-        let files = self.graph.files.lock().unwrap();
+        let g = &self.graph;
+        let dirs = g.dirs.lock().unwrap();
+        let files = g.files.lock().unwrap();
+        let masked = g.masked.lock().unwrap();
         // A file deleted, or replaced by a rename onto its name, under an
-        // open handle (wire.md 3.4.8).
-        let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get(&k)) else {
-            return Err(Status::IoError);
+        // open handle (wire.md 3.4.8); a layer's file until a copy-up, the
+        // upper's after it.
+        let e = match locate_in(&g.view(&dirs, &files, &masked), &vpath, id) {
+            Some(Loc::Upper(k)) => &files[&k],
+            Some(Loc::Lower(i, k)) => &g.layers[i].files[&k],
+            None => return Err(Status::IoError),
         };
         let limit = match e.style {
             ReadStyle::Error => return Err(Status::IoError),
@@ -1317,7 +1747,9 @@ impl Director for Reference {
         let src = &src[..src.len().min(at.inline_cap)];
         self.read_buf.clear();
         self.read_buf.extend_from_slice(src);
+        drop(masked);
         drop(files);
+        drop(dirs);
         Ok(ReadReply::Inline(&self.read_buf))
     }
 
@@ -1343,10 +1775,12 @@ impl Director for Reference {
         if !self.graph.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
+        let mut dirs = self.graph.dirs.lock().unwrap();
         let mut files = self.graph.files.lock().unwrap();
-        let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get_mut(&k)) else {
+        let Some(k) = self.graph.upper_file(&mut dirs, &mut files, &vpath, id) else {
             return Err(Status::NotFound);
         };
+        let e = files.get_mut(&k).expect("just located");
         // A zero-length WRITE changes nothing, wherever its offset (wire.md
         // 3.4.5): no growth to the offset, and no size limit to pass.
         if data.is_empty() {
@@ -1381,10 +1815,12 @@ impl Director for Reference {
         if size > MAX_FILE_LEN as u64 {
             return Err(Status::NoSpace);
         }
+        let mut dirs = self.graph.dirs.lock().unwrap();
         let mut files = self.graph.files.lock().unwrap();
-        let Some(e) = locate(&files, &vpath, id).and_then(|k| files.get_mut(&k)) else {
+        let Some(k) = self.graph.upper_file(&mut dirs, &mut files, &vpath, id) else {
             return Err(Status::NotFound);
         };
+        let e = files.get_mut(&k).expect("just located");
         e.bytes.resize(size as usize, 0);
         Ok(())
     }
@@ -1410,32 +1846,36 @@ impl Director for Reference {
         if is_root_key(&vpath) {
             return Err(Status::BadRequest);
         }
-        let mut dirs = self.graph.dirs.lock().unwrap();
-        let mut files = self.graph.files.lock().unwrap();
+        let g = &self.graph;
+        let mut dirs = g.dirs.lock().unwrap();
+        let mut files = g.files.lock().unwrap();
+        let mut masked = g.masked.lock().unwrap();
+        let v = g.view(&dirs, &files, &masked);
         let is_dir = dirs.contains_key(&vpath);
-        if !is_dir && !files.contains_key(&vpath) {
+        let lower = v.lower_only(&vpath).is_some();
+        if !is_dir && !files.contains_key(&vpath) && !lower {
             return Err(Status::NotFound);
         }
-        if self.graph.is_lower(&vpath) {
-            // A whiteout hides a lower-only name and everything under it
-            // (wire.md 3.4.9, "Names only in a read-only lower").
-            let below = format!("{vpath}/");
-            let gone = |k: &String| *k == vpath || k.starts_with(&below);
-            dirs.retain(|k, _| !gone(k));
-            files.retain(|k, _| !gone(k));
-            self.graph.lower.lock().unwrap().retain(|k| !gone(k));
-            return Ok(());
-        }
-        if !self.graph.is_writable(&vpath) {
+        if !g.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
-        if !is_dir {
-            files.remove(&vpath);
-        } else if has_children(&dirs, &files, &vpath) {
-            return Err(Status::IoError);
-        } else {
-            dirs.remove(&vpath);
+        if lower {
+            // A whiteout hides a lower-only name and everything under it
+            // (wire.md 3.4.9, "Names only in a read-only lower").
+            masked.insert(vpath);
+            return Ok(());
         }
+        if is_dir && v.has_children(&vpath) {
+            return Err(Status::IoError);
+        }
+        if is_dir {
+            dirs.remove(&vpath);
+        } else {
+            files.remove(&vpath);
+        }
+        // A deleted name is missing (wire.md 3.4.8): a layer's entry there
+        // does not show through.
+        g.hide_lower(&mut masked, &vpath);
         Ok(())
     }
 
@@ -1457,26 +1897,30 @@ impl Director for Reference {
             return Err(Status::IoError);
         }
         let mut dirs = g.dirs.lock().unwrap();
-        let mut files = g.files.lock().unwrap();
-        if is_dir_in(&dirs, &vpath) {
-            // A writable provider may answer OK ([`mkdir_existing_ok`]).
+        let files = g.files.lock().unwrap();
+        let mut masked = g.masked.lock().unwrap();
+        let v = g.view(&dirs, &files, &masked);
+        if v.is_dir(&vpath) {
+            // A writable provider may answer OK ([`mkdir_existing_ok`]). A
+            // directory only a layer holds is answered as any other: wire.md
+            // 3.4.9 allows OK or `ST_EXISTS` for an existing directory
+            // (`docs/conformance.md`, "Layered roots").
             return if g.mkdir_existing_ok && g.is_writable(&vpath) {
                 Ok(())
             } else {
                 Err(Status::Exists)
             };
         }
-        if files.contains_key(&vpath) && g.is_lower(&vpath) {
+        if matches!(v.lower_only(&vpath), Some(Low::File(_))) && g.is_writable(&vpath) {
             // The directory, made in the upper, hides the lower-only file
             // (wire.md 3.4.9, "Names only in a read-only lower").
-            files.remove(&vpath);
-            let name = created_spelling(&dirs, &files, root.0, path);
-            drop(files);
-            g.copy_up(&vpath);
+            let name = created_spelling(&v, root.0, path);
+            masked.insert(vpath.clone());
+            g.copy_up_parents(&mut dirs, &files, &masked, &vpath);
             dirs.insert(vpath, name);
             return Ok(());
         }
-        if files.contains_key(&vpath) {
+        if v.file(&vpath).is_some() {
             return Err(if g.is_writable(&vpath) {
                 Status::IoError
             } else {
@@ -1490,10 +1934,9 @@ impl Director for Reference {
                 Status::ReadOnly
             });
         }
-        g.parent_exists(&dirs, &files, &vpath)?;
-        let name = created_spelling(&dirs, &files, root.0, path);
-        drop(files);
-        g.copy_up(&vpath);
+        g.parent_exists(&v, &vpath)?;
+        let name = created_spelling(&v, root.0, path);
+        g.copy_up_parents(&mut dirs, &files, &masked, &vpath);
         dirs.insert(vpath, name);
         Ok(())
     }
@@ -1522,9 +1965,12 @@ impl Director for Reference {
         let graph = self.graph.clone();
         let _whole = graph.serve.lock().unwrap();
         self.graph.resolve_name(root, path)?;
-        let dirs = self.graph.dirs.lock().unwrap();
-        let files = self.graph.files.lock().unwrap();
-        let names = stored_components(&dirs, &files, root.0, path);
+        let g = &self.graph;
+        let dirs = g.dirs.lock().unwrap();
+        let files = g.files.lock().unwrap();
+        let masked = g.masked.lock().unwrap();
+        let names = stored_components(&g.view(&dirs, &files, &masked), root.0, path);
+        drop(masked);
         drop(files);
         drop(dirs);
         let skip = (skip as usize).min(names.len());

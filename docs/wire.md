@@ -1049,7 +1049,8 @@ writable provider holds) say otherwise:
 - MKDIR over a lower-only file creates the directory in the upper and
   answers `ST_OK`; the directory then hides the file.
 
-The reference director has no layers, so it never gives these answers.
+The reference director gives these answers for a root it serves with read-only
+layers beneath its writable upper.
 
 #### 3.4.10 CLOSE (11)
 

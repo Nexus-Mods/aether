@@ -151,14 +151,17 @@ passes on.
 
 ## The scenarios
 
-**What a tree means.** Files and directories under a `writable` entry are
-held by the writable provider itself, so wire.md 3.4.9's "names only in a
-read-only lower" allowances never apply to them, and an adapter must mount
-them that way (a director that serves a writable root as an overlay puts the
-tree's writable part in the upper). A file or directory outside every
-`writable` entry belongs to a read-only provider, and a root with no
-`writable` entry has none. Scenarios about "the root itself" (3.4.7, 3.4.8)
-make the root writable as a whole.
+**What a tree means.** A root's own files and directories under a
+`writable` entry are held by the writable provider itself, so wire.md 3.4.9's
+"names only in a read-only lower" allowances never apply to them, and an
+adapter must mount them that way (a director that serves a writable root as
+an overlay puts them in the upper). A root's `lower` layers are read-only
+layers beneath that upper, the nearest first, every name in them below a
+writable entry: an adapter mounts them as its overlay's lowers, and their
+names are the ones 3.4.9's allowances are about ("Layered roots" below). A
+file or directory outside every `writable` entry belongs to a read-only
+provider, and a root with no `writable` entry has none. Scenarios about "the
+root itself" (3.4.7, 3.4.8) make the root writable as a whole.
 
 `contract/scenarios/` holds the suite: what every director must do, as data,
 one scenario per file, named by its file. Each `description` names the
@@ -213,6 +216,7 @@ over a section (the tests and CI run both).
 | `spelling-after-delete-recreate`, `respell-parent-components`, `delete-and-excl-edges`, `type-change-same-name` | names deleted and created again in another case, file and directory; creating requests (RENAME, MKDIR, OPEN, RENAME_X) with parents spelled otherwise; exclusive creates of names freed by DELETE and RENAME; a directory holding only an empty directory; a name that changes kind (3.2, 3.4.3, 3.4.8, 3.4.13) |
 | `cache-content-change-same-size`, `roots-mutations-isolated`, `root-dot`, `root-dot-readonly` | a writable file changed at one size by a rename over it, a delete and create, a truncating OPEN and a RENAME_X, read inline and in bulk each time; DELETE, create, RENAME and MKDIR in one root leaving the other's same paths alone; GETATTR, MKDIR, OPEN and STORED_NAMES of the root `.`, held by a writable provider or not (3.2, 3.4.1, 3.4.3, 3.4.9, 3.4.12) |
 | `stage-exec-after-write` | STAGE_EXEC of an image written, and of one created, in the session: a stager's copy holds the bytes as they are now; a directory and a missing path (3.4.14) |
+| `overlay-*` | a root served as an overlay ("Layered roots" below): a copy-up read through handles opened before and after it, a lower-only file deleted and created again, renamed, truncated, a lower-only directory that does not move, listings and spellings from both layers, MKDIR over lower names, a written lower file that is the upper's (3.2, 3.4.2 to 3.4.13) |
 | `registry-key-lifecycle`, `registry-under-tombstone`, `registry-rename-changed-recreate`, `registry-reads-and-limits`, `registry-value-order` | a key created, given values and a subkey, renamed, looked up and reported changed under both names, deleted, made again empty; writes under a tombstone, a parent of a tombstone, a value deleted from a key with no node; REG_CHANGED around a rename, tombstones moving with it, a rename onto a tombstoned name, `volatile` kept, a rename in place; reads past the write depth, value names counted in UTF-16 units, the current user's hive by the fold, `since` past the version; a value's place and spelling (4.1 to 4.3) |
 
 **Where wire.md lets directors differ**, the step accepts each answer it
@@ -236,13 +240,16 @@ director gave, unless the answers leave the same state:
 | STORED_NAMES with `skip` at or past the number of components | an empty reply, `ST_BAD_REQUEST` | 3.4.12 | `stored-names-edges` |
 | A request naming a named stream | `ST_NOT_FOUND`, `ST_BAD_REQUEST`, or the stream a director holds | 3.2 | `names-stream`, `names-stream-writable` |
 | A create of a name a director's store would make one with another | created, `ST_EXISTS` | 3.2 | `case-fold-created` |
+| MKDIR of a directory only a lower layer holds | `ST_OK`, `ST_EXISTS`, `ST_READ_ONLY` | 3.4.9 | `overlay-mkdir` |
+| READ through a handle on a lower-only file that a DELETE, a RENAME onto it or a MKDIR over it hid | the hidden file's last bytes, `ST_IO_ERROR`, `ST_NOT_FOUND` | 3.4.8 | `overlay-delete-recreate`, `overlay-rename-file`, `overlay-mkdir`, `overlay-delete-dir` |
 
 GETATTR of a path below a file is found = 0 (or `ST_NOT_FOUND`, which the
 shim reads the same, 3.4.1), never `ST_NOT_A_DIRECTORY` (3.5).
 
 **Left out because wire.md does not fix the answer**, so no scenario
 asserts it: a write open, DELETE or RENAME of a missing path outside every
-writable provider in a root that has one. (What a write past the end, or a
+writable provider in a root that has one; and, in a layered root, the
+questions "Layered roots" below lists as proposed rules. (What a write past the end, or a
 SETATTR, puts in the gap is zeros, and a handle opened for writing alone
 serves READ: wire.md 3.4.4 to 3.4.6 say so, and `write-growth` and
 `write-only-read` check them.)
@@ -274,6 +281,101 @@ Still left out of every part of a run:
 - A WRITE or request larger than the ring's payload, and a registry value over
   `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
   REG_KEY is covered only as a `one_of`, since the cap is the director's.
+
+## Layered roots
+
+A tree's root may name `lower` layers (`contract/scenarios/README.md`,
+"Tree"): read-only layers beneath its writable upper, the nearest first, as a
+director serving a writable root as an overlay has them (wire.md 3.4.9,
+"Names only in a read-only lower"). The reference serves such a root as an
+overlay, the scenarios `overlay-*` play its rules, the generator makes
+layered roots in about half its cases and predicts their answers, and a run
+fails a director that breaks them.
+
+**What wire.md fixes, and where.** The upper is over the lower, so at a name
+both hold the upper's entry is the one served, its kind, size, bytes and
+spelling; between layers the tree's order decides, and a file hides what
+farther layers hold below its name, a directory over a file hides the file.
+Every rule below is checked by the scenario named and by generated cases.
+
+| Rule | wire.md | Scenarios |
+|---|---|---|
+| One listing of the upper and the layers, each name once, as the highest layer holding it has it; a name a DELETE or RENAME hid is not listed | 3.2, 3.4.2, 3.4.9 | `overlay-listing`, `overlay-delete-recreate`, `overlay-delete-dir` |
+| A name keeps the spelling of the layer that shows it; a create keeps its parents' stored spelling, a lower's too | 3.2, 3.4.12 | `overlay-spelling` |
+| A read open of a lower-only file is never immutable: a write open can change the file | 3.4.3 | every `overlay-*` OPEN, by the run's immutable check |
+| A write open of a lower-only file opens it with its bytes; every handle of it, those opened before the write open included, reads WRITEs, SETATTRs and truncating OPENs at once | 3.4.3, 3.4.4, 3.4.6 | `overlay-copy-up-handles`, `overlay-truncate` |
+| DELETE of a lower-only name, a directory with children included, hides it (nothing a farther layer holds there shows); a DELETE of a name the upper holds leaves it missing, the lower's entry under it included | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-listing` |
+| A name made where a DELETE hid one is new: an empty file, an empty directory; a handle on the hidden file never reaches it | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir` |
+| RENAME of a lower-only file copies it up and renames it; its handles follow it | 3.4.7, 3.4.9 | `overlay-rename-file` |
+| RENAME of a lower-only directory to another name is `ST_IO_ERROR`; to another case of itself `ST_OK`, the lower's spelling kept, for a file too | 3.4.9 | `overlay-rename-dir`, `overlay-spelling` |
+| RENAME onto a lower-only file replaces it; RENAME_X of a lower-only file moves it, of a lower-only directory is `ST_CROSS_ROOT` | 3.4.7, 3.4.13 | `overlay-rename-file`, `overlay-rename-dir` |
+| MKDIR over a lower-only file makes the directory, which hides the file | 3.4.9 | `overlay-mkdir`, `overlay-written-file` |
+| A lower-only file a WRITE or a truncating OPEN changed is the upper's (the lower is read-only): MKDIR over it is `ST_IO_ERROR`, a case-only RENAME respells it | 3.4.7, 3.4.9 | `overlay-written-file` |
+| DELETE of a directory the upper holds with a lower's names under it is `ST_IO_ERROR` | 3.4.8 | `overlay-delete-dir` |
+
+**Where wire.md lets an overlay answer otherwise**, the step accepts every
+answer: MKDIR of a directory only a lower holds is `ST_OK` or `ST_EXISTS` (an
+existing directory) or `ST_READ_ONLY` (one no writable provider serves), all
+of 3.4.9; a handle on a lower-only file that was hidden answers as 3.4.8 says
+of a deleted file. Both are in the `one_of` table above. The reference
+answers `ST_EXISTS` and `ST_IO_ERROR`.
+
+**Proposed rules.** wire.md is silent on these layered questions. The
+reference answers each as proposed here, its tests name them "proposed",
+and no scenario or generated case sends a request whose answer depends on
+one. They are for review; none is in wire.md.
+
+1. *When is a lower-only name in the upper?* A file a write open reaches,
+   unchanged, and a directory below which a name is made: lower-only still,
+   or the upper's? Candidates: a write open copies the file up (as an
+   NTFS-backed overlay must, to hand the program a writable file) or only
+   the first change does; a name made below a lower directory puts the
+   directory in the upper (an NTFS-backed upper is a real tree, so the
+   directory is made there) or directories stay the lower's until made by
+   MKDIR. It decides what DELETE of the directory and a case-only RENAME of
+   either answer later. Proposed: a write open copies the file up, and a
+   name made below a lower-only directory puts it, and every lower-only
+   directory above it, in the upper.
+2. *Does a directory both layers hold move?* RENAME of a directory the upper
+   holds that a lower holds too (a lower directory copied up as in 1, or
+   one the tree puts in both). Candidates: `ST_IO_ERROR`, nothing moving,
+   as for a lower-only directory; or `ST_OK` with the whole merged tree at
+   `to` and nothing at `from` (a director that copies up the subtree or
+   records a redirect); never part of it. NTFS-backed overlays commonly
+   refuse, as they cannot move the lower's part. Proposed: `ST_IO_ERROR`
+   or the whole move; the reference answers `ST_IO_ERROR`.
+3. *MKDIR of a directory only a lower holds.* 3.4.9's two readings allow
+   `ST_OK`, `ST_EXISTS` and `ST_READ_ONLY` (above); an NTFS-backed overlay
+   answers as of an existing directory. Proposed: `ST_OK` or `ST_EXISTS`,
+   the listing below it unchanged, an `ST_OK` free to put the directory in
+   the upper (as in 1). The reference answers `ST_EXISTS` and changes
+   nothing.
+
+**Generated cases** make roots with one or two layers below the writable
+part (a root writable as a whole, or a writable entry), their names drawn
+from the same list, so a name is often in the upper and a layer, or in both
+layers, in another case. The generator keeps its own account of the layers,
+apart from the reference: which names the upper holds, which a DELETE or
+RENAME hid, and which proposed rule 1 leaves open. From it it predicts each
+answer that depends on the layers (the statuses above), the bytes a READ
+through any live handle gets (a lower-only file's from its layer, a handle
+opened before a copy-up the file as it is now), the spelling of each
+STORED_NAMES component only a layer holds, and, after every step, every
+listing: each name the reference lists is the upper's or one a layer shows,
+with the layer's spelling, kind and size, and each name only a layer shows is
+listed. A reference that answers otherwise is a generator error. It does not
+send DELETE, case-only RENAME or MKDIR of a name proposed rule 1 leaves
+open, RENAME of a directory a layer holds too (rule 2), or anything after a
+MKDIR of a lower-only directory that depends on rule 3.
+
+**Proof it bites.** Test-only breaks of the reference adapter each make one
+mistake a layered director plausibly makes, and the tests show the scenario
+of its rule and the generator both fail it: `no-whiteout` (a deleted lower
+name found again), `lists-hidden` (one listed again), `write-through` (a
+written lower file still lower-only), `copy-up-loses-bytes`,
+`copy-up-old-handle-lower` (a handle opened before the copy-up reads the
+lower), `hidden-handle-reads-new` (the reverse: a hidden lower file's handle
+reads the file made at its name later), `upper-loses-listing`.
 
 ## Several clients
 
@@ -480,7 +582,9 @@ same seed gives the same cases, so `--seed S` replays a run.
 generates a tree spec (up to three roots, files and directories with names
 from a fixed list in varied case, writable entries or roots writable as a
 whole, now and then two writable entries in one root, an optional registry
-layer), a list of operations, each a kind and five numbers, and whether
+layer, and in about half the roots with a writable provider one or two
+read-only lower layers beneath it, "Layered roots" above), a list of
+operations, each a kind and five numbers, and whether
 clients other than client 0 send some of the steps. The generator builds the
 tree, mounts it in the reference director held in this process (behind a
 ring in memory, served as a director serves a ring), and reads the
@@ -592,6 +696,8 @@ and the parents their stored one (3.2).
   writable entry's own directory and its ancestors (an entry inside another
   included) are only read (GETATTR, READDIR, OPEN for reading), never
   written, deleted or renamed (README, "Who holds what").
+- In a layered root, the requests whose answer depends on a proposed rule
+  ("Layered roots" above).
 - Writes with no fixed answer (as "Left out" above): a write open, DELETE
   or RENAME of a missing name outside every writable provider in a root that
   has one.

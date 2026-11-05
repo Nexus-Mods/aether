@@ -922,3 +922,23 @@ fn a_tree_with_lower_layers_loads_and_writes_back() {
         "{e}"
     );
 }
+
+/// The README's example of a layered root is a root a tree may hold.
+#[test]
+fn the_readmes_layered_root_is_valid() {
+    let readme = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contract/scenarios/README.md"
+    ))
+    .unwrap()
+    .replace("\r\n", "\n");
+    let at = readme.find("**Layers.**").expect("the layers paragraph");
+    let start = at + readme[at..].find("```json\n").unwrap() + "```json\n".len();
+    let end = start + readme[start..].find("```").unwrap();
+    let root: Value = serde_json::from_str(&readme[start..end]).unwrap();
+    let mut v = scenario(json!([heartbeat_ok()]));
+    v["tree"]["roots"] = json!([root]);
+    let dir = aether_testkit::tempdir().unwrap();
+    let s = load(&write(dir.path(), "layered.json", &v)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(s.tree.roots[0].lower.len(), 2);
+}

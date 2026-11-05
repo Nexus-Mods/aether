@@ -1,0 +1,26 @@
+{
+  "name": "overlay-rename-dir",
+  "description": "A lower-only directory does not move: RENAME of it to another name is ST_IO_ERROR and nothing moves, and RENAME to another case of itself is ST_OK and keeps the lower's spelling (wire.md 3.4.9, \"Names only in a read-only lower\"). RENAME_X of it is ST_CROSS_ROOT (3.4.13: a directory is refused). DELETE of it, children and all, hides it (3.4.9).",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Meshes/a.nif", "contents": "a"}, {"path": "Data/Meshes/Sub/b.nif", "contents": "bb"}]}]},
+      {"id": 1, "writable": ["."]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 0, "from": "data/meshes", "to": "Data/Models"}, "expect": {"status": "io-error"}, "note": "a lower-only directory does not move"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/models"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes/sub/b.nif"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "data/meshes/sub", "to": "data/Sub2"}, "expect": {"status": "io-error"}},
+    {"request": {"op": "rename", "root": 0, "from": "data/meshes", "to": "Data/MESHES"}, "expect": {"status": "ok"}, "note": "another case of itself"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Meshes", "is_dir": true, "size": 0, "mtime": 0}]}}, "note": "the lower's spelling kept"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/meshes/a.nif"}, "expect": {"reply": {"names": "Data/Meshes/a.nif"}}},
+    {"request": {"op": "rename-x", "from_root": 0, "to_root": 1, "from": "data/meshes", "to": "Meshes"}, "expect": {"status": "cross-root"}},
+    {"request": {"op": "readdir", "root": 1, "path": "."}, "expect": {"reply": {"entries": []}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/meshes"}, "expect": {"status": "ok"}, "note": "a lower-only directory with children: hidden"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes/a.nif"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes/sub"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}]}}}
+  ]
+}

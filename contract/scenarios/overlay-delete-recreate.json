@@ -1,0 +1,29 @@
+{
+  "name": "overlay-delete-recreate",
+  "description": "A lower-only file deleted while a handle is open on it, then created again: the DELETE hides it (wire.md 3.4.9, \"Names only in a read-only lower\": \"a whiteout in the upper\"), so nothing a farther layer holds at the name shows either; the old handle reads the deleted file's last bytes or fails, and never the new file (3.4.8); the new file is the upper's, and once it is deleted the name is missing again (3.4.8).",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}]}, {"files": [{"path": "data/mod.esp", "contents": "deeper"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/mod.esp"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "mod"}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/mod.esp"}, "expect": {"status": "ok"}, "note": "a lower-only file: hidden"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "no layer shows through"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}]}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/mod.esp"}, "expect": {"status": "not-found"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": "mod"}}, {"status": "io-error"}, {"status": "not-found"}], "wire": "3.4.8"}, "note": "the deleted file's last bytes, or a failure"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create", "excl"], "path": "Data/MOD.esp"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "the name is free"},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "new!"}, "expect": {"reply": {"written": 4}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": "mod"}}, {"status": "io-error"}, {"status": "not-found"}], "wire": "3.4.8"}, "note": "never the new file"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "MOD.esp", "is_dir": false, "size": 4, "mtime": 0}]}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/mod.esp"}, "expect": {"reply": {"names": "Data/MOD.esp"}}, "note": "the new file's spelling"},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "delete", "root": 0, "path": "data/mod.esp"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, "note": "missing again: no layer comes back"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}]}}}
+  ]
+}

@@ -1220,14 +1220,25 @@ pub fn tree_json(t: &Tree) -> Value {
         .roots
         .iter()
         .map(|r| {
-            let files: Vec<Value> = r
-                .files
-                .iter()
-                .map(|f| {
-                    json!({"path": f.path, "contents": contents_json(&f.contents), "mtime": f.mtime})
-                })
-                .collect();
-            json!({"id": r.id, "files": files, "dirs": r.dirs, "writable": r.writable})
+            let files = |files: &[aether_refdirector::tree::File]| -> Vec<Value> {
+                files
+                    .iter()
+                    .map(|f| {
+                        json!({"path": f.path, "contents": contents_json(&f.contents), "mtime": f.mtime})
+                    })
+                    .collect()
+            };
+            let mut root =
+                json!({"id": r.id, "files": files(&r.files), "dirs": r.dirs, "writable": r.writable});
+            if !r.lower.is_empty() {
+                let lower: Vec<Value> = r
+                    .lower
+                    .iter()
+                    .map(|l| json!({"files": files(&l.files), "dirs": l.dirs}))
+                    .collect();
+                root["lower"] = json!(lower);
+            }
+            root
         })
         .collect();
     let mut tree = json!({ "roots": roots });

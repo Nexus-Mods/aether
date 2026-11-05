@@ -1,0 +1,27 @@
+{
+  "name": "overlay-copy-up-handles",
+  "description": "A root served as an overlay (a `lower` layer beneath the writable upper, contract/scenarios/README.md): a lower-only file opened for reading, then opened for writing and written. The handle opened before the write open reads the WRITE at once, as a new handle does (wire.md 3.4.4: \"Every handle of a file reads the file as it is now\"; the copy in the upper is that file), the write open holds the lower's bytes (3.4.3), and a read open of a lower-only file is never immutable (3.4.3: a file any request can change).",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Saved.esp", "contents": "mine"}], "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod bytes"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/mod.esp"}, "expect": {"reply": {"fh": 1, "size": 9, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "mod bytes"}}},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "data/mod.esp"}, "expect": {"reply": {"fh": 2, "size": 9, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "the lower's file, its bytes kept"},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": "mod bytes"}}},
+    {"request": {"op": "write", "fh": 2, "offset": 4, "data": "BYTES!"}, "expect": {"reply": {"written": 6}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "mod BYTES!"}}, "note": "the handle opened before the write open reads the file as it is now"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 10, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/mod.esp"}, "expect": {"reply": {"fh": 3, "size": 10, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"reply": {"data": "mod BYTES!"}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "MOD"}, "expect": {"reply": {"written": 3}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 3}, "expect": {"reply": {"data": "MOD"}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 3}, "expect": {"reply": {"data": "MOD"}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Mod.esp", "is_dir": false, "size": 10, "mtime": 0}, {"name": "Saved.esp", "is_dir": false, "size": 4, "mtime": 0}]}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}}
+  ]
+}

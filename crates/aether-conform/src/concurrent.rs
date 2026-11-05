@@ -77,7 +77,7 @@ use std::time::{Duration, Instant};
 
 use aether_protocol::Status;
 use aether_protocol::{OpenFlags, RequestFlags, RootId};
-use aether_refdirector::tree::{fill, Contents, File, RegKey, Registry, Root, Tree};
+use aether_refdirector::tree::{fill, Contents, File, Layer, RegKey, Registry, Root, Tree};
 use proptest::strategy::{Strategy, ValueTree};
 
 use crate::adapter::{Adapter, Env};
@@ -367,6 +367,19 @@ fn combine(cases: &[Scenario], slots: u32) -> Result<Tree, String> {
         root.dirs.extend(r.dirs.iter().map(|d| moved(&p, d)));
         root.writable
             .extend(r.writable.iter().map(|w| moved(&p, w)));
+        // Layer `i` of every case is layer `i` of the combined root.
+        for (i, l) in r.lower.iter().enumerate() {
+            if root.lower.len() <= i {
+                root.lower.resize_with(i + 1, Layer::default);
+            }
+            let to = &mut root.lower[i];
+            to.files.extend(l.files.iter().map(|f| File {
+                path: moved(&p, &f.path),
+                contents: f.contents.clone(),
+                mtime: f.mtime,
+            }));
+            to.dirs.extend(l.dirs.iter().map(|d| moved(&p, d)));
+        }
     }
     root.dirs.push(MEET_DIR.into());
     root.writable.push(MEET_DIR.into());

@@ -883,3 +883,42 @@ fn a_literal_handle_is_marked_and_written_back_as_one() {
     ]));
     assert!(e.contains("literal"), "{e}");
 }
+
+/// A root's `lower` layers load, write back as they were read, and a layer
+/// whose names are not below a writable entry is a load error naming them
+/// (`contract/scenarios/README.md`, "Tree").
+#[test]
+fn a_tree_with_lower_layers_loads_and_writes_back() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let mut v = scenario(json!([heartbeat_ok()]));
+    v["tree"]["roots"][0]["lower"] = json!([
+        {"files": [{"path": "saves/old.sav", "contents": "old"}], "dirs": ["saves/Empty"]},
+        {"files": [{"path": "saves/older.sav", "contents": {"size": 10, "seed": 2}}]}
+    ]);
+    let p = write(dir.path(), "layers.json", &v);
+    let s = load(&p).unwrap();
+    let lower = &s.tree.roots[0].lower;
+    assert_eq!(lower.len(), 2);
+    assert_eq!(lower[0].dirs, ["saves/Empty"]);
+    assert_eq!(lower[1].files[0].path, "saves/older.sav");
+    let text = aether_conform::scenario::to_json_string(&s);
+    std::fs::write(&p, &text).unwrap();
+    assert_eq!(load(&p).unwrap(), s);
+    // A root without layers writes none.
+    let plain = load(&write(
+        dir.path(),
+        "plain.json",
+        &scenario(json!([heartbeat_ok()])),
+    ))
+    .unwrap();
+    assert!(!aether_conform::scenario::to_json_string(&plain).contains("lower"));
+
+    v["tree"]["roots"][0]["lower"] = json!([{"files": [{"path": "data/b.esp", "contents": "b"}]}]);
+    let e = load(&write(dir.path(), "bad.json", &v))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("tree") && e.contains("data/b.esp") && e.contains("writable"),
+        "{e}"
+    );
+}

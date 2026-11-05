@@ -1,0 +1,36 @@
+{
+  "name": "overlay-rename-file",
+  "description": "RENAME of a lower-only file copies it up and renames it (wire.md 3.4.9, \"Names only in a read-only lower\"): it is at `to` with its bytes and gone from `from`, and a handle open on it follows it (3.4.7). A lower-only file moves out of a lower-only directory and an upper one into it; a file renamed onto a lower-only file replaces it, whose handle then reads its last bytes or fails (3.4.7, 3.4.8).",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}, {"path": "Data/Sub/x.txt", "contents": "x"}, {"path": "Data/Target.esp", "contents": "target!"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/mod.esp"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "data/mod.esp", "to": "Data/Renamed.esp"}, "expect": {"status": "ok"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/renamed.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "mod"}}, "note": "the handle follows its file"},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "data/renamed.esp"}, "expect": {"reply": {"fh": 2, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 0, "data": "M"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "Mod"}}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/renamed.esp"}, "expect": {"reply": {"names": "Data/Renamed.esp"}}},
+    {"request": {"op": "rename", "root": 0, "from": "data/sub/x.txt", "to": "Data/X.txt"}, "expect": {"status": "ok"}, "note": "out of a lower-only directory"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/sub"}, "expect": {"reply": {"entries": []}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/sub"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "data/renamed.esp", "to": "data/sub/Mod.esp"}, "expect": {"status": "ok"}, "note": "into it"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/sub"}, "expect": {"reply": {"entries": [{"name": "Mod.esp", "is_dir": false, "size": 3, "mtime": 0}]}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "Mod"}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/target.esp"}, "expect": {"reply": {"fh": 3, "size": 7, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "rename", "root": 0, "from": "data/keep.esp", "to": "Data/Target.esp"}, "expect": {"status": "ok"}, "note": "onto a lower-only file: replaced"},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/target.esp"}, "expect": {"reply": {"fh": 4, "size": 4, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 4, "offset": 0, "len": 64}, "expect": {"reply": {"data": "keep"}}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": "target!"}}, {"status": "io-error"}, {"status": "not-found"}], "wire": "3.4.8"}, "note": "the replaced file's handle"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Sub", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Target.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "X.txt", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}}
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "overlay-listing",
+  "description": "READDIR of a directory the upper and two lower layers hold: one entry per name (wire.md 3.2), the upper's where it holds the name and otherwise the nearer layer's, spelling, kind and size alike (wire.md 3.4.9, \"Names only in a read-only lower\": a writable upper over a read-only lower; the order of layers is the tree's, contract/scenarios/README.md); a directory over a file hides the file. After DELETEs, a create and a RENAME, the listings show neither a deleted name nor a farther layer's name under it.",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Both.esp", "contents": "upper!"}, {"path": "Data/Shared/up.txt", "contents": "u"}], "dirs": ["Data/Kind"], "lower": [{"files": [{"path": "DATA/BOTH.ESP", "contents": "lower one"}, {"path": "Data/Low.esp", "contents": "l"}, {"path": "Data/Shared/low.txt", "contents": "lo"}, {"path": "Data/Kind", "contents": "k"}]}, {"files": [{"path": "data/low.esp", "contents": "farther"}, {"path": "data/far.esp", "contents": "far"}, {"path": "data/SHARED/far.txt", "contents": "f"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Both.esp", "is_dir": false, "size": 6, "mtime": 0}, {"name": "Kind", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Low.esp", "is_dir": false, "size": 1, "mtime": 0}, {"name": "Shared", "is_dir": true, "size": 0, "mtime": 0}, {"name": "far.esp", "is_dir": false, "size": 3, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data/shared"}, "expect": {"reply": {"entries": [{"name": "far.txt", "is_dir": false, "size": 1, "mtime": 0}, {"name": "low.txt", "is_dir": false, "size": 2, "mtime": 0}, {"name": "up.txt", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data/kind"}, "expect": {"reply": {"entries": []}}, "note": "the upper's directory hides the lower's file"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 6, "mtime": 0}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/both.esp"}, "expect": {"reply": {"fh": 1, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"reply": {"data": "upper!"}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/shared/far.txt"}, "expect": {"reply": {"names": "Data/Shared/far.txt"}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/low.esp"}, "expect": {"status": "ok"}},
+    {"request": {"op": "delete", "root": 0, "path": "data/both.esp"}, "expect": {"status": "ok"}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "data/New.txt"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "rename", "root": 0, "from": "data/far.esp", "to": "data/shared/Far.esp"}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Kind", "is_dir": true, "size": 0, "mtime": 0}, {"name": "New.txt", "is_dir": false, "size": 0, "mtime": 0}, {"name": "Shared", "is_dir": true, "size": 0, "mtime": 0}]}}, "note": "neither deleted name, nor a farther layer's under it"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/shared"}, "expect": {"reply": {"entries": [{"name": "Far.esp", "is_dir": false, "size": 3, "mtime": 0}, {"name": "far.txt", "is_dir": false, "size": 1, "mtime": 0}, {"name": "low.txt", "is_dir": false, "size": 2, "mtime": 0}, {"name": "up.txt", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/low.esp"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}}
+  ]
+}

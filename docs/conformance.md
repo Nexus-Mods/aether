@@ -893,8 +893,9 @@ workflow run's id as the seed; and the committed scenarios, `--malformed`,
 debug build: the concurrent rounds take about 16 s per ring; 1024 generated
 cases about 30 s over a file ring (each mount creates a 16 MiB ring file)
 and 25 s over a section, of which the cases with client processes are a
-good part; each whole invocation about 50 s over a file ring, 55 s over a
-section, and 12 s with no arena. At two to three times slower on CI's
+good part; each whole invocation about 55 s over a file ring, 55 s over a
+section, and 11 s with no arena (seed 20261105, the 143 scenarios with the
+layered ones). At two to three times slower on CI's
 2-vCPU runners that is about five minutes for the Windows step.
 
 `aether-conform reference-adapter [--ring file|section] [--no-arena]` is an

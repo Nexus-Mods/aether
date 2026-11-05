@@ -1,6 +1,6 @@
 {
   "name": "overlay-spelling",
-  "description": "Stored spellings from either layer (wire.md 3.2, 3.4.12): a name the upper holds keeps the upper's spelling, one only a lower holds the lower's; a create below a lower directory keeps the lower's spelling of its parents (3.2: \"the components above it keep their stored spelling\"); a case-only RENAME of a lower-only file keeps the lower's spelling (wire.md 3.4.9, \"Names only in a read-only lower\").",
+  "description": "Stored spellings from either layer (wire.md 3.2, 3.4.12): a name the upper holds keeps the upper's spelling, one only a lower holds the lower's; a create below a lower directory keeps the lower's spelling of its parents (3.2: \"the components above it keep their stored spelling\"). A case-only RENAME of a lower-only file keeps the lower's spelling (wire.md 3.4.9, \"Names only in a read-only lower\") or, by the general rule, respells it (3.4.7): wire.md 3.4.9 lets an overlay give the answers its list of \"Names only in a read-only lower\" gives, or the ones the rules above it give; each such step, and every step whose answer depends on it, shares a choice label, the list's answer first.",
   "tree": {
     "roots": [
       {"id": 0, "writable": ["."], "files": [{"path": "Data/Upper.esp", "contents": "u"}], "lower": [{"files": [{"path": "DATA/Textures/Sky.DDS", "contents": "sky"}], "dirs": ["DATA/Meshes"]}]}
@@ -15,11 +15,11 @@
     {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
     {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/textures/new.dds"}, "expect": {"reply": {"names": "Data/Textures/NEW.dds"}}, "note": "the parents' stored spelling"},
     {"request": {"op": "readdir", "root": 0, "path": "data/textures"}, "expect": {"reply": {"entries": [{"name": "NEW.dds", "is_dir": false, "size": 0, "mtime": 0}, {"name": "Sky.DDS", "is_dir": false, "size": 3, "mtime": 0}]}}},
-    {"request": {"op": "rename", "root": 0, "from": "data/textures/sky.dds", "to": "data/textures/SKY.dds"}, "expect": {"status": "ok"}, "note": "a case-only rename of a lower-only file"},
-    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/textures/sky.dds"}, "expect": {"reply": {"names": "Data/Textures/Sky.DDS"}}, "note": "the lower's spelling kept"},
-    {"request": {"op": "readdir", "root": 0, "path": "data/textures"}, "expect": {"reply": {"entries": [{"name": "NEW.dds", "is_dir": false, "size": 0, "mtime": 0}, {"name": "Sky.DDS", "is_dir": false, "size": 3, "mtime": 0}]}}},
     {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "DATA/MESHES/Sub"}, "expect": {"status": "ok"}},
     {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/meshes/sub"}, "expect": {"reply": {"names": "Data/Meshes/Sub"}}},
-    {"request": {"op": "readdir", "root": 0, "path": "data/meshes"}, "expect": {"reply": {"entries": [{"name": "Sub", "is_dir": true, "size": 0, "mtime": 0}]}}}
+    {"request": {"op": "readdir", "root": 0, "path": "data/meshes"}, "expect": {"reply": {"entries": [{"name": "Sub", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "rename", "root": 0, "from": "data/textures/sky.dds", "to": "data/textures/SKY.dds"}, "expect": {"status": "ok"}, "note": "a case-only rename of a lower-only file"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/textures/sky.dds"}, "expect": {"one_of": [{"reply": {"names": "Data/Textures/Sky.DDS"}}, {"reply": {"names": "Data/Textures/SKY.dds"}}], "wire": "3.4.9", "choice": "spelled"}, "note": "the lower's spelling kept, or respelled"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/textures"}, "expect": {"one_of": [{"reply": {"entries": [{"name": "NEW.dds", "is_dir": false, "size": 0, "mtime": 0}, {"name": "Sky.DDS", "is_dir": false, "size": 3, "mtime": 0}]}}, {"reply": {"entries": [{"name": "NEW.dds", "is_dir": false, "size": 0, "mtime": 0}, {"name": "SKY.dds", "is_dir": false, "size": 3, "mtime": 0}]}}], "wire": "3.4.9", "choice": "spelled"}}
   ]
 }

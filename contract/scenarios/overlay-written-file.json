@@ -1,9 +1,9 @@
 {
   "name": "overlay-written-file",
-  "description": "A lower-only file whose bytes a WRITE or a truncating OPEN changed is held by the writable provider: the lower is read-only (wire.md 3.4.9, \"Names only in a read-only lower\": \"a writable upper over a read-only lower\"), so the changed file is the upper's. MKDIR over it is then ST_IO_ERROR and a case-only RENAME respells it (3.4.7, 3.4.9), where for a file still only in the lower MKDIR makes a directory and a case-only RENAME keeps the lower's spelling (3.4.9).",
+  "description": "A lower-only file whose bytes a WRITE or a truncating OPEN changed is held by the writable provider: the lower is read-only (wire.md 3.4.9, \"Names only in a read-only lower\": \"a writable upper over a read-only lower\"), so the changed file is the upper's. MKDIR over it is then ST_IO_ERROR and a case-only RENAME respells it (3.4.7, 3.4.9). For a file still only in the lower, MKDIR makes a directory or is ST_IO_ERROR, and a case-only RENAME keeps the lower's spelling or respells it: wire.md 3.4.9 lets an overlay give the answers its list of \"Names only in a read-only lower\" gives, or the ones the rules above it give; each such step, and every step whose answer depends on it, shares a choice label, the list's answer first.",
   "tree": {
     "roots": [
-      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}, {"path": "Data/Two.esp", "contents": "two"}, {"path": "Data/Three.esp", "contents": "three"}]}]}
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}, {"path": "Data/Two.esp", "contents": "two"}, {"path": "Data/Three.esp", "contents": "three"}, {"path": "Data/Four.esp", "contents": "four"}]}]}
     ]
   },
   "steps": [
@@ -17,8 +17,11 @@
     {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
     {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "data/two.esp"}, "expect": {"status": "io-error"}, "note": "a truncated file is the upper's"},
     {"request": {"op": "rename", "root": 0, "from": "data/three.esp", "to": "Data/THREE.esp"}, "expect": {"status": "ok"}, "note": "a lower-only file"},
-    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/three.esp"}, "expect": {"reply": {"names": "Data/Three.esp"}}, "note": "the lower's spelling kept"},
-    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "Data/Three.esp"}, "expect": {"status": "ok"}, "note": "a lower-only file: hidden by the directory"},
-    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "MOD.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Three.esp", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Two.esp", "is_dir": false, "size": 0, "mtime": 0}]}}}
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/three.esp"}, "expect": {"one_of": [{"reply": {"names": "Data/Three.esp"}}, {"reply": {"names": "Data/THREE.esp"}}], "wire": "3.4.9", "choice": "spelled"}, "note": "the lower's spelling kept, or respelled"},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "Data/Four.esp"}, "expect": {"one_of": [{"status": "ok"}, {"status": "io-error"}], "wire": "3.4.9", "choice": "over"}, "note": "a lower-only file: hidden by the directory, or refused"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/four.esp"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}], "wire": "3.4.9", "choice": "over"}},
+    {"request": {"op": "readdir", "root": 0, "path": "data/mod.esp"}, "expect": {"one_of": [{"reply": {"entries": []}}, {"status": "not-found"}, {"status": "not-a-directory"}], "wire": "3.4.2"}, "note": "a file"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/two.esp"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 0, "mtime": 0}}}
   ]
 }

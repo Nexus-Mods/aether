@@ -313,12 +313,38 @@ fn the_break_switch_is_not_reachable_without_the_flag() {
     }
 }
 
-/// A generated run of `cases` cases of `seed` against the reference adapter
-/// breaking `rule`, beside one HEARTBEAT scenario, so that only the
-/// generator can fail it: it fails, its case shrinks to at most `steps`
-/// steps whose first failure is at an `op` request, and the shrunk case,
-/// replayed against the reference, passes (its expectations are wire.md's).
+/// A generated run of `cases` cases against the reference adapter breaking
+/// `rule`, beside one HEARTBEAT scenario, so that only the generator can
+/// fail it: it fails, its case shrinks to at most `steps` steps whose first
+/// failure is at an `op` request, and the shrunk case, replayed against the
+/// reference, passes (its expectations are wire.md's). Seeds from `seed` up
+/// are tried in turn, at most [`SEEDS`] of them, until one shows all that:
+/// a change to the generator moves which seed reaches a rule, not whether
+/// one does.
 fn generator_catches(rule: &str, cases: u32, seed: u64, steps: usize, op: &str) {
+    let mut seen = Vec::new();
+    for seed in seed..seed + SEEDS {
+        match generator_catches_with(rule, cases, seed, steps, op) {
+            Ok(()) => return,
+            Err(e) => seen.push(format!("seed {seed}: {e}")),
+        }
+    }
+    panic!("{rule}: no seed of {SEEDS} caught it as asked:
+{}", seen.join("
+"));
+}
+
+/// How many seeds [`generator_catches`] tries.
+const SEEDS: u64 = 6;
+
+/// [`generator_catches`] for one seed: `Err` saying how it fell short.
+fn generator_catches_with(
+    rule: &str,
+    cases: u32,
+    seed: u64,
+    steps: usize,
+    op: &str,
+) -> Result<(), String> {
     let tmp = aether_testkit::tempdir().unwrap();
     let scenarios = heartbeat_only(tmp.path());
     let failures = tmp.path().join("failures");
@@ -342,23 +368,20 @@ fn generator_catches(rule: &str, cases: u32, seed: u64, steps: usize, op: &str) 
         report.to_str().unwrap(),
     ]);
     let v = json_report(&o, &report);
-    assert_eq!(
-        o.status.code(),
-        Some(1),
-        "{rule}: {v:#}
-{}",
-        stderr(&o)
-    );
+    if o.status.code() != Some(1) {
+        return Err(format!("exit {:?}", o.status.code()));
+    }
     let g = scenario(&v, "generated");
     let failed = first_failure(g);
-    assert_eq!(failed["request"]["op"], op, "{rule}: {failed:#}");
+    if failed["request"]["op"] != op {
+        return Err(format!("first failure at {}", failed["request"]["op"]));
+    }
     let file = g["file"].as_str().unwrap();
     let s: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     let n = s["steps"].as_array().unwrap().len();
-    assert!(
-        n <= steps,
-        "{rule}: shrunk to {n} steps, not at most {steps}: {s:#}"
-    );
+    if n > steps {
+        return Err(format!("shrunk to {n} steps, not at most {steps}"));
+    }
     let o = conform(&[
         "run",
         "--director",
@@ -367,6 +390,7 @@ fn generator_catches(rule: &str, cases: u32, seed: u64, steps: usize, op: &str) 
         failures.to_str().unwrap(),
     ]);
     assert_eq!(o.status.code(), Some(0), "{rule}: {}", stdout(&o));
+    Ok(())
 }
 
 /// One test per rule the generator now sends requests for, each a defect

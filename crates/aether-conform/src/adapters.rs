@@ -422,6 +422,16 @@ pub enum Break {
     /// (wire.md 3.4.7: such a directory is refused, or moved whole with
     /// every name under it from every layer; never in part).
     RenameMovesUpperPart,
+    /// Not a broken rule: lower-only names are answered by the rules for
+    /// names the writable provider holds, which wire.md 3.4.9 leaves an
+    /// overlay free to give, and a directory a layer holds moves whole
+    /// (3.4.7) (`Reference::general_lower_rules`). A run must pass it.
+    LowerGeneralRules,
+    /// Not a broken rule: every RENAME of a directory the upper and a layer
+    /// both hold is refused, a case-only one included (wire.md 3.4.7: it may
+    /// refuse;
+    /// `Reference::refuse_layered_dir_renames`). A run must pass it.
+    RefuseLayeredDirRenames,
 }
 
 impl Break {
@@ -515,6 +525,8 @@ impl Break {
             "hidden-handle-reads-new" => Some(Break::HiddenHandleReadsNew),
             "upper-loses-listing" => Some(Break::UpperLosesListing),
             "rename-moves-upper-part" => Some(Break::RenameMovesUpperPart),
+            "lower-general-rules" => Some(Break::LowerGeneralRules),
+            "refuse-layered-dir-renames" => Some(Break::RefuseLayeredDirRenames),
             _ => None,
         }
     }
@@ -925,7 +937,13 @@ fn mount(
     let s = crate::scenario::load(scenario).map_err(|e| e.to_string())?;
     let staged = Arc::new(Mutex::new(Vec::new()));
     let d = Served {
-        reference: Reference::from_tree(&s.tree)?,
+        reference: match broken {
+            Some(Break::LowerGeneralRules) => Reference::from_tree(&s.tree)?.general_lower_rules(),
+            Some(Break::RefuseLayeredDirRenames) => {
+                Reference::from_tree(&s.tree)?.refuse_layered_dir_renames()
+            }
+            _ => Reference::from_tree(&s.tree)?,
+        },
         broken,
         ring: None,
         banks: Arc::default(),

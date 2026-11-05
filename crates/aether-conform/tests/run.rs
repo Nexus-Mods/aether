@@ -1761,3 +1761,32 @@ fn a_director_whose_listing_prefers_the_lower_fails() {
 fn a_director_moving_only_the_upper_part_of_a_directory_fails() {
     caught_by("rename-moves-upper-part", "overlay-rename-both");
 }
+
+/// wire.md 3.4.9: an overlay "may" answer a lower-only name as its list
+/// says, so one that answers DELETE, RENAME and MKDIR of such names by the
+/// general rules (3.4.7 to 3.4.9) passes the committed suite and the
+/// generated cases, and so does one that refuses every RENAME of a
+/// directory both layers hold, a case-only one included (3.4.7).
+#[test]
+fn overlays_giving_the_general_rules_or_refusing_layered_renames_pass() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    for how in ["lower-general-rules", "refuse-layered-dir-renames"] {
+        let failures = aether_testkit::tempdir().unwrap();
+        let (code, entries, _, all) = run_json(
+            &format!("test-adapter --misbehave {how}"),
+            &dir,
+            "20",
+            &[
+                "--generate",
+                "--cases",
+                "512",
+                "--seed",
+                "3",
+                "--failures",
+                failures.path().to_str().unwrap(),
+            ],
+        );
+        assert_eq!(failed(&entries), Vec::<&str>::new(), "{how}: {all}");
+        assert_eq!(code, Some(0), "{how}: {all}");
+    }
+}

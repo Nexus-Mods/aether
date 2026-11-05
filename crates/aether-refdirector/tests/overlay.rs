@@ -606,3 +606,45 @@ fn a_tree_whose_lower_is_not_under_a_writable_entry_is_refused() {
     };
     assert_eq!(ok.validate(), Ok(()));
 }
+
+/// Knob: the answers wire.md 3.4.9's "may" leaves to an overlay that gives
+/// the general rules for lower-only names (3.4.7 to 3.4.9): DELETE of a
+/// lower-only directory with children is `ST_IO_ERROR`, RENAME of a
+/// lower-only directory or one both layers hold moves the whole merged tree,
+/// a case-only RENAME of a lower-only name respells it, MKDIR over a
+/// lower-only file is `ST_IO_ERROR`.
+#[test]
+fn the_general_rules_knob_answers_lower_only_names_as_held_ones() {
+    let mut d = mount(&layered()).general_lower_rules();
+    assert_eq!(d.delete(R0, "data/meshes"), Err(Status::IoError));
+    assert_eq!(found(&mut d, "data/meshes/a.nif"), Some((false, 4)));
+    assert_eq!(d.mkdir(R0, 0o755, "data/low.esp"), Err(Status::IoError));
+    assert_eq!(d.rename(R0, "data/second.esp", "Data/SECOND.esp"), Ok(()));
+    assert_eq!(
+        d.stored_names(R0, 0, "data/second.esp").unwrap(),
+        "Data/SECOND.esp"
+    );
+    assert_eq!(d.rename(R0, "data/meshes", "Data/Models"), Ok(()));
+    assert_eq!(found(&mut d, "data/meshes"), None);
+    assert_eq!(read_path(&mut d, "data/models/a.nif"), b"mesh");
+    assert_eq!(d.rename(R0, "data/deep", "Data/MODELS/Deep"), Ok(()));
+    assert_eq!(read_path(&mut d, "data/models/deep/b.dds"), b"b");
+    assert_eq!(d.rename(R0, "data", "Other"), Ok(()));
+    assert_eq!(names(&mut d, "."), ["Other"]);
+    assert_eq!(read_path(&mut d, "other/low.esp"), b"low");
+    assert_eq!(read_path(&mut d, "other/second.esp"), b"second");
+    assert_eq!(read_path(&mut d, "other/both.esp"), b"upper bytes");
+    assert_eq!(names(&mut d, "other/empty"), Vec::<String>::new());
+    assert_eq!(d.rename(R0, "other/meshes", "x"), Err(Status::NotFound));
+}
+
+/// Knob: an overlay that refuses every RENAME of a directory a lower holds,
+/// a case-only one of a directory both layers hold included (3.4.7: it may
+/// refuse to move it).
+#[test]
+fn the_refusing_knob_refuses_a_case_only_rename_of_a_directory_both_hold() {
+    let mut d = mount(&layered()).refuse_layered_dir_renames();
+    assert_eq!(d.rename(R0, "data", "DATA"), Err(Status::IoError));
+    assert_eq!(names(&mut d, "."), ["Data"]);
+    assert_eq!(d.rename(R0, "data/upper.esp", "data/UPPER.esp"), Ok(()));
+}

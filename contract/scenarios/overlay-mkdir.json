@@ -1,6 +1,6 @@
 {
   "name": "overlay-mkdir",
-  "description": "MKDIR over a lower-only file creates the directory in the upper, which hides the file (wire.md 3.4.9, \"Names only in a read-only lower\"); the file's handle reads its last bytes or fails, as for a deleted file (3.4.8). MKDIR of a directory only a lower holds is ST_OK or ST_EXISTS (3.4.9), and leaves its listing as it was. MKDIR over a file the upper holds is ST_IO_ERROR (3.4.9).",
+  "description": "MKDIR over a lower-only file creates the directory in the upper, which hides the file (wire.md 3.4.9, \"Names only in a read-only lower\"), or, by the general rule, is ST_IO_ERROR (3.4.9: an existing file a writable provider serves): wire.md 3.4.9 lets an overlay give the answers its list of \"Names only in a read-only lower\" gives, or the ones the rules above it give; each such step, and every step whose answer depends on it, shares a choice label, the list's answer first. The file's handle reads its last bytes or fails, as for a deleted file (3.4.8). MKDIR of a directory only a lower holds is ST_OK or ST_EXISTS (3.4.9), and leaves its listing as it was. MKDIR over a file the upper holds is ST_IO_ERROR (3.4.9).",
   "tree": {
     "roots": [
       {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}, {"path": "Data/Meshes/a.nif", "contents": "a"}]}]}
@@ -8,10 +8,9 @@
   },
   "steps": [
     {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/mod.esp"}, "expect": {"reply": {"fh": 1, "size": 3, "is_dir": false, "immutable": false, "mount_gen": 0}}},
-    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "Data/Mod.esp"}, "expect": {"status": "ok"}, "note": "over a lower-only file"},
-    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}},
-    {"request": {"op": "readdir", "root": 0, "path": "data/mod.esp"}, "expect": {"reply": {"entries": []}}},
-    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Meshes", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Mod.esp", "is_dir": true, "size": 0, "mtime": 0}]}}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "Data/Mod.esp"}, "expect": {"one_of": [{"status": "ok"}, {"status": "io-error"}], "wire": "3.4.9", "choice": "over"}, "note": "over a lower-only file: made, or refused"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/mod.esp"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}], "wire": "3.4.9", "choice": "over"}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"one_of": [{"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Meshes", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Mod.esp", "is_dir": true, "size": 0, "mtime": 0}]}}, {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Meshes", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Mod.esp", "is_dir": false, "size": 3, "mtime": 0}]}}], "wire": "3.4.9", "choice": "over"}},
     {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": "mod"}}, {"status": "io-error"}, {"status": "not-found"}], "wire": "3.4.8"}, "note": "the hidden file's handle"},
     {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "data/meshes"}, "expect": {"one_of": [{"status": "ok"}, {"status": "exists"}], "wire": "3.4.9"}, "note": "a directory only a lower holds"},
     {"request": {"op": "readdir", "root": 0, "path": "data/meshes"}, "expect": {"reply": {"entries": [{"name": "a.nif", "is_dir": false, "size": 1, "mtime": 0}]}}},

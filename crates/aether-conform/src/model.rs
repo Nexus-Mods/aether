@@ -962,7 +962,27 @@ enum Then {
         root: u32,
         dir: String,
     },
+    /// The case ends: the step's allowed answers leave trees that differ,
+    /// and the oracle's tree is one of them (wire.md 3.4.9: an overlay may
+    /// answer a lower-only name by its list or by the general rules).
+    End,
 }
+
+/// An answer that is `ST_OK` or this status, the oracle's first.
+fn ok_or(first_ok: bool, status: Status) -> Want {
+    let ok = Expect::Reply(OwnedReply::Empty);
+    let st = Expect::Status(status);
+    Want::Alts(if first_ok { vec![ok, st] } else { vec![st, ok] })
+}
+
+/// The notes of RENAMEs whose allowed answers leave trees that differ, after
+/// which the case ends ([`Then::End`]).
+const RENAME_ENDS: [&str; 4] = [
+    "another case of a lower-only directory: the lower's spelling kept, or respelled",
+    "another case of a lower-only file: the lower's spelling kept, or respelled",
+    "a lower-only directory: refused, or moved whole",
+    "another case of a directory both layers hold: respelled, or refused",
+];
 
 /// What a step changes in the generator's state when it succeeds.
 #[derive(Debug, Clone)]
@@ -2822,7 +2842,9 @@ impl Gen {
             Effect::None
         };
         // What a refused rename left, or a rename that changes nothing.
-        let then = if want != Want::Ok || note == "the same name, the same spelling" {
+        let then = if RENAME_ENDS.contains(&note) {
+            Then::End
+        } else if want != Want::Ok || note == "the same name, the same spelling" {
             Then::GetAttr {
                 root,
                 path: from.folded.clone(),
@@ -2889,34 +2911,29 @@ impl Gen {
             if f.dir {
                 match lo {
                     None => return None,
-                    Some(true) if same => {
-                        return Some((
-                            Want::Ok,
-                            "another case of a lower-only directory: the lower's spelling kept",
-                        ))
-                    }
+                    // wire.md 3.4.9's list, or the general rules (3.4.7):
+                    // the spelling kept or respelled, refused or moved
+                    // whole.
+                    Some(true) if same => return Some((Want::Ok, RENAME_ENDS[0])),
                     Some(true) => {
                         let fresh =
                             to.node.is_none() && to.parent_dir && self.held(root, &to.folded);
-                        return fresh.then_some((
-                            Want::Status(Status::IoError),
-                            "a lower-only directory does not move",
-                        ));
+                        return fresh.then_some((ok_or(false, Status::IoError), RENAME_ENDS[2]));
                     }
-                    // A directory a layer holds too: wire.md says nothing
-                    // of it (`docs/conformance.md`, "Layered roots").
+                    // A directory a layer holds too: refused or moved whole
+                    // (3.4.7), which `overlay-rename-both` plays; a
+                    // case-only RENAME of it is respelled or refused.
                     Some(false) if !same && self.lower_dir(root, &from.folded) => return None,
+                    Some(false) if self.lower_dir(root, &from.folded) => {
+                        let respelled = leaf(&to.path) != leaf(&f.path);
+                        return respelled.then_some((ok_or(true, Status::IoError), RENAME_ENDS[3]));
+                    }
                     Some(false) => {}
                 }
             } else if same {
                 match lo {
                     None => return None,
-                    Some(true) => {
-                        return Some((
-                            Want::Ok,
-                            "another case of a lower-only file: the lower's spelling kept",
-                        ))
-                    }
+                    Some(true) => return Some((Want::Ok, RENAME_ENDS[1])),
                     Some(false) => {}
                 }
             }
@@ -3180,10 +3197,11 @@ impl Gen {
                 Some(n) if self.held(root, &t.folded) => {
                     let children = n.dir && self.has_children(root, &t.folded);
                     match (self.lower_only(root, &t.folded), children) {
-                        // wire.md 3.4.9: hidden by a whiteout.
+                        // wire.md 3.4.9: hidden by a whiteout, or refused by the
+                        // general rule (3.4.8).
                         (Some(true), true) => (
-                            Want::Ok,
-                            "a lower-only directory with something under it: hidden",
+                            ok_or(true, Status::IoError),
+                            "a lower-only directory with something under it: hidden, or refused",
                         ),
                         (Some(true), false) => (Want::Ok, "a lower-only name: hidden"),
                         (None, true) => return None,
@@ -3200,7 +3218,9 @@ impl Gen {
                 _ => return None,
             }
         };
-        let effect = if want == Want::Ok {
+        // Hidden or refused: the trees differ, so the case ends there.
+        let either = matches!(want, Want::Alts(_));
+        let effect = if want == Want::Ok || either {
             Effect::Deleted {
                 root,
                 path: t.folded.clone(),
@@ -3208,6 +3228,7 @@ impl Gen {
         } else {
             Effect::None
         };
+        let then = if either { Then::End } else { Then::Nothing };
         Some(Plan {
             req: OwnedRequest::Delete {
                 root: RootId(root),
@@ -3217,7 +3238,7 @@ impl Gen {
             wire: "3.4.8",
             note: note.into(),
             effect,
-            then: Then::Nothing,
+            then,
         })
     }
 
@@ -3301,9 +3322,10 @@ impl Gen {
             }
             Some(n) if !n.dir && self.held(root, &t.folded) => {
                 match self.lower_only(root, &t.folded) {
+                    // Or refused, by the general rule (3.4.9).
                     Some(true) => (
-                        Want::Ok,
-                        "over a lower-only file: the directory hides it",
+                        ok_or(true, Status::IoError),
+                        "over a lower-only file: the directory hides it, or refused",
                         Effect::MadeOver {
                             root,
                             path: t.folded.clone(),
@@ -3341,11 +3363,15 @@ impl Gen {
                 mode,
                 path: t.path,
             },
+            then: if note == "over a lower-only file: the directory hides it, or refused" {
+                Then::End
+            } else {
+                Then::Nothing
+            },
             want,
             wire,
             note: note.into(),
             effect,
-            then: Then::Nothing,
         })
     }
 
@@ -3755,6 +3781,10 @@ impl Gen {
         }
         match plan.then {
             Then::Nothing => Ok(()),
+            Then::End => {
+                self.done = true;
+                Ok(())
+            }
             Then::GetAttr { root, path } => self.step(
                 Plan {
                     req: OwnedRequest::GetAttr {
@@ -4474,12 +4504,13 @@ mod tests {
             "`to` is read-only",
             "a `skip` of every component",
             "the case ends",
-            "a lower-only directory does not move",
-            "another case of a lower-only directory: the lower's spelling kept",
-            "another case of a lower-only file: the lower's spelling kept",
-            "a lower-only directory with something under it: hidden",
+            RENAME_ENDS[0],
+            RENAME_ENDS[1],
+            RENAME_ENDS[2],
+            RENAME_ENDS[3],
+            "a lower-only directory with something under it: hidden, or refused",
             "a lower-only name: hidden",
-            "over a lower-only file: the directory hides it",
+            "over a lower-only file: the directory hides it, or refused",
             "a directory only a lower holds",
         ];
         let mut seen = vec![0; notes.len()];

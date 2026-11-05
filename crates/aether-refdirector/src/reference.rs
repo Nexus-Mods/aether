@@ -329,6 +329,10 @@ struct Graph {
     mount_gen: AtomicU32,
     /// [`Reference::mkdir_existing_ok`].
     mkdir_existing_ok: bool,
+    /// [`Reference::general_lower_rules`].
+    general_lower: bool,
+    /// [`Reference::refuse_layered_dir_renames`].
+    refuse_layered_renames: bool,
     /// [`Reference::inline_reads`]: the `payload_cap` every READ is answered
     /// inline within.
     inline_cap: Option<u32>,
@@ -476,6 +480,43 @@ impl Graph {
             Loc::Lower(_, k) => {
                 self.copy_up_file(dirs, files, &masked, &k);
                 Some(k)
+            }
+        }
+    }
+
+    /// The directory only the layers show at table key `k`, put in the upper
+    /// with the directories above it, and (`all`) every name the layers show
+    /// below it: what [`Reference::general_lower_rules`] moves.
+    fn copy_up_dir(
+        &self,
+        dirs: &mut HashMap<String, String>,
+        files: &mut HashMap<String, Entry>,
+        masked: &HashSet<String>,
+        k: &str,
+        all: bool,
+    ) {
+        let below = format!("{k}/");
+        let mut keys: Vec<String> = self
+            .layers
+            .iter()
+            .flat_map(|l| l.dirs.keys().chain(l.files.keys()))
+            .filter(|p| *p == k || (all && p.starts_with(&below)))
+            .cloned()
+            .collect();
+        keys.sort_by_key(|p| p.matches('/').count());
+        keys.dedup();
+        for p in keys {
+            let shown = {
+                let v = self.view(dirs, files, masked);
+                v.lower_only(&p).map(|low| (low, v.stored(&p)))
+            };
+            match shown {
+                Some((Low::Dir(_), name)) => {
+                    self.copy_up_parents(dirs, files, masked, &p);
+                    dirs.insert(p, name);
+                }
+                Some((Low::File(_), _)) => self.copy_up_file(dirs, files, masked, &p),
+                None => {}
             }
         }
     }
@@ -931,6 +972,8 @@ impl Reference {
                 roots: Vec::new(),
                 mount_gen: AtomicU32::new(0),
                 mkdir_existing_ok: false,
+                general_lower: false,
+                refuse_layered_renames: false,
                 inline_cap: None,
                 staging: HashMap::new(),
                 mtimes: HashMap::new(),
@@ -1133,6 +1176,29 @@ impl Reference {
     /// under a writable prefix is `Status::Ok`, as a writable provider may
     /// answer, instead of `Status::Exists` (`docs/wire.md` 3.4.9 allows
     /// either). Off by default; conformance never sets it.
+    /// An answer other directors give: lower-only names are answered by the
+    /// rules for names the writable provider holds, which `docs/wire.md`
+    /// 3.4.9 leaves an overlay free to give ("may answer ... as follows"):
+    /// DELETE of a lower-only directory with something under it is
+    /// `Status::IoError`, a case-only RENAME of a lower-only name copies it
+    /// up and respells it, MKDIR over a lower-only file is
+    /// `Status::IoError`, and RENAME of a directory a layer holds (alone or
+    /// with the upper) copies the whole of it up and moves it (3.4.7: "or
+    /// move it whole"). Off by default; conformance never sets it.
+    pub fn general_lower_rules(mut self) -> Reference {
+        self.building().general_lower = true;
+        self
+    }
+
+    /// An answer other directors give: every RENAME of a directory the upper
+    /// and a layer both hold is `Status::IoError`, a case-only one included
+    /// (`docs/wire.md` 3.4.7: such a director "may refuse to move it").
+    /// Off by default; conformance never sets it.
+    pub fn refuse_layered_dir_renames(mut self) -> Reference {
+        self.building().refuse_layered_renames = true;
+        self
+    }
+
     pub fn mkdir_existing_ok(mut self) -> Reference {
         self.building().mkdir_existing_ok = true;
         self
@@ -1311,7 +1377,11 @@ impl Reference {
         // A lower-only name (wire.md 3.4.9, "Names only in a read-only
         // lower"): another case of itself keeps the lower's spelling, a
         // directory does not move, a file is copied up and moves below.
-        if lower.is_some() {
+        let layered_dir = !is_file && !v.lower_dirs(&from).is_empty();
+        if layered_dir && lower.is_none() && g.refuse_layered_renames {
+            return Err(Status::IoError);
+        }
+        if lower.is_some() && !g.general_lower {
             if to_key == from {
                 return Ok(());
             }
@@ -1320,9 +1390,8 @@ impl Reference {
             }
         }
         // A directory a layer holds as well as the upper does not move
-        // either: the reference's answer where wire.md 3.4.9 speaks only of
-        // lower-only directories (`docs/conformance.md`, "Layered roots").
-        if !is_file && to_key != from && !v.lower_dirs(&from).is_empty() {
+        // either (wire.md 3.4.7: an overlay may refuse to move it).
+        if layered_dir && to_key != from && !g.general_lower {
             return Err(Status::IoError);
         }
         g.parent_exists(&v, &to_key)?;
@@ -1350,6 +1419,11 @@ impl Reference {
         if to_key != from {
             files.remove(&to_key);
             g.hide_lower(&mut masked, &to_key);
+        }
+        if g.general_lower && !is_file {
+            // The whole of it moves (wire.md 3.4.7), so the whole of it is
+            // copied up first; a case-only RENAME copies the name alone.
+            g.copy_up_dir(&mut dirs, &mut files, &masked, &from, to_key != from);
         }
         g.copy_up_file(&mut dirs, &mut files, &masked, &from);
         g.copy_up_parents(&mut dirs, &files, &masked, &to_key);
@@ -1859,6 +1933,9 @@ impl Director for Reference {
         if !g.is_writable(&vpath) {
             return Err(Status::ReadOnly);
         }
+        if lower && g.general_lower && v.is_dir(&vpath) && v.has_children(&vpath) {
+            return Err(Status::IoError);
+        }
         if lower {
             // A whiteout hides a lower-only name and everything under it
             // (wire.md 3.4.9, "Names only in a read-only lower").
@@ -1911,7 +1988,10 @@ impl Director for Reference {
                 Err(Status::Exists)
             };
         }
-        if matches!(v.lower_only(&vpath), Some(Low::File(_))) && g.is_writable(&vpath) {
+        if matches!(v.lower_only(&vpath), Some(Low::File(_)))
+            && g.is_writable(&vpath)
+            && !g.general_lower
+        {
             // The directory, made in the upper, hides the lower-only file
             // (wire.md 3.4.9, "Names only in a read-only lower").
             let name = created_spelling(&v, root.0, path);

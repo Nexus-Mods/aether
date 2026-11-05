@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::RwLock;
 
 use crate::RootVpath;
@@ -165,8 +166,54 @@ pub(crate) struct PathCache {
 
 #[derive(Default)]
 pub(crate) struct PathCacheState {
-    map: HashMap<String, Option<RootVpath>>,
+    map: HashMap<String, Option<RootVpath>, BuildHasherDefault<FxHasher>>,
     order: VecDeque<String>,
+}
+
+/// The path cache's hash: rustc's FxHash, a word at a time, with its output
+/// rotated so the bits the table indexes and tags by are mixed ones (as
+/// rustc-hash 2 does). Not resistant to chosen collisions, and it need not
+/// be: the keys are the paths this process opens, not input from across a
+/// trust boundary. SipHash, the default, costs several times as much per byte
+/// on every lookup, a hit included.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const K: u64 = 0xf135_7aea_2e62_a9c5;
+
+    fn add(&mut self, word: u64) {
+        self.hash = self.hash.wrapping_add(word).wrapping_mul(Self::K);
+    }
+}
+
+impl Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.add(u64::from_le_bytes(*w));
+        }
+        if !rest.is_empty() {
+            let mut last = [0u8; 8];
+            last[..rest.len()].copy_from_slice(rest);
+            // The length too, so a tail of zeros is not the same as no tail.
+            self.add(u64::from_le_bytes(last) ^ ((rest.len() as u64) << 59));
+        }
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.hash.rotate_left(26)
+    }
 }
 
 impl PathCache {
@@ -218,5 +265,38 @@ impl PathCache {
             .unwrap_or_else(|e| e.into_inner())
             .map
             .len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FxHasher;
+    use std::hash::{BuildHasher, BuildHasherDefault};
+
+    fn hash(s: &str) -> u64 {
+        BuildHasherDefault::<FxHasher>::default().hash_one(s)
+    }
+
+    /// Paths that differ only in their tail, their length or one letter
+    /// hash apart, and the bits a hash table indexes and tags by spread.
+    #[test]
+    fn the_path_hash_tells_near_paths_apart() {
+        assert_eq!(hash(r"\??\C:\Games\a.esp"), hash(r"\??\C:\Games\a.esp"));
+        let mut paths = Vec::new();
+        for i in 0..20_000 {
+            paths.push(format!(r"\??\C:\Games\Skyrim\Data\Meshes\m{i}.nif"));
+        }
+        for tail in ["", "a", "a\0", "ab", "abcdefg", "abcdefgh", "abcdefghi"] {
+            paths.push(format!(r"\??\C:\x{tail}"));
+        }
+        paths.push(r"\??\C:\Games\A.esp".into());
+        paths.push(r"\??\C:\Games\a.esp".into());
+        let hashes: std::collections::HashSet<u64> = paths.iter().map(|p| hash(p)).collect();
+        assert_eq!(hashes.len(), paths.len(), "64-bit collisions");
+        // hashbrown's tag is the top 7 bits; its bucket index the low ones.
+        let tags: std::collections::HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
+        let low: std::collections::HashSet<u64> = hashes.iter().map(|h| h & 0xfff).collect();
+        assert_eq!(tags.len(), 128, "tags used");
+        assert!(low.len() > 3900, "low 12 bits: {} of 4096 used", low.len());
     }
 }

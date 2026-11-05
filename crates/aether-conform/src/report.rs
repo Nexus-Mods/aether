@@ -42,11 +42,7 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
         let n = n + 1;
         let name = tap_name(&s.name);
         if let Some(why) = &s.skipped {
-            out.push_str(&format!(
-                "ok {n} - {name} # SKIP {}
-",
-                tap_name(why)
-            ));
+            out.push_str(&format!("ok {n} - {name} # SKIP {}\n", tap_name(why)));
             continue;
         }
         if s.passed {
@@ -83,10 +79,7 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
         .filter(|s| s.skipped.is_some())
         .count();
     if skipped > 0 {
-        out.push_str(&format!(
-            "# skipped {skipped}
-"
-        ));
+        out.push_str(&format!("# skipped {skipped}\n"));
     }
     for (op, counts) in &report.answers {
         let list: Vec<String> = counts.iter().map(|(a, n)| format!("{a} {n}")).collect();

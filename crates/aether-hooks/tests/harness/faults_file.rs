@@ -579,9 +579,29 @@ fn want(
             Want::Is(success(op))
         }
         StepFault::Garbage(bytes) => decoded(op, bytes, None)?,
-        // A reply already no longer than the cut is left whole: a final
-        // name's reply is shorter once a component is known and not asked
-        // again.
+        // The fault cuts every STORED_NAMES of a final name's query, and
+        // the program gets the spelling of the last one asked: one asked
+        // again because a component went stale between the system's two
+        // name queries asks for more components (wire.md 3.4.12), so its
+        // reply may be cut where the first was left whole, and the
+        // caller's spelling stands (wire.md 3.7, final name, truncated).
+        StepFault::Truncate(n) if h.times().is_none() => {
+            let r = recs
+                .iter()
+                .rev()
+                .find(|r| r.op() == Some(op.opcode()) && r.status == Status::Ok.code())
+                .ok_or_else(|| format!("no {:?} answered OK", op.opcode()))?;
+            match r.reply.len() < *n {
+                true => Want::Is(success(op)),
+                false => {
+                    let own = director.to(r).ok_or_else(|| {
+                        format!("no director's reply to the cut {:?}", op.opcode())
+                    })?;
+                    decoded(op, &r.reply, Some(&own))?
+                }
+            }
+        }
+        // A reply already no longer than the cut is left whole.
         StepFault::Truncate(n)
             if recs
                 .iter()
@@ -1016,6 +1036,103 @@ fn a_hang_is_let_go_before_the_next_case() {
         ],
     );
     assert_eq!(next, Ok(()));
+}
+
+// ---- fixed sequences -------------------------------------------------------
+
+/// The bytes `hex` spells, two digits a byte.
+fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|k| u8::from_str_radix(&hex[k..k + 2], 16).expect("hex digits"))
+        .collect()
+}
+
+/// The garbage of seed 14284789208369896287's shortest failing sequence.
+const SOAK_GARBAGE: &str = "a24bf3ce01e48ec80720348f144ecf6efe8aa9fd7164dead099ecd0539bd916f2c378e3e243a3543a74a21d0fe7fdec4feb014027f0becbeeedbe5a2932b339baf778ac7f5050d000fb78fa4b740644fc00379c02466b67441d6c82a40679b8beb0593939d0e61859e0fd52c82816ebbc068041119c53ea5acf9881c6939189e9d5a1e22dfffe3b34fdb0d3c97e6dc7b4cdf81fd3b315cfe03d69e884ca8a827d055079ff288ab6224e738b1334e8ffee9ab0a00db41eedacbdf9dadb59aa452d56fd221c07646e4f25204faad9a1224156a619aca5fca58b44499103f1cba8681afaa06d29e43d8e49eb709267e54f29cda9aae6be389b058091f4d449d2490f827a20a8117d0e488e917710dab283044d3a598906eadc7cd8c172962da1a1da865ec8c35a487fec8a2b6191f64ee4305d06f6db0950c57b727db70b4013e577e9c6a83c4dc4b0bc6783064a426112b2076fe1e7164a762b6283cf789ca2164eae5ec3849c95578e1fe4d82d1b5d7bfacddbe7f5791df3609542cef1a6d0bb811973d99dbd5ef306c0704b6c1eeddb7cf98e0f96ed5ee76a60a119ccadfe8f4e976f4c4c58572dbea7859ca694123de5ae3c0a10edfd0d3227ab8c06e074f3ca8ed6eee27f0b7e54926da3f954a474de7f564bffe147c767f18c38244cc554845939772280e7daa5aed9996d95013a7440e08f58a43060411a0810d5811189a065bf2e40eae0f15f586318596bee9c9d3d87d15a02df1202bbf8c45ef08e6dbab5e30503af0dc48894ff61f2d9cd8dcb8a7fc311734ce0b62186c7d534be9790decc094447e0ed7b557204c5baeb67c8f4d4058ce7fc8362bc754ad169f4bfcd56bd94819a729a46149c8419f516a423940ceecf30d03bef107de18c03b17ed2d73e9ebf34c06de1880330afb52655a5fb924eeccbf2312ba1a6f4055f875727edc3fe23173539961ac2897c2a40e8cf62484f70da0d3f7d5b2386fc53eeb3b287ec199519b0599784fb5ce702747657cd292be932acbabfae67db96df75e020f3f9264f6862ba42336931a3a1b47c6dfa957e0877cd418fb3b1d9b4bf6ff06b4e3deb66819ca0af3f238e6d52fc59f2975f554979e31a8f7845e3fa6dfc3b17f88337955fcab631dce565a42711f1c38a08d1159c515a988eeb1d3f24425399c700db78e8c17cc7c4960de25c356e1891161ab09f785a5da04b9e531e1ca1ebf434f5db2ce82e979d3939aebcdf815501ce10e55a87b7e2ede0e9f5e6ec0a72fbb696c5637bc6281b17d4d30f46e0b88a444870ee24d9007cbe82876634095394b870db0aaa8e656be82f79ef825e896588fe681205ade58ecf81367d0ddff657e6427a71f956e6e7a851ca09c90f37b5a2efe522da800a02076beb59351165190a0f00621284845183341b8ffd9a062db4354998d3a6281164ebc7049cdc7c161fb1a98f4ac4a8c70b9adbbb122aa8164031683eea59a7597b107ee74e19a4f0c7dcf3ac7cf36f0d7e1e514736b3153c5e85f453c38ac8616aa2fcb689e454a6c3fa410e8ca5f88eb904e53236f31af87e9fa11eaa03d69c8b1a304bb113d85193c98797bcbc011d374daf4df73db4ae0bcc15c411b99e952d4441bdf0c4cdcd69578b51255029bd5ea02017ad49c592df18681c0b206e27cb38371ac43df474a05d7798015d74eabb669c04f9039c3b8298fe9fc48c5b358c221cb99443bb27065444ba0951204b06cada855a5faee9821587b4a00454fe8fb150a9a296c16aa7dd4c404c44e339b599b017d1be3a734731a1376ee16678f741a63aaa667dc4d3e07be13de34c48c01a8b8a8723c52e0f0fcbfb1d248d7cbd00c6706573849cb156a98add0d5af6198c3f915e4a8bba7b0f8a30f88ed5a2382a53b9a768c64bb2f9a9638408166ca2eaab278e0ba51f0f1aef30acd99f5e7cee8c40b4845c2820cedd571f1d852ce75b5934c269dbc0d577f1af1449e0289821ea94b078c1658a4d8cf1aa0fcd05965dffbb0017d974e22297971bdcfae209d4e215e9f306648b4cd303a8c50a9c59e119bff4df7391dde5d9e08710c0f4c7ba5430539e136c416c0949954107391987f732640aced56e6ac9c98583f5f3e2a450a0dc0dde2a152f78a3cdb0a0af77ba4464a076fd1482139c8e17821aadb1c06daa735830d9ef5c162334783d943e4edbc5ab45de62dce5264a6db7c0e7687890c56cfc1cecc0655ba1a5896fbe03612b7286be4adf3342727ce16eab935a7b21c5a4d9451439d474b4b1bff96c159279777352c666d309767af82421f2c40e5c08acaa5dde5a059537aa80b077345ab2f9808054ed69aef5635dc92d4764c1b8f9680874543d518dae664dfefe080f8ecc5201dcfb19dc58ff034677e21959bd6be3d5242fd0995e2e3733fc591a88559b7b875fc5e82b15843b703707ef22937f1a95c60b96287c73e7d04a14b83c6f43e57bdebfd9bf77e35d3169a05dfcfedd2748a2be007bcbed949a8aab9605f59b2c8f9bc3fc8e0fe0c3acd94c6e07b532392b676b043e84fd2a77488db2281c4f6ec8f0c67174e277a218337c5a9893ce066b20d1e9166c3f45b983dae38e7b4baad86836030023e7a1936af4dc1e30a1621e89d4577f5691ef3c5dc3933dc1d50cb4ec5eda5901a473068309f4c5d3931b87cc869fa9b2f45c81c01f94b8cca80c441f3d68f701fd2ea6425783ba636ca1dc4c937c05a02ce25890ac3b214c8adb50939b8e450deebcc415c61b5a010a1362ad6cbf216d5a37e856d9228a2b8bcdf60356a7e66f0e12804bb3435708efe9b4e0d9ff37c6ec85d67741a74c1e3777502936ea27fdc140679ef1ac2da25ec544c97d523ee36d7adca879f47b4b32ca3966ccceb5af9cdacc080de2e67eb0ef5c0a3f25895ab9808306d13f17f3751235a15da1f7109a5501b4d1e3db06c6dd7dcae36480b23529e2e2da73c03d89d85a0a19050c59fdd1cf8775425f09e4e563dff7e01e274972916e75a2d3f7b5d3879452d217f56d662deb9feb7544e89f2eaaaf02d3901ca3c8a1978781b77f7b055d95c6291222bd5e314907a1dde5e1539aedc8d046292208e23410b6f8ebff3e6dc0563bcc9251c5e6119d222ca681706cb3f59b7b8f73df87dbaab5422014ce8df3534161ef0aa434db64ce53176958b6e8cbf115650d6d7361509498e8309c3f081d583a538dce4553365fc9439ddc4822a83a2d93434f42b95636e6e1023882333bbc0672d566a0dc948bdca4e113bbd4d23a7e1044202c01d9c48952c2eed32888e6759af1bd9e9b2fa708594b45a6ea299c1f38d82ada3256b6d9e573966e3116f728ed9ec113a71c3415c6dff549ce089d7e8163e85ccad4a60e4a7cafb5a99a95c3b907f7a7a9b1cacaf184abd194d8fed097a155da855f65cffc9bea53b2cbb49ab88fe44d5bcae52b7260185f37fd29000cb19b7402e10fc96aa8c67a9f989b87f7115d0301c8ff3d4f610831f53d0cdc20b9cc821511b77401a893edca5c9a75e3ae35235f263051b57fbbfb140464957570053c8b820dd395d4d05681605e324a5daa46479cfbb4f5f54ae83d031271154f4bfdb914123bff19c5dcf7a103d892775403a000e6c70559256bf2897643a707fd6118f34c10e102577540142d8c8b5eb1d35c17e6d478a8c21d66f519519a07fcd8c1b207e638de1128e59a19a0704152d17687732af27e63d9b0303ebfda6f295161e3f71882a5d61bb1308c734b2cba09970ddfa32ca76a552bcdf284433832fcd8a27d242338ecd2a2f1a26e17a1cf45bbd367a80c9d1d657ae87e576b71ea977467791b9cd811715499de0d1d60307ee7c2a70d6dcdf6dc93dfd09be668550640da1ac3b4f106f67880cda1e48d0d928f4d558b53dc8ce3f1ba471a38c4d10463d15c3e72ec24e98f8507e92932c744dd037067c8b5bd0aa0346d779cde2fda9c025134559c6f081e1e44a7e63ff28b78957103ac5d7524fa27a591389ec023fbd3f4126d6dd027c3b32b153ba8f1367b853276253b4f2e3772b707bc93522e60edd3958bc918036e6b7dc713b016ffff31170eaab39d9434de7bf688b0f41a7c5de8c2fd0d6aadb44a084a8911bb32160dcb0f4f36f8c9492b5eebf5d4a20dde0ae613de73bc9dabc9a403cb5f16054d4b5b9cde3674bf3bc460f3588514e596b0bb2c06090472d7c8d16b895c2dbe20bc6cd8de3581ad8ee6430d277383358c0e4587047ea19c8dcbae49a041d4e530c84b12dce851ec30b8e2aa488fc";
+
+/// The shortest failing sequence of seed 14284789208369896287: a final name
+/// cut to 13 bytes, attributes by name answered with 6 garbage bytes, a
+/// delete by name answered with 3015.
+fn soak_sequence(cut: usize) -> [Step; 3] {
+    [
+        Step {
+            op: Op::Call(HookedOp::StoredNames),
+            fault: Some(StepFault::Truncate(cut)),
+        },
+        Step {
+            op: Op::Call(HookedOp::GetAttr),
+            fault: Some(StepFault::Garbage(unhex("222623f3734e"))),
+        },
+        Step {
+            op: Op::Call(HookedOp::DeleteByName),
+            fault: Some(StepFault::Garbage(unhex(SOAK_GARBAGE))),
+        },
+    ]
+}
+
+#[test]
+fn the_soak_s_final_name_cut_then_garbage_sequence_is_the_table_s() {
+    isolate!();
+    let steps = soak_sequence(13);
+    assert!(matches!(&steps[2].fault, Some(StepFault::Garbage(g)) if g.len() == 3015));
+    let ops = steps.iter().map(|s| s.op).collect::<Vec<_>>();
+    let s = file_subject(0, WATCHDOG, &ops);
+    assert_eq!(run_case(s, &steps), Ok(()));
+}
+
+/// Leaves the reply whole and makes every spelling the shim remembers
+/// stale: the next name query asks for every component again.
+fn names_go_stale(_: &mut aether_refdirector::harness::OwnedReplyBytes) {
+    aether_hooks::director::advance_name_clock(aether_hooks::director::NAME_TTL_MS_FOR_TESTS);
+}
+
+/// The soak's final name, made to happen: `GetFinalPathNameByHandleW`
+/// queries the name more than once, the first query's STORED_NAMES asks for
+/// the two components not yet known and is left whole by the cut, the
+/// spellings go stale before the next, whose STORED_NAMES asks for all three
+/// and is cut, as is every one after it. The program gets the caller's spelling (wire.md 3.7, final name,
+/// truncated), and the property's expectation, which reads the last
+/// STORED_NAMES of the call, allows it.
+#[test]
+fn a_final_name_asked_again_once_stale_and_cut_then_falls_back() {
+    isolate!();
+    let op = Op::Call(HookedOp::StoredNames);
+    // Measuring the reply's length taught the shim the shared `Names`.
+    let s = file_subject(0, WATCHDOG, &[op]);
+    let i = s.next.load(Ordering::Relaxed);
+    let whole = format!("N{i}/File.txt").len();
+    let mark = s.served.recorder.mark();
+    let stale = s.served.faults.arm(
+        Match {
+            op: Some(Opcode::StoredNames),
+            nth: Some(1),
+            ..Match::default()
+        },
+        Fault::Rewrite(names_go_stale),
+    );
+    let cut = s.served.faults.arm(op.matching(), Fault::Truncate(whole));
+    let got = s.watched(op).expect("the call returns");
+    s.settle(mark).expect("every reply landed");
+    let recs = s.served.recorder.since(mark);
+    let asked: Vec<_> = recs
+        .iter()
+        .filter(|r| r.op() == Some(Opcode::StoredNames))
+        .map(|r| r.reply.len())
+        .collect();
+    // Each later query asks again: nothing was learnt from a cut reply.
+    assert!(asked.len() >= 2, "{asked:?}");
+    assert!(asked.iter().all(|&l| l == whole), "{asked:?}");
+    assert_eq!(s.served.faults.applied(stale), 1);
+    assert_eq!(
+        s.served.faults.applied(cut) as usize,
+        asked.len() - 1,
+        "every request but the first is cut"
+    );
+    assert_eq!(got, Ok(Expect::Fallback));
+    let w = want(op, &StepFault::Truncate(whole), &recs, &s.director).expect("a want");
+    assert!(w.allows(&got), "got {got:?}, want {w:?}");
+    assert_eq!(s.watched(op).expect("the call returns"), success(op));
 }
 
 /// The case count: `PROPTEST_CASES`, else [`CASES`], over `divisor` (at

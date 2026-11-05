@@ -43,8 +43,9 @@ use crate::scenario::{self, LoadError, OwnedReply, OwnedRequest, Scenario};
 pub struct RunOptions {
     /// The adapter's command line.
     pub director: String,
-    /// The folder of `*.json` scenarios.
-    pub scenarios: PathBuf,
+    /// The folder of `*.json` scenarios, or none to play none (a soak's
+    /// later batches).
+    pub scenarios: Option<PathBuf>,
     /// How long each adapter answer, and each ring request, may take.
     pub timeout: Duration,
     /// Also send the malformed requests ([`crate::malformed`]).
@@ -183,16 +184,19 @@ pub fn scenario_files(dir: &Path) -> Result<Vec<PathBuf>, LoadError> {
 /// function other than the `aether-conform` binary can play only scenarios
 /// whose steps are all client 0's.
 pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
-    let files = scenario_files(&opts.scenarios).map_err(|e| RunError::Scenarios(e.to_string()))?;
+    let files = match &opts.scenarios {
+        Some(dir) => scenario_files(dir).map_err(|e| RunError::Scenarios(e.to_string()))?,
+        None => Vec::new(),
+    };
     let scenarios: Vec<(PathBuf, Scenario)> = files
         .into_iter()
         .map(|f| scenario::load(&f).map(|s| (f, s)))
         .collect::<Result<_, _>>()
         .map_err(|e| RunError::Scenarios(e.to_string()))?;
-    if scenarios.is_empty() {
+    if let (true, Some(dir)) = (scenarios.is_empty(), &opts.scenarios) {
         return Err(RunError::Scenarios(format!(
             "no scenarios (*.json) in {}",
-            opts.scenarios.display()
+            dir.display()
         )));
     }
     let mut adapter = Adapter::start(&opts.director, opts.timeout).map_err(RunError::Adapter)?;

@@ -943,6 +943,41 @@ fn the_readmes_layered_root_is_valid() {
     assert_eq!(s.tree.roots[0].lower.len(), 2);
 }
 
+/// A `choice` beside a `one_of`'s `wire` loads, writes back, and is refused
+/// where it means nothing: on an answer that is not a `one_of`, or on lists
+/// of different lengths in one label.
+#[test]
+fn a_choice_labels_a_one_of_and_is_checked() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let either = |label: Value, n: usize| {
+        let alts: Vec<Value> = (0..n)
+            .map(|k| json!({"reply": {"found": k == 0, "is_dir": false, "size": 0, "mtime": 0}}))
+            .collect();
+        json!({"request": {"op": "getattr", "root": 0, "path": "data/a.esp"},
+               "expect": {"one_of": alts, "wire": "3.4.7", "choice": label}})
+    };
+    let steps = json!([either(json!("moved"), 2), either(json!("moved"), 2)]);
+    let p = write(dir.path(), "c.json", &scenario(steps));
+    let s = load(&p).unwrap();
+    assert_eq!(s.steps[1].choice.as_deref(), Some("moved"));
+    std::fs::write(&p, aether_conform::scenario::to_json_string(&s)).unwrap();
+    assert_eq!(load(&p).unwrap(), s);
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains("\"choice\": \"moved\""), "{text}");
+
+    let e = load_error(json!([
+        either(json!("moved"), 2),
+        either(json!("moved"), 3)
+    ]));
+    assert!(e.contains("moved") && e.contains("alternatives"), "{e}");
+    let e = load_error(json!([either(json!(""), 2)]));
+    assert!(e.contains("choice"), "{e}");
+    let e = load_error(json!([
+        {"request": {"op": "heartbeat"}, "expect": {"status": "ok", "choice": "x"}}
+    ]));
+    assert!(e.contains("choice"), "{e}");
+}
+
 /// wire.md 3.4.13, 3.4.7: RENAME_X between equal roots acts as RENAME, which
 /// answers `ST_BAD_REQUEST` or `ST_IO_ERROR` for the root at an end, so the
 /// committed scenario accepts both.
@@ -964,4 +999,43 @@ fn rename_x_of_the_root_in_one_root_accepts_both_refusals() {
             Expect::Status(Status::IoError)
         ])
     );
+}
+
+/// `overlay-rename-both` accepts a director that refuses the move and one
+/// that moves the whole directory, and fails one whose steps show the move
+/// in one place and the refusal in another (wire.md 3.4.7).
+#[test]
+fn the_rename_of_a_directory_in_both_layers_is_whole_or_refused() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let s = load(&dir.join("overlay-rename-both.json")).unwrap();
+    let answer = |e: &Expect, n: usize| -> Result<OwnedReply, Status> {
+        match e {
+            Expect::OneOf(alts) => match &alts[n] {
+                Expect::Reply(r) => Ok(r.clone()),
+                Expect::Status(s) => Err(*s),
+                Expect::OneOf(_) => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    };
+    let play = |pick: &dyn Fn(usize) -> usize| {
+        let mut sess = Session::new();
+        let mut failed = Vec::new();
+        for (i, st) in s.steps.iter().enumerate() {
+            let got = answer(&st.expect, pick(i));
+            if sess
+                .check_chosen(i, &st.request, &st.expect, &got, st.choice.as_deref())
+                .is_err()
+            {
+                failed.push(i);
+            }
+        }
+        failed
+    };
+    assert_eq!(play(&|_| 0), Vec::<usize>::new(), "moved whole");
+    assert_eq!(play(&|_| 1), Vec::<usize>::new(), "refused");
+    // The upper's part moved: the parent lists both names and the lower's
+    // names stayed where they were.
+    let failed = play(&|i| usize::from(i != 0 && i != 1 && s.steps.len() > i && i % 2 == 1));
+    assert!(!failed.is_empty(), "a mixture must fail");
 }

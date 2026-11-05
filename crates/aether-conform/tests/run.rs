@@ -1752,3 +1752,12 @@ fn a_director_whose_listing_prefers_the_lower_fails() {
     caught_by("upper-loses-listing", "overlay-listing");
     caught_by("upper-loses-listing", "overlay-spelling");
 }
+
+/// wire.md 3.4.7: a directory both the upper and a lower hold is refused or
+/// moved whole, never in part. A director that moves only the upper's part
+/// fails, and the reference, which refuses, and a director that moves the
+/// whole of it both pass.
+#[test]
+fn a_director_moving_only_the_upper_part_of_a_directory_fails() {
+    caught_by("rename-moves-upper-part", "overlay-rename-both");
+}

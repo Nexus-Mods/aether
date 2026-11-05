@@ -417,6 +417,11 @@ pub enum Break {
     /// has it, its spelling, kind and size (wire.md 3.4.9: a writable upper
     /// over a read-only lower; 3.4.2).
     UpperLosesListing,
+    /// RENAME of a directory the upper and a lower both hold moves the
+    /// names the upper holds under it and leaves the lower's where they were
+    /// (wire.md 3.4.7: such a directory is refused, or moved whole with
+    /// every name under it from every layer; never in part).
+    RenameMovesUpperPart,
 }
 
 impl Break {
@@ -509,6 +514,7 @@ impl Break {
             "copy-up-old-handle-lower" => Some(Break::CopyUpOldHandleLower),
             "hidden-handle-reads-new" => Some(Break::HiddenHandleReadsNew),
             "upper-loses-listing" => Some(Break::UpperLosesListing),
+            "rename-moves-upper-part" => Some(Break::RenameMovesUpperPart),
             _ => None,
         }
     }
@@ -2030,6 +2036,46 @@ impl Served {
         }
     }
 
+    /// [`Break::RenameMovesUpperPart`]: moves what the upper holds under
+    /// directory `from`, which a lower holds too, to a new directory `to`,
+    /// and says whether it did. A directory with nothing of the upper's
+    /// under it is left to the reference, which refuses it.
+    fn move_upper_part(&mut self, root: RootId, from: &str, to: &str) -> bool {
+        let f = aether_casefold::fold(from);
+        let lower_dir = self
+            .tree
+            .lower
+            .get(&(root.0, f.clone()))
+            .is_some_and(|(_, b)| b.is_none());
+        if !lower_dir
+            || !self.is_dir(root, from)
+            || self.reference.get_attr(root, to).is_ok_and(|a| a.found)
+        {
+            return false;
+        }
+        let mut listing = Listing::default();
+        if self.reference.read_dir(root, from, &mut listing).is_err() {
+            return false;
+        }
+        let upper: Vec<String> = listing
+            .iter()
+            .map(|e| e.name.to_string())
+            .filter(|n| {
+                let child = aether_casefold::fold(&format!("{f}/{n}"));
+                !self.tree.lower.contains_key(&(root.0, child))
+            })
+            .collect();
+        if upper.is_empty() || self.reference.mkdir(root, 0o755, to).is_err() {
+            return false;
+        }
+        for name in upper {
+            let _ = self
+                .reference
+                .rename(root, &format!("{from}/{name}"), &format!("{to}/{name}"));
+        }
+        true
+    }
+
     /// Whether `root`'s `path` is a directory.
     fn is_dir(&mut self, root: RootId, path: &str) -> bool {
         self.reference
@@ -2612,6 +2658,9 @@ impl Director for Served {
                     let _ = self.reference.delete(root, from);
                 }
                 return Ok(());
+            }
+            Some(Break::RenameMovesUpperPart) if self.move_upper_part(root, from, to) => {
+                return Ok(())
             }
             Some(Break::FileOntoDirKept)
                 if self

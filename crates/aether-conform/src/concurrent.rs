@@ -445,6 +445,7 @@ fn round(
                 note: st.note.clone(),
                 client: k as u32,
                 literal_fh: false,
+                choice: None,
             };
             mine.push((steps.len(), step.clone()));
             steps.push(step);
@@ -1722,6 +1723,7 @@ mod tests {
             note: None,
             client: 0,
             literal_fh: false,
+            choice: None,
         }
     }
 

@@ -206,7 +206,7 @@ state):
 | STORED_NAMES with `skip` at or past the number of components | an empty reply or `bad-request` | 3.4.12 |
 | A request naming a named stream (`x.sav:s`) | `not-found`, `bad-request`, or the stream a director holds | 3.2 |
 | A create of a name a director's store would make one with another (`ας` beside `ασ`) | created, or `exists` | 3.2 |
-| MKDIR of a directory only a lower layer holds | `ok`, `exists` or `read-only` | 3.4.9 |
+| MKDIR of a directory only a lower layer holds | `ok` or `exists` | 3.4.9 |
 
 An error answer must carry no payload (wire.md 3.1: "A director answers
 every error with an empty payload"); one that does fails its step whatever
@@ -257,7 +257,7 @@ what it checks and cites wire.md.
 | STAGE_EXEC | `stage-exec`, `stage-exec-after-write` |
 | Registry | `registry-none`, `registry-lookup`, `registry-case`, `registry-bad-path`, `registry-values`, `registry-value-order`, `registry-delete-value`, `registry-create-key`, `registry-delete-key`, `registry-delete-unknown-key`, `registry-rename-key`, `registry-changed`, `registry-current-user`, `registry-limits`, `registry-key-too-large`, `registry-write-depth`, `registry-reads-and-limits`, `registry-refused-writes-keep-version`, `registry-key-lifecycle`, `registry-under-tombstone`, `registry-rename-changed-recreate` |
 | Several clients | `multi-handle-shared`, `multi-handles-unique`, `multi-write-visible`, `multi-registry-gen`, `multi-registry-overlay` |
-| A root served as an overlay (`lower` layers) | `overlay-copy-up-handles`, `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-rename-file`, `overlay-rename-dir`, `overlay-listing`, `overlay-spelling`, `overlay-mkdir`, `overlay-truncate`, `overlay-written-file` |
+| A root served as an overlay (`lower` layers) | `overlay-copy-up-handles`, `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-rename-file`, `overlay-rename-dir`, `overlay-listing`, `overlay-spelling`, `overlay-mkdir`, `overlay-truncate`, `overlay-written-file`, `overlay-rename-both` |
 
 The interactions a director is most likely to get wrong each have a scenario
 of their own, to be read as the contract's example of them; generated cases

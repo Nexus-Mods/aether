@@ -1,8 +1,9 @@
 //! A root served as an overlay: the tree's `lower` layers, read-only, under
 //! its writable upper (`contract/scenarios/README.md`, "Tree"). Each test is
 //! one rule of `docs/wire.md` for such a root, named by its section; the
-//! rules wire.md does not fix, which the reference answers as the conformance
-//! notes propose, say "proposed" (`docs/conformance.md`, "Layered roots").
+//! choices wire.md leaves open, which the reference makes as the conformance
+//! notes say, are named `the_reference_...` (`docs/conformance.md`, "Layered
+//! roots").
 
 use aether_protocol::{OpenFlags, ReadReply, RequestFlags, RootId, Status};
 use aether_refdirector::tree::{Contents, File, Layer, Root, Tree};
@@ -339,22 +340,23 @@ fn mkdir_over_a_lower_only_file_makes_a_directory_that_hides_it() {
     assert_eq!(read(&mut d, h), Err(Status::IoError));
 }
 
-/// Proposed: MKDIR of a directory only a lower holds is `ST_EXISTS` (as of
-/// any existing directory; wire.md 3.4.9 lets a director answer `ST_OK`
-/// too), and the listing below it is unchanged.
+/// MKDIR of a directory only a lower holds is `ST_OK` or `ST_EXISTS`
+/// (wire.md 3.4.9), and the listing below it is unchanged: the reference
+/// answers `ST_EXISTS`.
 #[test]
-fn proposed_mkdir_over_a_lower_only_directory_is_exists() {
+fn mkdir_over_a_lower_only_directory_is_exists() {
     let mut d = mount(&layered());
     assert_eq!(d.mkdir(R0, 0o755, "data/meshes"), Err(Status::Exists));
     assert_eq!(names(&mut d, "data/meshes"), ["a.nif"]);
 }
 
-/// Proposed: a name created below a lower-only directory copies the
+/// The reference's choice where wire.md is silent: a name created below a
+/// lower-only directory copies the
 /// directory up, and a write open of a lower-only file copies the file up:
 /// from then on the rules for names the writable provider holds apply
 /// (wire.md 3.4.7 to 3.4.9).
 #[test]
-fn proposed_a_create_below_a_lower_directory_and_a_write_open_copy_up() {
+fn the_reference_copies_up_a_directory_for_a_create_below_it_and_a_file_for_a_write_open() {
     let mut d = mount(&layered());
     open(
         &mut d,
@@ -386,11 +388,11 @@ fn a_written_lower_file_is_the_uppers() {
     );
 }
 
-/// Proposed: a directory a lower holds, the upper holding it too, does not
-/// move (as a lower-only one does not, wire.md 3.4.9); a case-only RENAME
-/// of it respells it.
+/// A directory a lower holds, the upper holding it too, is refused with
+/// `ST_IO_ERROR` and nothing moves (wire.md 3.4.7 allows that or the whole
+/// move); a case-only RENAME of it respells it.
 #[test]
-fn proposed_a_directory_in_both_layers_does_not_move() {
+fn the_reference_refuses_to_move_a_directory_both_layers_hold() {
     let mut d = mount(&layered());
     assert_eq!(d.rename(R0, "data", "Other"), Err(Status::IoError));
     assert_eq!(found(&mut d, "data/low.esp"), Some((false, 3)));

@@ -31,7 +31,7 @@
 //! says. A write open copies a lower-only file up, keeping its identity, so
 //! every handle of it reads it as it is now (3.4.4). Where wire.md leaves
 //! an overlay's answer open the reference answers as `docs/conformance.md`
-//! ("Layered roots") proposes, and says so where it does. With no layers
+//! ("Layered roots") says, and says so where it does. With no layers
 //! every answer is the upper's alone, as before.
 //!
 //! A name keeps the spelling it was created with (a fixture's vpath, a

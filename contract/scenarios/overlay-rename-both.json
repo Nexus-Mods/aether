@@ -1,0 +1,23 @@
+{
+  "name": "overlay-rename-both",
+  "description": "RENAME of a directory both the upper and a lower hold is refused with ST_IO_ERROR, nothing moving, or moves the whole of it: every name under it from every layer, as the merged tree shows it (wire.md 3.4.7, \"Names in both the upper and a lower\"). Never part of it. The steps share a choice, so every one of them must show the refusal or every one the move.",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}, {"path": "Data/Both/Up.txt", "contents": "up"}, {"path": "Data/Both/Sub/Up2.txt", "contents": "up2up"}], "lower": [{"files": [{"path": "Data/Both/Low.txt", "contents": "low"}, {"path": "Data/Both/Sub/Deep.txt", "contents": "deep"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 0, "from": "data/both", "to": "Data/Moved"}, "expect": {"one_of": [{"status": "ok"}, {"status": "io-error"}], "wire": "3.4.7", "choice": "moved"}, "note": "a directory the upper and a lower both hold: moved whole, or refused"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"one_of": [{"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Moved", "is_dir": true, "size": 0, "mtime": 0}]}}, {"reply": {"entries": [{"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Both", "is_dir": true, "size": 0, "mtime": 0}]}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/moved/up.txt"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both/up.txt"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/moved/low.txt"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both/low.txt"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 3, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/moved/sub"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both/sub"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/moved/sub/deep.txt"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both/sub/deep.txt"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 4, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/moved/sub/up2.txt"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": false, "size": 5, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both/sub/up2.txt"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 5, "mtime": 0}}], "wire": "3.4.7", "choice": "moved"}}
+  ]
+}

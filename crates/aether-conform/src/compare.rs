@@ -68,7 +68,7 @@
 //!   returns other bytes fails, since the shim's cache would have served the
 //!   old ones. READs through other handles are not recorded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use aether_casefold::fold;
@@ -99,6 +99,9 @@ pub struct Session {
     cached: BTreeMap<(CacheKey, u64, u32), Vec<u8>>,
     /// Never send a closed handle's old number ([`Session::among_others`]).
     no_reuse: bool,
+    /// For each label a step's `one_of` shares with others, the
+    /// alternatives (by position) every step of the label has allowed so far.
+    chosen: BTreeMap<String, BTreeSet<usize>>,
 }
 
 /// What the shim's read cache keys a file's blocks by (wire.md 3.4.3): the
@@ -217,8 +220,56 @@ impl Session {
         expected: &Expect,
         got: &Result<OwnedReply, Status>,
     ) -> Result<(), Mismatch> {
-        let mut next = self.clone();
-        next.check_one(step, req, expected, got)?;
+        self.check_chosen(step, req, expected, got, None)
+    }
+
+    /// [`Session::check`] for a step whose `one_of` carries a `choice`
+    /// label (`contract/scenarios/README.md`, "Expectations"). The steps
+    /// of one label have lists of equal length, and take the alternative of
+    /// one position all together: an answer that fits several alternatives
+    /// leaves the others open for the steps after it, one that fits none
+    /// that every earlier step of the label allows fails. It is how a
+    /// scenario shows that a change happened whole or not at all where
+    /// wire.md allows either.
+    pub fn check_chosen(
+        &mut self,
+        step: usize,
+        req: &OwnedRequest,
+        expected: &Expect,
+        got: &Result<OwnedReply, Status>,
+        choice: Option<&str>,
+    ) -> Result<(), Mismatch> {
+        let (Some(label), Expect::OneOf(alts)) = (choice, expected) else {
+            let mut next = self.clone();
+            next.check_one(step, req, expected, got)?;
+            *self = next;
+            return Ok(());
+        };
+        let open: BTreeSet<usize> = (0..alts.len()).collect();
+        let allowed = self.chosen.get(label).unwrap_or(&open).clone();
+        let mut next = None;
+        let mut matched = BTreeSet::new();
+        for (n, alt) in alts.iter().enumerate().filter(|(n, _)| allowed.contains(n)) {
+            let mut trial = self.clone();
+            if trial.check_one(step, req, alt, got).is_ok() {
+                matched.insert(n);
+                next.get_or_insert(trial);
+            }
+        }
+        let Some(mut next) = next else {
+            // An answer no alternative takes fails as it would without a
+            // label; one the label's earlier steps rule out says so.
+            self.clone().check_one(step, req, expected, got)?;
+            return Err(Mismatch {
+                step,
+                why: format!(
+                    "none of the answers that agree with the earlier steps of choice {label:?}"
+                ),
+                expected: render_expect(expected),
+                got: render_got(got),
+            });
+        };
+        next.chosen.insert(label.to_string(), matched);
         *self = next;
         Ok(())
     }
@@ -238,14 +289,25 @@ impl Session {
         };
         match (expected, got) {
             (Expect::OneOf(alts), _) => {
+                // A reply that breaks a rule whichever answer is expected
+                // (mtime past 2^40 seconds) says so, not "none of them".
+                let mut rule = None;
                 for alt in alts {
                     let mut trial = self.clone();
-                    if trial.check_one(step, req, alt, got).is_ok() {
-                        *self = trial;
-                        return Ok(());
+                    match trial.check_one(step, req, alt, got) {
+                        Ok(()) => {
+                            *self = trial;
+                            return Ok(());
+                        }
+                        Err(m) if !m.why.contains("different") => {
+                            rule.get_or_insert(m.why);
+                        }
+                        Err(_) => {}
                     }
                 }
-                Err(miss("none of the allowed answers".into()))
+                Err(miss(
+                    rule.unwrap_or_else(|| "none of the allowed answers".into()),
+                ))
             }
             (Expect::Status(e), Err(g)) if e == g => Ok(()),
             (Expect::Status(_), _) | (Expect::Reply(_), Err(_)) => {
@@ -594,6 +656,90 @@ mod tests {
             &Expect::Reply(OwnedReply::Empty),
             &Ok(OwnedReply::Empty),
         )
+    }
+
+    fn getattr(path: &str) -> OwnedRequest {
+        OwnedRequest::GetAttr {
+            root: RootId(0),
+            path: path.into(),
+        }
+    }
+
+    fn found(size: u64) -> OwnedReply {
+        OwnedReply::GetAttr(aether_protocol::AttrResp {
+            found: true,
+            is_dir: false,
+            size,
+            mtime: 0,
+        })
+    }
+
+    fn missing() -> OwnedReply {
+        OwnedReply::GetAttr(aether_protocol::AttrResp {
+            found: false,
+            is_dir: false,
+            size: 0,
+            mtime: 0,
+        })
+    }
+
+    /// Two alternatives, the first "moved" and the second "stayed".
+    fn either(moved: OwnedReply, stayed: OwnedReply) -> Expect {
+        Expect::OneOf(vec![Expect::Reply(moved), Expect::Reply(stayed)])
+    }
+
+    /// Steps that share a choice take the same alternative: a director that
+    /// answers the first step as alternative 0 and the second as alternative
+    /// 1 fails the second, though each answer is one the step allows.
+    #[test]
+    fn steps_sharing_a_choice_must_take_the_same_alternative() {
+        let at_to = either(found(1), missing());
+        let at_from = either(missing(), found(1));
+        let mut sess = Session::new();
+        sess.check_chosen(0, &getattr("to"), &at_to, &Ok(found(1)), Some("moved"))
+            .unwrap();
+        // Alternative 1 of the second step is not the first step's choice.
+        let e = sess
+            .check_chosen(1, &getattr("from"), &at_from, &Ok(found(1)), Some("moved"))
+            .unwrap_err();
+        assert_eq!(e.step, 1);
+        assert!(e.why.contains("moved"), "{}", e.why);
+        sess.check_chosen(1, &getattr("from"), &at_from, &Ok(missing()), Some("moved"))
+            .unwrap();
+    }
+
+    /// Without a label, or under different labels, steps choose freely, and
+    /// an answer that fits several alternatives leaves the choice open.
+    #[test]
+    fn labels_are_independent_and_a_shared_answer_leaves_the_choice_open() {
+        let same = either(found(1), found(1));
+        let mut sess = Session::new();
+        sess.check_chosen(0, &getattr("a"), &same, &Ok(found(1)), Some("x"))
+            .unwrap();
+        sess.check_chosen(
+            1,
+            &getattr("b"),
+            &either(found(2), missing()),
+            &Ok(missing()),
+            Some("x"),
+        )
+        .unwrap();
+        sess.check_chosen(
+            2,
+            &getattr("c"),
+            &either(found(3), missing()),
+            &Ok(found(3)),
+            Some("y"),
+        )
+        .unwrap();
+        sess.check_chosen(
+            3,
+            &getattr("d"),
+            &either(found(3), missing()),
+            &Ok(found(3)),
+            None,
+        )
+        .unwrap();
     }
 
     #[test]

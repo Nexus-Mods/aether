@@ -969,6 +969,12 @@ outside every writable provider `ST_READ_ONLY`.
 - **A missing parent.** A `to` whose parent is missing is `ST_NOT_FOUND`;
   one whose parent is a file is `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`.
   Nothing moves. The reference answers `ST_NOT_FOUND` for both.
+- **A directory the upper and a lower both hold.** A director that serves a
+  writable root as an overlay may refuse to move it, with `ST_IO_ERROR` and
+  nothing moved (it cannot move the lower's part), or move it whole: every
+  name under it, from every layer, as the merged tree shows them, is then
+  under `to` and none under `from`. It never moves part of it. The reference
+  refuses.
 
 The reference checks in this order: the root at an end or a `to` inside
 `from`, then a missing `from`, then a read-only end, then `to`'s parent,
@@ -1048,6 +1054,9 @@ writable provider holds) say otherwise:
   without respelling it: the name keeps the lower's spelling.
 - MKDIR over a lower-only file creates the directory in the upper and
   answers `ST_OK`; the directory then hides the file.
+- MKDIR of a directory only the lower holds answers `ST_OK` or `ST_EXISTS`,
+  as it does for any existing directory, and leaves the directory's listing
+  as it was. (The reference answers `ST_EXISTS`.)
 
 The reference director gives these answers for a root it serves with read-only
 layers beneath its writable upper.

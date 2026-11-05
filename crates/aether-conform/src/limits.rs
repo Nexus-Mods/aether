@@ -270,6 +270,7 @@ fn scenario(g: Geometry) -> Scenario {
             note: Some(note.to_string()),
             client: 0,
             literal_fh: false,
+            choice: None,
         });
     };
     add(

@@ -404,7 +404,13 @@ pub(crate) fn play(
         let gen_broken = reg_gen.before(&step.request, gen_before);
         let (got, mut passed) = match &sent {
             Sent::Answer(got) => {
-                let r = session.check(i, &step.request, &step.expect, got);
+                let r = session.check_chosen(
+                    i,
+                    &step.request,
+                    &step.expect,
+                    got,
+                    step.choice.as_deref(),
+                );
                 if let Err(m) = &r {
                     notes.insert(0, m.why.clone());
                 }

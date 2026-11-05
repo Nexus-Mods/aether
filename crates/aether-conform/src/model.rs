@@ -45,8 +45,8 @@
 //! What it leaves out, and why, is listed in `docs/conformance.md`
 //! ("Generated cases"). In short: names whose answer depends on the
 //! director's layering (a writable entry's own directory, its ancestors;
-//! in a layered root, the questions `docs/conformance.md` lists as
-//! proposed rules);
+//! in a layered root, the question `docs/conformance.md` lists as left to
+//! the director);
 //! WRITE and SETATTR on a handle opened without write access; requests that
 //! create a named stream; READs through a handle whose file is gone after a
 //! WRITE or SETATTR through it; paths that leave their root (`escape-paths`
@@ -3284,14 +3284,12 @@ impl Gen {
                 if self.lower_only(root, &t.folded) == Some(false) {
                     (Want::OkOrExists, "an existing directory", Effect::None)
                 } else {
-                    // wire.md 3.4.9: an existing directory, `ST_OK` or
-                    // `ST_EXISTS`, or one no writable provider serves,
-                    // `ST_EXISTS` or `ST_READ_ONLY`.
+                    // wire.md 3.4.9: a directory only a lower holds, `ST_OK`
+                    // or `ST_EXISTS`.
                     (
                         Want::Alts(vec![
                             Expect::Reply(OwnedReply::Empty),
                             Expect::Status(Status::Exists),
-                            Expect::Status(Status::ReadOnly),
                         ]),
                         "a directory only a lower holds",
                         Effect::Unsure {
@@ -3717,6 +3715,7 @@ impl Gen {
             note: Some(note),
             client,
             literal_fh: false,
+            choice: None,
         });
         if let Ok(r) = &got {
             self.record_version(r);
@@ -3792,6 +3791,7 @@ impl Gen {
                     )),
                     client,
                     literal_fh: false,
+                    choice: None,
                 });
                 let after = self.oracle.ask(&listing(root, &dir));
                 let (Some(Ok(b @ OwnedReply::ReadDir(_))), Ok(a @ OwnedReply::ReadDir(_))) =
@@ -3819,6 +3819,7 @@ impl Gen {
                     )),
                     client,
                     literal_fh: false,
+                    choice: None,
                 });
                 self.done = true;
                 Ok(())

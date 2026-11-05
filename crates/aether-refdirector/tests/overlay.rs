@@ -265,10 +265,10 @@ fn deleting_a_lower_only_directory_with_children_hides_all_of_it() {
     assert_eq!(read(&mut d, h), Err(Status::IoError));
 }
 
-/// Proposed: a directory made again where a DELETE hid a lower one is
-/// empty; what the DELETE hid stays hidden.
+/// wire.md 3.4.9: what a DELETE hid stays hidden, so a directory made again
+/// where it hid a lower one is empty.
 #[test]
-fn proposed_a_directory_made_again_over_a_hidden_one_is_empty() {
+fn a_directory_made_again_over_a_hidden_one_is_empty() {
     let mut d = mount(&layered());
     d.delete(R0, "data/meshes").unwrap();
     assert_eq!(d.mkdir(R0, 0o755, "Data/meshes"), Ok(()));

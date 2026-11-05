@@ -383,6 +383,40 @@ pub enum Break {
     /// entry of one kind; a create under a renamed directory lands under one
     /// of its names or is refused).
     RacyCreate,
+    /// A DELETE or RENAME of a name a lower layer holds leaves no whiteout
+    /// for GETATTR: the lower's entry shows through again, as a director
+    /// that removes the upper's entry and forgets the lower's would answer
+    /// (wire.md 3.4.8: a deleted name is missing; 3.4.9: DELETE of a
+    /// lower-only name hides it).
+    NoWhiteout,
+    /// READDIR lists the lower's entry of a name a DELETE or RENAME hid, as
+    /// a director that merges listings without its whiteouts would (wire.md
+    /// 3.4.2, 3.4.9).
+    ListsHidden,
+    /// A lower-only file opened for writing is written in the lower, never
+    /// copied up, so it is still lower-only to MKDIR and to a case-only
+    /// RENAME (wire.md 3.4.9: the lower is read-only, so a file a WRITE
+    /// changed is the upper's: MKDIR over it is `ST_IO_ERROR`, a case-only
+    /// RENAME respells it).
+    WriteThrough,
+    /// A write open of a lower-only file without OPEN_TRUNC copies up none
+    /// of its bytes (wire.md 3.4.3, 3.4.4: the open file is the file, as it
+    /// is).
+    CopyUpLosesBytes,
+    /// A handle opened for reading on a lower-only file reads the lower's
+    /// bytes for ever, whatever a write open and WRITEs did to the file
+    /// since (wire.md 3.4.4: "Every handle of a file reads the file as it is
+    /// now").
+    CopyUpOldHandleLower,
+    /// A handle opened on a lower-only file whose name was then hidden (a
+    /// DELETE, a RENAME onto it, MKDIR over it) reads the file made at that
+    /// name later (wire.md 3.4.8: a handle "never reads or changes a file
+    /// created at, or moved to, that name later").
+    HiddenHandleReadsNew,
+    /// READDIR answers a name both the upper and a lower hold as the lower
+    /// has it, its spelling, kind and size (wire.md 3.4.9: a writable upper
+    /// over a read-only lower; 3.4.2).
+    UpperLosesListing,
 }
 
 impl Break {
@@ -468,6 +502,13 @@ impl Break {
             "keep-deleted" => Some(Break::KeepDeleted),
             "gone-handles-private" => Some(Break::GoneHandlesPrivate),
             "racy-create" => Some(Break::RacyCreate),
+            "no-whiteout" => Some(Break::NoWhiteout),
+            "lists-hidden" => Some(Break::ListsHidden),
+            "write-through" => Some(Break::WriteThrough),
+            "copy-up-loses-bytes" => Some(Break::CopyUpLosesBytes),
+            "copy-up-old-handle-lower" => Some(Break::CopyUpOldHandleLower),
+            "hidden-handle-reads-new" => Some(Break::HiddenHandleReadsNew),
+            "upper-loses-listing" => Some(Break::UpperLosesListing),
             _ => None,
         }
     }
@@ -1485,6 +1526,9 @@ struct Served {
 struct Mounts {
     files: BTreeMap<(u32, String), Vec<u8>>,
     roots: Vec<RootId>,
+    /// The nearest lower layer's entry at each (root, folded path) a layer
+    /// holds: its stored path and a file's bytes (`None` for a directory).
+    lower: BTreeMap<(u32, String), (String, Option<Vec<u8>>)>,
 }
 
 impl Mounts {
@@ -1495,6 +1539,18 @@ impl Mounts {
             for f in &r.files {
                 m.files
                     .insert((r.id, aether_casefold::fold(&f.path)), f.contents.bytes());
+            }
+            for l in &r.lower {
+                for d in l.dirs_spelled() {
+                    let k = (r.id, aether_casefold::fold(&d));
+                    m.lower.entry(k).or_insert((d, None));
+                }
+                for f in &l.files {
+                    let k = (r.id, aether_casefold::fold(&f.path));
+                    m.lower
+                        .entry(k)
+                        .or_insert((f.path.clone(), Some(f.contents.bytes())));
+                }
             }
         }
         m
@@ -1549,6 +1605,15 @@ struct Held {
     /// files, and which one each handle on a gone file reads.
     kept: Vec<Vec<u8>>,
     kept_by: BTreeMap<u64, usize>,
+    /// [`Break::NoWhiteout`]'s and [`Break::ListsHidden`]'s names a DELETE
+    /// or RENAME hid that a lower holds, until a create there.
+    hidden: std::collections::BTreeSet<(u32, String)>,
+    /// Lower-only files a write open reached.
+    copied: std::collections::BTreeSet<(u32, String)>,
+    /// [`Break::CopyUpOldHandleLower`]'s handles and the lower's bytes.
+    lower_reads: BTreeMap<u64, Vec<u8>>,
+    /// [`Break::HiddenHandleReadsNew`]'s handles on lower-only files.
+    lower_names: BTreeMap<u64, (RootId, String)>,
 }
 
 /// What was below a directory: each path below it as stored, and a file's
@@ -1632,6 +1697,128 @@ impl Served {
             ReadReply::Inline(d) => Ok(d.to_vec()),
             ReadReply::Bulk { .. } => Err(Status::IoError),
         }
+    }
+
+    /// The bytes of the mounted lower's file at `root`'s `path`, where the
+    /// tree's upper has no file: what the overlay breaks act on.
+    fn lower_file(&self, root: RootId, path: &str) -> Option<Vec<u8>> {
+        let k = (root.0, aether_casefold::fold(path));
+        if self.tree.files.contains_key(&k) {
+            return None;
+        }
+        self.tree.lower.get(&k).and_then(|(_, b)| b.clone())
+    }
+
+    /// What the overlay breaks note of an OPEN of `root`'s `path` that the
+    /// reference answered `o`, and [`Break::CopyUpLosesBytes`]'s loss.
+    fn overlay_open(
+        &mut self,
+        root: RootId,
+        flags: OpenFlags,
+        path: &str,
+        o: &mut OpenResp,
+    ) -> Result<(), Status> {
+        let key = (root.0, aether_casefold::fold(path));
+        if flags.contains(OpenFlags::CREATE) {
+            self.held().hidden.remove(&key);
+        }
+        if o.is_dir || self.lower_file(root, path).is_none() {
+            return Ok(());
+        }
+        let first = !self.held().copied.contains(&key);
+        if flags.contains(OpenFlags::WRITE) {
+            self.held().copied.insert(key);
+            if first
+                && self.broken == Some(Break::CopyUpLosesBytes)
+                && !flags.contains(OpenFlags::TRUNC)
+            {
+                self.reference.set_attr(o.fh, 0)?;
+                o.size = 0;
+            }
+        } else if first && !self.held().hidden.contains(&key) {
+            match self.broken {
+                Some(Break::CopyUpOldHandleLower) => {
+                    let b = self.lower_file(root, path).unwrap_or_default();
+                    self.held().lower_reads.insert(o.fh, b);
+                }
+                Some(Break::HiddenHandleReadsNew) => {
+                    self.held()
+                        .lower_names
+                        .insert(o.fh, (root, path.to_string()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Break::ListsHidden`]'s and [`Break::UpperLosesListing`]'s listing of
+    /// `root`'s `path`, from the reference's in `out`.
+    fn overlay_listing(&self, root: RootId, path: &str, out: &mut Listing) {
+        let dir = aether_casefold::fold(path);
+        let under = |name: &str| {
+            let n = aether_casefold::fold(name);
+            if dir == "." {
+                n
+            } else {
+                format!("{dir}/{n}")
+            }
+        };
+        let mut rows: Vec<(String, bool, u64, i64)> = out
+            .iter()
+            .map(|e| (e.name.to_string(), e.is_dir, e.size, e.mtime))
+            .collect();
+        if self.broken == Some(Break::UpperLosesListing) {
+            for row in &mut rows {
+                if let Some((stored, b)) = self.tree.lower.get(&(root.0, under(&row.0))) {
+                    row.0 = stored.rsplit('/').next().unwrap_or(stored).to_string();
+                    row.1 = b.is_none();
+                    row.2 = b.as_ref().map_or(0, |b| b.len() as u64);
+                }
+            }
+        } else {
+            let hidden: Vec<(u32, String)> = self.held().hidden.iter().cloned().collect();
+            for (r, p) in hidden {
+                let parent = p.rsplit_once('/').map_or(".", |(d, _)| d);
+                let listed = rows.iter().any(|row| under(&row.0) == p);
+                let lower = self.tree.lower.get(&(r, p.clone()));
+                if let (true, false, Some((stored, b))) =
+                    (r == root.0 && parent == dir, listed, lower)
+                {
+                    let name = stored.rsplit('/').next().unwrap_or(stored).to_string();
+                    rows.push((
+                        name,
+                        b.is_none(),
+                        b.as_ref().map_or(0, |b| b.len() as u64),
+                        0,
+                    ));
+                }
+            }
+        }
+        *out = Listing::default();
+        for (name, is_dir, size, mtime) in &rows {
+            out.push(aether_protocol::DirEntry {
+                name,
+                is_dir: *is_dir,
+                size: *size,
+                mtime: *mtime,
+            });
+        }
+    }
+
+    /// Notes that `root`'s `path`, and the lower's names below it, were
+    /// hidden ([`Break::NoWhiteout`], [`Break::ListsHidden`]).
+    fn hide(&self, root: RootId, path: &str) {
+        let f = aether_casefold::fold(path);
+        let below = format!("{f}/");
+        let names: Vec<(u32, String)> = self
+            .tree
+            .lower
+            .keys()
+            .filter(|(r, p)| *r == root.0 && (*p == f || p.starts_with(&below)))
+            .cloned()
+            .collect();
+        self.held().hidden.extend(names);
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Held> {
@@ -1878,6 +2065,16 @@ impl Director for Served {
                 a = old.clone();
             }
         }
+        if self.broken == Some(Break::NoWhiteout) && !a.found && self.held().hidden.contains(&key) {
+            if let Some((_, b)) = self.tree.lower.get(&key) {
+                a = AttrResp {
+                    found: true,
+                    is_dir: b.is_none(),
+                    size: b.as_ref().map_or(0, |b| b.len() as u64),
+                    mtime: 0,
+                };
+            }
+        }
         if self.broken == Some(Break::StaleKind) && a.found {
             let mut h = self.held();
             match h.kinds.get(&key) {
@@ -1919,6 +2116,12 @@ impl Director for Served {
             }
         }
         self.reference.read_dir(root, path, out)?;
+        if matches!(
+            self.broken,
+            Some(Break::ListsHidden | Break::UpperLosesListing)
+        ) {
+            self.overlay_listing(root, path, out);
+        }
         let millis = self.broken == Some(Break::MtimeMillis);
         let held = self.broken == Some(Break::SetattrAtClose);
         if self.broken == Some(Break::TruncateReaddir) || millis || held {
@@ -2008,6 +2211,7 @@ impl Director for Served {
             self.respell_parents(root, path);
             self.old_spelling(root, path);
         }
+        self.overlay_open(root, flags, path, &mut o)?;
         if matches!(self.broken, Some(Break::TornAppend | Break::LostUpdate))
             && flags.contains(OpenFlags::APPEND)
         {
@@ -2070,6 +2274,29 @@ impl Director for Served {
         }
         let slot_cap = at.inline_cap;
         let fh = self.fh_in(fh);
+        let lower = self.held().lower_reads.get(&fh).cloned();
+        let named = self.held().lower_names.get(&fh).cloned();
+        let lower = match (lower, named) {
+            (Some(b), _) => Some(b),
+            // The file is gone: whatever is at its name now.
+            (None, Some((root, path))) if self.bytes(fh).is_err() => {
+                match self.reference.open(root, OpenFlags::READ, &path) {
+                    Ok(o) => {
+                        let b = self.bytes(o.fh);
+                        let _ = self.reference.close(o.fh);
+                        b.ok()
+                    }
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(b) = lower {
+            let start = offset.min(b.len() as u64) as usize;
+            let n = (b.len() - start).min(len as usize).min(slot_cap);
+            self.view = b[start..start + n].to_vec();
+            return Ok(ReadReply::Inline(&self.view));
+        }
         let gone = self.held().kept_by.get(&fh).copied();
         if let Some(at) = gone {
             let b = self.held().kept[at].clone();
@@ -2421,9 +2648,22 @@ impl Director for Served {
         } else {
             Vec::new()
         };
+        let through_key = (root.0, f.clone());
+        if self.broken == Some(Break::WriteThrough)
+            && f == t
+            && self.lower_file(root, from).is_some()
+            && self.held().copied.contains(&through_key)
+        {
+            // Still the lower's name to a director that wrote through to it.
+            return Ok(());
+        }
         let live = self.live_files();
         self.reference.rename(root, from, to)?;
         self.keep_gone(live);
+        if f != t {
+            self.hide(root, from);
+            self.held().hidden.remove(&(root.0, t.clone()));
+        }
         if ghosts {
             self.held()
                 .ghosts
@@ -2479,6 +2719,7 @@ impl Director for Served {
             }
         }
         r?;
+        self.hide(root, path);
         if let Some(sp) = spelled {
             self.held().spellings.insert(key, sp);
         }
@@ -2498,11 +2739,20 @@ impl Director for Served {
     }
     fn mkdir(&mut self, root: RootId, mode: u32, path: &str) -> Result<(), Status> {
         self.arrive();
+        let key = (root.0, aether_casefold::fold(path));
+        if self.broken == Some(Break::WriteThrough)
+            && self.lower_file(root, path).is_some()
+            && self.held().copied.contains(&key)
+        {
+            // MKDIR over what is still a lower-only file to such a director.
+            let _ = self.reference.delete(root, path);
+        }
         let mut made = self.reference.mkdir(root, mode, path);
         if made == Err(Status::NotFound) && self.no_parent(root, path)? {
             made = self.reference.mkdir(root, mode, path);
         }
         made?;
+        self.held().hidden.remove(&key);
         self.respell_parents(root, path);
         self.old_spelling(root, path);
         let folded = aether_casefold::fold(path);
@@ -2538,6 +2788,8 @@ impl Director for Served {
         let _ = self.flush(fh);
         self.held().kept_by.remove(&fh);
         self.held().appends.remove(&fh);
+        self.held().lower_reads.remove(&fh);
+        self.held().lower_names.remove(&fh);
         let at = self.held().by_path.remove(&fh).and_then(|e| e.3);
         if let Some(t) = at {
             let _ = self.reference.close(t);

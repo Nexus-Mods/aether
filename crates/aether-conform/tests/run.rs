@@ -1343,6 +1343,7 @@ fn a_director_refusing_reads_through_write_only_handles_fails() {
         [
             "handles-deleted-file",
             "handles-follow-rename",
+            "overlay-copy-up-handles",
             "truncate-then-read",
             "write-only-read",
             "write-then-read"
@@ -1695,4 +1696,59 @@ fn a_director_keeping_deleted_files_for_their_handles_passes() {
 #[test]
 fn a_director_keeping_a_copy_per_gone_handle_fails() {
     caught_by("gone-handles-private", "handles-deleted-file-shared");
+}
+
+/// wire.md 3.4.8, 3.4.9: a DELETE of a name a lower layer holds hides it.
+/// A director whose GETATTR finds the lower's entry again fails.
+#[test]
+fn a_director_forgetting_a_whiteout_fails() {
+    caught_by("no-whiteout", "overlay-delete-recreate");
+    caught_by("no-whiteout", "overlay-delete-dir");
+}
+
+/// wire.md 3.4.2, 3.4.9: a listing shows no name a DELETE or RENAME hid.
+/// A director that merges its layers without its whiteouts fails.
+#[test]
+fn a_director_listing_a_hidden_name_fails() {
+    caught_by("lists-hidden", "overlay-listing");
+    caught_by("lists-hidden", "overlay-delete-recreate");
+}
+
+/// wire.md 3.4.9: the lower is read-only, so a lower-only file a WRITE
+/// changed is the upper's. A director writing into the lower fails.
+#[test]
+fn a_director_writing_through_to_the_lower_fails() {
+    caught_by("write-through", "overlay-written-file");
+}
+
+/// wire.md 3.4.3, 3.4.4: a write open of a lower-only file opens the file
+/// as it is. A director whose copy-up loses its bytes fails.
+#[test]
+fn a_director_whose_copy_up_loses_bytes_fails() {
+    caught_by("copy-up-loses-bytes", "overlay-copy-up-handles");
+}
+
+/// wire.md 3.4.4: every handle of a file reads it as it is now, one opened
+/// on the lower's file before the copy-up included. A director whose old
+/// handle goes on reading the lower fails.
+#[test]
+fn a_director_whose_old_handle_reads_the_lower_fails() {
+    caught_by("copy-up-old-handle-lower", "overlay-copy-up-handles");
+    caught_by("copy-up-old-handle-lower", "overlay-truncate");
+}
+
+/// wire.md 3.4.8: a handle never reads a file created at its name after
+/// its own was hidden. A director whose handle on a hidden lower file
+/// reaches the new upper one fails.
+#[test]
+fn a_director_whose_hidden_handle_reads_the_new_file_fails() {
+    caught_by("hidden-handle-reads-new", "overlay-delete-recreate");
+}
+
+/// wire.md 3.4.9, 3.4.2: the upper over the lower, so a name both hold is
+/// listed as the upper has it. A director listing the lower's fails.
+#[test]
+fn a_director_whose_listing_prefers_the_lower_fails() {
+    caught_by("upper-loses-listing", "overlay-listing");
+    caught_by("upper-loses-listing", "overlay-spelling");
 }

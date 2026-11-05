@@ -464,6 +464,8 @@ caught_by_the_generator! {
     a_hidden_files_handle_never_reads_the_new_one: "hidden-handle-reads-new", 256, 7, "read";
     // 3.4.9, 3.4.2: the upper wins in a listing.
     the_upper_wins_in_a_listing: "upper-loses-listing", 256, 7, "readdir";
+    // 3.4.9, 3.4.2: a name made below a lower directory keeps its lower names listed.
+    a_copy_up_keeps_the_lower_siblings: "copy-up-opaque-parent", 256, 7, "readdir";
 }
 
 /// A concurrent run of `rounds` rounds of 4 clients against the reference

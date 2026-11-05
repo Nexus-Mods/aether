@@ -438,6 +438,12 @@ pub enum Break {
     /// run must pass it, the layered scenarios skipped and no generated
     /// root layered.
     NoLayers,
+    /// A name made in, or a lower-only file copied up from, a directory a
+    /// lower holds makes the directory opaque: READDIR of it no longer
+    /// lists the names only a lower holds there, as a director that copies
+    /// a directory up as a new, empty one would (wire.md 3.4.9: an upper
+    /// over a read-only lower; 3.4.2).
+    CopyUpOpaqueParent,
 }
 
 impl Break {
@@ -534,6 +540,7 @@ impl Break {
             "lower-general-rules" => Some(Break::LowerGeneralRules),
             "refuse-layered-dir-renames" => Some(Break::RefuseLayeredDirRenames),
             "no-layers" => Some(Break::NoLayers),
+            "copy-up-opaque-parent" => Some(Break::CopyUpOpaqueParent),
             _ => None,
         }
     }
@@ -1656,6 +1663,8 @@ struct Held {
     lower_reads: BTreeMap<u64, Vec<u8>>,
     /// [`Break::HiddenHandleReadsNew`]'s handles on lower-only files.
     lower_names: BTreeMap<u64, (RootId, String)>,
+    /// [`Break::CopyUpOpaqueParent`]'s directories made opaque.
+    opaque: std::collections::BTreeSet<(u32, String)>,
 }
 
 /// What was below a directory: each path below it as stored, and a file's
@@ -1764,6 +1773,9 @@ impl Served {
         if flags.contains(OpenFlags::CREATE) {
             self.held().hidden.remove(&key);
         }
+        if self.broken == Some(Break::CopyUpOpaqueParent) && flags.contains(OpenFlags::WRITE) {
+            self.make_opaque(root, path);
+        }
         if o.is_dir || self.lower_file(root, path).is_none() {
             return Ok(());
         }
@@ -1808,7 +1820,17 @@ impl Served {
             .iter()
             .map(|e| (e.name.to_string(), e.is_dir, e.size, e.mtime))
             .collect();
-        if self.broken == Some(Break::UpperLosesListing) {
+        if self.broken == Some(Break::CopyUpOpaqueParent) {
+            if self.held().opaque.contains(&(root.0, dir.clone())) {
+                let copied = self.held().copied.clone();
+                rows.retain(|row| {
+                    let k = (root.0, under(&row.0));
+                    !self.tree.lower.contains_key(&k)
+                        || self.tree.files.contains_key(&k)
+                        || copied.contains(&k)
+                });
+            }
+        } else if self.broken == Some(Break::UpperLosesListing) {
             for row in &mut rows {
                 if let Some((stored, b)) = self.tree.lower.get(&(root.0, under(&row.0))) {
                     row.0 = stored.rsplit('/').next().unwrap_or(stored).to_string();
@@ -1843,6 +1865,16 @@ impl Served {
                 size: *size,
                 mtime: *mtime,
             });
+        }
+    }
+
+    /// [`Break::CopyUpOpaqueParent`]: the directory above `root`'s `path`,
+    /// when a lower holds it, is opaque from now on.
+    fn make_opaque(&self, root: RootId, path: &str) {
+        let f = aether_casefold::fold(path);
+        let parent = f.rsplit_once('/').map_or(".", |(d, _)| d).to_string();
+        if self.tree.lower.contains_key(&(root.0, parent.clone())) {
+            self.held().opaque.insert((root.0, parent));
         }
     }
 
@@ -2198,7 +2230,7 @@ impl Director for Served {
         self.reference.read_dir(root, path, out)?;
         if matches!(
             self.broken,
-            Some(Break::ListsHidden | Break::UpperLosesListing)
+            Some(Break::ListsHidden | Break::UpperLosesListing | Break::CopyUpOpaqueParent)
         ) {
             self.overlay_listing(root, path, out);
         }
@@ -2836,6 +2868,9 @@ impl Director for Served {
         }
         made?;
         self.held().hidden.remove(&key);
+        if self.broken == Some(Break::CopyUpOpaqueParent) {
+            self.make_opaque(root, path);
+        }
         self.respell_parents(root, path);
         self.old_spelling(root, path);
         let folded = aether_casefold::fold(path);

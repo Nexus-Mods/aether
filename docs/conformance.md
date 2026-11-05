@@ -378,7 +378,9 @@ name found again), `lists-hidden` (one listed again), `write-through` (a
 written lower file still lower-only), `copy-up-loses-bytes`,
 `copy-up-old-handle-lower` (a handle opened before the copy-up reads the
 lower), `hidden-handle-reads-new` (the reverse: a hidden lower file's handle
-reads the file made at its name later), `upper-loses-listing`.
+reads the file made at its name later), `upper-loses-listing`,
+`copy-up-opaque-parent` (a name made below a lower directory makes it
+opaque, losing the lower's names there).
 
 ## Several clients
 

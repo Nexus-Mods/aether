@@ -1865,3 +1865,11 @@ fn a_director_serving_no_layers_skips_the_layered_scenarios_and_generates_none()
         "{out}"
     );
 }
+
+/// wire.md 3.4.9, 3.4.2: a name made below a lower directory leaves the
+/// lower's names there listed. A director whose copy-up makes the directory
+/// opaque, losing them, fails.
+#[test]
+fn a_director_whose_copy_up_makes_the_parent_opaque_fails() {
+    caught_by("copy-up-opaque-parent", "overlay-spelling");
+}

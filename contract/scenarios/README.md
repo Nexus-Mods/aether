@@ -161,7 +161,9 @@ components (`a/../..`) is not sent. Registry paths are sent as written.
   together: once a step's answer has ruled out an alternative, a later step
   of the label that answers as that alternative fails. It is how a scenario
   shows that a change happened whole or not at all where wire.md allows
-  either (`overlay-rename-both`).
+  either (`overlay-rename-both`). Under a label an OPEN reply's
+  `immutable` is compared, so the READs through a handle can depend on
+  whether its OPEN set it (`overlay-copy-up-handles`).
 
 A step may carry a `note`, and `"client": n` (default 0): which client of
 the ring sends it. The run attaches one client per number named, every one
@@ -187,7 +189,7 @@ text quoted from the section named; there are no others.
 |---|---|---|
 | OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number: the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. Never 0 (3.4.3: a director never issues 0). | 3.4.3: "`fh` is any u64 the director chooses except 0, unique among open handles" |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; where a director starts it is its own |
-| OPEN `immutable` | Not compared, except that it must be clear on a write open, on a directory and on a file under a `writable` entry; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory"; "never set it for a file a writable provider holds" |
+| OPEN `immutable` | Not compared, except that it must be clear on a write open, on a directory and on a file under a `writable` entry (a file only the tree's lower layers hold may set it until a write open of it, or a RENAME or MKDIR onto its name, has succeeded); reads through immutable handles are checked against each other (below). In a `one_of` with a `choice` label it is compared, so a label can tie the READs through a handle to whether its OPEN set it. | 3.4.3: it permits caching; "Never set it for a write open or a directory"; "never set it for a file a writable provider holds", but for an overlay's read open of a file only a lower layer holds (3.4.3, 3.4.9) |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared (but it must be below 2^40, the year 36812, as seconds are: 3.2, "`mtime` is seconds since the Unix epoch"), and not checked for changed or unchanged after a write either: the time is the director's. A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first. | 3.4.4: the client "must accept either whatever flag it sent" |

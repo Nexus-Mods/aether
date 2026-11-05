@@ -307,8 +307,8 @@ Every rule below is checked by the scenario named and by generated cases.
 |---|---|---|
 | One listing of the upper and the layers, each name once, as the highest layer holding it has it; a name a DELETE or RENAME hid is not listed | 3.2, 3.4.2, 3.4.9 | `overlay-listing`, `overlay-delete-recreate`, `overlay-delete-dir` |
 | A name keeps the spelling of the layer that shows it; a create keeps its parents' stored spelling, a lower's too | 3.2, 3.4.12 | `overlay-spelling` |
-| A read open of a lower-only file is never immutable: a write open can change the file | 3.4.3, 3.4.9 | every `overlay-*` OPEN, by the run's immutable check |
-| A copy-up keeps a file's identity: a write open of a lower-only file opens it with its bytes, and every handle of it, those opened before the copy-up included, reads WRITEs, SETATTRs and truncating OPENs at once | 3.4.3, 3.4.4, 3.4.6, 3.4.9 | `overlay-copy-up-handles`, `overlay-truncate` |
+| A read open of a lower-only file may be immutable; once a write open of the file (or a RENAME or MKDIR onto its name) has succeeded, no read open of it is. The run checks it: `immutable` on a file a writable provider holds fails unless the tree's layers alone hold it and no write has reached it yet | 3.4.3, 3.4.9 | every `overlay-*` OPEN, by the run's immutable check |
+| A copy-up keeps a file's identity: a write open of a lower-only file opens it with its bytes, and every handle of it opened without `immutable`, those opened before the copy-up included, reads WRITEs, SETATTRs and truncating OPENs at once; an immutable handle keeps the bytes it had. The OPEN and the READs after a change share a `choice`, so a handle reads as its OPEN said it would | 3.4.3, 3.4.4, 3.4.6, 3.4.9 | `overlay-copy-up-handles`, `overlay-truncate`, `overlay-rename-file` |
 | DELETE of a lower-only file hides it (nothing a farther layer holds there shows); DELETE of a lower-only directory with children hides it, or is `ST_IO_ERROR` by the general rule; a DELETE of a name the upper holds leaves it missing, the lower's entry under it included | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-listing` |
 | A name made where a DELETE hid one is new: an empty file, an empty directory; a handle on the hidden file never reaches it | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir` |
 | RENAME of a lower-only file copies it up and renames it; its handles follow it | 3.4.7, 3.4.9 | `overlay-rename-file` |
@@ -380,7 +380,21 @@ written lower file still lower-only), `copy-up-loses-bytes`,
 lower), `hidden-handle-reads-new` (the reverse: a hidden lower file's handle
 reads the file made at its name later), `upper-loses-listing`,
 `copy-up-opaque-parent` (a name made below a lower directory makes it
-opaque, losing the lower's names there).
+opaque, losing the lower's names there), `immutable-after-copy-up` (a read
+open still immutable after a write open of the file) and
+`immutable-sees-new-bytes` (an immutable handle that reads the copy-up's
+new bytes). `copy-up-old-handle-lower` now breaks the handles opened
+without `immutable`. The adapter mode `mutable-lower-reads` (no read open of
+a lower-only file immutable) passes the suite and the generated cases.
+
+**Immutable handles in generated cases.** The reference opens a lower-only
+file immutable, and the generator predicts it (and predicts no other read
+open of a file the writable provider holds is). Such an OPEN's step is a
+`one_of` of the reply with and without `immutable`, labelled by its handle;
+a READ through the handle once its bytes and the file's differ is a `one_of`
+of the handle's own bytes and the file as it is now, with the same label.
+The read-cache check still holds: an immutable handle keeps its bytes, and
+no read open after a write of the file is immutable.
 
 ## Several clients
 

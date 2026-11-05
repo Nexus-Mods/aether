@@ -213,8 +213,12 @@ when one does.
   the root at an end, as `rename-root` does.
 - `docs/wire.md` 3.4.9: the general rules stay allowed answers for a
   lower-only name (conformance accepts both); a copy-up keeps a file's
-  identity, so a handle opened before it reads the copy (3.4.4); a read open
-  of a lower-only file is never `immutable` (3.4.3).
+  identity, so a handle opened before it without `immutable` reads the copy
+  (3.4.4); a read open of a lower-only file may answer `immutable`, such a
+  handle keeps the lower's bytes while it is open, and once the file has been
+  copied up or a write open of it succeeded no read open of it does (3.4.3).
+  The reference opens lower-only files immutable, so the shim's read cache
+  serves a writable root's game files.
 
 ## 1.0.0
 

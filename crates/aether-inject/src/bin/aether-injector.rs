@@ -8,7 +8,8 @@
 //!
 //! Environment: `VFS_READY_TIMEOUT_SECS` (default 180) bounds the wait for the
 //! shim's ready report; `VFS_INJECT_CWD` is the target's working directory
-//! (default: this process's); `VFS_INJECT_STEAM_HELPER` is the command line
+//! (default: this process's); `VFS_INJECT_NEW_CONSOLE=1` gives the target a
+//! console of its own; `VFS_INJECT_STEAM_HELPER` is the command line
 //! of Proton's Steam helper, run before the target so the target's Steam API
 //! finds a running Steam client, or `off` to only clear a stale helper pid
 //! (default: neither). What it did is written to `<ready_file>.steam-helper`
@@ -77,6 +78,7 @@ fn main() {
         env_remove: Vec::new(),
         virtual_image: None,
         virtual_cwd: None,
+        new_console: aether_env::opt_in(aether_env::INJECT_NEW_CONSOLE),
     })
     // The whole tree, not just the first process: a launcher that starts the
     // game and exits (skse64_loader.exe) has not ended the launch, and the

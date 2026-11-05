@@ -617,7 +617,7 @@ suspended, with the shim already in. No image is edited, on disk or in memory.
 `VFS_FORCE_INJECTION` is accepted and has no effect.
 
 **Nothing is skipped on purpose.** The hook does not exempt system processes, helpers or anything
-else; `VFS_INJECT_*` switches (`INJECT_CWD`, `INJECT_STEAM_HELPER`) belong to the top-level
+else; `VFS_INJECT_*` switches (`INJECT_CWD`, `INJECT_STEAM_HELPER`, `INJECT_NEW_CONSOLE`) belong to the top-level
 injector, which starts the Steam helper itself, outside the shim. The only knob is
 `VFS_CHILD_CWD_ROOT`, which changes the child's working directory, not whether it is injected. A
 child that cannot be injected (a 32-bit image, for instance) therefore fails to start; if a case

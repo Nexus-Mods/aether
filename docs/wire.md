@@ -1674,7 +1674,7 @@ The handshake names fall into three tables, shipped as `contract/env.json`
 | Table | Names | Rule |
 |---|---|---|
 | transport | `VFS_RING_PATH`, `VFS_RING_SECTION`, `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_OFFSET`, `VFS_ARENA_LEN`, `VFS_SERVER_EV`, `VFS_CLIENT_EV`, `VFS_FUSE_CFG`, `VFS_VIRTUAL_DIR`, `VFS_VIRTUAL_ROOTS`, `VFS_ROOT_BACKINGS`, `VFS_REGISTRY` | A launch sets **or removes** every one of these, so nothing inherited from an earlier session reaches the child. |
-| inject | `VFS_INJECT_CWD`, `VFS_INJECT_STEAM_HELPER` | Read only by the injector. A Wine launch sets or removes them like the transport names. |
+| inject | `VFS_INJECT_CWD`, `VFS_INJECT_STEAM_HELPER`, `VFS_INJECT_NEW_CONSOLE` | Read only by the injector. A Wine launch sets or removes them like the transport names. |
 | config | `VFS_STATE_DIR`, `VFS_HOME`, `VFS_LAUNCH_IMAGE`, `VFS_DISCOVERY_PATH`, `VFS_SHIM_CONFIG`, `VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG`, `VFS_FORCE_INJECTION` | Other handshake configuration; not cleared by a launch. |
 
 Names compare without ASCII case on the Windows side (Wine included), so a
@@ -1703,6 +1703,7 @@ case-insensitive); an **opt-out** switch is off only for `0`, `false`, `no`,
 | `VFS_REGISTRY` | director | shim | Opt-in. Set to `1` only while a registry layer is attached; otherwise remove it. |
 | `VFS_INJECT_CWD` | director | injector | The target's working directory as the target sees it. Unset or empty: the injector's own. |
 | `VFS_INJECT_STEAM_HELPER` | director | injector | Under Wine: a Steam helper command line to run before the target, or `off` to only clear a stale helper pid. On native Windows nothing is run, but the injector still writes `<ready>.steam-helper` with `disabled:not running under Wine` (section 6.3). |
+| `VFS_INJECT_NEW_CONSOLE` | director | injector | Opt-in. Set to `1` to start the target with a console of its own instead of the injector's: a console program that sets its title or reads keys needs one, and under Wine the injector's output is piped, so it has none to share. Unset: the target shares the injector's. |
 | `VFS_STATE_DIR` | director | shim | Session state directory (the shim's panic log goes to `<dir>\shim-panic.log`). |
 | `VFS_HOME` | director | director side | Aether's own data directory. |
 | `VFS_LAUNCH_IMAGE` | director | shim | Absolute path of the staged EXE; its parent directory is another spelling of root 0. |

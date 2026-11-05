@@ -3,6 +3,7 @@
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
+#[cfg(not(target_arch = "x86"))]
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 
@@ -18,8 +19,8 @@ use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress
 use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use windows_sys::Win32::System::Threading::{
     CreateRemoteThread, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, LPTHREAD_START_ROUTINE,
-    PROCESS_INFORMATION,
+    CREATE_NEW_CONSOLE, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE,
+    LPTHREAD_START_ROUTINE, PROCESS_INFORMATION,
 };
 
 use crate::tree::{Job, ProcessTree};
@@ -500,6 +501,16 @@ fn launch_env_block(cfg: &RunConfig) -> Vec<u16> {
     crate::env_block::build(&crate::env_block::current(), &set, &cfg.env_remove)
 }
 
+/// `CREATE_NEW_CONSOLE` when the target is to have a console of its own
+/// ([`RunConfig::new_console`]), else nothing: it shares this process's.
+fn console_flag(cfg: &RunConfig) -> u32 {
+    if cfg.new_console {
+        CREATE_NEW_CONSOLE
+    } else {
+        0
+    }
+}
+
 /// A target that is running with its shim up.
 struct Started {
     /// Its process handle, owned by the receiver. The thread handle is closed.
@@ -529,7 +540,7 @@ fn start_target(
             job,
             app_w.as_ptr(),
             cmd_w.as_mut_ptr(),
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | console_flag(cfg),
             env.as_ptr().cast(),
             cwd_w
                 .as_ref()
@@ -629,6 +640,31 @@ unsafe fn tell_where(process: HANDLE, cfg: &RunConfig) -> Result<(), InjectError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn config(new_console: bool) -> RunConfig {
+        RunConfig {
+            target_exe: String::new(),
+            args: Vec::new(),
+            current_dir: None,
+            dll_path: String::new(),
+            config_path: String::new(),
+            ready_path: String::new(),
+            ready_timeout: Duration::from_secs(1),
+            detach: false,
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+            virtual_image: None,
+            virtual_cwd: None,
+            new_console,
+        }
+    }
+
+    #[test]
+    fn a_target_gets_its_own_console_only_when_asked() {
+        assert_eq!(console_flag(&config(false)), 0);
+        assert_eq!(console_flag(&config(true)), CREATE_NEW_CONSOLE);
+    }
 
     #[test]
     fn ready_file_contents_map_to_release_kill_or_wait() {

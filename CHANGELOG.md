@@ -5,8 +5,9 @@ Aether's crates. Newest first.
 
 ## Unreleased
 
-The wire is unchanged: the wire version (4), the golden vectors,
-`contract/env.json` and `contract/artifacts.json` are as in 1.0.0. The shim
+The wire is unchanged: the wire version (4), the golden vectors and
+`contract/artifacts.json` are as in 1.0.0, and `contract/env.json` gains one
+injector input (`VFS_INJECT_NEW_CONSOLE`, below). The shim
 sends a director that follows `docs/wire.md` the same requests, except where
 an entry below says otherwise (a `CreateDirectoryW` is a GETATTR then a
 MKDIR, and starting a managed child process is two requests). What the shim
@@ -88,6 +89,14 @@ when one does.
   never comes.
 
 ### Added
+
+- `VFS_INJECT_NEW_CONSOLE=1` makes `aether-injector` start its target with a
+  console of its own (`CREATE_NEW_CONSOLE`). A console program that sets its
+  title or reads keys fails without one, and the injector's, under Wine with
+  its output piped, is no console. Unset, the target shares the injector's
+  console as before. `aether_inject::RunConfig` gains the field `new_console`;
+  `docs/wire.md` 5.2 and 5.3 list the variable and `contract/env.json` names it
+  in its `inject` table.
 
 - `aether-conform`, a tool that checks any director against the contract.
   `aether-conform run --director "<adapter command>"` mounts each scenario's

@@ -162,14 +162,17 @@ pub struct Failures {
 impl Failures {
     /// Records a failure of `kind` and `class` whose shrunk scenario is
     /// `scenario`, if it has one. Whether it is new: a failure found again
-    /// (same kind, class, and tree and steps) only counts, in `failure`.
+    /// (same kind, class and shrunk shape, [`shape`]) only counts, in
+    /// `failure`. Two seeds that meet one defect seldom shrink to one tree,
+    /// names and bytes, but to the same requests, so the shape leaves those
+    /// out.
     pub fn add(&mut self, failure: Failure, scenario: Option<&Scenario>) -> bool {
         self.total += 1;
         let key = format!(
             "{}|{}|{}",
             failure.kind,
             failure.class,
-            scenario.map(canonical).unwrap_or_default()
+            scenario.map(shape).unwrap_or_default()
         );
         match self.seen.get(&key) {
             Some(&at) => {
@@ -185,15 +188,19 @@ impl Failures {
     }
 }
 
-/// `s` as JSON without what names it (its name and description hold the
-/// seed it came from), so that scenarios that differ only there are equal.
-fn canonical(s: &Scenario) -> String {
-    let mut v = scenario::to_json(s);
-    if let Some(o) = v.as_object_mut() {
-        o.remove("name");
-        o.remove("description");
-    }
-    v.to_string()
+/// A shrunk scenario's shape: its steps' opcodes in order, and the client
+/// of each, without the tree, the paths, the bytes or the names, which
+/// differ from seed to seed for one defect.
+fn shape(s: &Scenario) -> String {
+    let steps: Vec<String> = s
+        .steps
+        .iter()
+        .map(|st| {
+            let r = scenario::request_json(&st.request);
+            format!("{}@{}", r["op"].as_str().unwrap_or("?"), st.client)
+        })
+        .collect();
+    steps.join(",")
 }
 
 /// How the first failing step of `r` failed, as generation classes
@@ -578,6 +585,25 @@ impl Soak {
     pub fn passed(&self) -> bool {
         self.failures.total == 0
     }
+
+    /// Whether the soak stopped because its batches played nothing.
+    pub fn stalled(&self) -> bool {
+        self.stopped == Some("no progress")
+    }
+}
+
+/// A soak's exit code: 1 when it found a failure, whatever else went wrong
+/// (so a summary that could not be written does not hide one); 2 when it
+/// found none but played nothing for a while (`stalled`) or could not write
+/// its summary; 0 otherwise.
+pub fn exit_code(passed: bool, stalled: bool, summary_written: bool) -> u8 {
+    if !passed {
+        1
+    } else if stalled || !summary_written {
+        2
+    } else {
+        0
+    }
 }
 
 /// The case or round a failed result is of, from its scenario's name.
@@ -725,9 +751,10 @@ mod tests {
         }
     }
 
-    /// The same failure found from another seed (another name, one tree and
-    /// steps) is counted, not listed again; another class, or the same class
-    /// with other steps, is another failure.
+    /// The same failure found from another seed (another name, and another
+    /// tree, names and bytes, but the same requests in the same order) is
+    /// counted, not listed again; another class, or the same class with
+    /// other requests, is another failure.
     #[test]
     fn a_failure_found_again_is_counted_once() {
         let mut f = Failures::default();
@@ -743,10 +770,17 @@ mod tests {
         assert_eq!(f.list[0].occurrences, 3);
         assert_eq!(f.list[0].seed, 1, "the first finding is kept");
         assert_eq!(f.total, 3);
-        let other_steps = scenario("generated-4-0", "b");
+        let other_names = scenario("generated-4-0", "b");
+        assert!(!f.add(
+            failure("generated", "mismatch at getattr", 4),
+            Some(&other_names)
+        ));
+        let mut longer = scenario("generated-4-1", "b");
+        longer.steps.push(longer.steps[0].clone());
+        longer.steps[0].request = crate::scenario::OwnedRequest::Heartbeat;
         assert!(f.add(
             failure("generated", "mismatch at getattr", 4),
-            Some(&other_steps)
+            Some(&longer)
         ));
         assert!(f.add(failure("generated", "mismatch at readdir", 5), Some(&again)));
         assert!(f.add(
@@ -754,11 +788,21 @@ mod tests {
             Some(&again)
         ));
         assert_eq!(f.list.len(), 4);
-        assert_eq!(f.total, 6);
+        assert_eq!(f.list[0].occurrences, 4);
+        assert_eq!(f.total, 7);
         // Failures with no scenario are one by kind and class.
         assert!(f.add(failure("adapter", "error: exited", 1), None));
         assert!(!f.add(failure("adapter", "error: exited", 2), None));
         assert!(f.add(failure("adapter", "error: attach failed", 3), None));
+    }
+
+    #[test]
+    fn a_failure_outranks_every_other_exit_and_a_stall_is_no_pass() {
+        assert_eq!(exit_code(true, false, true), 0);
+        assert_eq!(exit_code(false, false, true), 1);
+        assert_eq!(exit_code(false, true, false), 1);
+        assert_eq!(exit_code(true, true, true), 2);
+        assert_eq!(exit_code(true, false, false), 2);
     }
 
     #[test]

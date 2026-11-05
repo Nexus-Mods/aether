@@ -1028,9 +1028,12 @@ shrunk as `run --generate` shrinks it and counted by its kind (`generated`,
 `concurrent`, `suite` for a scenario, the malformed requests or the limits,
 `adapter` for an adapter that failed, `generator` for a reference answer
 wire.md does not give), its class (`mismatch at getattr`, `error: mount
-refused`) and, for a generated case or round, the tree and steps of its
-shrunk scenario. One found again, from another seed, is counted in
-`occurrences` and not written again.
+refused`) and, for a generated case or round, the shape of its shrunk
+scenario: its steps' opcodes in order and the client of each. The tree, the
+paths, the bytes and the names are left out, since two seeds that meet one
+defect seldom shrink to the same ones. One found again, from another seed,
+is counted in `occurrences` and not written again, so a common defect is one
+failure however many batches meet it.
 
 **What is written.** `--failures DIR` (default a folder in the temporary
 directory) gets a folder for each distinct failure, `DIR/<id>/`, holding its
@@ -1048,8 +1051,11 @@ replay it. `--summary FILE` (and standard output) has the JSON summary:
 | `warnings` | things that were not the director's failure (too few rounds for every slot to carry a request) |
 | `wall_seconds`, `passed`, `stopped` | the time, whether nothing failed, and `"no progress"` if it gave up |
 
-The exit code is 0 when nothing failed, 1 when something did, 2 for a usage
-error.
+The exit code is 1 when something failed (a summary that could not be
+written does not hide it), 2 for a usage error, a summary that could not be
+written, or a soak that stopped because its batches played nothing, and 0
+otherwise. The workflow lists at most 30 failures in its job summary; every
+one is in the uploaded `summary.json`.
 
 **Replaying a failure.** The scenario in a failure's folder is an ordinary
 scenario, so against the director that failed it fails the same way:

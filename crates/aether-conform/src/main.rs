@@ -530,6 +530,7 @@ fn cmd_soak(args: &[String]) -> ExitCode {
     }
     let mut text = serde_json::to_string_pretty(&run.summary()).expect("a summary is JSON");
     text.push('\n');
+    let mut written = true;
     if let Some(out) = get("--summary") {
         if let Some(dir) = std::path::Path::new(&out)
             .parent()
@@ -539,15 +540,18 @@ fn cmd_soak(args: &[String]) -> ExitCode {
         }
         if let Err(e) = std::fs::write(&out, &text) {
             eprintln!("aether-conform: cannot write {out}: {e}");
-            return ExitCode::from(2);
+            written = false;
         }
     }
     print!("{text}");
-    if run.passed() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
+    if run.stalled() && run.passed() {
+        eprintln!("aether-conform: the soak's batches played nothing, and it stopped");
     }
+    ExitCode::from(aether_conform::soak::exit_code(
+        run.passed(),
+        run.stalled(),
+        written,
+    ))
 }
 
 fn ring_kind(v: Option<&str>) -> Result<RingKind, String> {

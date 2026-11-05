@@ -237,7 +237,7 @@ cargo test -p aether-hooks --test harness soak_ -- --ignored --nocapture
 | `AETHER_FAULTS_SOAK` | how long: `90s`, `10m`, `2h`, `1h30m`, a bare number is seconds; a round that starts before the time is up is played whole; unset, one round |
 | `AETHER_FAULTS_SEED` | the first round's seed; the others are drawn from it; unset, from the clock, printed |
 | `AETHER_FAULTS_ROUND_CASES` | cases of each property in a round (default 256) |
-| `AETHER_FAULTS_FAILURES` | the folder for failures (default `target/faults-failures`) |
+| `AETHER_FAULTS_FAILURES` | the folder for failures (default `target/faults-failures`); a relative one is taken from the workspace's root, not the package folder `cargo test` runs the harness in |
 
 A round plays each property in a process of its own (`PROPTEST_CASES` and
 `AETHER_FAULTS_SEED` set for it, as a person would set them), because the

@@ -17,7 +17,9 @@
 //! - `AETHER_FAULTS_ROUND_CASES`: cases of each property in a round (default
 //!   256).
 //! - `AETHER_FAULTS_FAILURES`: the folder a failure is written to, as
-//!   `<property>-<seed>.txt` (default `target/faults-failures`).
+//!   `<property>-<seed>.txt` (default `target/faults-failures`). A relative
+//!   folder is taken from the workspace's root, not from the package's,
+//!   which is where `cargo test` runs a test binary.
 //!
 //! A round plays each property in a process of its own (the shim and the
 //! director are one per process, kept from case to case, so many rounds in
@@ -31,6 +33,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The properties a round plays, as libtest names them.
+/// `faults_file::generated_faults_never_crash_or_hang_a_child_start` is not
+/// one: each of its cases starts a fixture process through the injector,
+/// which needs the built fixtures and a probe of them, and its few cases a
+/// round would add little.
 const PROPERTIES: [&str; 2] = [
     "faults_file::generated_faults_never_crash_or_hang_a_file_call",
     "faults_registry::generated_faults_never_crash_or_hang_a_registry_call",
@@ -123,6 +129,8 @@ pub(crate) fn soak(
     };
     loop {
         let seed = round_seed(first_seed, report.rounds);
+        // Said before the round, so a round that hangs is known by its seed.
+        eprintln!("faults soak: round {} seed {seed}: starting", report.rounds);
         for property in PROPERTIES {
             let outcome = play(property, seed, cases);
             eprintln!(
@@ -152,6 +160,17 @@ pub(crate) fn soak(
     }
 }
 
+/// The folder failures are written to: `AETHER_FAULTS_FAILURES`'s, or
+/// `target/faults-failures`, a relative one taken from the workspace's root.
+pub(crate) fn failures_dir(var: Option<&str>) -> PathBuf {
+    let p = PathBuf::from(var.unwrap_or("target/faults-failures"));
+    if p.is_absolute() {
+        p
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(p)
+    }
+}
+
 /// The soak `AETHER_FAULTS_SOAK` and the other variables ask for.
 #[test]
 #[ignore = "a soak: cargo test -p aether-hooks --test harness soak_ -- --ignored"]
@@ -176,9 +195,7 @@ fn soak_generated_faults() {
                 .expect("AETHER_FAULTS_ROUND_CASES is a number")
         })
         .unwrap_or(ROUND_CASES);
-    let dir = PathBuf::from(
-        var("AETHER_FAULTS_FAILURES").unwrap_or_else(|| "target/faults-failures".into()),
-    );
+    let dir = failures_dir(var("AETHER_FAULTS_FAILURES").as_deref());
     eprintln!(
         "faults soak: {budget:?}, first seed {seed} (AETHER_FAULTS_SEED), {cases} cases a \
          property and round, failures in {}",
@@ -216,6 +233,30 @@ mod tests {
             passed: true,
             output: String::new(),
         }
+    }
+
+    /// A relative failures folder is the workspace's, as the workflow and
+    /// the docs name it; an absolute one is kept.
+    #[test]
+    fn a_relative_failures_folder_is_taken_from_the_workspace_root() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert_eq!(
+            failures_dir(Some("target/soak/faults")),
+            root.join("target/soak/faults")
+        );
+        assert_eq!(failures_dir(None), root.join("target/faults-failures"));
+        let abs = std::env::temp_dir().join("x");
+        assert_eq!(failures_dir(abs.to_str()), abs);
+    }
+
+    #[test]
+    fn one_test_passed_is_read_from_libtest_s_summary() {
+        let ok = |n: &str| {
+            format!("running 1 test\ntest x ... ok\n\ntest result: ok. {n} passed; 0 failed;")
+        };
+        assert!(crate::common::one_passed(&ok("1")));
+        assert!(!crate::common::one_passed(&ok("11")));
+        assert!(!crate::common::one_passed(&ok("0")));
     }
 
     #[test]

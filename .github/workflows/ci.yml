@@ -49,8 +49,10 @@ jobs:
       # 32-bit injector) and components
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      # The key soak.yml's Windows jobs restore too.
       - uses: Swatinem/rust-cache@v2.9.3
         with:
+          shared-key: workspace-${{ runner.os }}
           save-if: ${{ env.SAVE_LARGE_CACHES == 'true' }}
       - name: Format (cargo fmt --check)
         run: cargo fmt --all --check
@@ -160,8 +162,10 @@ jobs:
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       # fuzz/ builds into a target folder of its own (its own workspace).
+      # The key soak.yml's Linux job restores too.
       - uses: Swatinem/rust-cache@v2.9.3
         with:
+          shared-key: workspace-${{ runner.os }}
           save-if: ${{ env.SAVE_LARGE_CACHES == 'true' }}
           workspaces: |
             . -> target

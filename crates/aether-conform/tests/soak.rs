@@ -136,6 +136,17 @@ fn a_broken_director_is_found_kept_going_past_and_each_failure_written_once() {
     assert!(seen >= 2, "{v:#}");
     assert_eq!(v["distinct_failures"].as_u64().unwrap(), list.len() as u64);
     assert!(!list.is_empty() && list.len() as u64 <= seen, "{v:#}");
+    // One defect, found in batch after batch from other seeds, shrinks to a
+    // few shapes at most, not one failure per finding.
+    assert!(
+        (list.len() as u64) < seen && list.len() <= 3,
+        "{} distinct of {seen}: {v:#}",
+        list.len()
+    );
+    assert!(
+        list.iter().any(|f| f["occurrences"].as_u64().unwrap() > 1),
+        "{v:#}"
+    );
     assert_eq!(
         list.iter()
             .map(|f| f["occurrences"].as_u64().unwrap())

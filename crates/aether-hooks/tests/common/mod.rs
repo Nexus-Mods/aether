@@ -111,6 +111,13 @@ pub(crate) fn run_isolated_output_with(
     Some(stdout.into_owned())
 }
 
+/// Whether libtest's summary in `stdout` says exactly one test ran and
+/// passed (`11 passed` is not one).
+#[allow(dead_code)]
+pub(crate) fn one_passed(stdout: &str) -> bool {
+    stdout.contains("test result: ok. 1 passed;")
+}
+
 /// What one test run in a process of its own did ([`run_child`]).
 #[allow(dead_code)]
 pub(crate) struct Child {
@@ -136,7 +143,7 @@ pub(crate) fn run_child(name: &str, env: &[(&str, &str)]) -> Child {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     Child {
-        passed: out.status.success() && stdout.contains("1 passed"),
+        passed: out.status.success() && one_passed(&stdout),
         output: format!(
             "{stdout}
 {stderr}"

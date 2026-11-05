@@ -15,7 +15,7 @@ on:
         description: Minutes each job runs (conformance and shim faults)
         default: '120'
       director:
-        description: reference, or an adapter command line run from the repository root (conformance only)
+        description: reference, or an adapter command line run from the repository root, of a director that needs no build step here (conformance only)
         default: reference
       seed:
         description: First seed (empty for one from the clock)
@@ -46,6 +46,9 @@ jobs:
         run: |
           case "$DURATION" in
             ''|*[!0-9]*) echo "duration must be a whole number of minutes, not '$DURATION'" >&2; exit 1 ;;
+          esac
+          case "$SEED" in
+            *[!0-9]*) echo "seed must be empty or a whole number, not '$SEED'" >&2; exit 1 ;;
           esac
           if [ "$DURATION" -lt 1 ] || [ "$DURATION" -gt 300 ]; then
             echo "duration must be 1 to 300 minutes, not $DURATION" >&2
@@ -85,8 +88,10 @@ jobs:
         shell: pwsh
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      # ci.yml's cache for this system, never saved from here.
       - uses: Swatinem/rust-cache@v2.9.3
         with:
+          shared-key: workspace-${{ runner.os }}
           save-if: false
       - name: Build aether-conform
         run: cargo build --release -p aether-conform
@@ -112,7 +117,10 @@ jobs:
             echo
             jq -r '"\(.cases) cases, \(.rounds) rounds, \(.batches) batches, \(.distinct_failures) distinct failure(s), \(.wall_seconds) s"' target/soak/summary.json
             echo
-            jq -r '.failures[] | "- `\(.id)` (\(.kind), \(.class), seen \(.occurrences) time(s), seed \(.seed))\n\n  ```\n  \(.replay)\n  ```"' target/soak/summary.json
+            # At most 30 listed: the job summary holds 1 MiB; every failure
+            # is in the uploaded summary.json.
+            jq -r '.failures[:30][] | "- `\(.id)` (\(.kind), \(.class), seen \(.occurrences) time(s), seed \(.seed))\n\n  ```\n  \(.replay)\n  ```"' target/soak/summary.json
+            jq -r 'if (.failures | length) > 30 then "\n\((.failures | length) - 30) more in summary.json" else empty end' target/soak/summary.json
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Soak results
         if: always()
@@ -134,7 +142,8 @@ jobs:
       TEMP: C:\vfstmp
       VFS_TEST_REQUIRE_ALL: '1'
       AETHER_FAULTS_SOAK: ${{ inputs.duration || '120' }}m
-      AETHER_FAULTS_FAILURES: target/soak/faults
+      # Absolute: cargo test runs the harness from the package's folder.
+      AETHER_FAULTS_FAILURES: ${{ github.workspace }}/target/soak/faults
     steps:
       - uses: actions/checkout@v4
       - name: Create an 8.3-free TMP
@@ -142,12 +151,20 @@ jobs:
         shell: pwsh
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      # ci.yml's cache for this system, never saved from here.
       - uses: Swatinem/rust-cache@v2.9.3
         with:
+          shared-key: workspace-${{ runner.os }}
           save-if: false
+      # What the harness launches, built as ci.yml's Windows job builds it
+      # before its tests: the injector, the shim and the fixtures (staticimp
+      # after vproxy, whose import library it links).
+      - name: Build inject artifacts
+        run: cargo build -p aether-inject -p aether-shim -p aether-fixtures -p aether-fixture-vproxy -p aether-shimbench && cargo build -p aether-fixture-staticimp
+      # The seed was checked by the plan job: empty or a whole number.
       - name: Set the first seed
-        if: inputs.seed != ''
-        run: echo "AETHER_FAULTS_SEED=${{ inputs.seed }}" >> $env:GITHUB_ENV
+        if: env.SEED != ''
+        run: echo "AETHER_FAULTS_SEED=$env:SEED" >> $env:GITHUB_ENV
         shell: pwsh
       - name: Soak
         run: cargo test -p aether-hooks --test harness soak_ -- --ignored --nocapture

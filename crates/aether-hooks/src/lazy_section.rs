@@ -245,6 +245,25 @@ const FILL_WORKERS: usize = if cfg!(target_pointer_width = "64") {
     2
 };
 
+/// Each fill worker's stack. A fill is one READ through the ring (and, if
+/// it panics, the panic hook): its deepest, measured on x64 in a test build
+/// (`a_fill_worker_s_deepest_is_a_fraction_of_the_32_bit_stack`), is 16 KiB
+/// committed, 36 KiB for a panic whose hook symbolises a backtrace; a
+/// release build's frames are smaller, and x86's. 64-bit keeps a wide
+/// margin, its address space being plentiful; 32-bit, where each worker's
+/// stack is address space a game is short of, keeps four times the test's
+/// bound, which is a quarter of it.
+const FILL_WORKER_STACK: usize = fill_worker_stack(usize::BITS);
+
+/// [`FILL_WORKER_STACK`] for a target whose pointers are `bits` wide.
+pub(crate) const fn fill_worker_stack(bits: u32) -> usize {
+    if bits == 64 {
+        8 * 1024 * 1024
+    } else {
+        256 * 1024
+    }
+}
+
 /// Where a fill writes.
 #[derive(Debug, Clone, Copy)]
 enum Target {
@@ -290,7 +309,7 @@ fn ensure_worker() {
                 std::thread::Builder::new()
                     .name("vfs-lazy-fill".into())
                     // Deep FUSE I/O must never run on the game's primary stack.
-                    .stack_size(8 * 1024 * 1024)
+                    .stack_size(FILL_WORKER_STACK)
                     .spawn(move || fill_worker(jobs))
                     .is_ok()
             })
@@ -318,8 +337,20 @@ fn fill_worker(jobs: &Mutex<Receiver<FillJob>>) {
             || unsafe { fill_into(job.fh, job.file_off, job.target, job.len, job.span) },
             || None,
         );
+        #[cfg(feature = "test-support")]
+        WORKER_STACK_PEAK.fetch_max(crate::peb::stack_committed(), Ordering::SeqCst);
         let _ = job.reply.send(n);
     }
+}
+
+/// The most stack a fill worker has committed, after any job.
+#[cfg(feature = "test-support")]
+static WORKER_STACK_PEAK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// [`WORKER_STACK_PEAK`].
+#[cfg(feature = "test-support")]
+pub(crate) fn worker_stack_peak() -> usize {
+    WORKER_STACK_PEAK.load(Ordering::SeqCst)
 }
 
 /// Stream `[file_off, file_off+len)` of `fh` into `target`, then zeros up to

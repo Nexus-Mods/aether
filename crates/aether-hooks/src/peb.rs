@@ -77,6 +77,25 @@ pub(crate) fn process_parameters() -> usize {
     unsafe { *((peb + PEB_PROCESS_PARAMETERS) as *const usize) }
 }
 
+/// How much of this thread's stack is committed: `NT_TIB.StackBase` less
+/// `NT_TIB.StackLimit`, which the guard page moves down as the stack grows,
+/// so the deepest the thread has been (and a page or two).
+#[cfg(feature = "test-support")]
+pub(crate) fn stack_committed() -> usize {
+    let (base, limit): (usize, usize);
+    // SAFETY: reads two fields of the current thread's TEB through its
+    // segment register; no memory is written.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x08]", "mov {}, gs:[0x10]", out(reg) base, out(reg) limit, options(nostack, readonly, preserves_flags))
+    };
+    #[cfg(target_arch = "x86")]
+    unsafe {
+        core::arch::asm!("mov {}, fs:[0x04]", "mov {}, fs:[0x08]", out(reg) base, out(reg) limit, options(nostack, readonly, preserves_flags))
+    };
+    base - limit
+}
+
 /// An ntdll export, looked up once.
 fn ntdll_export(name: &core::ffi::CStr) -> Option<unsafe extern "system" fn() -> isize> {
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};

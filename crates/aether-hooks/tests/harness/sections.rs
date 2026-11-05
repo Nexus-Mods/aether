@@ -1282,3 +1282,75 @@ fn a_fill_that_panics_is_tried_again_and_releases_its_view() {
     close(section);
     close(file);
 }
+
+// ---- demand-paged: the fill workers' stack -------------------------------
+
+/// Which fills [`a_fill_worker_s_deepest_is_a_fraction_of_the_32_bit_stack`]
+/// runs, in a process of its own each.
+const STACK_CASE: &str = "AETHER_FILL_STACK_CASE";
+
+/// The fill workers' stack is sized to what a fill uses: the deepest a
+/// worker goes (READ, wire.md 3.4.4) is at most a quarter of the 32-bit
+/// workers' stack, measured here on x64, whose frames are the larger, in
+/// a test build, whose frames are larger than a release's. Over the bulk
+/// arena into a section's second view; inline READs over the file ring into
+/// private memory; and a fill that panics, with `RUST_BACKTRACE=full`, so
+/// the panic hook symbolises a backtrace on the worker.
+#[test]
+fn a_fill_worker_s_deepest_is_a_fraction_of_the_32_bit_stack() {
+    fn f() {}
+    let name = std::any::type_name_of_val(&f);
+    let case = std::env::var(STACK_CASE).ok();
+    let Some(case) = case else {
+        for (case, backtrace) in [("bulk", "0"), ("inline", "0"), ("panic", "full")] {
+            crate::common::run_isolated_output_with(
+                name,
+                None,
+                &[(STACK_CASE, case), ("RUST_BACKTRACE", backtrace)],
+            );
+        }
+        return;
+    };
+    if crate::common::run_isolated_output_with(name, None, &[]).is_some() {
+        return;
+    }
+    let want = pattern(LAZY);
+    let fake = Fake::new().with(FILE, want.clone(), ReadStyle::Whole);
+    let opts = match case.as_str() {
+        "inline" => {
+            aether_hooks::fail_shared_lazy_reserve(true);
+            fakedirector::Options {
+                arena_len: 0,
+                ring: fakedirector::RingKind::File,
+                ..fakedirector::Options::default()
+            }
+        }
+        _ => fakedirector::Options::default(),
+    };
+    aether_hooks::set_eager_section_max(EAGER_MAX);
+    let root = root();
+    let _served = fakedirector::install_with(&root, fake, opts);
+    std::mem::forget(aether_hooks::install().expect("install"));
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section);
+    for at in (0..LAZY).step_by(CHUNK) {
+        if case == "panic" {
+            aether_hooks::panic_next_lazy_fill(true);
+        }
+        assert!(
+            bytes(v, at, 1) == want[at..at + 1],
+            "{case}: the bytes at {at}"
+        );
+    }
+    let peak = aether_hooks::lazy_fill_worker_stack_peak();
+    let stack = aether_hooks::lazy_fill_worker_stack(32);
+    assert!(peak > 0, "{case}: no fill ran on a worker");
+    assert!(
+        peak * 4 <= stack,
+        "{case}: a fill worker committed {peak} bytes of stack, over a quarter of the 32-bit workers' {stack}"
+    );
+    unmap(v);
+    close(section);
+    close(file);
+}

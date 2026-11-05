@@ -171,11 +171,11 @@ pub(crate) struct PathCacheState {
 }
 
 /// The path cache's hash: rustc's FxHash, a word at a time, with its output
-/// rotated so the bits the table indexes and tags by are mixed ones (as
-/// rustc-hash 2 does). Not resistant to chosen collisions, and it need not
-/// be: the keys are the paths this process opens, not input from across a
-/// trust boundary. SipHash, the default, costs several times as much per byte
-/// on every lookup, a hit included.
+/// laid out so the bits the table indexes and tags by are mixed ones
+/// ([`FxHasher::finish_for`]). Not resistant to chosen collisions, and it
+/// need not be: the keys are the paths this process opens, not input from
+/// across a trust boundary. SipHash, the default, costs several times as
+/// much per byte on every lookup, a hit included.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct FxHasher {
     hash: u64,
@@ -186,6 +186,22 @@ impl FxHasher {
 
     fn add(&mut self, word: u64) {
         self.hash = self.hash.wrapping_add(word).wrapping_mul(Self::K);
+    }
+
+    /// `hash` as the table wants it where a `usize` is `pointer_bits` wide.
+    ///
+    /// In a multiply chain a bit depends only on the bits at or below it of
+    /// each word, so the top bits are the mixed ones. hashbrown indexes by
+    /// the low bits of the hash as a `usize` and tags by that `usize`'s top 7.
+    /// 64-bit: a rotation brings mixed bits to both (as rustc-hash 2 does).
+    /// 32-bit: the `usize` is the low half, so the high half is the answer:
+    /// the tag is bits 57..63, the index bits 32 and up.
+    fn finish_for(hash: u64, pointer_bits: u32) -> u64 {
+        if pointer_bits == 64 {
+            hash.rotate_left(26)
+        } else {
+            hash >> 32
+        }
     }
 }
 
@@ -212,7 +228,7 @@ impl Hasher for FxHasher {
     }
 
     fn finish(&self) -> u64 {
-        self.hash.rotate_left(26)
+        Self::finish_for(self.hash, usize::BITS)
     }
 }
 
@@ -271,10 +287,17 @@ impl PathCache {
 #[cfg(test)]
 mod tests {
     use super::FxHasher;
-    use std::hash::{BuildHasher, BuildHasherDefault};
+    use std::hash::Hash;
+
+    /// `s`'s hash as a build for `pointer_bits` answers it.
+    fn hash_for(s: &str, pointer_bits: u32) -> u64 {
+        let mut h = FxHasher::default();
+        s.hash(&mut h);
+        FxHasher::finish_for(h.hash, pointer_bits)
+    }
 
     fn hash(s: &str) -> u64 {
-        BuildHasherDefault::<FxHasher>::default().hash_one(s)
+        hash_for(s, 64)
     }
 
     /// Paths that differ only in their tail, their length or one letter
@@ -293,10 +316,27 @@ mod tests {
         paths.push(r"\??\C:\Games\a.esp".into());
         let hashes: std::collections::HashSet<u64> = paths.iter().map(|p| hash(p)).collect();
         assert_eq!(hashes.len(), paths.len(), "64-bit collisions");
-        // hashbrown's tag is the top 7 bits; its bucket index the low ones.
+        // hashbrown's tag is the top 7 bits of a 64-bit hash; its bucket
+        // index the low ones.
         let tags: std::collections::HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
         let low: std::collections::HashSet<u64> = hashes.iter().map(|h| h & 0xfff).collect();
-        assert_eq!(tags.len(), 128, "tags used");
-        assert!(low.len() > 3900, "low 12 bits: {} of 4096 used", low.len());
+        assert_eq!(tags.len(), 128, "64-bit tags used");
+        assert!(
+            low.len() > 3900,
+            "64-bit low 12 bits: {} of 4096 used",
+            low.len()
+        );
+        // On a 32-bit target hashbrown keeps the hash's low 32 bits (a
+        // `usize`): its tag is their top 7, bits 25..31, and its index their
+        // low ones. Computed here in u32 as an i686 build does.
+        let h32: Vec<u32> = paths.iter().map(|p| hash_for(p, 32) as u32).collect();
+        let tags: std::collections::HashSet<u32> = h32.iter().map(|h| h >> 25).collect();
+        let low: std::collections::HashSet<u32> = h32.iter().map(|h| h & 0xfff).collect();
+        assert_eq!(tags.len(), 128, "32-bit tags used");
+        assert!(
+            low.len() > 3900,
+            "32-bit low 12 bits: {} of 4096 used",
+            low.len()
+        );
     }
 }

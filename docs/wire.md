@@ -772,7 +772,10 @@ Reply, 24 bytes:
   Never set it for a write open or a directory. Since every handle of a file
   reads the file as it is now (3.4.4), a handle on a file any request can
   change cannot be immutable: never set it for a file a writable provider
-  holds.
+  holds, nor for one it serves as an overlay serves the names of its
+  read-only layers (3.4.9). A file only a lower layer holds can be copied
+  up and written while the handle is open, and the shim's read cache would
+  then serve the bytes it had.
 - `mount_gen`: a generation the director bumps whenever a root's content is
   replaced. The cache keys a file's blocks by (root, folded path, size,
   `mount_gen`), so two immutable opens of one path with equal size and
@@ -1041,10 +1044,11 @@ whose parent is missing is `ST_NOT_FOUND`; one whose parent is a file is
 answers `ST_NOT_FOUND` for both.
 
 **Names only in a read-only lower.** A director may serve a writable root as
-an overlay: a writable upper over a read-only lower. For a name that exists
-only in the lower, not in the upper, such a director may answer DELETE,
-RENAME and MKDIR as follows, where the rules above (written for names the
-writable provider holds) say otherwise:
+an overlay: a writable upper over one or more read-only lower layers. For a
+name that exists only in a lower, not in the upper, such a director may
+answer DELETE, RENAME and MKDIR as follows, where the rules above (written
+for names the writable provider holds) say otherwise; the answers the rules
+above give remain allowed for such a name too:
 
 - DELETE of a lower-only name, a directory with children included, hides it
   (a whiteout in the upper) and answers `ST_OK`.
@@ -1058,8 +1062,15 @@ writable provider holds) say otherwise:
   as it does for any existing directory, and leaves the directory's listing
   as it was. (The reference answers `ST_EXISTS`.)
 
-The reference director gives these answers for a root it serves with read-only
-layers beneath its writable upper.
+Whatever it answers to these, a copy-up keeps a file's identity. When the
+overlay copies a lower-only file up (at a write open or at its first change,
+as the director chooses), the upper's copy, with the lower's bytes, is the
+same file: every handle opened on it before then reads it, and what is
+written to it, from then on (3.4.4), as every handle opened after does. A
+read open of a lower-only file is never `immutable` (3.4.3).
+
+The reference director gives the answers in the list above for a root it
+serves with read-only layers beneath its writable upper.
 
 #### 3.4.10 CLOSE (11)
 

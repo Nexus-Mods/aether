@@ -803,6 +803,7 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
         passed: false,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     };
     for mount in [Mount::Files, Mount::Registry] {
         if let Some(e) = one_mount(adapter, timeout, mount, &mut result.steps)? {

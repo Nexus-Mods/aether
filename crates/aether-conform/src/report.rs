@@ -41,6 +41,14 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
     for (n, s) in report.scenarios.iter().enumerate() {
         let n = n + 1;
         let name = tap_name(&s.name);
+        if let Some(why) = &s.skipped {
+            out.push_str(&format!(
+                "ok {n} - {name} # SKIP {}
+",
+                tap_name(why)
+            ));
+            continue;
+        }
         if s.passed {
             out.push_str(&format!("ok {n} - {name}\n"));
             continue;
@@ -68,6 +76,17 @@ pub fn tap(report: &RunReport, planned: usize) -> String {
             }
         }
         out.push_str("  ...\n");
+    }
+    let skipped = report
+        .scenarios
+        .iter()
+        .filter(|s| s.skipped.is_some())
+        .count();
+    if skipped > 0 {
+        out.push_str(&format!(
+            "# skipped {skipped}
+"
+        ));
     }
     for (op, counts) in &report.answers {
         let list: Vec<String> = counts.iter().map(|(a, n)| format!("{a} {n}")).collect();
@@ -129,6 +148,7 @@ fn scenario(s: &ScenarioResult) -> Value {
         "name": s.name,
         "file": s.file.to_string_lossy(),
         "passed": s.passed,
+        "skipped": s.skipped,
         "error": s.error,
         "steps": s.steps.iter().map(|st| json!({
             "index": st.index,
@@ -156,6 +176,7 @@ mod tests {
                     passed: *passed,
                     steps: Vec::new(),
                     error: None,
+                    skipped: None,
                 })
                 .collect(),
             adapter_error: None,

@@ -1790,3 +1790,78 @@ fn overlays_giving_the_general_rules_or_refusing_layered_renames_pass() {
         assert_eq!(code, Some(0), "{how}: {all}");
     }
 }
+
+/// An adapter whose director serves no root as an overlay says so in its
+/// mount answers (`"layers": false`) and refuses a tree with lower layers.
+/// The run skips the layered scenarios (reported skipped, neither passed
+/// nor failed), generates no layered root (a refused mount would fail the
+/// generated entry) and passes (docs/conformance.md, "The adapter
+/// protocol").
+#[test]
+fn a_director_serving_no_layers_skips_the_layered_scenarios_and_generates_none() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let out = aether_testkit::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    let director = format!("{} test-adapter --misbehave no-layers", quoted_exe());
+    let failures = out.path().join("failures");
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+        "--generate",
+        "--cases",
+        "256",
+        "--seed",
+        "3",
+        "--concurrent",
+        "4",
+        "--concurrent-cases",
+        "32",
+        "--failures",
+        failures.to_str().unwrap(),
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    let all = all_output(&o);
+    assert_eq!(o.status.code(), Some(0), "{all}");
+    let v: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let mut skipped = Vec::new();
+    for s in v["scenarios"].as_array().unwrap() {
+        let name = s["name"].as_str().unwrap();
+        if s["skipped"].is_string() {
+            assert_eq!(s["passed"], false, "{name}");
+            skipped.push(name.to_string());
+        } else {
+            assert_eq!(s["passed"], true, "{name}: {s:#}");
+        }
+    }
+    let layered: Vec<String> = aether_conform::scenario::load_dir(&dir)
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.tree.roots.iter().any(|r| !r.lower.is_empty()))
+        .map(|s| s.name)
+        .collect();
+    assert!(!layered.is_empty());
+    assert_eq!(skipped, layered, "{all}");
+    // The TAP report says SKIP.
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+    ]);
+    let out = stdout(&o);
+    assert!(
+        out.contains("ok 49 - overlay-copy-up-handles # SKIP"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("# skipped {}", layered.len())),
+        "{out}"
+    );
+}

@@ -164,7 +164,10 @@ fn probe(adapter: &mut Adapter, file: &Path) -> Result<Limits, GenerateError> {
         Ok(env) => {
             adapter.unmount()?;
             let (cap, arena) = crate::attach::payload_cap_and_arena(&env);
-            Ok(Limits::of(cap, arena))
+            Ok(Limits {
+                layers: adapter.serves_layers(),
+                ..Limits::of(cap, arena)
+            })
         }
         Err(_) => Ok(Limits::default()),
     }
@@ -307,6 +310,7 @@ fn cases_against(
             passed: false,
             steps: r.steps,
             error: r.error.map(|e| format!("case {case}: {e}")),
+            skipped: None,
         });
     }
     Ok(ScenarioResult {
@@ -315,6 +319,7 @@ fn cases_against(
         passed: true,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     })
 }
 
@@ -342,6 +347,7 @@ mod tests {
                 })
                 .collect(),
             error: error.map(str::to_string),
+            skipped: None,
         }
     }
 

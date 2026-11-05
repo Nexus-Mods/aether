@@ -367,7 +367,7 @@ impl Soak {
                 ("concurrent", false) => played_rounds += u64::from(case.map_or(rounds, |c| c + 1)),
                 _ => {}
             }
-            if r.passed {
+            if r.passed || r.skipped.is_some() {
                 continue;
             }
             let message = r.error.clone().unwrap_or_default();

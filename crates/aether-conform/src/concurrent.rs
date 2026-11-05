@@ -624,7 +624,10 @@ fn probe(adapter: &mut Adapter, file: &Path, timeout: Duration) -> Result<Probe,
     let slots = attached.map_err(|e| GenerateError::Generator(format!("attach failed: {e}")))?;
     let (cap, arena) = crate::attach::payload_cap_and_arena(&env);
     Ok(Probe {
-        limits: Limits::of(cap, arena),
+        limits: Limits {
+            layers: adapter.serves_layers(),
+            ..Limits::of(cap, arena)
+        },
         slots,
     })
 }
@@ -663,6 +666,7 @@ fn rounds(
         passed: false,
         steps,
         error,
+        skipped: None,
     };
     for r in 0..opts.cases {
         let round = round(&mut runner, opts, probe.limits, r, probe.slots)?;
@@ -723,6 +727,7 @@ fn rounds(
         passed: true,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     })
 }
 

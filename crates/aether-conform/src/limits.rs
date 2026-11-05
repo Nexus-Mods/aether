@@ -117,6 +117,7 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
         passed: false,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     };
     let file = std::env::temp_dir().join(format!(
         "aether-conform-limits-{}-{}.json",

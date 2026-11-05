@@ -1130,6 +1130,9 @@ pub struct Limits {
     pub write: usize,
     /// Whether the ring has a bulk arena (`VFS_ARENA_LEN` above 0).
     pub arena: bool,
+    /// Whether the director serves roots with `lower` layers: without, no
+    /// generated root has any.
+    pub layers: bool,
 }
 
 impl Limits {
@@ -1139,6 +1142,7 @@ impl Limits {
             inline_read: payload_cap.saturating_sub(8),
             write: payload_cap.saturating_sub(24) as usize,
             arena: arena_len > 0,
+            layers: true,
         }
     }
 }
@@ -1223,7 +1227,13 @@ pub fn build_with(
     description: &str,
     limits: Limits,
 ) -> Result<Scenario, String> {
-    let (tree, roots) = build_tree(&input.tree);
+    let mut spec = input.tree.clone();
+    if !limits.layers {
+        for r in &mut spec.roots {
+            r.lower.clear();
+        }
+    }
+    let (tree, roots) = build_tree(&spec);
     tree.validate()
         .map_err(|e| format!("generator: an invalid tree: {e}"))?;
     let mut g = Gen::new(&tree, roots.clone(), limits)?;
@@ -4584,6 +4594,7 @@ mod tests {
                 inline_read: 100,
                 write: 50,
                 arena,
+                layers: true,
             };
             let mut runner = proptest::test_runner::TestRunner::deterministic();
             let (mut reads, mut writes) = (0, 0);

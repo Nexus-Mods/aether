@@ -89,6 +89,10 @@ pub struct ScenarioResult {
     /// mount, a failed attach, a ring that stopped answering, an adapter
     /// error.
     pub error: Option<String>,
+    /// Why the scenario was not played: its tree has `lower` layers and
+    /// the director serves no root as an overlay. A skipped scenario is not
+    /// passed, and fails nothing.
+    pub skipped: Option<String>,
 }
 
 /// A whole run.
@@ -135,7 +139,11 @@ fn count_answers(tally: &mut Answers, s: &Scenario, r: &ScenarioResult) {
 
 impl RunReport {
     pub fn passed(&self) -> bool {
-        self.adapter_error.is_none() && self.scenarios.iter().all(|s| s.passed)
+        self.adapter_error.is_none()
+            && self
+                .scenarios
+                .iter()
+                .all(|s| s.passed || s.skipped.is_some())
     }
 }
 
@@ -217,11 +225,16 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             passed: false,
             steps: Vec::new(),
             error: None,
+            skipped: None,
         };
         match one(&mut adapter, file, s, opts.timeout, &mut result) {
             Ok(()) => {
-                result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
-                count_answers(&mut report.answers, s, &result);
+                result.passed = result.error.is_none()
+                    && result.skipped.is_none()
+                    && result.steps.iter().all(|s| s.passed);
+                if result.skipped.is_none() {
+                    count_answers(&mut report.answers, s, &result);
+                }
                 report.scenarios.push(result);
             }
             Err(e) => {
@@ -288,9 +301,11 @@ pub(crate) fn play_file(
         passed: false,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     };
     one(adapter, file, s, timeout, &mut result)?;
-    result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
+    result.passed =
+        result.error.is_none() && result.skipped.is_none() && result.steps.iter().all(|s| s.passed);
     Ok(result)
 }
 
@@ -303,8 +318,18 @@ fn one(
     timeout: Duration,
     out: &mut ScenarioResult,
 ) -> Result<(), AdapterError> {
+    let layered = s.tree.roots.iter().any(|r| !r.lower.is_empty());
+    let unserved = "the director serves no root as an overlay, and the tree has lower layers";
+    if layered && !adapter.serves_layers() {
+        out.skipped = Some(unserved.into());
+        return Ok(());
+    }
     let env = match adapter.mount(file)? {
         Ok(env) => env,
+        Err(_) if layered && !adapter.serves_layers() => {
+            out.skipped = Some(unserved.into());
+            return Ok(());
+        }
         Err(why) => {
             out.error = Some(format!("mount refused: {why}"));
             return Ok(());

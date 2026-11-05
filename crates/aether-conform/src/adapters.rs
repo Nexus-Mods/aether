@@ -432,6 +432,12 @@ pub enum Break {
     /// refuse;
     /// `Reference::refuse_layered_dir_renames`). A run must pass it.
     RefuseLayeredDirRenames,
+    /// Not a broken rule: a director that serves no root as an overlay.
+    /// Every mount answer says `"layers": false`, and a tree with `lower`
+    /// layers is refused (docs/conformance.md, "The adapter protocol"). A
+    /// run must pass it, the layered scenarios skipped and no generated
+    /// root layered.
+    NoLayers,
 }
 
 impl Break {
@@ -527,6 +533,7 @@ impl Break {
             "rename-moves-upper-part" => Some(Break::RenameMovesUpperPart),
             "lower-general-rules" => Some(Break::LowerGeneralRules),
             "refuse-layered-dir-renames" => Some(Break::RefuseLayeredDirRenames),
+            "no-layers" => Some(Break::NoLayers),
             _ => None,
         }
     }
@@ -547,14 +554,18 @@ pub fn reference_adapter(kind: RingKind, arena: bool, broken: Option<Break>) -> 
             if mounted.is_some() {
                 return json!({"ok": false, "error": "a tree is already mounted"});
             }
-            match mount(Path::new(&scenario), kind, arena, broken) {
+            let mut answer = match mount(Path::new(&scenario), kind, arena, broken) {
                 Ok(m) => {
                     let env = m.env.clone();
                     mounted = Some(m);
                     json!({"ok": true, "env": env})
                 }
                 Err(e) => json!({"ok": false, "error": e}),
+            };
+            if broken == Some(Break::NoLayers) {
+                answer["layers"] = json!(false);
             }
+            answer
         }
         AdapterRequest::Unmount => match mounted.take().map(Mounted::unmount) {
             Some(Err(e)) => json!({"ok": false, "error": e}),
@@ -935,6 +946,9 @@ fn mount(
     broken: Option<Break>,
 ) -> Result<Mounted, String> {
     let s = crate::scenario::load(scenario).map_err(|e| e.to_string())?;
+    if broken == Some(Break::NoLayers) && s.tree.roots.iter().any(|r| !r.lower.is_empty()) {
+        return Err("this director serves no root as an overlay (lower layers)".into());
+    }
     let staged = Arc::new(Mutex::new(Vec::new()));
     let d = Served {
         reference: match broken {

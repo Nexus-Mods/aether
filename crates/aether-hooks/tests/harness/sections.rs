@@ -1006,3 +1006,177 @@ fn threads_on_a_chunk_whose_fill_keeps_failing_all_raise_after_one_bounded_try()
         )
     };
 }
+
+// ---- demand-paged: a fault while the process exits -----------------------
+
+/// Set in [`lazy_exit_child`]'s process: the folder its handshake files are
+/// in. Absent in an ordinary run, so the child test is a no-op then.
+const EXIT_CHILD_DIR: &str = "AETHER_LAZY_EXIT_CHILD_DIR";
+/// The child's exit codes: its exit-time reads saw the file's bytes, saw
+/// other bytes, or never ran (the process ended by its `ExitProcess`).
+const EXIT_FILLED: u32 = 0x0E0F_0001;
+const EXIT_WRONG: u32 = 0x0E0F_0002;
+const EXIT_NOT_READ: u32 = 0x0E0F_0003;
+/// Bytes compared at each exit-time read.
+const EXIT_READ: usize = 16;
+
+/// The child's view, once it is about to exit: its process-detach TLS
+/// callback reads through it. 0 in every other process.
+static EXIT_VIEW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// What those reads should see: the file's bytes at the chunk a killed
+/// thread was filling, and at a chunk nobody touched.
+static EXIT_WANT: std::sync::OnceLock<[[u8; EXIT_READ]; 2]> = std::sync::OnceLock::new();
+/// The two places read at exit.
+const EXIT_AT: [usize; 2] = [TOUCH + PAGE, OTHER_TOUCH];
+
+/// This binary's TLS callback. The loader calls it with
+/// `DLL_PROCESS_DETACH` from `LdrShutdownProcess`: after `ExitProcess` has
+/// ended every other thread (the fill workers among them), with the loader
+/// lock held, where a DLL's detach or its CRT's `atexit` handlers run.
+#[used]
+#[link_section = ".CRT$XLY"]
+static ON_TLS: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) =
+    on_tls;
+
+unsafe extern "system" fn on_tls(
+    _: *mut core::ffi::c_void,
+    reason: u32,
+    _: *mut core::ffi::c_void,
+) {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    const DLL_PROCESS_DETACH: u32 = 0;
+    let v = EXIT_VIEW.load(Ordering::SeqCst);
+    let Some(want) = EXIT_WANT.get() else {
+        return;
+    };
+    if reason != DLL_PROCESS_DETACH || v == 0 {
+        return;
+    }
+    // No allocation: a killed thread may have held the heap's lock.
+    let ok = EXIT_AT.iter().zip(want).all(|(&at, want)| {
+        (0..EXIT_READ).all(|i| core::ptr::read_volatile((v + at + i) as *const u8) == want[i])
+    });
+    TerminateProcess(
+        GetCurrentProcess(),
+        if ok { EXIT_FILLED } else { EXIT_WRONG },
+    );
+}
+
+/// The handshake between the test and its child: a file appearing in `dir`.
+fn wait_for_file(dir: &Path, name: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !dir.join(name).exists() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+/// The process the test watches exit: it maps a demand-paged section of the
+/// test's director, has a thread start a fill of [`TOUCH`]'s chunk (whose
+/// READ the test holds), and exits; at exit its TLS callback reads that
+/// chunk and an untouched one.
+#[test]
+#[ignore = "the child of a_fault_while_the_process_exits_is_filled; inert on its own"]
+fn lazy_exit_child() {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    };
+    let Some(dir) = std::env::var_os(EXIT_CHILD_DIR).map(PathBuf::from) else {
+        return;
+    };
+    // SAFETY: sets this process's error mode; no pointers.
+    unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+    aether_hooks::director::try_init_from_env().expect("attach to the test's director");
+    aether_hooks::set_eager_section_max(EAGER_MAX);
+    std::mem::forget(aether_hooks::install().expect("install"));
+    let root = PathBuf::from(std::env::var_os(aether_env::VIRTUAL_DIR).expect("root"));
+    let want = pattern(LAZY);
+    let _ = EXIT_WANT.set(EXIT_AT.map(|at| want[at..at + EXIT_READ].try_into().unwrap()));
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section) as usize;
+    std::fs::write(dir.join("mapped"), b"").unwrap();
+    assert!(wait_for_file(&dir, "armed"), "the test never held the READ");
+    // Ended by the exit mid-fill: the chunk stays marked as filling.
+    std::thread::spawn(move || bytes(v as *const u8, TOUCH, 1));
+    assert!(
+        wait_for_file(&dir, "go"),
+        "the test never saw the held READ"
+    );
+    EXIT_VIEW.store(v, std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: plain FFI.
+    unsafe { ExitProcess(EXIT_NOT_READ) };
+}
+
+/// A fault in a demand-paged section during process exit is filled, and the
+/// process ends: once `ExitProcess` has ended the fill workers, and the
+/// thread that was filling a chunk, no fill waits on them. At exit the
+/// child reads the chunk the killed thread was filling and one nobody
+/// touched, from its TLS callback's `DLL_PROCESS_DETACH`, and sees the
+/// file's bytes (READ, wire.md 3.4.4).
+#[test]
+fn a_fault_while_the_process_exits_is_filled() {
+    isolate!();
+    use std::time::{Duration, Instant};
+    let root = root();
+    let dir = aether_testkit::tempdir().expect("handshake folder");
+    let served = fakedirector::install_with(
+        &root,
+        Fake::new().with(FILE, pattern(LAZY), ReadStyle::Whole),
+        fakedirector::Options::default(),
+    );
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sections::lazy_exit_child",
+            "--include-ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(EXIT_CHILD_DIR, dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the child");
+    let end = |child: &mut std::process::Child, why: &str| -> ! {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("{why}");
+    };
+    if !wait_for_file(dir.path(), "mapped") {
+        end(&mut child, "the child never mapped the section");
+    }
+    // The next READ, the thread's fill of TOUCH's chunk, is held.
+    let hold = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..reads(Opcode::Read)
+        },
+        Fault::Delay(Duration::from_secs(10)),
+    );
+    std::fs::write(dir.path().join("armed"), b"").unwrap();
+    if !served.faults.wait_applied(hold, 1, Duration::from_secs(10)) {
+        end(&mut child, "the child's fill READ never came");
+    }
+    std::fs::write(dir.path().join("go"), b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break s,
+            None if Instant::now() >= deadline => {
+                end(&mut child, "the child never exited: a fault at exit hung")
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    served.faults.release();
+    assert_eq!(
+        status.code().map(|c| c as u32),
+        Some(EXIT_FILLED),
+        "the child's exit-time reads ({status})"
+    );
+}

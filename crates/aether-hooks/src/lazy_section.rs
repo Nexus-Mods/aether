@@ -190,6 +190,19 @@ static REGIONS: Mutex<BTreeMap<usize, OwnedRegion>> = Mutex::new(BTreeMap::new()
 /// every region, so a wake can be for another chunk, and the waiter then
 /// waits again.
 static FILLED: Condvar = Condvar::new();
+
+/// [`REGIONS`], locked; `None` if it cannot be had. Once the process is
+/// ending (`crate::peb::process_ending`) the lock is only tried: a thread
+/// `ExitProcess` ended inside it never lets it go, and waiting would hang
+/// the exit.
+fn regions() -> Option<std::sync::MutexGuard<'static, BTreeMap<usize, OwnedRegion>>> {
+    if crate::peb::process_ending() {
+        REGIONS.try_lock().ok()
+    } else {
+        REGIONS.lock().ok()
+    }
+}
+
 static VEH_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -266,6 +279,8 @@ static FILL_JOBS: OnceLock<Mutex<Receiver<FillJob>>> = OnceLock::new();
 /// Start the fill workers. Call from a normal call context (section
 /// creation), never from the VEH — see the note above.
 fn ensure_worker() {
+    // Looked up here, in a normal call context, rather than first in a fault.
+    let _ = crate::peb::process_ending();
     FILL_WORKER.get_or_init(|| {
         let (tx, rx) = channel::<FillJob>();
         let jobs = FILL_JOBS.get_or_init(|| Mutex::new(rx));
@@ -310,11 +325,12 @@ fn fill_worker(jobs: &Mutex<Receiver<FillJob>>) {
 /// `span` when all `len` came, returning the bytes read.
 ///
 /// Uses a fill worker when there is one; falls back to an inline read (aether-inject
-/// expands the primary stack for exactly this) if none started or we are
-/// already *on* one.
+/// expands the primary stack for exactly this) if none started, we are
+/// already *on* one, or none can answer: once the process is ending,
+/// `ExitProcess` has ended them (a job queued then would wait forever).
 fn fill_bytes(fh: u64, file_off: u64, target: Target, len: usize, span: usize) -> Option<usize> {
-    let on_worker = IS_FILL_WORKER.with(|c| c.get());
-    if !on_worker {
+    let inline = IS_FILL_WORKER.with(|c| c.get()) || crate::peb::process_ending();
+    if !inline {
         if let Some(Some(tx)) = FILL_WORKER.get() {
             let (reply, wait) = channel();
             let queued = tx.lock().ok().and_then(|tx| {
@@ -596,8 +612,8 @@ fn track(
     lazy: bool,
     section: usize,
 ) -> bool {
-    match REGIONS.lock() {
-        Ok(mut g) => {
+    match regions() {
+        Some(mut g) => {
             g.insert(
                 base,
                 OwnedRegion {
@@ -616,12 +632,12 @@ fn track(
             );
             true
         }
-        Err(_) => false,
+        None => false,
     }
 }
 
 fn forget(base: usize) {
-    if let Ok(mut g) = REGIONS.lock() {
+    if let Some(mut g) = regions() {
         g.remove(&base);
     }
 }
@@ -671,38 +687,32 @@ pub(crate) fn let_go(fh: Option<u64>) {
 ///
 /// Call *after* retiring the view in [`crate::synth_section::unmap_view`].
 pub(crate) fn on_view_unmapped(addr: usize) {
-    let dropped = match REGIONS.lock() {
-        Ok(mut g) => region_key(&g, addr).and_then(|key| reap(&mut g, key)),
-        Err(_) => None,
-    };
+    let dropped =
+        regions().and_then(|mut g| region_key(&g, addr).and_then(|key| reap(&mut g, key)));
     let_go(dropped);
 }
 
 /// Note that the section handle covering `base` was closed. Frees the region
 /// once the last view is unmapped.
 pub(crate) fn on_section_closed(base: usize) {
-    let dropped = match REGIONS.lock() {
-        Ok(mut g) => region_key(&g, base).and_then(|key| {
+    let dropped = regions().and_then(|mut g| {
+        region_key(&g, base).and_then(|key| {
             if let Some(r) = g.get_mut(&key) {
                 r.section_open = false;
             }
             reap(&mut g, key)
-        }),
-        Err(_) => None,
-    };
+        })
+    });
     let_go(dropped);
 }
 
 /// Whether `addr` falls in a demand-paged region (so a fault there is ours).
 pub(crate) fn is_lazy_base(addr: usize) -> bool {
-    REGIONS
-        .lock()
-        .map(|g| {
-            g.range(..=addr)
-                .next_back()
-                .is_some_and(|(_, r)| r.lazy && addr < r.base + r.reserved)
-        })
-        .unwrap_or(false)
+    regions().is_some_and(|g| {
+        g.range(..=addr)
+            .next_back()
+            .is_some_and(|(_, r)| r.lazy && addr < r.base + r.reserved)
+    })
 }
 
 // ── demand paging ──────────────────────────────────────────────────────────
@@ -856,7 +866,7 @@ fn record_failure(base: usize, chunk: usize) -> Fill {
     let deadline = crate::director::global()
         .map(|c| c.deadline())
         .unwrap_or(aether_ipc::RESPONSE_DEADLINE);
-    let Ok(mut g) = REGIONS.lock() else {
+    let Some(mut g) = regions() else {
         // Nothing to count with: no more tries.
         return Fill::Dead;
     };
@@ -897,8 +907,8 @@ struct Filling(usize, usize);
 
 impl Drop for Filling {
     fn drop(&mut self) {
-        let dropped = match REGIONS.lock() {
-            Ok(mut g) => {
+        let dropped = match regions() {
+            Some(mut g) => {
                 if let Some(r) = g.get_mut(&self.0) {
                     r.filling = r.filling.saturating_sub(1);
                     if r.chunks.get(&self.1) == Some(&Chunk::Filling) {
@@ -907,7 +917,7 @@ impl Drop for Filling {
                 }
                 reap(&mut g, self.0)
             }
-            Err(_) => None,
+            None => None,
         };
         FILLED.notify_all();
         let_go(dropped);
@@ -928,9 +938,8 @@ impl Drop for Filling {
 /// Nothing else waits: fills of other chunks run at the same time.
 unsafe fn fill_chunk_at(addr: usize) -> Fill {
     let (base, file_size, fh, section, chunk_idx, commit_off, commit_len) = {
-        let mut g = match REGIONS.lock() {
-            Ok(g) => g,
-            Err(_) => return Fill::NotOurs,
+        let Some(mut g) = regions() else {
+            return Fill::NotOurs;
         };
         loop {
             let Some((_, region)) = g
@@ -944,7 +953,7 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
             let chunk_idx = off / CHUNK;
             match region.chunks.get(&chunk_idx) {
                 Some(Chunk::Filled) => return Fill::Done,
-                Some(Chunk::Filling) => {
+                Some(Chunk::Filling) if !crate::peb::process_ending() => {
                     // Another thread's fill of this chunk: wait for it to
                     // end, then look again (the region may be gone too).
                     g = match FILLED.wait(g) {
@@ -953,7 +962,9 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
                     };
                     continue;
                 }
-                None => {}
+                // The process is ending, and the thread that was filling
+                // the chunk was ended with every other: this one fills it.
+                Some(Chunk::Filling) | None => {}
             }
             if region.failed.contains(&chunk_idx) {
                 return Fill::Dead;
@@ -1030,7 +1041,7 @@ unsafe fn fill_chunk_at(addr: usize) -> Fill {
         return record_failure(base, chunk_idx);
     }
 
-    if let Ok(mut g) = REGIONS.lock() {
+    if let Some(mut g) = regions() {
         if let Some(region) = g.get_mut(&base) {
             region.chunks.insert(chunk_idx, Chunk::Filled);
             region.failing.remove(&chunk_idx);

@@ -77,6 +77,34 @@ pub(crate) fn process_parameters() -> usize {
     unsafe { *((peb + PEB_PROCESS_PARAMETERS) as *const usize) }
 }
 
+/// An ntdll export, looked up once.
+fn ntdll_export(name: &core::ffi::CStr) -> Option<unsafe extern "system" fn() -> isize> {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    // SAFETY: ntdll is loaded in every process; a NUL-terminated name.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        GetProcAddress(ntdll, name.as_ptr().cast())
+    }
+}
+
+/// Whether the process is ending: `LdrShutdownProcess` has begun
+/// (`RtlDllShutdownInProgress`). `ExitProcess` has then ended every other
+/// thread, and this one, holding the loader lock, runs the DLLs' detach (a
+/// DLL's CRT runs its `atexit` handlers there). No other thread will answer
+/// anything this one waits for.
+pub(crate) fn process_ending() -> bool {
+    type InProgress = unsafe extern "system" fn() -> u8;
+    static F: std::sync::OnceLock<Option<InProgress>> = std::sync::OnceLock::new();
+    let f = F.get_or_init(|| {
+        ntdll_export(c"RtlDllShutdownInProgress").map(|p| {
+            // SAFETY: the export's documented signature, `BOOLEAN (void)`.
+            unsafe { core::mem::transmute::<unsafe extern "system" fn() -> isize, InProgress>(p) }
+        })
+    });
+    // SAFETY: takes no arguments; reads a loader flag.
+    f.is_some_and(|f| unsafe { f() } != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

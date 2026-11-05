@@ -710,6 +710,96 @@ fn a_second_thread_never_reads_a_chunk_before_its_fill_is_done() {
     close(file);
 }
 
+// ---- demand-paged: fills of different chunks ----------------------------
+
+/// Where the other-chunk touches land: outside the warm window and outside
+/// [`TOUCH`]'s chunk.
+const OTHER_TOUCH: usize = 4 * MIB;
+
+/// While one chunk's fill READ is held, a fault on another chunk of the
+/// same section, and one on a chunk of another section, are filled: only a
+/// thread on the held chunk waits for it.
+#[test]
+fn a_held_fill_does_not_hold_fills_of_other_chunks() {
+    isolate!();
+    use std::time::Duration;
+    const OTHER: &str = "data/other.bin";
+    let want = pattern(LAZY);
+    let other_want: Vec<u8> = pattern(LAZY).iter().map(|b| b ^ 0x5A).collect();
+    let (root, served) = serve(
+        Fake::new().with(FILE, want.clone(), ReadStyle::Whole).with(
+            OTHER,
+            other_want.clone(),
+            ReadStyle::Whole,
+        ),
+        true,
+    );
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY).expect("CreateFileMappingW");
+    let v = view(section) as usize;
+    let other_file = open(&root.join(OTHER), GENERIC_READ);
+    let other_section = mapping(other_file, PAGE_READONLY).expect("CreateFileMappingW");
+    let ov = view(other_section) as usize;
+    // The first thread's fill READ is held until released (or MAX_DELAY).
+    let id = served.faults.arm(
+        Match {
+            times: Some(1),
+            ..reads(Opcode::Read)
+        },
+        Fault::Delay(Duration::from_secs(10)),
+    );
+    let first = std::thread::spawn(move || bytes(v as *const u8, TOUCH, PAGE));
+    assert!(
+        served.faults.wait_applied(id, 1, Duration::from_secs(10)),
+        "the first touch's READ never reached the director"
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let same_tx = tx.clone();
+    let same = std::thread::spawn(move || {
+        let _ = same_tx.send(("same", bytes(v as *const u8, OTHER_TOUCH, PAGE)));
+    });
+    let other = std::thread::spawn(move || {
+        let _ = tx.send(("other", bytes(ov as *const u8, OTHER_TOUCH, PAGE)));
+    });
+    // Both while the first fill is still held.
+    let mut early = Vec::new();
+    for _ in 0..2 {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(got) => early.push(got),
+            Err(_) => break,
+        }
+    }
+    let held = !first.is_finished();
+    served.faults.release();
+    let first_got = first.join().unwrap();
+    same.join().unwrap();
+    other.join().unwrap();
+    assert!(
+        held,
+        "the first fill was not held while the others were filled"
+    );
+    assert_eq!(
+        early.len(),
+        2,
+        "fills that finished while another chunk's fill was held: {:?}",
+        early.iter().map(|(w, _)| *w).collect::<Vec<_>>()
+    );
+    for (which, got) in early {
+        let src = if which == "same" { &want } else { &other_want };
+        assert!(
+            got == src[OTHER_TOUCH..OTHER_TOUCH + PAGE],
+            "the {which} chunk's bytes are not the file's"
+        );
+    }
+    assert!(first_got == want[TOUCH..TOUCH + PAGE]);
+    unmap(ov as *const u8);
+    close(other_section);
+    close(other_file);
+    unmap(v as *const u8);
+    close(section);
+    close(file);
+}
+
 // ---- unmapping: real views, and the process an unmap names ---------------
 
 /// A view of a real file (outside every root) unmaps through the hooks: its

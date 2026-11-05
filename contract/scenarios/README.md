@@ -151,6 +151,12 @@ components (`a/../..`) is not sent. Registry paths are sent as written.
   HEARTBEAT, RENAME_X).
 - `{"one_of": [...], "wire": "<section>"}`: any of the listed answers, only
   where wire.md allows more than one, and `wire` names the section that does.
+  A `one_of` may also carry `"choice": "<label>"`. The `one_of`s of one
+  label have lists of equal length and take the alternative of one position
+  together: once a step's answer has ruled out an alternative, a later step
+  of the label that answers as that alternative fails. It is how a scenario
+  shows that a change happened whole or not at all where wire.md allows
+  either (`overlay-rename-both`).
 
 A step may carry a `note`, and `"client": n` (default 0): which client of
 the ring sends it. The run attaches one client per number named, every one

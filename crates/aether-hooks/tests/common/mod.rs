@@ -111,6 +111,39 @@ pub(crate) fn run_isolated_output_with(
     Some(stdout.into_owned())
 }
 
+/// What one test run in a process of its own did ([`run_child`]).
+#[allow(dead_code)]
+pub(crate) struct Child {
+    /// It passed: exit code 0 and one test run.
+    pub(crate) passed: bool,
+    /// What it wrote, standard output then standard error.
+    pub(crate) output: String,
+}
+
+/// Runs the test `name` (libtest's path, `module::test`) in a process of
+/// its own with `env` set, as [`run_isolated_output_with`] does, and reports
+/// what it did rather than panicking when it fails: for a caller that runs
+/// a test over and over (the fault soak) and keeps each failure.
+#[allow(dead_code)]
+pub(crate) fn run_child(name: &str, env: &[(&str, &str)]) -> Child {
+    let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let out = Command::new(std::env::current_exe().expect("current exe"))
+        .args(["--exact", name, "--test-threads=1", "--include-ignored"])
+        .env(CHILD_ENV, "1")
+        .envs(env.iter().copied())
+        .output()
+        .expect("spawn the test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Child {
+        passed: out.status.success() && stdout.contains("1 passed"),
+        output: format!(
+            "{stdout}
+{stderr}"
+        ),
+    }
+}
+
 /// An unhandled exception in this process ends it with the exception's code, without Windows
 /// Error Reporting's dialog waiting for someone to close it.
 #[allow(unsafe_code)]

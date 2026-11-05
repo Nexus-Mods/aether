@@ -330,10 +330,15 @@ impl Layer {
     }
 
     /// Every directory of this layer, each once (by fold) with the spelling
-    /// the layer gives it: the listed ones, then every file's ancestors as
-    /// the file's path spells them. The first spelling of a name wins.
+    /// the layer gives it: the listed ones and the ones above them, then
+    /// every file's ancestors as the file's path spells them. The first
+    /// spelling of a name wins.
     pub fn dirs_spelled(&self) -> Vec<String> {
-        spelled(self.dirs.iter().cloned(), &self.files)
+        let listed = self.dirs.iter().flat_map(|d| {
+            let comps: Vec<&str> = d.split('/').collect();
+            (1..=comps.len()).map(move |n| comps[..n].join("/"))
+        });
+        spelled(listed, &self.files)
     }
 }
 

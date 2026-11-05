@@ -1528,8 +1528,12 @@ struct Mounts {
     roots: Vec<RootId>,
     /// The nearest lower layer's entry at each (root, folded path) a layer
     /// holds: its stored path and a file's bytes (`None` for a directory).
-    lower: BTreeMap<(u32, String), (String, Option<Vec<u8>>)>,
+    lower: BTreeMap<(u32, String), LowerEntry>,
 }
+
+/// A lower layer's entry in [`Mounts::lower`]: its stored path, and a file's
+/// bytes (`None` for a directory).
+type LowerEntry = (String, Option<Vec<u8>>);
 
 impl Mounts {
     fn of(t: &aether_refdirector::tree::Tree) -> Mounts {
@@ -1726,6 +1730,11 @@ impl Served {
             return Ok(());
         }
         let first = !self.held().copied.contains(&key);
+        if first && self.broken == Some(Break::HiddenHandleReadsNew) {
+            self.held()
+                .lower_names
+                .insert(o.fh, (root, path.to_string()));
+        }
         if flags.contains(OpenFlags::WRITE) {
             self.held().copied.insert(key);
             if first
@@ -1735,19 +1744,12 @@ impl Served {
                 self.reference.set_attr(o.fh, 0)?;
                 o.size = 0;
             }
-        } else if first && !self.held().hidden.contains(&key) {
-            match self.broken {
-                Some(Break::CopyUpOldHandleLower) => {
-                    let b = self.lower_file(root, path).unwrap_or_default();
-                    self.held().lower_reads.insert(o.fh, b);
-                }
-                Some(Break::HiddenHandleReadsNew) => {
-                    self.held()
-                        .lower_names
-                        .insert(o.fh, (root, path.to_string()));
-                }
-                _ => {}
-            }
+        } else if first
+            && !self.held().hidden.contains(&key)
+            && self.broken == Some(Break::CopyUpOldHandleLower)
+        {
+            let b = self.lower_file(root, path).unwrap_or_default();
+            self.held().lower_reads.insert(o.fh, b);
         }
         Ok(())
     }

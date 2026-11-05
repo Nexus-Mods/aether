@@ -87,6 +87,34 @@ fn ntdll_export(name: &core::ffi::CStr) -> Option<unsafe extern "system" fn() ->
     }
 }
 
+/// Whether this thread holds the loader lock (`PEB.LoaderLock`). A thread
+/// started meanwhile cannot run until it is released (its
+/// `DLL_THREAD_ATTACH` waits for the lock), so the holder must not wait for
+/// one.
+pub(crate) fn holds_loader_lock() -> bool {
+    type Locked = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+    static F: std::sync::OnceLock<Option<Locked>> = std::sync::OnceLock::new();
+    let f = F.get_or_init(|| {
+        ntdll_export(c"RtlIsCriticalSectionLockedByThread").map(|p| {
+            // SAFETY: the export's documented signature.
+            unsafe { core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p) }
+        })
+    });
+    let Some(f) = f else {
+        return false;
+    };
+    let peb = peb();
+    if peb == 0 {
+        return false;
+    }
+    // SAFETY: the PEB's `LoaderLock` is the loader's critical section; both
+    // are valid for the life of the process.
+    unsafe {
+        let lock = *((peb + PEB_LOADER_LOCK) as *const *mut core::ffi::c_void);
+        !lock.is_null() && f(lock) != 0
+    }
+}
+
 /// Whether the process is ending: `LdrShutdownProcess` has begun
 /// (`RtlDllShutdownInProgress`). `ExitProcess` has then ended every other
 /// thread, and this one, holding the loader lock, runs the DLLs' detach (a

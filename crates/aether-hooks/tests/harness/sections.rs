@@ -1180,3 +1180,61 @@ fn a_fault_while_the_process_exits_is_filled() {
         "the child's exit-time reads ({status})"
     );
 }
+
+// ---- demand-paged: under the loader lock ---------------------------------
+
+/// Exit code of the loader-lock test when its section never came back.
+const HUNG_UNDER_LOADER_LOCK: u32 = 0x0E0F_0004;
+
+/// The first demand-paged section is created, and a chunk of it faulted in,
+/// by a thread holding the loader lock, as a `DllMain` would: both are
+/// filled (READ, wire.md 3.4.4) and return. The fill workers start with
+/// that section, and a thread started under the loader lock cannot run
+/// until it is released, so no fill there may wait on one.
+#[test]
+fn a_lazy_section_created_under_the_loader_lock_fills() {
+    isolate!();
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    type Lock = unsafe extern "system" fn(u32, *mut u32, *mut usize) -> i32;
+    type Unlock = unsafe extern "system" fn(u32, usize) -> i32;
+    type Export = unsafe extern "system" fn() -> isize;
+    let want = pattern(LAZY);
+    let (root, _served) = serve(Fake::new().with(FILE, want.clone(), ReadStyle::Whole), true);
+    // SAFETY: ntdll exports cast to their signatures.
+    let (lock, unlock) = unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        let f = |n: &core::ffi::CStr| GetProcAddress(ntdll, n.as_ptr().cast()).expect("export");
+        (
+            core::mem::transmute::<Export, Lock>(f(c"LdrLockLoaderLock")),
+            core::mem::transmute::<Export, Unlock>(f(c"LdrUnlockLoaderLock")),
+        )
+    };
+    // Started before the lock is taken: a hang ends the process, without
+    // `ExitProcess`, which would wait for the lock.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        // SAFETY: plain FFI.
+        unsafe { TerminateProcess(GetCurrentProcess(), HUNG_UNDER_LOADER_LOCK) };
+    });
+    let mut cookie = 0usize;
+    // SAFETY: takes the loader lock, released below on this thread.
+    assert_eq!(unsafe { lock(0, core::ptr::null_mut(), &mut cookie) }, 0);
+    let file = open(&root.join(FILE), GENERIC_READ);
+    let section = mapping(file, PAGE_READONLY);
+    let read = section.map(|s| {
+        let v = view(s);
+        (bytes(v, 0, PAGE), bytes(v, TOUCH, PAGE), v)
+    });
+    // SAFETY: the cookie the lock gave.
+    assert_eq!(unsafe { unlock(0, cookie) }, 0);
+    let (warm, touched, v) = read.expect("CreateFileMappingW");
+    assert!(warm == want[..PAGE], "the warm window's bytes");
+    assert!(
+        touched == want[TOUCH..TOUCH + PAGE],
+        "the faulted chunk's bytes"
+    );
+    unmap(v);
+    close(section.unwrap());
+    close(file);
+}

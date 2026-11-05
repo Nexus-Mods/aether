@@ -281,6 +281,7 @@ static FILL_JOBS: OnceLock<Mutex<Receiver<FillJob>>> = OnceLock::new();
 fn ensure_worker() {
     // Looked up here, in a normal call context, rather than first in a fault.
     let _ = crate::peb::process_ending();
+    let _ = crate::peb::holds_loader_lock();
     FILL_WORKER.get_or_init(|| {
         let (tx, rx) = channel::<FillJob>();
         let jobs = FILL_JOBS.get_or_init(|| Mutex::new(rx));
@@ -327,9 +328,13 @@ fn fill_worker(jobs: &Mutex<Receiver<FillJob>>) {
 /// Uses a fill worker when there is one; falls back to an inline read (aether-inject
 /// expands the primary stack for exactly this) if none started, we are
 /// already *on* one, or none can answer: once the process is ending,
-/// `ExitProcess` has ended them (a job queued then would wait forever).
+/// `ExitProcess` has ended them (a job queued then would wait forever), and
+/// while this thread holds the loader lock, a worker started meanwhile (the
+/// first demand-paged section starts them, in a `DllMain` say) cannot run.
 fn fill_bytes(fh: u64, file_off: u64, target: Target, len: usize, span: usize) -> Option<usize> {
-    let inline = IS_FILL_WORKER.with(|c| c.get()) || crate::peb::process_ending();
+    let inline = IS_FILL_WORKER.with(|c| c.get())
+        || crate::peb::process_ending()
+        || crate::peb::holds_loader_lock();
     if !inline {
         if let Some(Some(tx)) = FILL_WORKER.get() {
             let (reply, wait) = channel();

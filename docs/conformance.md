@@ -965,6 +965,94 @@ part is one entry, `generated`: passed, with no steps and the case count and
 seed as its `file`, or failed, with the shrunk case's steps and the file it
 was written to.
 
+## Soak runs
+
+CI plays 1024 generated cases a seed. A failure that only a rare sequence
+shows needs many more, so `aether-conform soak` plays batches of generated
+cases and concurrent rounds for as long as it is given, each batch from a
+fresh seed, and keeps every failure it finds as a case that replays.
+
+```sh
+# Two hours against the reference, a new seed each batch:
+target/debug/aether-conform soak --director "target/debug/aether-conform reference-adapter"     --for 2h --failures soak-failures --summary soak-summary.json
+# A number of generated cases instead of a time, from a seed that makes the
+# whole soak repeat:
+target/debug/aether-conform soak --director "..." --cases 20000 --seed 42
+# Another director, behind its own adapter:
+aether-conform soak --director "java -jar my-director-adapter.jar" --for 30m
+```
+
+**What a batch is.** One `run` against an adapter process of its own: 128
+generated cases (`--batch-cases`) and 64 rounds of 4 clients at once
+(`--concurrent`, `--concurrent-cases`; `--no-concurrent` for none), at most
+`--steps` operations a case. The first batch also plays the scenarios, the
+malformed requests and the limits (`--generated-only` leaves them out). The
+soak ends after the batch that passes `--for` (`90s`, `10m`, `2h`, `1h30m`),
+or once `--cases` generated cases are played, and stops early if ten batches
+in a row play nothing (an adapter that exits at once). The first batch's seed
+is `--seed`, else from the clock, and the others are drawn from it, so
+`--seed` repeats a whole soak. The batch seeds are in the summary.
+
+**What a failure is.** A failure ends its batch, not the soak. Each one is
+shrunk as `run --generate` shrinks it and counted by its kind (`generated`,
+`concurrent`, `suite` for a scenario, the malformed requests or the limits,
+`adapter` for an adapter that failed, `generator` for a reference answer
+wire.md does not give), its class (`mismatch at getattr`, `error: mount
+refused`) and, for a generated case or round, the tree and steps of its
+shrunk scenario. One found again, from another seed, is counted in
+`occurrences` and not written again.
+
+**What is written.** `--failures DIR` (default a folder in the temporary
+directory) gets a folder for each distinct failure, `DIR/<id>/`, holding its
+scenario `<id>.json` (a generated case or round) and `replay.txt`: the kind,
+the class, the seed, batch and case that found it, and the commands that
+replay it. `--summary FILE` (and standard output) has the JSON summary:
+
+| Field | Meaning |
+|---|---|
+| `director`, `seed`, `seeds`, `batches` | the command line, the first seed, every batch's seed |
+| `budget` | `{"for_seconds": s}` or `{"cases": n}` |
+| `cases`, `rounds`, `suite_scenarios` | generated cases, concurrent rounds and scenarios played (a failing batch counts up to its failing case) |
+| `failures_seen`, `distinct_failures` | failures found, repeats included, and without them |
+| `failures` | each distinct one: `id`, `kind`, `class`, `seed`, `batch`, `case`, `occurrences`, `file`, `replay`, `message` |
+| `warnings` | things that were not the director's failure (too few rounds for every slot to carry a request) |
+| `wall_seconds`, `passed`, `stopped` | the time, whether nothing failed, and `"no progress"` if it gave up |
+
+The exit code is 0 when nothing failed, 1 when something did, 2 for a usage
+error.
+
+**Replaying a failure.** The scenario in a failure's folder is an ordinary
+scenario, so against the director that failed it fails the same way:
+
+```sh
+target/debug/aether-conform run --director "..." --scenarios soak-failures/generated-123-4
+```
+
+Against a correct director it passes: its expectations are the reference's
+answers. `replay.txt` also has the command that finds it again from its
+seed (`run --generate --cases N --seed S`), which plays the cases before it
+too.
+
+**Making one a regression.** A failure is the director's, the reference's,
+or the generator's. Read the shrunk scenario against wire.md first: if its
+expectation is not what wire.md says, the reference or the generator is
+wrong, and the fix goes there, with this case as its test. If the director is
+wrong, copy `<id>.json` to `contract/scenarios/` under a name that says what
+it checks (`rename-dir-open-handle.json`), give it that `name` and a
+`description` citing the wire.md rule, trim steps the failure does not
+need, list it in the scenarios' README index and in "The scenarios" above,
+and run the whole suite against the reference. A `one_of` is added only where
+wire.md allows several answers. A failure of kind `suite` is already a
+committed scenario or part of the malformed or limits requests.
+
+**In CI.** `.github/workflows/soak.yml` runs the soak nightly and by hand
+(`workflow_dispatch`, with the minutes to run, the director and a first
+seed): against the reference over a ring file on Linux and on Windows and
+over a named section on Windows, and the shim's fault soak below on Windows.
+It never runs on a push or a pull request. A failure uploads the failures
+folder and the summary and lists each failure with its replay command in the
+job summary.
+
 ## Benchmarks
 
 `aether-conform bench` times a director on the workloads in

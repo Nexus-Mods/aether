@@ -155,6 +155,16 @@ when one does.
 - `aether_casefold::eq_folded` compares two names by their fold without
   building either.
 
+- `aether-conform soak --director "<adapter command>" --for 2h` plays
+  generated cases and concurrent rounds in batches, each from a fresh seed,
+  and writes every distinct shrunk failure as a scenario file with its seed
+  and the command that replays it. The shim's generated fault properties have
+  the same, set by `AETHER_FAULTS_SOAK` and its companions. Both run nightly
+  in `.github/workflows/soak.yml`, never on a push (`docs/conformance.md`,
+  "Soak runs"; `docs/benchmarks.md`).
+- A scenario's `one_of` may carry a `choice` label, so that several steps
+  show one of the outcomes `docs/wire.md` allows together (`overlay-rename-both`).
+
 ### Changed
 
 - `aether-protocol`'s API is one typed table: `Opcode`, `Status`,
@@ -182,6 +192,12 @@ when one does.
   next release signs new natives. The natives key leaves out the crates no
   native depends on, and releases check that exclusion with
   `bin/natives-key.tests.ps1`.
+- `docs/wire.md` 3.4.7: RENAME of a directory that an overlay's upper and a
+  lower both hold may be refused with `ST_IO_ERROR` or moved whole, never in
+  part. 3.4.9: MKDIR of a directory only a lower holds is `ST_OK` or
+  `ST_EXISTS`, and its listing is unchanged (no longer `ST_READ_ONLY`).
+  `rename-x-same-root` accepts `ST_IO_ERROR` as well as `ST_BAD_REQUEST` for
+  the root at an end, as `rename-root` does.
 
 ## 1.0.0
 

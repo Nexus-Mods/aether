@@ -333,6 +333,8 @@ struct Graph {
     general_lower: bool,
     /// [`Reference::refuse_layered_dir_renames`].
     refuse_layered_renames: bool,
+    /// [`Reference::mutable_lower_reads`].
+    mutable_lower_reads: bool,
     /// [`Reference::inline_reads`]: the `payload_cap` every READ is answered
     /// inline within.
     inline_cap: Option<u32>,
@@ -574,7 +576,14 @@ impl Graph {
         Ok(k)
     }
 
-    fn issue(&self, vpath: String, file: Option<u64>, append: bool, tally: &Tally) -> u64 {
+    fn issue(
+        &self,
+        vpath: String,
+        file: Option<u64>,
+        append: bool,
+        pinned: Option<(usize, String)>,
+        tally: &Tally,
+    ) -> u64 {
         let reused = self
             .reissue
             .as_ref()
@@ -587,6 +596,7 @@ impl Graph {
                 vpath,
                 file,
                 append,
+                pinned,
             },
         );
         fh
@@ -928,12 +938,16 @@ fn escapes(path: &str) -> bool {
 /// under it), the identity of the file it holds (`None` for a directory
 /// handle), and whether it was opened `OpenFlags::APPEND`. A file handle
 /// acts on its file wherever the file is now, and on nothing once the file
-/// is gone (`docs/wire.md` 3.4.7, 3.4.8).
+/// is gone (`docs/wire.md` 3.4.7, 3.4.8). A read handle opened `immutable`
+/// on a file only a layer held (`pinned`: the layer and its key) reads that
+/// layer's bytes while its file is there, whatever a copy-up and WRITEs
+/// did since (3.4.3: its bytes cannot change while it is open).
 #[derive(Clone)]
 struct Handle {
     vpath: String,
     file: Option<u64>,
     append: bool,
+    pinned: Option<(usize, String)>,
 }
 
 /// The reference director. Built with the methods below, then served
@@ -974,6 +988,7 @@ impl Reference {
                 mkdir_existing_ok: false,
                 general_lower: false,
                 refuse_layered_renames: false,
+                mutable_lower_reads: false,
                 inline_cap: None,
                 staging: HashMap::new(),
                 mtimes: HashMap::new(),
@@ -1196,6 +1211,16 @@ impl Reference {
     /// Off by default; conformance never sets it.
     pub fn refuse_layered_dir_renames(mut self) -> Reference {
         self.building().refuse_layered_renames = true;
+        self
+    }
+
+    /// An answer other directors give: a read open of a file only a layer
+    /// holds is not `immutable` (`docs/wire.md` 3.4.3 lets it be either), so
+    /// the handle reads the file as it is now across a copy-up (3.4.4,
+    /// 3.4.9: a copy-up keeps the file's identity). Off by default;
+    /// conformance never sets it.
+    pub fn mutable_lower_reads(mut self) -> Reference {
+        self.building().mutable_lower_reads = true;
         self
     }
 
@@ -1670,7 +1695,7 @@ impl Director for Reference {
                     Status::IoError
                 });
             }
-            let fh = g.issue(vpath, None, append, &self.tally);
+            let fh = g.issue(vpath, None, append, None, &self.tally);
             return Ok(OpenResp {
                 fh,
                 size: 0,
@@ -1729,6 +1754,14 @@ impl Director for Reference {
         };
         let size = e.bytes.len() as u64;
         let id = e.id;
+        // A read open of a file only a layer holds is immutable (wire.md
+        // 3.4.3, 3.4.9): the handle keeps the layer's bytes across a later
+        // copy-up. After a copy-up the upper holds the file, so no read open
+        // of it is.
+        let pinned = match g.view(&dirs, &files, &masked).lower_only(&vpath) {
+            Some(Low::File(i)) if !write && !g.mutable_lower_reads => Some((i, vpath.clone())),
+            _ => None,
+        };
         drop(masked);
         drop(files);
         drop(dirs);
@@ -1740,8 +1773,8 @@ impl Director for Reference {
         // stays 0 unless a test moves it ([`Reference::set_mount_gen`]).
         // Never on a write open, a directory, or a file the writable
         // provider holds.
-        let immutable = !write && !g.is_writable(&vpath);
-        let fh = g.issue(vpath, Some(id), append, &self.tally);
+        let immutable = !write && (!g.is_writable(&vpath) || pinned.is_some());
+        let fh = g.issue(vpath, Some(id), append, pinned, &self.tally);
         Ok(OpenResp {
             fh,
             size,
@@ -1761,7 +1794,13 @@ impl Director for Reference {
     ) -> Result<ReadReply<'_>, Status> {
         let graph = self.graph.clone();
         let _whole = graph.serve.lock().unwrap();
-        let Some(Handle { vpath, file, .. }) = self.graph.handle(fh) else {
+        let Some(Handle {
+            vpath,
+            file,
+            pinned,
+            ..
+        }) = self.graph.handle(fh)
+        else {
             return Err(Status::BadFh);
         };
         Tally::bump(&self.tally.reads, &vpath);
@@ -1775,10 +1814,15 @@ impl Director for Reference {
         // A file deleted, or replaced by a rename onto its name, under an
         // open handle (wire.md 3.4.8); a layer's file until a copy-up, the
         // upper's after it.
-        let e = match locate_in(&g.view(&dirs, &files, &masked), &vpath, id) {
-            Some(Loc::Upper(k)) => &files[&k],
-            Some(Loc::Lower(i, k)) => &g.layers[i].files[&k],
-            None => return Err(Status::IoError),
+        let e = match (
+            locate_in(&g.view(&dirs, &files, &masked), &vpath, id),
+            &pinned,
+        ) {
+            (None, _) => return Err(Status::IoError),
+            // An immutable handle: the layer's bytes it was opened on.
+            (Some(_), Some((i, k))) => &g.layers[*i].files[k],
+            (Some(Loc::Upper(k)), None) => &files[&k],
+            (Some(Loc::Lower(i, k)), None) => &g.layers[i].files[&k],
         };
         let limit = match e.style {
             ReadStyle::Error => return Err(Status::IoError),
@@ -1835,6 +1879,7 @@ impl Director for Reference {
             vpath,
             file,
             append,
+            pinned,
         }) = self.graph.handle(fh)
         else {
             return Err(Status::BadFh);
@@ -1843,6 +1888,10 @@ impl Director for Reference {
         let Some(id) = file else {
             return Err(Status::IsDir);
         };
+        // An immutable handle's bytes do not change (wire.md 3.4.3, 3.4.5).
+        if pinned.is_some() {
+            return Err(Status::ReadOnly);
+        }
         // Only a read open reaches a file no writable provider holds, and
         // its bytes stay as they are: OPEN called them immutable. Such a
         // file never moves, so the key it was opened at says.
@@ -1877,13 +1926,19 @@ impl Director for Reference {
     fn set_attr(&mut self, fh: u64, size: u64) -> Result<(), Status> {
         let graph = self.graph.clone();
         let _whole = graph.serve.lock().unwrap();
-        let Some(Handle { vpath, file, .. }) = self.graph.handle(fh) else {
+        let Some(Handle {
+            vpath,
+            file,
+            pinned,
+            ..
+        }) = self.graph.handle(fh)
+        else {
             return Err(Status::BadFh);
         };
         let Some(id) = file else {
             return Err(Status::IsDir);
         };
-        if !self.graph.is_writable(&vpath) {
+        if !self.graph.is_writable(&vpath) || pinned.is_some() {
             return Err(Status::ReadOnly);
         }
         if size > MAX_FILE_LEN as u64 {

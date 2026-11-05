@@ -134,13 +134,73 @@ fn a_lower_file_is_found_and_read_and_the_nearer_layer_wins() {
     assert_eq!(read_path(&mut d, "data/both.esp"), b"upper bytes");
 }
 
-/// wire.md 3.4.3: a file any request can change cannot be immutable, and a
-/// write open of a lower-only file changes what its handles read (3.4.4).
+/// wire.md 3.4.3, 3.4.9: a read open of a file only a lower holds may be
+/// immutable, and the reference answers so; once a write open has copied
+/// the file up, no read open of it is.
 #[test]
-fn a_read_open_of_a_lower_only_file_is_not_immutable() {
+fn a_read_open_of_a_lower_only_file_is_immutable_until_a_copy_up() {
     let mut d = mount(&layered());
     let o = d.open(R0, OpenFlags::READ, "data/low.esp").unwrap();
+    assert!(o.immutable);
+    open(&mut d, OpenFlags::WRITE, "data/low.esp").unwrap();
+    let o = d.open(R0, OpenFlags::READ, "data/low.esp").unwrap();
     assert!(!o.immutable);
+    // An upper file never is, one in both layers included.
+    assert!(
+        !d.open(R0, OpenFlags::READ, "data/both.esp")
+            .unwrap()
+            .immutable
+    );
+}
+
+/// wire.md 3.4.3: an immutable handle's bytes cannot change while it is
+/// open, so it reads the lower's bytes across a copy-up and the WRITEs and
+/// truncation after it (the exception to 3.4.9's copy-up identity), WRITE
+/// and SETATTR through it are `ST_READ_ONLY`, and once the file is deleted it
+/// fails as any handle of a deleted file does (3.4.8).
+#[test]
+fn an_immutable_handle_keeps_its_bytes_across_a_copy_up() {
+    let mut d = mount(&layered());
+    let old = open(&mut d, OpenFlags::READ, "data/low.esp").unwrap();
+    let w = open(&mut d, OpenFlags::WRITE, "data/low.esp").unwrap();
+    write(&mut d, w, b"new");
+    assert_eq!(read(&mut d, old).unwrap(), b"low");
+    assert_eq!(read(&mut d, w).unwrap(), b"new");
+    assert_eq!(d.write(old, 0, b"x"), Err(Status::ReadOnly));
+    assert_eq!(d.set_attr(old, 0), Err(Status::ReadOnly));
+    let old2 = open(&mut d, OpenFlags::READ, "data/second.esp").unwrap();
+    open(
+        &mut d,
+        OpenFlags::WRITE | OpenFlags::TRUNC,
+        "data/second.esp",
+    )
+    .unwrap();
+    assert_eq!(read(&mut d, old2).unwrap(), b"second");
+    assert_eq!(found(&mut d, "data/second.esp"), Some((false, 0)));
+    d.delete(R0, "data/low.esp").unwrap();
+    assert_eq!(read(&mut d, old), Err(Status::IoError));
+}
+
+/// Knob: read opens of lower-only files answered without `immutable`, as
+/// wire.md 3.4.3 lets a director answer: such a handle reads the file as it
+/// is now across a copy-up (3.4.4, 3.4.9: a copy-up keeps the file's
+/// identity).
+#[test]
+fn a_mutable_handle_opened_before_the_copy_up_reads_the_file_as_it_is_now() {
+    let mut d = mount(&layered()).mutable_lower_reads();
+    let o = d.open(R0, OpenFlags::READ, "data/low.esp").unwrap();
+    assert!(!o.immutable);
+    let w = open(&mut d, OpenFlags::WRITE, "data/low.esp").unwrap();
+    write(&mut d, w, b"new");
+    assert_eq!(read(&mut d, o.fh).unwrap(), b"new");
+    let old = open(&mut d, OpenFlags::READ, "data/second.esp").unwrap();
+    open(
+        &mut d,
+        OpenFlags::WRITE | OpenFlags::TRUNC,
+        "data/second.esp",
+    )
+    .unwrap();
+    assert_eq!(read(&mut d, old).unwrap(), b"");
 }
 
 /// wire.md 3.4.2, 3.2: one listing of the upper and every lower, a name in
@@ -206,26 +266,15 @@ fn a_write_open_copies_a_lower_file_up_with_its_bytes() {
     assert_eq!(d.contents("data/low.esp"), Some(b"LOw".to_vec()));
 }
 
-/// wire.md 3.4.4: every handle of a file reads the file as it is now, a
-/// handle opened on the lower's file before the copy-up included: the
-/// WRITEs through another handle, and a truncating OPEN.
+/// wire.md 3.4.4, 3.4.9: a write handle opened before another write open
+/// reads that one's WRITEs: a copy-up keeps the file's identity.
 #[test]
-fn a_handle_opened_before_the_copy_up_reads_the_file_as_it_is_now() {
+fn a_write_handle_reads_the_file_as_it_is_now() {
     let mut d = mount(&layered());
-    let old = open(&mut d, OpenFlags::READ, "data/low.esp").unwrap();
+    let first = open(&mut d, OpenFlags::WRITE, "data/low.esp").unwrap();
     let w = open(&mut d, OpenFlags::WRITE, "data/low.esp").unwrap();
     write(&mut d, w, b"new");
-    assert_eq!(read(&mut d, old).unwrap(), b"new");
-
-    let old = open(&mut d, OpenFlags::READ, "data/second.esp").unwrap();
-    open(
-        &mut d,
-        OpenFlags::WRITE | OpenFlags::TRUNC,
-        "data/second.esp",
-    )
-    .unwrap();
-    assert_eq!(read(&mut d, old).unwrap(), b"");
-    assert_eq!(found(&mut d, "data/second.esp"), Some((false, 0)));
+    assert_eq!(read(&mut d, first).unwrap(), b"new");
 }
 
 /// wire.md 3.4.9: DELETE of a lower-only file hides it (no lower beneath
@@ -299,7 +348,8 @@ fn renaming_a_lower_only_file_copies_it_up_and_its_handles_follow() {
     assert_eq!(read(&mut d, h).unwrap(), b"low");
     let w = open(&mut d, OpenFlags::WRITE, "data/moved.esp").unwrap();
     write(&mut d, w, b"L");
-    assert_eq!(read(&mut d, h).unwrap(), b"Low");
+    // An immutable handle: its bytes do not change (wire.md 3.4.3).
+    assert_eq!(read(&mut d, h).unwrap(), b"low");
     let n = names(&mut d, "data");
     assert!(n.contains(&"Moved.esp".to_string()) && !n.contains(&"Low.esp".to_string()));
 }
@@ -451,7 +501,8 @@ fn truncating_a_lower_only_file() {
     )
     .unwrap();
     assert_eq!(read(&mut d, w).unwrap(), b"");
-    assert_eq!(read(&mut d, old).unwrap(), b"");
+    // An immutable handle: its bytes do not change (wire.md 3.4.3).
+    assert_eq!(read(&mut d, old).unwrap(), b"mesh");
     assert_eq!(
         list(&mut d, "data/meshes"),
         [("a.nif".to_string(), false, 0)]

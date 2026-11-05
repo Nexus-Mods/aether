@@ -772,10 +772,12 @@ Reply, 24 bytes:
   Never set it for a write open or a directory. Since every handle of a file
   reads the file as it is now (3.4.4), a handle on a file any request can
   change cannot be immutable: never set it for a file a writable provider
-  holds, nor for one it serves as an overlay serves the names of its
-  read-only layers (3.4.9). A file only a lower layer holds can be copied
-  up and written while the handle is open, and the shim's read cache would
-  then serve the bytes it had.
+  holds. The one exception is a director serving a writable root as an
+  overlay (3.4.9): a read open of a file only a read-only lower layer holds
+  may set it, and that handle then keeps reading the bytes it had while it
+  is open, whatever a copy-up of the file and writes through other handles
+  do. Once the file has been copied up, or any write open of it has
+  succeeded, no read open of it sets it.
 - `mount_gen`: a generation the director bumps whenever a root's content is
   replaced. The cache keys a file's blocks by (root, folded path, size,
   `mount_gen`), so two immutable opens of one path with equal size and
@@ -1065,9 +1067,15 @@ above give remain allowed for such a name too:
 Whatever it answers to these, a copy-up keeps a file's identity. When the
 overlay copies a lower-only file up (at a write open or at its first change,
 as the director chooses), the upper's copy, with the lower's bytes, is the
-same file: every handle opened on it before then reads it, and what is
-written to it, from then on (3.4.4), as every handle opened after does. A
-read open of a lower-only file is never `immutable` (3.4.3).
+same file: every handle opened on it before then without `immutable` reads
+it, and what is written to it, from then on (3.4.4), as every handle opened
+after does. A read open of a lower-only file may answer `immutable`, and
+such a handle is the exception: it keeps reading the lower's bytes while it
+is open (3.4.3). Once the file has been copied up, or a write open of it has
+succeeded, no read open of it answers `immutable`. The shim's read cache
+stays sound under this: it serves cached blocks only through immutable
+handles, which keep those bytes, and caches nothing more of a path for the
+rest of the process once an open of it answers without `immutable`.
 
 The reference director gives the answers in the list above for a root it
 serves with read-only layers beneath its writable upper.

@@ -43,8 +43,9 @@ use crate::scenario::{self, LoadError, OwnedReply, OwnedRequest, Scenario};
 pub struct RunOptions {
     /// The adapter's command line.
     pub director: String,
-    /// The folder of `*.json` scenarios.
-    pub scenarios: PathBuf,
+    /// The folder of `*.json` scenarios, or none to play none (a soak's
+    /// later batches).
+    pub scenarios: Option<PathBuf>,
     /// How long each adapter answer, and each ring request, may take.
     pub timeout: Duration,
     /// Also send the malformed requests ([`crate::malformed`]).
@@ -88,6 +89,10 @@ pub struct ScenarioResult {
     /// mount, a failed attach, a ring that stopped answering, an adapter
     /// error.
     pub error: Option<String>,
+    /// Why the scenario was not played: its tree has `lower` layers and
+    /// the director serves no root as an overlay. A skipped scenario is not
+    /// passed, and fails nothing.
+    pub skipped: Option<String>,
 }
 
 /// A whole run.
@@ -134,7 +139,11 @@ fn count_answers(tally: &mut Answers, s: &Scenario, r: &ScenarioResult) {
 
 impl RunReport {
     pub fn passed(&self) -> bool {
-        self.adapter_error.is_none() && self.scenarios.iter().all(|s| s.passed)
+        self.adapter_error.is_none()
+            && self
+                .scenarios
+                .iter()
+                .all(|s| s.passed || s.skipped.is_some())
     }
 }
 
@@ -183,16 +192,19 @@ pub fn scenario_files(dir: &Path) -> Result<Vec<PathBuf>, LoadError> {
 /// function other than the `aether-conform` binary can play only scenarios
 /// whose steps are all client 0's.
 pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
-    let files = scenario_files(&opts.scenarios).map_err(|e| RunError::Scenarios(e.to_string()))?;
+    let files = match &opts.scenarios {
+        Some(dir) => scenario_files(dir).map_err(|e| RunError::Scenarios(e.to_string()))?,
+        None => Vec::new(),
+    };
     let scenarios: Vec<(PathBuf, Scenario)> = files
         .into_iter()
         .map(|f| scenario::load(&f).map(|s| (f, s)))
         .collect::<Result<_, _>>()
         .map_err(|e| RunError::Scenarios(e.to_string()))?;
-    if scenarios.is_empty() {
+    if let (true, Some(dir)) = (scenarios.is_empty(), &opts.scenarios) {
         return Err(RunError::Scenarios(format!(
             "no scenarios (*.json) in {}",
-            opts.scenarios.display()
+            dir.display()
         )));
     }
     let mut adapter = Adapter::start(&opts.director, opts.timeout).map_err(RunError::Adapter)?;
@@ -213,11 +225,16 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             passed: false,
             steps: Vec::new(),
             error: None,
+            skipped: None,
         };
         match one(&mut adapter, file, s, opts.timeout, &mut result) {
             Ok(()) => {
-                result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
-                count_answers(&mut report.answers, s, &result);
+                result.passed = result.error.is_none()
+                    && result.skipped.is_none()
+                    && result.steps.iter().all(|s| s.passed);
+                if result.skipped.is_none() {
+                    count_answers(&mut report.answers, s, &result);
+                }
                 report.scenarios.push(result);
             }
             Err(e) => {
@@ -284,9 +301,11 @@ pub(crate) fn play_file(
         passed: false,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     };
     one(adapter, file, s, timeout, &mut result)?;
-    result.passed = result.error.is_none() && result.steps.iter().all(|s| s.passed);
+    result.passed =
+        result.error.is_none() && result.skipped.is_none() && result.steps.iter().all(|s| s.passed);
     Ok(result)
 }
 
@@ -299,8 +318,18 @@ fn one(
     timeout: Duration,
     out: &mut ScenarioResult,
 ) -> Result<(), AdapterError> {
+    let layered = s.tree.roots.iter().any(|r| !r.lower.is_empty());
+    let unserved = "the director serves no root as an overlay, and the tree has lower layers";
+    if layered && !adapter.serves_layers() {
+        out.skipped = Some(unserved.into());
+        return Ok(());
+    }
     let env = match adapter.mount(file)? {
         Ok(env) => env,
+        Err(_) if layered && !adapter.serves_layers() => {
+            out.skipped = Some(unserved.into());
+            return Ok(());
+        }
         Err(why) => {
             out.error = Some(format!("mount refused: {why}"));
             return Ok(());
@@ -359,6 +388,7 @@ pub(crate) fn play(
     let mut others = Others::start(env, timeout, s)?;
     let mut session = Session::new();
     let mut reg_gen = RegGen::new(s.tree.registry.is_some(), ring.reg_gen());
+    let mut written: std::collections::BTreeSet<(u32, String)> = Default::default();
     for (i, step) in s.steps.iter().enumerate() {
         let mut notes: Vec<String> = Vec::new();
         // A literal handle is sent as written (`Step::literal_fh`).
@@ -404,7 +434,13 @@ pub(crate) fn play(
         let gen_broken = reg_gen.before(&step.request, gen_before);
         let (got, mut passed) = match &sent {
             Sent::Answer(got) => {
-                let r = session.check(i, &step.request, &step.expect, got);
+                let r = session.check_chosen(
+                    i,
+                    &step.request,
+                    &step.expect,
+                    got,
+                    step.choice.as_deref(),
+                );
                 if let Err(m) = &r {
                     notes.insert(0, m.why.clone());
                 }
@@ -432,16 +468,39 @@ pub(crate) fn play(
         if let (Sent::Answer(Ok(OwnedReply::Open(o))), OwnedRequest::Open { root, path, .. }) =
             (&sent, &req)
         {
-            if o.immutable && !o.is_dir && writable_holds(&s.tree, *root, path) {
+            let pinnable = lower_only_in_tree(&s.tree, *root, path)
+                && !written.contains(&(root.0, aether_casefold::fold(path)));
+            if o.immutable && !o.is_dir && writable_holds(&s.tree, *root, path) && !pinnable {
                 notes.insert(
                     0,
-                    "immutable set on a file a writable provider holds (wire.md 3.4.3: \"never set it for a file a writable provider holds\")"
+                    "immutable set on a file a writable provider holds (wire.md 3.4.3: \"never set it for a file a writable provider holds\"; only a file a lower layer alone holds may be, until a write open of it, 3.4.9)"
                         .into(),
                 );
                 passed = false;
             }
         }
         let succeeded = matches!(sent, Sent::Answer(Ok(_)));
+        // The names a write reached: no read open of them may be immutable
+        // from then on (wire.md 3.4.9).
+        if succeeded {
+            match &req {
+                OwnedRequest::Open { root, flags, path }
+                    if flags.contains(aether_protocol::OpenFlags::WRITE) =>
+                {
+                    written.insert((root.0, aether_casefold::fold(path)));
+                }
+                OwnedRequest::Rename { root, to, .. } => {
+                    written.insert((root.0, aether_casefold::fold(to)));
+                }
+                OwnedRequest::RenameX { to_root, to, .. } => {
+                    written.insert((to_root.0, aether_casefold::fold(to)));
+                }
+                OwnedRequest::Mkdir { root, path, .. } => {
+                    written.insert((root.0, aether_casefold::fold(path)));
+                }
+                _ => {}
+            }
+        }
         let answer = match &sent {
             Sent::Answer(Ok(_)) => Some("ok".to_string()),
             Sent::Answer(Err(st)) => Some(st.name().to_string()),
@@ -463,6 +522,19 @@ pub(crate) fn play(
         });
     }
     Ok(())
+}
+
+/// Whether `path` in `root` is a file one of the tree's lower layers holds
+/// and its upper does not: one a read open may answer `immutable` until a
+/// write reaches it (wire.md 3.4.3, 3.4.9).
+fn lower_only_in_tree(tree: &crate::tree::Tree, root: aether_protocol::RootId, path: &str) -> bool {
+    let f = aether_casefold::fold(path);
+    tree.roots.iter().filter(|r| r.id == root.0).any(|r| {
+        !r.files.iter().any(|x| aether_casefold::fold(&x.path) == f)
+            && r.lower
+                .iter()
+                .any(|l| l.files.iter().any(|x| aether_casefold::fold(&x.path) == f))
+    })
 }
 
 /// Whether `path` in `root` lies under one of the tree's `writable`

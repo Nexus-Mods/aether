@@ -23,6 +23,11 @@ usage:
                      [--steps M] [--failures DIR]]
                      [--concurrent N [--concurrent-cases C]]
                      [--report tap|json] [--out FILE] [--timeout SECS]
+  aether-conform soak --director \"<command line>\" (--for TIME | --cases N)
+                      [--scenarios DIR] [--seed S] [--steps M] [--batch-cases N]
+                      [--concurrent N [--concurrent-cases C] | --no-concurrent]
+                      [--generated-only] [--failures DIR] [--summary FILE]
+                      [--timeout SECS]
   aether-conform reference-adapter [--ring file|section] [--no-arena]
   aether-conform bench --director \"<command line>\" [--workloads DIR]
                        [--only NAME[,NAME...]] [--floor \"<command line>\"]
@@ -53,6 +58,21 @@ run       starts the director's adapter (the command line) and plays every
           each a generated case under a directory of its own, their requests
           in flight together across every slot of the ring; a failing round
           is written to the failures DIR. --seed and --steps apply too.
+soak      plays generated cases and rounds of clients at once in batches,
+          each from a fresh seed (drawn from S, default: from the clock,
+          printed), against a new adapter process each, until TIME has
+          passed (90s, 10m, 2h, 1h30m: the batch that ends past it is the
+          last) or N generated cases have been played. A batch plays N
+          cases (--batch-cases, default 128) and C rounds (default 64) of
+          clients; the first batch also plays the scenarios, the malformed
+          requests and the limits, unless --generated-only. A failure ends
+          its batch, not the soak: each distinct one is shrunk and written
+          to DIR/<id>/ (default a folder in the temporary directory) as a
+          scenario file with replay.txt, the seed and the commands that
+          replay it. A failure found again is counted, not written again.
+          The JSON summary (cases, rounds, seeds, failures, wall time) is
+          printed, and written to FILE if given. Exit code 0 when nothing
+          failed, 1 when something did, 2 on a usage error.
 reference-adapter
           an adapter serving each scenario's tree from the reference
           director, over a ring file (default) or, on Windows, a named
@@ -91,6 +111,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "run" => cmd_run(rest),
         "bench" => cmd_bench(rest),
+        "soak" => cmd_soak(rest),
         "null-adapter" => cmd_null_adapter(rest),
         // `--break` is test-only (`adapters::Break`) and not in the usage.
         "reference-adapter" => match switches(rest, &["--ring", "--break"], &["--no-arena"]) {
@@ -340,18 +361,22 @@ fn cmd_run(args: &[String]) -> ExitCode {
     };
     let opts = RunOptions {
         director,
-        scenarios: get("--scenarios")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("contract/scenarios")),
+        scenarios: Some(
+            get("--scenarios")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("contract/scenarios")),
+        ),
         timeout,
         malformed: has("--malformed"),
         limits: has("--limits"),
         generate,
         concurrent,
     };
-    let planned = aether_conform::run::scenario_files(&opts.scenarios)
-        .map(|f| f.len())
-        .unwrap_or(0)
+    let planned = opts
+        .scenarios
+        .as_deref()
+        .and_then(|d| aether_conform::run::scenario_files(d).ok())
+        .map_or(0, |f| f.len())
         + usize::from(opts.malformed)
         + usize::from(opts.limits)
         + usize::from(opts.generate.is_some())
@@ -397,6 +422,136 @@ fn cmd_run(args: &[String]) -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+fn cmd_soak(args: &[String]) -> ExitCode {
+    use aether_conform::soak::{self, Budget, Soak, SoakOptions};
+    let f = match switches(
+        args,
+        &[
+            "--director",
+            "--for",
+            "--cases",
+            "--scenarios",
+            "--seed",
+            "--steps",
+            "--batch-cases",
+            "--concurrent",
+            "--concurrent-cases",
+            "--failures",
+            "--summary",
+            "--timeout",
+        ],
+        &["--generated-only", "--no-concurrent"],
+    ) {
+        Ok(f) => f,
+        Err(e) => return usage(&e),
+    };
+    let get = |k: &str| f.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let has = |k: &str| f.iter().any(|(n, _)| n == k);
+    let Some(director) = get("--director") else {
+        return usage("soak needs --director \"<command line>\"");
+    };
+    let number = |k: &str, default: u64| -> Result<u64, String> {
+        match get(k) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| format!("{k} {v:?} is not a whole number")),
+        }
+    };
+    let count = |k: &str, default: u32| -> Result<u32, String> {
+        number(k, u64::from(default))
+            .and_then(|n| u32::try_from(n).map_err(|_| format!("{k} {n} is too many")))
+    };
+    let budget = match (get("--for"), get("--cases")) {
+        (Some(t), None) => match soak::parse_duration(&t) {
+            Ok(d) if d > Duration::ZERO => Budget::For(d),
+            Ok(_) => return usage("--for needs a time above zero"),
+            Err(e) => return usage(&format!("--for {e}")),
+        },
+        (None, Some(_)) => match number("--cases", 0) {
+            Ok(n) if n > 0 => Budget::Cases(n),
+            Ok(_) => return usage("--cases needs a number above zero"),
+            Err(e) => return usage(&e),
+        },
+        _ => return usage("soak needs one budget: --for TIME or --cases N"),
+    };
+    let timeout = match get("--timeout").map(|t| t.parse::<f64>()) {
+        None => Duration::from_secs(30),
+        Some(Ok(s)) if s > 0.0 && s.is_finite() => Duration::from_secs_f64(s),
+        Some(_) => return usage("--timeout needs a positive number of seconds"),
+    };
+    let parsed = (
+        number("--seed", clock_seed()),
+        number("--steps", generate::DEFAULT_STEPS as u64),
+        count("--batch-cases", soak::BATCH_CASES),
+        count("--concurrent", soak::CLIENTS),
+        count("--concurrent-cases", soak::ROUNDS),
+    );
+    let (seed, steps, batch_cases, clients, rounds) = match parsed {
+        (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e)) => (a, b, c, d, e),
+        (Err(e), ..)
+        | (_, Err(e), ..)
+        | (_, _, Err(e), ..)
+        | (_, _, _, Err(e), _)
+        | (_, _, _, _, Err(e)) => return usage(&e),
+    };
+    if batch_cases == 0 {
+        return usage("--batch-cases needs a number above zero");
+    }
+    if has("--no-concurrent") && (has("--concurrent") || has("--concurrent-cases")) {
+        return usage("--no-concurrent goes with neither --concurrent nor --concurrent-cases");
+    }
+    if clients == 0 || rounds == 0 {
+        return usage("--concurrent and --concurrent-cases need numbers above zero");
+    }
+    let failures = get("--failures")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("aether-soak-failures-{seed}")));
+    eprintln!("aether-conform: soak from seed {seed} (replay the whole soak with --seed {seed})");
+    let mut run = Soak::new(SoakOptions {
+        director,
+        scenarios: get("--scenarios")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("contract/scenarios")),
+        timeout,
+        budget,
+        seed,
+        steps: steps.max(1) as usize,
+        batch_cases,
+        concurrent: (!has("--no-concurrent")).then_some((clients, rounds)),
+        fixed: !has("--generated-only"),
+        failures,
+    });
+    if let Err(e) = run.run() {
+        eprintln!("aether-conform: {e}");
+        return ExitCode::from(2);
+    }
+    let mut text = serde_json::to_string_pretty(&run.summary()).expect("a summary is JSON");
+    text.push('\n');
+    let mut written = true;
+    if let Some(out) = get("--summary") {
+        if let Some(dir) = std::path::Path::new(&out)
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+        {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&out, &text) {
+            eprintln!("aether-conform: cannot write {out}: {e}");
+            written = false;
+        }
+    }
+    print!("{text}");
+    if run.stalled() && run.passed() {
+        eprintln!("aether-conform: the soak's batches played nothing, and it stopped");
+    }
+    ExitCode::from(aether_conform::soak::exit_code(
+        run.passed(),
+        run.stalled(),
+        written,
+    ))
 }
 
 fn ring_kind(v: Option<&str>) -> Result<RingKind, String> {

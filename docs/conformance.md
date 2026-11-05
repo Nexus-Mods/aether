@@ -151,14 +151,17 @@ passes on.
 
 ## The scenarios
 
-**What a tree means.** Files and directories under a `writable` entry are
-held by the writable provider itself, so wire.md 3.4.9's "names only in a
-read-only lower" allowances never apply to them, and an adapter must mount
-them that way (a director that serves a writable root as an overlay puts the
-tree's writable part in the upper). A file or directory outside every
-`writable` entry belongs to a read-only provider, and a root with no
-`writable` entry has none. Scenarios about "the root itself" (3.4.7, 3.4.8)
-make the root writable as a whole.
+**What a tree means.** A root's own files and directories under a
+`writable` entry are held by the writable provider itself, so wire.md 3.4.9's
+"names only in a read-only lower" allowances never apply to them, and an
+adapter must mount them that way (a director that serves a writable root as
+an overlay puts them in the upper). A root's `lower` layers are read-only
+layers beneath that upper, the nearest first, every name in them below a
+writable entry: an adapter mounts them as its overlay's lowers, and their
+names are the ones 3.4.9's allowances are about ("Layered roots" below). A
+file or directory outside every `writable` entry belongs to a read-only
+provider, and a root with no `writable` entry has none. Scenarios about "the
+root itself" (3.4.7, 3.4.8) make the root writable as a whole.
 
 `contract/scenarios/` holds the suite: what every director must do, as data,
 one scenario per file, named by its file. Each `description` names the
@@ -213,6 +216,7 @@ over a section (the tests and CI run both).
 | `spelling-after-delete-recreate`, `respell-parent-components`, `delete-and-excl-edges`, `type-change-same-name` | names deleted and created again in another case, file and directory; creating requests (RENAME, MKDIR, OPEN, RENAME_X) with parents spelled otherwise; exclusive creates of names freed by DELETE and RENAME; a directory holding only an empty directory; a name that changes kind (3.2, 3.4.3, 3.4.8, 3.4.13) |
 | `cache-content-change-same-size`, `roots-mutations-isolated`, `root-dot`, `root-dot-readonly` | a writable file changed at one size by a rename over it, a delete and create, a truncating OPEN and a RENAME_X, read inline and in bulk each time; DELETE, create, RENAME and MKDIR in one root leaving the other's same paths alone; GETATTR, MKDIR, OPEN and STORED_NAMES of the root `.`, held by a writable provider or not (3.2, 3.4.1, 3.4.3, 3.4.9, 3.4.12) |
 | `stage-exec-after-write` | STAGE_EXEC of an image written, and of one created, in the session: a stager's copy holds the bytes as they are now; a directory and a missing path (3.4.14) |
+| `overlay-*` | a root served as an overlay ("Layered roots" below): a copy-up read through handles opened before and after it, a lower-only file deleted and created again, renamed, truncated, a lower-only directory that does not move, listings and spellings from both layers, MKDIR over lower names, a written lower file that is the upper's (3.2, 3.4.2 to 3.4.13) |
 | `registry-key-lifecycle`, `registry-under-tombstone`, `registry-rename-changed-recreate`, `registry-reads-and-limits`, `registry-value-order` | a key created, given values and a subkey, renamed, looked up and reported changed under both names, deleted, made again empty; writes under a tombstone, a parent of a tombstone, a value deleted from a key with no node; REG_CHANGED around a rename, tombstones moving with it, a rename onto a tombstoned name, `volatile` kept, a rename in place; reads past the write depth, value names counted in UTF-16 units, the current user's hive by the fold, `since` past the version; a value's place and spelling (4.1 to 4.3) |
 
 **Where wire.md lets directors differ**, the step accepts each answer it
@@ -236,13 +240,19 @@ director gave, unless the answers leave the same state:
 | STORED_NAMES with `skip` at or past the number of components | an empty reply, `ST_BAD_REQUEST` | 3.4.12 | `stored-names-edges` |
 | A request naming a named stream | `ST_NOT_FOUND`, `ST_BAD_REQUEST`, or the stream a director holds | 3.2 | `names-stream`, `names-stream-writable` |
 | A create of a name a director's store would make one with another | created, `ST_EXISTS` | 3.2 | `case-fold-created` |
+| MKDIR of a directory only a lower layer holds | `ST_OK`, `ST_EXISTS` | 3.4.9 | `overlay-mkdir` |
+| DELETE of a lower-only directory with children; RENAME of a lower-only directory to another name; a case-only RENAME of a lower-only name; MKDIR over a lower-only file | 3.4.9's list's answer, or the general rules' (`ST_IO_ERROR`, moved whole, respelled, `ST_IO_ERROR`), later steps sharing a `choice` | 3.4.9 | `overlay-delete-dir`, `overlay-rename-dir`, `overlay-spelling`, `overlay-mkdir`, `overlay-written-file` |
+| A case-only RENAME of a directory the upper and a lower both hold | `ST_OK` (respelled), `ST_IO_ERROR` | 3.4.7 | `overlay-rename-dir` |
+| RENAME of a directory the upper and a lower both hold | `ST_IO_ERROR` with nothing moved, or the whole of it moved; each step that shows the outcome shares one `choice` | 3.4.7 | `overlay-rename-both` |
+| READ through a handle on a lower-only file that a DELETE, a RENAME onto it or a MKDIR over it hid | the hidden file's last bytes, `ST_IO_ERROR`, `ST_NOT_FOUND` | 3.4.8 | `overlay-delete-recreate`, `overlay-rename-file`, `overlay-mkdir`, `overlay-delete-dir` |
 
 GETATTR of a path below a file is found = 0 (or `ST_NOT_FOUND`, which the
 shim reads the same, 3.4.1), never `ST_NOT_A_DIRECTORY` (3.5).
 
 **Left out because wire.md does not fix the answer**, so no scenario
 asserts it: a write open, DELETE or RENAME of a missing path outside every
-writable provider in a root that has one. (What a write past the end, or a
+writable provider in a root that has one; and, in a layered root, the
+question "Layered roots" below lists as left to the director. (What a write past the end, or a
 SETATTR, puts in the gap is zeros, and a handle opened for writing alone
 serves READ: wire.md 3.4.4 to 3.4.6 say so, and `write-growth` and
 `write-only-read` check them.)
@@ -274,6 +284,117 @@ Still left out of every part of a run:
 - A WRITE or request larger than the ring's payload, and a registry value over
   `MAX_DATA` (the request would not fit the ring); `payload_cap - 8` for
   REG_KEY is covered only as a `one_of`, since the cap is the director's.
+
+## Layered roots
+
+A tree's root may name `lower` layers (`contract/scenarios/README.md`,
+"Tree"): read-only layers beneath its writable upper, the nearest first, as a
+director serving a writable root as an overlay has them (wire.md 3.4.9,
+"Names only in a read-only lower"). The reference serves such a root as an
+overlay, the scenarios `overlay-*` play its rules, the generator makes
+layered roots in about half its cases and predicts their answers, and a run
+fails a director that breaks them. A director that serves no root as an
+overlay says so ("The adapter protocol"), and the run then skips the layered
+scenarios and generates no layered root.
+
+**What wire.md fixes, and where.** The upper is over the lower, so at a name
+both hold the upper's entry is the one served, its kind, size, bytes and
+spelling; between layers the tree's order decides, and a file hides what
+farther layers hold below its name, a directory over a file hides the file.
+Every rule below is checked by the scenario named and by generated cases.
+
+| Rule | wire.md | Scenarios |
+|---|---|---|
+| One listing of the upper and the layers, each name once, as the highest layer holding it has it; a name a DELETE or RENAME hid is not listed | 3.2, 3.4.2, 3.4.9 | `overlay-listing`, `overlay-delete-recreate`, `overlay-delete-dir` |
+| A name keeps the spelling of the layer that shows it; a create keeps its parents' stored spelling, a lower's too | 3.2, 3.4.12 | `overlay-spelling` |
+| A read open of a lower-only file may be immutable; once a write open of the file (or a RENAME or MKDIR onto its name) has succeeded, no read open of it is. The run checks it: `immutable` on a file a writable provider holds fails unless the tree's layers alone hold it and no write has reached it yet | 3.4.3, 3.4.9 | every `overlay-*` OPEN, by the run's immutable check |
+| A copy-up keeps a file's identity: a write open of a lower-only file opens it with its bytes, and every handle of it opened without `immutable`, those opened before the copy-up included, reads WRITEs, SETATTRs and truncating OPENs at once; an immutable handle keeps the bytes it had. The OPEN and the READs after a change share a `choice`, so a handle reads as its OPEN said it would | 3.4.3, 3.4.4, 3.4.6, 3.4.9 | `overlay-copy-up-handles`, `overlay-truncate`, `overlay-rename-file` |
+| DELETE of a lower-only file hides it (nothing a farther layer holds there shows); DELETE of a lower-only directory with children hides it, or is `ST_IO_ERROR` by the general rule; a DELETE of a name the upper holds leaves it missing, the lower's entry under it included | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-listing` |
+| A name made where a DELETE hid one is new: an empty file, an empty directory; a handle on the hidden file never reaches it | 3.4.8, 3.4.9 | `overlay-delete-recreate`, `overlay-delete-dir` |
+| RENAME of a lower-only file copies it up and renames it; its handles follow it | 3.4.7, 3.4.9 | `overlay-rename-file` |
+| RENAME of a lower-only directory to another name is `ST_IO_ERROR`, or by the general rule moves it whole; to another case of itself `ST_OK`, the lower's spelling kept or (the general rule) respelled, for a file too | 3.4.7, 3.4.9 | `overlay-rename-dir`, `overlay-spelling`, `overlay-written-file` |
+| RENAME onto a lower-only file replaces it; RENAME_X of a lower-only file moves it, of a lower-only directory is `ST_CROSS_ROOT` | 3.4.7, 3.4.13 | `overlay-rename-file`, `overlay-rename-dir` |
+| RENAME of a directory the upper and a lower both hold is `ST_IO_ERROR` with nothing moved, or moves the whole of it, every name under it from every layer; never part of it. A case-only RENAME of it respells it, or is refused | 3.4.7 | `overlay-rename-both`, `overlay-rename-dir` |
+| MKDIR of a directory only a lower holds is `ST_OK` or `ST_EXISTS`, and its listing is unchanged | 3.4.9 | `overlay-mkdir` |
+| MKDIR over a lower-only file makes the directory, which hides the file, or by the general rule is `ST_IO_ERROR` | 3.4.9 | `overlay-mkdir`, `overlay-written-file` |
+| A lower-only file a WRITE or a truncating OPEN changed is the upper's (the lower is read-only): MKDIR over it is `ST_IO_ERROR`, a case-only RENAME respells it | 3.4.7, 3.4.9 | `overlay-written-file` |
+| DELETE of a directory the upper holds with a lower's names under it is `ST_IO_ERROR` | 3.4.8 | `overlay-delete-dir` |
+
+**Where wire.md lets an overlay answer otherwise**, the step accepts every
+answer. 3.4.9 says an overlay "may" answer a lower-only name by its list, and
+the answers the general rules give stay allowed, so for each of four
+requests on a lower-only name either is accepted: DELETE of a directory with
+children (hidden, or `ST_IO_ERROR`), RENAME of a directory to another name
+(`ST_IO_ERROR`, or moved whole), RENAME to another case of itself (the
+lower's spelling kept, or respelled) and MKDIR over a file (the directory
+made, or `ST_IO_ERROR`). MKDIR of a directory only a lower holds is `ST_OK`
+or `ST_EXISTS` (3.4.9). RENAME of a directory the upper and a lower both hold
+is `ST_IO_ERROR` or the whole move (3.4.7), and a case-only RENAME of it is
+respelled or refused. A handle on a lower-only file that was hidden answers
+as 3.4.8 says of a deleted file. Where the answers leave different trees, the
+step and every later step whose answer depends on it share a `choice`, so a
+director must keep to the answer it gave (and one that moves part of a
+directory fails `overlay-rename-both`); a generated case ends after such a
+step. The `one_of` table above lists them. The reference answers by 3.4.9's
+list, `ST_EXISTS` and `ST_IO_ERROR`; the test-only adapter modes
+`lower-general-rules` (the general rules, and whole moves) and
+`refuse-layered-dir-renames` (every RENAME of a directory both layers hold
+refused) pass the suite and generated cases.
+
+**Where wire.md is silent.** One layered question is left to the director,
+and the reference's answer to it is its own choice: *when is a lower-only
+name in the upper?* A file a write open reaches, unchanged, and a directory
+below which a name is made are lower-only still, or the upper's. The
+reference copies a file up at the write open, and puts a directory, and every
+lower-only directory above it, in the upper when a name is made below it. Its
+tests (`overlay`, the ones named `the_reference_...`) say so. No scenario or
+generated case sends a request whose answer depends on it. It decides only
+what DELETE of the directory and a case-only RENAME of either answer later.
+
+**Generated cases** make roots with one or two layers below the writable
+part (a root writable as a whole, or a writable entry), their names drawn
+from the same list, so a name is often in the upper and a layer, or in both
+layers, in another case. The generator keeps its own account of the layers,
+apart from the reference: which names the upper holds, which a DELETE or
+RENAME hid, and which the question left to the director leaves open. From it it predicts each
+answer that depends on the layers (the statuses above), the bytes a READ
+through any live handle gets (a lower-only file's from its layer, a handle
+opened before a copy-up the file as it is now), the spelling of each
+STORED_NAMES component only a layer holds, and, after every step, every
+listing: each name the reference lists is the upper's or one a layer shows,
+with the layer's spelling, kind and size, and each name only a layer shows is
+listed. A reference that answers otherwise is a generator error. It does not
+send DELETE, case-only RENAME or MKDIR of a name the question left to the
+director leaves open, RENAME of a directory a layer holds too to another
+name (the scenario `overlay-rename-both` plays it), or anything after a
+MKDIR of a lower-only directory that depends on the answer it chose; a
+request wire.md lets an overlay answer two ways that leave different trees
+(above) is the case's last step.
+
+**Proof it bites.** Test-only breaks of the reference adapter each make one
+mistake a layered director plausibly makes, and the tests show the scenario
+of its rule and the generator both fail it: `no-whiteout` (a deleted lower
+name found again), `lists-hidden` (one listed again), `write-through` (a
+written lower file still lower-only), `copy-up-loses-bytes`,
+`copy-up-old-handle-lower` (a handle opened before the copy-up reads the
+lower), `hidden-handle-reads-new` (the reverse: a hidden lower file's handle
+reads the file made at its name later), `upper-loses-listing`,
+`copy-up-opaque-parent` (a name made below a lower directory makes it
+opaque, losing the lower's names there), `immutable-after-copy-up` (a read
+open still immutable after a write open of the file) and
+`immutable-sees-new-bytes` (an immutable handle that reads the copy-up's
+new bytes). `copy-up-old-handle-lower` now breaks the handles opened
+without `immutable`. The adapter mode `mutable-lower-reads` (no read open of
+a lower-only file immutable) passes the suite and the generated cases.
+
+**Immutable handles in generated cases.** The reference opens a lower-only
+file immutable, and the generator predicts it (and predicts no other read
+open of a file the writable provider holds is). Such an OPEN's step is a
+`one_of` of the reply with and without `immutable`, labelled by its handle;
+a READ through the handle once its bytes and the file's differ is a `one_of`
+of the handle's own bytes and the file as it is now, with the same label.
+The read-cache check still holds: an immutable handle keeps its bytes, and
+no read open after a write of the file is immutable.
 
 ## Several clients
 
@@ -480,7 +601,9 @@ same seed gives the same cases, so `--seed S` replays a run.
 generates a tree spec (up to three roots, files and directories with names
 from a fixed list in varied case, writable entries or roots writable as a
 whole, now and then two writable entries in one root, an optional registry
-layer), a list of operations, each a kind and five numbers, and whether
+layer, and in about half the roots with a writable provider one or two
+read-only lower layers beneath it, "Layered roots" above), a list of
+operations, each a kind and five numbers, and whether
 clients other than client 0 send some of the steps. The generator builds the
 tree, mounts it in the reference director held in this process (behind a
 ring in memory, served as a director serves a ring), and reads the
@@ -592,6 +715,8 @@ and the parents their stored one (3.2).
   writable entry's own directory and its ancestors (an entry inside another
   included) are only read (GETATTR, READDIR, OPEN for reading), never
   written, deleted or renamed (README, "Who holds what").
+- In a layered root, the requests whose answer depends on a question left to
+  the director ("Layered roots" above).
 - Writes with no fixed answer (as "Left out" above): a write open, DELETE
   or RENAME of a missing name outside every writable provider in a root that
   has one.
@@ -641,6 +766,7 @@ its stdout, never two requests at once.
 {"op":"mount","scenario":"/abs/path/contract/scenarios/files.json"}
     -> {"ok":true,"env":{"VFS_RING_PATH":"/tmp/x.ring","VFS_RING_BYTES":"16777216",...}}
     or {"ok":false,"error":"why not"}
+    either may carry "layers":false (the director serves no layered roots)
 {"op":"unmount"}
     -> {"ok":true}
 ```
@@ -662,6 +788,17 @@ its stdout, never two requests at once.
   its environment (every name of 5.2's table but `VFS_REGISTRY`, with values
   like `aether-conform-stale-VFS_RING_SECTION` and `7`). A mount answer that holds one passed it
   on, as a launch built on the director's own environment would.
+- A director that serves no root as an overlay (no `lower` layers,
+  `contract/scenarios/README.md`) says so in its mount answers with
+  `"layers": false` beside `ok`, and refuses (`"ok":false`) the mount of a
+  tree that has lower layers; it never mounts one and ignores the layers.
+  Without the field, a director serves them (`"layers": true`). Once a mount
+  answer has said `false`, the run reports each scenario whose tree has
+  lower layers as skipped (TAP `# SKIP`, JSON `"skipped"` with the reason,
+  `"passed": false`, failing nothing) without mounting it, and the generated
+  cases and concurrent rounds, which learn it from their first mount of an
+  empty tree, make no layered root. A skipped scenario is not a passed one:
+  such a director has not shown it serves overlays.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed
@@ -770,8 +907,9 @@ workflow run's id as the seed; and the committed scenarios, `--malformed`,
 debug build: the concurrent rounds take about 16 s per ring; 1024 generated
 cases about 30 s over a file ring (each mount creates a 16 MiB ring file)
 and 25 s over a section, of which the cases with client processes are a
-good part; each whole invocation about 50 s over a file ring, 55 s over a
-section, and 12 s with no arena. At two to three times slower on CI's
+good part; each whole invocation about 55 s over a file ring, 55 s over a
+section, and 11 s with no arena (seed 20261105, the 143 scenarios with the
+layered ones). At two to three times slower on CI's
 2-vCPU runners that is about five minutes for the Windows step.
 
 `aether-conform reference-adapter [--ring file|section] [--no-arena]` is an
@@ -873,6 +1011,100 @@ names the rule and shows the slot fields and payload in hex. The generated
 part is one entry, `generated`: passed, with no steps and the case count and
 seed as its `file`, or failed, with the shrunk case's steps and the file it
 was written to.
+
+## Soak runs
+
+CI plays 1024 generated cases a seed. A failure that only a rare sequence
+shows needs many more, so `aether-conform soak` plays batches of generated
+cases and concurrent rounds for as long as it is given, each batch from a
+fresh seed, and keeps every failure it finds as a case that replays.
+
+```sh
+# Two hours against the reference, a new seed each batch:
+target/debug/aether-conform soak --director "target/debug/aether-conform reference-adapter"     --for 2h --failures soak-failures --summary soak-summary.json
+# A number of generated cases instead of a time, from a seed that makes the
+# whole soak repeat:
+target/debug/aether-conform soak --director "..." --cases 20000 --seed 42
+# Another director, behind its own adapter:
+aether-conform soak --director "java -jar my-director-adapter.jar" --for 30m
+```
+
+**What a batch is.** One `run` against an adapter process of its own: 128
+generated cases (`--batch-cases`) and 64 rounds of 4 clients at once
+(`--concurrent`, `--concurrent-cases`; `--no-concurrent` for none), at most
+`--steps` operations a case. The first batch also plays the scenarios, the
+malformed requests and the limits (`--generated-only` leaves them out). The
+soak ends after the batch that passes `--for` (`90s`, `10m`, `2h`, `1h30m`),
+or once `--cases` generated cases are played, and stops early if ten batches
+in a row play nothing (an adapter that exits at once). The first batch's seed
+is `--seed`, else from the clock, and the others are drawn from it, so
+`--seed` repeats a whole soak. The batch seeds are in the summary.
+
+**What a failure is.** A failure ends its batch, not the soak. Each one is
+shrunk as `run --generate` shrinks it and counted by its kind (`generated`,
+`concurrent`, `suite` for a scenario, the malformed requests or the limits,
+`adapter` for an adapter that failed, `generator` for a reference answer
+wire.md does not give), its class (`mismatch at getattr`, `error: mount
+refused`) and, for a generated case or round, the shape of its shrunk
+scenario: its steps' opcodes in order and the client of each. The tree, the
+paths, the bytes and the names are left out, since two seeds that meet one
+defect seldom shrink to the same ones. One found again, from another seed,
+is counted in `occurrences` and not written again, so a common defect is one
+failure however many batches meet it.
+
+**What is written.** `--failures DIR` (default a folder in the temporary
+directory) gets a folder for each distinct failure, `DIR/<id>/`, holding its
+scenario `<id>.json` (a generated case or round) and `replay.txt`: the kind,
+the class, the seed, batch and case that found it, and the commands that
+replay it. `--summary FILE` (and standard output) has the JSON summary:
+
+| Field | Meaning |
+|---|---|
+| `director`, `seed`, `seeds`, `batches` | the command line, the first seed, every batch's seed |
+| `budget` | `{"for_seconds": s}` or `{"cases": n}` |
+| `cases`, `rounds`, `suite_scenarios` | generated cases, concurrent rounds and scenarios played (a failing batch counts up to its failing case) |
+| `failures_seen`, `distinct_failures` | failures found, repeats included, and without them |
+| `failures` | each distinct one: `id`, `kind`, `class`, `seed`, `batch`, `case`, `occurrences`, `file`, `replay`, `message` |
+| `warnings` | things that were not the director's failure (too few rounds for every slot to carry a request) |
+| `wall_seconds`, `passed`, `stopped` | the time, whether nothing failed, and `"no progress"` if it gave up |
+
+The exit code is 1 when something failed (a summary that could not be
+written does not hide it), 2 for a usage error, a summary that could not be
+written, or a soak that stopped because its batches played nothing, and 0
+otherwise. The workflow lists at most 30 failures in its job summary; every
+one is in the uploaded `summary.json`.
+
+**Replaying a failure.** The scenario in a failure's folder is an ordinary
+scenario, so against the director that failed it fails the same way:
+
+```sh
+target/debug/aether-conform run --director "..." --scenarios soak-failures/generated-123-4
+```
+
+Against a correct director it passes: its expectations are the reference's
+answers. `replay.txt` also has the command that finds it again from its
+seed (`run --generate --cases N --seed S`), which plays the cases before it
+too.
+
+**Making one a regression.** A failure is the director's, the reference's,
+or the generator's. Read the shrunk scenario against wire.md first: if its
+expectation is not what wire.md says, the reference or the generator is
+wrong, and the fix goes there, with this case as its test. If the director is
+wrong, copy `<id>.json` to `contract/scenarios/` under a name that says what
+it checks (`rename-dir-open-handle.json`), give it that `name` and a
+`description` citing the wire.md rule, trim steps the failure does not
+need, list it in the scenarios' README index and in "The scenarios" above,
+and run the whole suite against the reference. A `one_of` is added only where
+wire.md allows several answers. A failure of kind `suite` is already a
+committed scenario or part of the malformed or limits requests.
+
+**In CI.** `.github/workflows/soak.yml` runs the soak nightly and by hand
+(`workflow_dispatch`, with the minutes to run, the director and a first
+seed): against the reference over a ring file on Linux and on Windows and
+over a named section on Windows, and the shim's fault soak below on Windows.
+It never runs on a push or a pull request. A failure uploads the failures
+folder and the summary and lists each failure with its replay command in the
+job summary.
 
 ## Benchmarks
 

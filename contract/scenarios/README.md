@@ -57,12 +57,56 @@ directors, and one that may be lifted: it makes every root writable when
 root 0 is writable as a whole, so a tree with root 0 writable as a whole
 must make every root writable as a whole, or the reference refuses it.
 
-**Who holds what.** Everything under a `writable` entry (the files and
-directories the tree lists there, and any made there later) is held by the
+**Layers.** A root may also name `lower`, a list of read-only layers beneath
+its writable upper, the nearest to the upper first, each `{"files": [...],
+"dirs": [...]}` with files and directories as a root lists them (a listed
+directory's ancestors, and a file's, are directories of the layer too):
+
+```json
+{"id": 0, "writable": ["."],
+ "files": [{"path": "Data/Saved.esp", "contents": "mine"}],
+ "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}]},
+           {"files": [{"path": "Data/Base.esm", "contents": "base"}],
+            "dirs": ["Data/Empty"]}]}
+```
+
+The root's own `files` and `dirs`, its `writable` entries and every
+directory above them are then its upper. Every file and listed directory of
+a layer lies strictly below one of the root's `writable` entries (anywhere,
+in a root writable as a whole); the directories a layer's names imply above
+them may lie outside the writable part (they are the upper's names too, so
+the two merge). Within one layer a name is there once and of one kind; two
+layers, or a layer and the upper, may hold one name, in any spelling. The root is served as one tree, an
+overlay (wire.md 3.4.9, "Names only in a read-only lower"):
+
+- At a name the upper holds, the upper's entry is served (its kind, size,
+  bytes and spelling). Below it, the nearest layer holding the name.
+- A file, in the upper or a layer, hides whatever farther layers hold at and
+  below its name. A directory over a directory merges with it: its listing
+  holds the names of both. A directory over a file hides the file and
+  anything farther layers hold below it.
+- A name only the layers hold is a lower-only name, the one wire.md's
+  allowances for "names only in a read-only lower" are about; the upper
+  holds every name the tree's `files` and `dirs` give, and any made, moved,
+  or changed in the session.
+
+An adapter mounts the layers as its director's read-only lowers in this
+order and the root's own entries as the upper (as the reference does). An
+adapter whose director serves no root as an overlay refuses such a mount
+and says `"layers": false` in its mount answers; it never ignores `lower`.
+The run then skips the scenarios with layers (`docs/conformance.md`, "The
+adapter protocol"). wire.md 3.4.9 lets an overlay answer four requests on a
+lower-only name by its list or by the general rules, and the scenarios
+accept both. `docs/conformance.md` ("Layered roots") lists the rules they
+check and the questions wire.md leaves open.
+
+**Who holds what.** Everything under a `writable` entry that the root's own
+`files` and `dirs` list, and any name made there later, is held by the
 writable provider itself, not by a read-only layer beneath it, so wire.md
-3.4.9's allowances for "names only in a read-only lower" never apply, and an
-adapter must mount them that way (a director that serves a writable root as an
-overlay must have the tree's writable part in the upper). A file or directory
+3.4.9's allowances for "names only in a read-only lower" never apply to
+them, and an adapter must mount them that way (a director that serves a
+writable root as an overlay must have them in the upper). Those allowances
+are for the names of a root's `lower` layers (above). A file or directory
 outside every `writable` entry belongs to a read-only provider: a write open,
 DELETE, RENAME or MKDIR of it is `read-only` (wire.md 3.5). A root with no
 `writable` entry has no writable provider at all. A scenario that needs "the
@@ -112,6 +156,14 @@ components (`a/../..`) is not sent. Registry paths are sent as written.
   HEARTBEAT, RENAME_X).
 - `{"one_of": [...], "wire": "<section>"}`: any of the listed answers, only
   where wire.md allows more than one, and `wire` names the section that does.
+  A `one_of` may also carry `"choice": "<label>"`. The `one_of`s of one
+  label have lists of equal length and take the alternative of one position
+  together: once a step's answer has ruled out an alternative, a later step
+  of the label that answers as that alternative fails. It is how a scenario
+  shows that a change happened whole or not at all where wire.md allows
+  either (`overlay-rename-both`). Under a label an OPEN reply's
+  `immutable` is compared, so the READs through a handle can depend on
+  whether its OPEN set it (`overlay-copy-up-handles`).
 
 A step may carry a `note`, and `"client": n` (default 0): which client of
 the ring sends it. The run attaches one client per number named, every one
@@ -137,7 +189,7 @@ text quoted from the section named; there are no others.
 |---|---|---|
 | OPEN `fh` | Paired with the expected fh at the OPEN that issues it, one to one while open; a successful CLOSE ends the pairing, so the number may come back. Requests carry the director's number: the paired one while open; after CLOSE the number the director closed, so a use-after-close tests that handle (unless the director has issued it again); otherwise, and for a number never paired, a stand-in no open handle of the director has, counted down from `u64::MAX`. Never 0 (3.4.3: a director never issues 0). | 3.4.3: "`fh` is any u64 the director chooses except 0, unique among open handles" |
 | OPEN `mount_gen` | Not compared. | 3.4.3: "a generation the director bumps whenever a root's content is replaced"; where a director starts it is its own |
-| OPEN `immutable` | Not compared, except that it must be clear on a write open, on a directory and on a file under a `writable` entry; reads through immutable handles are checked against each other (below). | 3.4.3: it permits caching; "Never set it for a write open or a directory"; "never set it for a file a writable provider holds" |
+| OPEN `immutable` | Not compared, except that it must be clear on a write open, on a directory and on a file under a `writable` entry (a file only the tree's lower layers hold may set it until a write open of it, or a RENAME or MKDIR onto its name, has succeeded); reads through immutable handles are checked against each other (below). In a `one_of` with a `choice` label it is compared, so a label can tie the READs through a handle to whether its OPEN set it. | 3.4.3: it permits caching; "Never set it for a write open or a directory"; "never set it for a file a writable provider holds", but for an overlay's read open of a file only a lower layer holds (3.4.3, 3.4.9) |
 | READDIR order | Entries compared as a multiset. | 3.4.2: "A director may send the entries in any order." |
 | `mtime` (GETATTR, READDIR) | Not compared (but it must be below 2^40, the year 36812, as seconds are: 3.2, "`mtime` is seconds since the Unix epoch"), and not checked for changed or unchanged after a write either: the time is the director's. A mounted file's `mtime` in the tree is input for a director that keeps it; the reference reports 0. | 3.2: "Which time a director reports for a path, if any, is the director's to choose" |
 | READ inline or bulk | Compared by data; a bulk reply is read from the arena first. | 3.4.4: the client "must accept either whatever flag it sent" |
@@ -167,6 +219,9 @@ state):
 | STORED_NAMES with `skip` at or past the number of components | an empty reply or `bad-request` | 3.4.12 |
 | A request naming a named stream (`x.sav:s`) | `not-found`, `bad-request`, or the stream a director holds | 3.2 |
 | A create of a name a director's store would make one with another (`ας` beside `ασ`) | created, or `exists` | 3.2 |
+| MKDIR of a directory only a lower layer holds | `ok` or `exists` | 3.4.9 |
+| DELETE of a lower-only directory with children; RENAME of a lower-only directory to another name; a case-only RENAME of a lower-only name; MKDIR over a lower-only file | the answer 3.4.9's list gives, or the general rules' (`io-error`, moved whole, respelled, `io-error`), the steps after it sharing a `choice` | 3.4.9 |
+| A case-only RENAME of a directory the upper and a lower both hold | `ok` (respelled) or `io-error` | 3.4.7 |
 
 An error answer must carry no payload (wire.md 3.1: "A director answers
 every error with an empty payload"); one that does fails its step whatever
@@ -217,6 +272,7 @@ what it checks and cites wire.md.
 | STAGE_EXEC | `stage-exec`, `stage-exec-after-write` |
 | Registry | `registry-none`, `registry-lookup`, `registry-case`, `registry-bad-path`, `registry-values`, `registry-value-order`, `registry-delete-value`, `registry-create-key`, `registry-delete-key`, `registry-delete-unknown-key`, `registry-rename-key`, `registry-changed`, `registry-current-user`, `registry-limits`, `registry-key-too-large`, `registry-write-depth`, `registry-reads-and-limits`, `registry-refused-writes-keep-version`, `registry-key-lifecycle`, `registry-under-tombstone`, `registry-rename-changed-recreate` |
 | Several clients | `multi-handle-shared`, `multi-handles-unique`, `multi-write-visible`, `multi-registry-gen`, `multi-registry-overlay` |
+| A root served as an overlay (`lower` layers) | `overlay-copy-up-handles`, `overlay-delete-recreate`, `overlay-delete-dir`, `overlay-rename-file`, `overlay-rename-dir`, `overlay-listing`, `overlay-spelling`, `overlay-mkdir`, `overlay-truncate`, `overlay-written-file`, `overlay-rename-both` |
 
 The interactions a director is most likely to get wrong each have a scenario
 of their own, to be read as the contract's example of them; generated cases
@@ -234,3 +290,8 @@ of their own, to be read as the contract's example of them; generated cases
 | A case-only rename, then READDIR and STORED_NAMES | `rename-dir-case-only` |
 | RENAME_X across roots, then read in both | `rename-x-read-both` |
 | A registry key created, given values, renamed, looked up under both names, deleted with values and subkeys | `registry-key-lifecycle` |
+| A lower-only file copied up, read through a handle opened before and one after | `overlay-copy-up-handles` |
+| A lower-only file deleted, then created again | `overlay-delete-recreate` |
+| A lower-only file renamed; a lower-only directory that does not move | `overlay-rename-file`, `overlay-rename-dir` |
+| A listing of names in both layers, after mixed changes; spellings from either | `overlay-listing`, `overlay-spelling` |
+| MKDIR over lower names; a lower-only file truncated | `overlay-mkdir`, `overlay-truncate` |

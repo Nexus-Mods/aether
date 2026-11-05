@@ -1,0 +1,32 @@
+{
+  "name": "overlay-delete-dir",
+  "description": "DELETE of a lower-only directory with children hides it and everything under it, a farther layer's names included (wire.md 3.4.9, \"Names only in a read-only lower\"), or, by the general rule, is ST_IO_ERROR and nothing is deleted (3.4.8): wire.md 3.4.9 lets an overlay give the answers its list of \"Names only in a read-only lower\" gives, or the ones the rules above it give; each such step, and every step whose answer depends on it, shares a choice label, the list's answer first. A handle on a file below it reads its last bytes or fails (3.4.8); a lower-only directory emptied by DELETEs and deleted is made again empty, since what the DELETEs hid stays hidden; a directory the upper holds with a lower's names under it is ST_IO_ERROR to DELETE (3.4.8: \"A directory with anything under it\").",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "dirs": ["Data/Up"], "lower": [{"files": [{"path": "Data/Meshes/a.nif", "contents": "a"}, {"path": "Data/Meshes/Deep/b.nif", "contents": "b"}, {"path": "Data/Up/low.txt", "contents": "low"}, {"path": "Data/Gone/g.nif", "contents": "g"}]}, {"files": [{"path": "data/meshes/c.nif", "contents": "c"}, {"path": "data/gone/h.nif", "contents": "h"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/meshes/deep/b.nif"}, "expect": {"reply": {"fh": 1, "size": 1, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data/meshes"}, "expect": {"reply": {"entries": [{"name": "Deep", "is_dir": true, "size": 0, "mtime": 0}, {"name": "a.nif", "is_dir": false, "size": 1, "mtime": 0}, {"name": "c.nif", "is_dir": false, "size": 1, "mtime": 0}]}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/meshes"}, "expect": {"one_of": [{"status": "ok"}, {"status": "io-error"}], "wire": "3.4.9", "choice": "hidden"}, "note": "children and all: hidden, or refused"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}], "wire": "3.4.9", "choice": "hidden"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes/deep/b.nif"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}], "wire": "3.4.9", "choice": "hidden"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes/c.nif"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}], "wire": "3.4.9", "choice": "hidden"}, "note": "the farther layer's too"},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"one_of": [{"reply": {"entries": [{"name": "Gone", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Up", "is_dir": true, "size": 0, "mtime": 0}]}}, {"reply": {"entries": [{"name": "Gone", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Meshes", "is_dir": true, "size": 0, "mtime": 0}, {"name": "Up", "is_dir": true, "size": 0, "mtime": 0}]}}], "wire": "3.4.9", "choice": "hidden"}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": "b"}}, {"status": "io-error"}, {"status": "not-found"}], "wire": "3.4.8"}},
+    {"request": {"op": "delete", "root": 0, "path": "data/gone/g.nif"}, "expect": {"status": "ok"}},
+    {"request": {"op": "delete", "root": 0, "path": "data/gone/h.nif"}, "expect": {"status": "ok"}, "note": "the farther layer's file"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/gone"}, "expect": {"reply": {"entries": []}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/gone"}, "expect": {"status": "ok"}, "note": "a lower-only directory with nothing left under it"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/gone"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "mkdir", "root": 0, "mode": 493, "path": "Data/gone"}, "expect": {"status": "ok"}},
+    {"request": {"op": "readdir", "root": 0, "path": "data/gone"}, "expect": {"reply": {"entries": []}}, "note": "made again: empty, what was hidden stays hidden"},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "create"], "path": "data/gone/g.nif"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}, "note": "a new file, not the lower's"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/gone/h.nif"}, "expect": {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "delete", "root": 0, "path": "data/up"}, "expect": {"status": "io-error"}, "note": "an upper directory whose only child is a lower's"},
+    {"request": {"op": "readdir", "root": 0, "path": "data/up"}, "expect": {"reply": {"entries": [{"name": "low.txt", "is_dir": false, "size": 3, "mtime": 0}]}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}}
+  ]
+}

@@ -219,6 +219,41 @@ never fails on a timing: `--fail-over` is not passed, a base that lacks a
 tool is skipped with a notice, and the only way for it to fail is a reply the
 director got wrong or a build that does not build.
 
+## Soak runs
+
+The generated fault properties above run one seed each on every push. A
+soak runs them again and again with fresh seeds, for as long as it is given,
+and keeps each failing seed and shrunk sequence in a folder. Windows only,
+since that is where the shim runs; it is an ignored test, set by the
+environment:
+
+```powershell
+$env:AETHER_FAULTS_SOAK = '30m'
+cargo test -p aether-hooks --test harness soak_ -- --ignored --nocapture
+```
+
+| Variable | Meaning |
+|---|---|
+| `AETHER_FAULTS_SOAK` | how long: `90s`, `10m`, `2h`, `1h30m`, a bare number is seconds; a round that starts before the time is up is played whole; unset, one round |
+| `AETHER_FAULTS_SEED` | the first round's seed; the others are drawn from it; unset, from the clock, printed |
+| `AETHER_FAULTS_ROUND_CASES` | cases of each property in a round (default 256) |
+| `AETHER_FAULTS_FAILURES` | the folder for failures (default `target/faults-failures`); a relative one is taken from the workspace's root, not the package folder `cargo test` runs the harness in |
+
+A round plays each property in a process of its own (`PROPTEST_CASES` and
+`AETHER_FAULTS_SEED` set for it, as a person would set them), because the
+shim and director of a test are one for the process and use up a fresh name
+for each call. A property that fails writes `<property>-<seed>.txt`: its
+first three lines are the property, the seed and the command that replays
+it, then come the shortest sequence that still fails and everything the
+process wrote. The soak goes on, and the test fails at the end if any file
+was written. To turn a failure into a regression, add its sequence as a
+test beside the properties in `faults_file.rs` or `faults_registry.rs`
+(`run_case` takes a sequence of steps), and fix what it found.
+
+`.github/workflows/soak.yml` runs this nightly and by hand on Windows,
+beside the conformance soak (`docs/conformance.md`, "Soak runs"), and
+uploads the folder.
+
 ## Fuzzing
 
 `aether-fuzz` holds the bodies of seven targets, and `fuzz/` is the cargo-fuzz

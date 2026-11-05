@@ -1066,16 +1066,20 @@ fn a_lower_only_name_is_answered_as_wire_md_3_4_9_says() {
             Err(CallError::Status(Status::IoError))
         );
         assert!(getattr(c, "data/fixed").unwrap().is_dir);
-        // A name created under a lower directory copies it up: it then
-        // moves as an upper directory does.
+        // A name created under a lower directory copies it up, and a
+        // directory a lower holds still does not move (the reference's
+        // answer where wire.md speaks only of lower-only directories).
         open_with(
             c,
             OpenFlags::WRITE | OpenFlags::CREATE,
             "Data/Fixed/new.esp",
         )
         .unwrap();
-        assert_eq!(empty(c, rename("data/fixed", "data/moved")), Ok(()));
-        assert!(getattr(c, "data/moved/new.esp").unwrap().found);
+        assert_eq!(
+            empty(c, rename("data/fixed", "data/moved")),
+            Err(CallError::Status(Status::IoError))
+        );
+        assert!(getattr(c, "data/fixed/new.esp").unwrap().found);
         assert_eq!(empty(c, rename("data/copied.esp", "Data/Up.esp")), Ok(()));
         assert_eq!(knob.contents("data/up.esp"), Some(vec![3, 3, 3]));
         assert!(!getattr(c, "data/copied.esp").unwrap().found);

@@ -155,6 +155,29 @@ when one does.
 - `aether_casefold::eq_folded` compares two names by their fold without
   building either.
 
+- `aether-conform soak --director "<adapter command>" --for 2h` plays
+  generated cases and concurrent rounds in batches, each from a fresh seed,
+  and writes every distinct shrunk failure as a scenario file with its seed
+  and the command that replays it. The shim's generated fault properties have
+  the same, set by `AETHER_FAULTS_SOAK` and its companions. Both run nightly
+  in `.github/workflows/soak.yml`, never on a push (`docs/conformance.md`,
+  "Soak runs"; `docs/benchmarks.md`).
+- A scenario's `one_of` may carry a `choice` label, so that several steps
+  show one of the outcomes `docs/wire.md` allows together (`overlay-rename-both`).
+- The scenario tree format: a root may name `lower`, read-only layers beneath
+  its writable upper (`contract/scenarios/README.md`, "Layers"). The JSON is
+  backward compatible (absent, no layers; written only when there are some).
+  `aether_refdirector::tree::Root` has a new public field, `lower`, so Rust
+  code that builds a `Root` with a struct literal adds it (or uses
+  `..Root::default()`), and an adapter built on an older crate refuses a tree
+  that has one (unknown field), rather than mount it without its layers.
+- The reference director serves a root with lower layers as an overlay
+  (`docs/wire.md` 3.4.9), and the scenarios `overlay-*` and the generated
+  cases check a director that does (`docs/conformance.md`, "Layered roots").
+  A director that serves no overlays says `"layers": false` in its mount
+  answers, and the run skips the layered scenarios and generates no layered
+  roots for it (`docs/conformance.md`, "The adapter protocol").
+
 ### Changed
 
 - `aether-protocol`'s API is one typed table: `Opcode`, `Status`,
@@ -182,6 +205,20 @@ when one does.
   next release signs new natives. The natives key leaves out the crates no
   native depends on, and releases check that exclusion with
   `bin/natives-key.tests.ps1`.
+- `docs/wire.md` 3.4.7: RENAME of a directory that an overlay's upper and a
+  lower both hold may be refused with `ST_IO_ERROR` or moved whole, never in
+  part. 3.4.9: MKDIR of a directory only a lower holds is `ST_OK` or
+  `ST_EXISTS`, and its listing is unchanged (no longer `ST_READ_ONLY`).
+  `rename-x-same-root` accepts `ST_IO_ERROR` as well as `ST_BAD_REQUEST` for
+  the root at an end, as `rename-root` does.
+- `docs/wire.md` 3.4.9: the general rules stay allowed answers for a
+  lower-only name (conformance accepts both); a copy-up keeps a file's
+  identity, so a handle opened before it without `immutable` reads the copy
+  (3.4.4); a read open of a lower-only file may answer `immutable`, such a
+  handle keeps the lower's bytes while it is open, and once the file has been
+  copied up or a write open of it succeeded no read open of it does (3.4.3).
+  The reference opens lower-only files immutable, so the shim's read cache
+  serves a writable root's game files.
 
 ## 1.0.0
 

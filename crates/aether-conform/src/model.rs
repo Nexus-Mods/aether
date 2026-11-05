@@ -24,6 +24,16 @@
 //! A handle whose file was deleted or replaced keeps the bytes the file had
 //! then ([`Gone`]), and its answers are the `one_of`s 3.4.8 allows.
 //!
+//! A root may be served as an overlay, with read-only `lower` layers beneath
+//! its writable upper. The generator keeps its own account of those layers
+//! ([`Layered`]), apart from the oracle: which names the upper holds, which
+//! a DELETE or RENAME hid, and which a rule wire.md leaves open makes
+//! unsure. From it it predicts the overlay's statuses (3.4.9, "Names only
+//! in a read-only lower"), the bytes a READ through any live handle gets,
+//! the layer's spelling of a lower-only name, and after every step every
+//! listing ([`Gen::check_layers`]); the oracle answering otherwise fails
+//! [`build`], as a status wire.md disagrees with does.
+//!
 //! The generator only sends what `docs/wire.md` fixes the answer to, as
 //! `contract/scenarios/README.md` reads a tree ("Who holds what"), and where
 //! wire.md allows several answers the expectation is a `one_of` of exactly
@@ -34,7 +44,9 @@
 //!
 //! What it leaves out, and why, is listed in `docs/conformance.md`
 //! ("Generated cases"). In short: names whose answer depends on the
-//! director's layering (a writable entry's own directory, its ancestors);
+//! director's layering (a writable entry's own directory, its ancestors;
+//! in a layered root, the question `docs/conformance.md` lists as left to
+//! the director);
 //! WRITE and SETATTR on a handle opened without write access; requests that
 //! create a named stream; READs through a handle whose file is gone after a
 //! WRITE or SETATTR through it; paths that leave their root (`escape-paths`
@@ -45,7 +57,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use aether_casefold::fold;
 use aether_ipc::{ring, DataArena, Geom, OwnedSeg, RingServer, SpinNotifier};
 use aether_protocol::{OpenFlags, Reply, RequestFlags, RootId, Status};
-use aether_refdirector::tree::{fill, Contents, File, RegKey, RegValue, Registry, Root, Tree};
+use aether_refdirector::tree::{
+    fill, Contents, File, Layer, RegKey, RegValue, Registry, Root, Tree,
+};
 use aether_refdirector::{Reference, BULK_THRESHOLD};
 use aether_rpc::Scratch;
 use proptest::prelude::*;
@@ -169,6 +183,10 @@ pub struct RootSpec {
     /// another.
     pub two: bool,
     pub entries: Vec<EntrySpec>,
+    /// Read-only layers beneath the writable upper, the nearest first, each
+    /// a list of entries placed below the writable part ([`build_tree`]); a
+    /// root with no writable provider has none.
+    pub lower: Vec<Vec<EntrySpec>>,
 }
 
 /// A file or directory: under the directory `parent` picks, named from
@@ -345,11 +363,16 @@ fn root_spec() -> impl Strategy<Value = RootSpec> {
         proptest::option::weighted(0.7, any::<u32>()),
         proptest::bool::weighted(0.3),
         proptest::collection::vec(entry_spec(), 0..12),
+        prop_oneof![
+            1 => Just(Vec::new()),
+            1 => proptest::collection::vec(proptest::collection::vec(entry_spec(), 1..10), 1..=2),
+        ],
     )
-        .prop_map(|(writable, two, entries)| RootSpec {
+        .prop_map(|(writable, two, entries, lower)| RootSpec {
             writable,
             two,
             entries,
+            lower,
         })
 }
 
@@ -529,6 +552,157 @@ struct RootInfo {
     entries: Vec<String>,
 }
 
+/// The name `path` of a lower layer, by its folded path: as the layer spells
+/// it, and a file's bytes (`None` for a directory).
+type LayerNames = BTreeMap<String, (String, Option<Vec<u8>>)>;
+
+/// The layers of `root`, each as [`LayerNames`] with every directory a
+/// file's path implies.
+fn layer_names(root: &Root) -> Vec<LayerNames> {
+    root.lower
+        .iter()
+        .map(|l| {
+            let mut m = LayerNames::new();
+            for d in l.dirs_spelled() {
+                m.entry(fold(&d)).or_insert((d, None));
+            }
+            for f in &l.files {
+                m.insert(fold(&f.path), (f.path.clone(), Some(f.contents.bytes())));
+            }
+            m
+        })
+        .collect()
+}
+
+/// A name the lower layers show beneath an upper that holds nothing.
+#[derive(Debug, Clone)]
+struct LowerNode {
+    /// As its layer spells it.
+    path: String,
+    dir: bool,
+    bytes: Vec<u8>,
+}
+
+/// What the generator knows of a root served as an overlay, kept apart
+/// from the oracle so that it can predict the overlay's answers
+/// (`docs/wire.md` 3.4.9, "Names only in a read-only lower") rather than
+/// take them: the layers as one tree, and which names the upper holds.
+#[derive(Debug, Clone, Default)]
+struct Layered {
+    /// What the layers show by folded path, as the tree format combines
+    /// them (`contract/scenarios/README.md`): the nearest layer holding a
+    /// name, a file hiding what farther layers hold below it.
+    view: BTreeMap<String, LowerNode>,
+    /// Every folded path any layer holds, shown or not.
+    raw: BTreeSet<String>,
+    /// The names the upper holds: the tree's own, and every name made,
+    /// moved there or changed since.
+    upper: BTreeSet<String>,
+    /// Names wire.md does not say are in the upper or not: a lower-only file
+    /// a write open reached without changing it, a lower-only directory a
+    /// name was made below or a MKDIR of it was answered. Requests whose
+    /// answer would depend on it are not sent for them.
+    unsure: BTreeSet<String>,
+    /// Folded paths where, and below which, the upper hides the layers: a
+    /// DELETE or RENAME of a name they hold, or the name an upper entry
+    /// replaced one at.
+    masked: BTreeSet<String>,
+}
+
+impl Layered {
+    /// `root`'s layers as the generator keeps them, its upper as the tree
+    /// has it.
+    fn of(root: &Root) -> Layered {
+        let layers = layer_names(root);
+        let mut raw = BTreeSet::new();
+        for l in &layers {
+            raw.extend(l.keys().cloned());
+        }
+        // The layers making up each directory, from the root down, and the
+        // nearest layer's entry at each name among its parent's.
+        let mut keys: Vec<&String> = raw.iter().collect();
+        keys.sort_by_key(|k| k.matches('/').count());
+        let mut contrib: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        contrib.insert(".".into(), (0..layers.len()).collect());
+        let mut view = BTreeMap::new();
+        for k in keys {
+            let Some(up) = contrib.get(parent(k)).cloned() else {
+                continue;
+            };
+            let mut dirs = Vec::new();
+            let mut shown = None;
+            for i in up {
+                match layers[i].get(k) {
+                    Some((path, None)) => {
+                        dirs.push(i);
+                        shown.get_or_insert((path.clone(), None));
+                    }
+                    Some((path, Some(b))) => {
+                        shown.get_or_insert((path.clone(), Some(b.clone())));
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            if let Some((path, bytes)) = shown {
+                if bytes.is_none() {
+                    contrib.insert(k.clone(), dirs);
+                }
+                view.insert(
+                    k.clone(),
+                    LowerNode {
+                        path,
+                        dir: bytes.is_none(),
+                        bytes: bytes.unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        let mut upper: BTreeSet<String> = BTreeSet::new();
+        let ancestors = |p: &str| -> Vec<String> {
+            let c: Vec<&str> = p.split('/').collect();
+            (1..=c.len()).map(|n| fold(&c[..n].join("/"))).collect()
+        };
+        for p in root
+            .files
+            .iter()
+            .map(|f| &f.path)
+            .chain(&root.dirs)
+            .chain(root.writable.iter().filter(|w| *w != "."))
+        {
+            upper.extend(ancestors(p));
+        }
+        Layered {
+            view,
+            raw,
+            upper,
+            ..Layered::default()
+        }
+    }
+
+    /// Whether any layer holds folded `path` or anything below it.
+    fn holds(&self, path: &str) -> bool {
+        let below = format!("{path}/");
+        self.raw.iter().any(|k| k == path || k.starts_with(&below))
+    }
+
+    /// The upper holds `path` now: no longer unsure.
+    fn up(&mut self, path: &str) {
+        self.unsure.remove(path);
+        self.upper.insert(path.to_string());
+    }
+
+    /// What the upper held at and below `path`, gone, and the layers hidden
+    /// there.
+    fn gone(&mut self, path: &str) {
+        self.upper.retain(|k| !under(k, path));
+        self.unsure.retain(|k| !under(k, path));
+        if self.holds(path) {
+            self.masked.insert(path.to_string());
+        }
+    }
+}
+
 /// The tree `spec` stands for, and what the generator keeps of it. Names
 /// that fold like one already there are skipped, so the tree is valid
 /// whatever proptest made.
@@ -598,11 +772,78 @@ fn build_tree(spec: &TreeSpec) -> (Tree, Vec<RootInfo>) {
                 writable.iter().map(|w| fold(w)).collect()
             },
         });
+        // The layers, each placed below the writable part: under a
+        // writable entry, or anywhere in a root writable as a whole. A
+        // name may be one the upper or a nearer layer has, in any case.
+        let lower = if writable.is_empty() {
+            Vec::new()
+        } else {
+            let below_writable =
+                |d: &str| spec.whole || writable.iter().any(|w| under(&fold(d), &fold(w)));
+            let mut upper_dirs: Vec<String> = if spec.whole {
+                vec![".".to_string()]
+            } else {
+                Vec::new()
+            };
+            upper_dirs.extend(dirs.iter().filter(|d| below_writable(d)).cloned());
+            r.lower
+                .iter()
+                .map(|entries| {
+                    let mut layer = Layer::default();
+                    let mut taken: BTreeSet<String> = BTreeSet::new();
+                    let mut files_taken: BTreeSet<String> = BTreeSet::new();
+                    let mut own: Vec<String> = Vec::new();
+                    for e in entries {
+                        let places: Vec<&String> = upper_dirs.iter().chain(&own).collect();
+                        let dir = places[e.parent as usize % places.len()].clone();
+                        if dir != "." && dir.split('/').count() >= 3 {
+                            continue;
+                        }
+                        let name =
+                            respell(NAMES[e.name as usize % NAMES.len()], u32::from(e.case) >> 2);
+                        let path = join(&dir, &name);
+                        let f = fold(&path);
+                        // One name, of one kind, in a layer: nothing below
+                        // a file of its own, no file over its own names.
+                        let below_file = files_taken.iter().any(|t| under(&f, t));
+                        let over_names = e.file.is_some()
+                            && taken.iter().any(|t| t.starts_with(&format!("{f}/")));
+                        if below_file || over_names || !taken.insert(f.clone()) {
+                            continue;
+                        }
+                        if e.file.is_some() {
+                            files_taken.insert(f);
+                        }
+                        match &e.file {
+                            None => {
+                                own.push(path.clone());
+                                layer.dirs.push(path);
+                            }
+                            Some(fs) => layer.files.push(File {
+                                path,
+                                contents: match fs {
+                                    FileSpec::Text(t) => Contents::Text(
+                                        TEXTS[(*t as usize + 3) % TEXTS.len()].to_string(),
+                                    ),
+                                    FileSpec::Fill { size, seed } => Contents::Fill {
+                                        size: u64::from(*size),
+                                        seed: 100 + u64::from(*seed),
+                                    },
+                                },
+                                mtime: 0,
+                            }),
+                        }
+                    }
+                    layer
+                })
+                .collect()
+        };
         roots.push(Root {
             id,
             files,
             dirs,
             writable,
+            lower,
         });
     }
     let registry = spec.registry.as_ref().map(|keys| {
@@ -688,6 +929,11 @@ enum Want {
     Alts(Vec<Expect>),
 }
 
+/// The note of a READ through an immutable handle whose bytes and the file's
+/// differ ([`Gen::pinned_label`]).
+const PINNED_NOTE: &str =
+    "an immutable handle on a lower-only file: its bytes, or the file as it is now";
+
 /// A path below a file, to any opcode but GETATTR: `ST_NOT_FOUND` or
 /// `ST_NOT_A_DIRECTORY` (3.5).
 const BELOW_A_FILE: &[Status] = &[Status::NotFound, Status::NotADirectory];
@@ -721,7 +967,27 @@ enum Then {
         root: u32,
         dir: String,
     },
+    /// The case ends: the step's allowed answers leave trees that differ,
+    /// and the oracle's tree is one of them (wire.md 3.4.9: an overlay may
+    /// answer a lower-only name by its list or by the general rules).
+    End,
 }
+
+/// An answer that is `ST_OK` or this status, the oracle's first.
+fn ok_or(first_ok: bool, status: Status) -> Want {
+    let ok = Expect::Reply(OwnedReply::Empty);
+    let st = Expect::Status(status);
+    Want::Alts(if first_ok { vec![ok, st] } else { vec![st, ok] })
+}
+
+/// The notes of RENAMEs whose allowed answers leave trees that differ, after
+/// which the case ends ([`Then::End`]).
+const RENAME_ENDS: [&str; 4] = [
+    "another case of a lower-only directory: the lower's spelling kept, or respelled",
+    "another case of a lower-only file: the lower's spelling kept, or respelled",
+    "a lower-only directory: refused, or moved whole",
+    "another case of a directory both layers hold: respelled, or refused",
+];
 
 /// What a step changes in the generator's state when it succeeds.
 #[derive(Debug, Clone)]
@@ -735,9 +1001,15 @@ enum Effect {
         append: bool,
         /// The open created the file or truncated it.
         emptied: bool,
+        /// The open created the file.
+        created: bool,
+        /// The open changed the file's bytes (a truncation of a file that
+        /// had some).
+        changed: bool,
     },
-    /// A WRITE or SETATTR through this handle changed its file.
-    Wrote(u64),
+    /// A WRITE or SETATTR through this handle; `true` when it changed the
+    /// file's bytes or size.
+    Wrote(u64, bool),
     /// A WRITE or SETATTR through this handle, whose file is gone, may or
     /// may not have changed what it reads.
     Spent(u64),
@@ -749,6 +1021,23 @@ enum Effect {
         to: String,
     },
     Deleted {
+        root: u32,
+        path: String,
+    },
+    /// MKDIR made a directory at a missing name.
+    Made {
+        root: u32,
+        path: String,
+    },
+    /// MKDIR made a directory over a lower-only file, which it hides: to
+    /// the file's handles a deleted file (wire.md 3.4.9, 3.4.8).
+    MadeOver {
+        root: u32,
+        path: String,
+    },
+    /// MKDIR of a directory only a lower holds, whatever it was answered:
+    /// whether the upper holds it now is open ([`Layered::unsure`]).
+    Unsure {
         root: u32,
         path: String,
     },
@@ -794,6 +1083,13 @@ struct Handle {
     /// a directory above it since it was opened (wire.md says nothing of
     /// such a handle's answers, so it is then only closed).
     clean: bool,
+    /// For a read handle the oracle opened `immutable` on a file only a
+    /// layer held, the layer's bytes: what it reads while its file is there
+    /// (wire.md 3.4.3). A director may have opened it without `immutable`,
+    /// and then it reads the file as it is now (3.4.4, 3.4.9), so once the
+    /// two differ a READ through it is a `one_of` of both, tied to its OPEN
+    /// by a choice label ([`Gen::pinned_label`]).
+    pinned: Option<Vec<u8>>,
 }
 
 /// A file handle whose file was deleted, or replaced by a RENAME or
@@ -846,6 +1142,9 @@ pub struct Limits {
     pub write: usize,
     /// Whether the ring has a bulk arena (`VFS_ARENA_LEN` above 0).
     pub arena: bool,
+    /// Whether the director serves roots with `lower` layers: without, no
+    /// generated root has any.
+    pub layers: bool,
 }
 
 impl Limits {
@@ -855,6 +1154,7 @@ impl Limits {
             inline_read: payload_cap.saturating_sub(8),
             write: payload_cap.saturating_sub(24) as usize,
             arena: arena_len > 0,
+            layers: true,
         }
     }
 }
@@ -900,6 +1200,8 @@ struct Gen {
     /// A step whose allowed answers leave different trees ended the case.
     done: bool,
     steps: Vec<Step>,
+    /// The roots served as overlays, by id ([`Layered`]).
+    layered: BTreeMap<u32, Layered>,
 }
 
 /// How many recent paths and handles [`Gen`] keeps for its locality bias.
@@ -937,7 +1239,13 @@ pub fn build_with(
     description: &str,
     limits: Limits,
 ) -> Result<Scenario, String> {
-    let (tree, roots) = build_tree(&input.tree);
+    let mut spec = input.tree.clone();
+    if !limits.layers {
+        for r in &mut spec.roots {
+            r.lower.clear();
+        }
+    }
+    let (tree, roots) = build_tree(&spec);
     tree.validate()
         .map_err(|e| format!("generator: an invalid tree: {e}"))?;
     let mut g = Gen::new(&tree, roots.clone(), limits)?;
@@ -987,6 +1295,12 @@ impl Gen {
             others: 0,
             done: false,
             steps: Vec::new(),
+            layered: tree
+                .roots
+                .iter()
+                .filter(|r| !r.lower.is_empty())
+                .map(|r| (r.id, Layered::of(r)))
+                .collect(),
         };
         g.refresh();
         Ok(g)
@@ -1034,6 +1348,210 @@ impl Gen {
     fn has_writable(&self, root: u32) -> bool {
         self.info(root)
             .is_some_and(|r| r.whole || !r.entries.is_empty())
+    }
+
+    // --- Layers (wire.md 3.4.9, "Names only in a read-only lower").
+
+    /// What `root`'s layers show at folded `path` now, by the generator's
+    /// own reckoning: nothing where a mask or a file of the upper's at or
+    /// above it hides them, or where a directory above it is not a layer's.
+    fn lower_shows(&self, root: u32, path: &str) -> Option<&LowerNode> {
+        let l = self.layered.get(&root)?;
+        let upper_file = |p: &str| {
+            (l.upper.contains(p) || l.unsure.contains(p))
+                && self.node(root, p).is_some_and(|n| !n.dir)
+        };
+        let c: Vec<&str> = path.split('/').collect();
+        for n in 1..c.len() {
+            let a = c[..n].join("/");
+            if l.masked.contains(&a) || upper_file(&a) || !l.view.get(&a).is_some_and(|x| x.dir) {
+                return None;
+            }
+        }
+        if l.masked.contains(path) || upper_file(path) {
+            return None;
+        }
+        l.view.get(path)
+    }
+
+    /// Whether the existing name at `root`'s folded `path` is one only the
+    /// layers hold: `Some(false)` when the upper holds it (and in a root
+    /// with no layers), `None` when wire.md leaves it open
+    /// ([`Layered::unsure`]).
+    fn lower_only(&self, root: u32, path: &str) -> Option<bool> {
+        let Some(l) = self.layered.get(&root) else {
+            return Some(false);
+        };
+        if l.unsure.contains(path) {
+            return None;
+        }
+        if l.upper.contains(path) {
+            return Some(false);
+        }
+        Some(self.lower_shows(root, path).is_some())
+    }
+
+    /// Whether a layer holds a directory at `root`'s folded `path`, the upper
+    /// holding it too or not.
+    fn lower_dir(&self, root: u32, path: &str) -> bool {
+        self.lower_shows(root, path).is_some_and(|n| n.dir)
+    }
+
+    /// The directories above `root`'s folded `path` that only the layers
+    /// show, which a name made at `path` may put in the upper.
+    fn unsure_parents(&mut self, root: u32, path: &str) {
+        let c: Vec<&str> = path.split('/').collect();
+        let up: Vec<String> = (1..c.len())
+            .map(|n| c[..n].join("/"))
+            .filter(|a| self.lower_only(root, a) == Some(true))
+            .collect();
+        if let Some(l) = self.layered.get_mut(&root) {
+            l.unsure.extend(up);
+        }
+    }
+
+    /// The generator's reckoning of every layered root against the oracle's
+    /// listings: each name the oracle lists is the upper's, or one the
+    /// layers show (with the layer's spelling, kind and size), and each
+    /// name only the layers show is listed. A difference is the reference
+    /// answering an overlay otherwise than the generator predicts.
+    fn check_layers(&self) -> Result<(), String> {
+        for (&root, l) in &self.layered {
+            for n in self.all(root).iter().filter(|n| n.folded != ".") {
+                if l.upper.contains(&n.folded) || l.unsure.contains(&n.folded) {
+                    continue;
+                }
+                let Some(low) = self.lower_shows(root, &n.folded) else {
+                    return Err(format!(
+                        "generator: after step {}, root {root} lists {:?}, which the upper \
+                         does not hold and no layer shows (wire.md 3.4.9)",
+                        self.steps.len(),
+                        n.path
+                    ));
+                };
+                let size = if low.dir { 0 } else { low.bytes.len() as u64 };
+                if (low.dir, leaf(&low.path), size) != (n.dir, leaf(&n.path), n.size) {
+                    return Err(format!(
+                        "generator: after step {}, root {root} lists {:?} (directory {}, size {}), \
+                         which only a layer holds, as {:?} (directory {}, size {size}) \
+                         (wire.md 3.4.9, 3.2)",
+                        self.steps.len(),
+                        n.path,
+                        n.dir,
+                        n.size,
+                        low.path,
+                        low.dir
+                    ));
+                }
+            }
+            for k in l.view.keys() {
+                let lower_only = !l.upper.contains(k) && !l.unsure.contains(k);
+                if lower_only && self.lower_shows(root, k).is_some() && self.node(root, k).is_none()
+                {
+                    return Err(format!(
+                        "generator: after step {}, root {root} does not list {k:?}, which a \
+                         layer shows and nothing hid (wire.md 3.4.9)",
+                        self.steps.len()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// What the generator predicts of the oracle's answer `got` to `req`,
+    /// beyond its status: a READ through a live handle answers the file's
+    /// bytes as they are now, the layer's while only a layer holds the file
+    /// (wire.md 3.4.4); a STORED_NAMES component only a layer holds has
+    /// the layer's spelling (3.2, 3.4.12); a read open of a file the
+    /// writable provider holds is immutable exactly when only a layer holds it
+    /// (3.4.3). A difference is the reference answering otherwise.
+    fn check_prediction(
+        &self,
+        req: &OwnedRequest,
+        got: &Result<OwnedReply, Status>,
+    ) -> Result<(), String> {
+        let differ = |what: String| {
+            Err(format!(
+                "generator: step {}: {req:?}: the generator predicts {what}, but the \
+                 reference answered {}",
+                self.steps.len(),
+                crate::compare::render_got(got)
+            ))
+        };
+        match (req, got) {
+            (
+                OwnedRequest::Read {
+                    fh, offset, len, ..
+                },
+                Ok(OwnedReply::Read(data)),
+            ) => {
+                let Some(h) = self.handles.get(fh) else {
+                    return Ok(());
+                };
+                if h.dir || h.gone.is_some() {
+                    return Ok(());
+                }
+                let bytes = match (&h.pinned, self.lower_only(h.root, &h.folded)) {
+                    // An immutable handle keeps its bytes (wire.md 3.4.3).
+                    (Some(p), _) => p.clone(),
+                    (None, Some(true)) => match self.lower_shows(h.root, &h.folded) {
+                        Some(n) => n.bytes.clone(),
+                        None => return Ok(()),
+                    },
+                    _ => self.bytes_at(h.root, &h.folded),
+                };
+                let from = (*offset).min(bytes.len() as u64) as usize;
+                let to = (from as u64)
+                    .saturating_add(u64::from(*len))
+                    .min(bytes.len() as u64) as usize;
+                if data[..] != bytes[from..to] {
+                    return differ(format!("the {} bytes the file holds at {from}", to - from));
+                }
+            }
+            (
+                OwnedRequest::StoredNames { root, skip, path },
+                Ok(OwnedReply::StoredNames(names)),
+            ) if self.layered.contains_key(&root.0) => {
+                let c: Vec<&str> = path.split('/').collect();
+                let got: Vec<&str> = names.split('/').collect();
+                for i in (*skip as usize)..c.len() {
+                    let k = fold(&c[..=i].join("/"));
+                    if self.node(root.0, &k).is_none() || self.lower_only(root.0, &k) != Some(true)
+                    {
+                        continue;
+                    }
+                    let Some(n) = self.lower_shows(root.0, &k) else {
+                        continue;
+                    };
+                    let want = leaf(&n.path);
+                    if got.get(i - *skip as usize) != Some(&want) {
+                        return differ(format!(
+                            "component {i} spelled {want:?}, as its layer has it"
+                        ));
+                    }
+                }
+            }
+            // The reference opens a file only a layer holds immutable, and
+            // no other file the writable provider holds (wire.md 3.4.3,
+            // 3.4.9).
+            (OwnedRequest::Open { root, flags, path }, Ok(OwnedReply::Open(o)))
+                if !flags.contains(OpenFlags::WRITE)
+                    && !o.is_dir
+                    && self.held(root.0, &fold(path)) =>
+            {
+                let pinned = self.lower_only(root.0, &fold(path)) == Some(true);
+                if o.immutable != pinned {
+                    return differ(if pinned {
+                        "an immutable handle on a file only a layer holds".into()
+                    } else {
+                        "a handle that is not immutable".into()
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn node(&self, root: u32, folded: &str) -> Option<&Node> {
@@ -1406,6 +1924,38 @@ impl Gen {
         }
     }
 
+    /// What a RENAME or RENAME_X of `from` to `to` does to the layers'
+    /// bookkeeping: what the upper held at `to` is replaced and the layers
+    /// hidden there, the upper's names below `from` move below `to`, `to`
+    /// is the upper's (a lower-only file is copied up), and the layers are
+    /// hidden at `from` (wire.md 3.4.7, 3.4.9, 3.4.13).
+    fn moved_layers(&mut self, from_root: u32, from: &str, to_root: u32, to: &str) {
+        let moved: Vec<String> = self
+            .layered
+            .get(&from_root)
+            .map(|l| {
+                l.upper
+                    .iter()
+                    .filter(|k| under(k, from) && *k != from)
+                    .map(|k| format!("{to}{}", &k[from.len()..]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A lower-only `from` is copied up first, its directories with it.
+        self.unsure_parents(from_root, from);
+        if let Some(l) = self.layered.get_mut(&from_root) {
+            l.gone(from);
+        }
+        self.unsure_parents(to_root, to);
+        if let Some(l) = self.layered.get_mut(&to_root) {
+            l.gone(to);
+            l.up(to);
+            for k in moved {
+                l.up(&k);
+            }
+        }
+    }
+
     /// Moves every live handle's place to where its file is now.
     fn follow(&mut self) {
         let at: BTreeMap<u64, (u32, String)> =
@@ -1723,6 +2273,8 @@ impl Gen {
                     write: false,
                     append: false,
                     emptied: false,
+                    created: false,
+                    changed: false,
                 },
             ),
         };
@@ -1855,6 +2407,9 @@ impl Gen {
                 write: true,
                 append: flags.contains(OpenFlags::APPEND),
                 emptied: t.node.is_none() || flags.contains(OpenFlags::TRUNC),
+                created: t.node.is_none(),
+                changed: flags.contains(OpenFlags::TRUNC)
+                    && t.node.as_ref().is_some_and(|n| n.size > 0),
             }
         } else {
             Effect::None
@@ -1943,21 +2498,45 @@ impl Gen {
             offset,
             len: len as u32,
         };
+        let slice = |b: &[u8]| {
+            let from = offset.min(b.len() as u64) as usize;
+            let to = (from as u64).saturating_add(len).min(b.len() as u64) as usize;
+            b[from..to].to_vec()
+        };
         if let Some(g) = &h.gone {
-            let from = offset.min(g.snap.len() as u64) as usize;
-            let to = (from as u64).saturating_add(len).min(g.snap.len() as u64) as usize;
+            let mut alts = vec![
+                Expect::Reply(OwnedReply::Read(slice(&g.snap))),
+                Expect::Status(Status::IoError),
+                Expect::Status(Status::NotFound),
+            ];
+            // An immutable handle may keep its own bytes (3.4.3).
+            if let Some(p) = h.pinned.as_ref().filter(|p| slice(p) != slice(&g.snap)) {
+                alts.insert(1, Expect::Reply(OwnedReply::Read(slice(p))));
+            }
             return Some(Plan {
                 req,
-                want: Want::Alts(vec![
-                    Expect::Reply(OwnedReply::Read(g.snap[from..to].to_vec())),
-                    Expect::Status(Status::IoError),
-                    Expect::Status(Status::NotFound),
-                ]),
+                want: Want::Alts(alts),
                 wire: "3.4.8",
                 note: "a handle whose file is gone: its last bytes, or a failure".into(),
                 effect: Effect::None,
                 then: Then::Nothing,
             });
+        }
+        if let Some(p) = &h.pinned {
+            let now = slice(&self.bytes_at(h.root, &h.folded));
+            if slice(p) != now {
+                return Some(Plan {
+                    req,
+                    want: Want::Alts(vec![
+                        Expect::Reply(OwnedReply::Read(slice(p))),
+                        Expect::Reply(OwnedReply::Read(now)),
+                    ]),
+                    wire: "3.4.3, 3.4.9",
+                    note: PINNED_NOTE.into(),
+                    effect: Effect::None,
+                    then: Then::Nothing,
+                });
+            }
         }
         Some(Plan {
             req,
@@ -1967,6 +2546,14 @@ impl Gen {
             effect: Effect::None,
             then: Then::Nothing,
         })
+    }
+
+    /// The choice label tying a READ through an immutable handle on a
+    /// lower-only file to its OPEN (wire.md 3.4.3, 3.4.9): the OPEN's
+    /// `one_of` is the handle immutable or not, each READ's the handle's own
+    /// bytes or the file as it is now, in that order.
+    fn pinned_label(fh: u64) -> String {
+        format!("pinned-{fh}")
     }
 
     /// What a WRITE or SETATTR through a handle whose file was deleted or
@@ -2084,7 +2671,7 @@ impl Gen {
             } else {
                 String::new()
             },
-            effect: Effect::Wrote(*fh),
+            effect: Effect::Wrote(*fh, n > 0),
             then: Then::Nothing,
         })
     }
@@ -2132,7 +2719,7 @@ impl Gen {
             } else {
                 String::new()
             },
-            effect: Effect::Wrote(*fh),
+            effect: Effect::Wrote(*fh, to != size),
             then: Then::Nothing,
         })
     }
@@ -2320,7 +2907,9 @@ impl Gen {
             Effect::None
         };
         // What a refused rename left, or a rename that changes nothing.
-        let then = if want != Want::Ok || note == "the same name, the same spelling" {
+        let then = if RENAME_ENDS.contains(&note) {
+            Then::End
+        } else if want != Want::Ok || note == "the same name, the same spelling" {
             Then::GetAttr {
                 root,
                 path: from.folded.clone(),
@@ -2373,6 +2962,46 @@ impl Gen {
         let held_ends = self.held(root, &from.folded) && self.held(root, &to.folded);
         if from.node.is_some() && to.folded.starts_with(&format!("{}/", from.folded)) {
             return held_ends.then_some((Want::BadRequestOrIoError, "`to` inside `from`"));
+        }
+        // A root served as an overlay (wire.md 3.4.9, "Names only in a
+        // read-only lower"), where the answer depends on which layer holds
+        // `from`.
+        if let Some(f) = from
+            .node
+            .as_ref()
+            .filter(|_| self.layered.contains_key(&root))
+        {
+            let same = to.folded == from.folded;
+            let lo = self.lower_only(root, &from.folded);
+            if f.dir {
+                match lo {
+                    None => return None,
+                    // wire.md 3.4.9's list, or the general rules (3.4.7):
+                    // the spelling kept or respelled, refused or moved
+                    // whole.
+                    Some(true) if same => return Some((Want::Ok, RENAME_ENDS[0])),
+                    Some(true) => {
+                        let fresh =
+                            to.node.is_none() && to.parent_dir && self.held(root, &to.folded);
+                        return fresh.then_some((ok_or(false, Status::IoError), RENAME_ENDS[2]));
+                    }
+                    // A directory a layer holds too: refused or moved whole
+                    // (3.4.7), which `overlay-rename-both` plays; a
+                    // case-only RENAME of it is respelled or refused.
+                    Some(false) if !same && self.lower_dir(root, &from.folded) => return None,
+                    Some(false) if self.lower_dir(root, &from.folded) => {
+                        let respelled = leaf(&to.path) != leaf(&f.path);
+                        return respelled.then_some((ok_or(true, Status::IoError), RENAME_ENDS[3]));
+                    }
+                    Some(false) => {}
+                }
+            } else if same {
+                match lo {
+                    None => return None,
+                    Some(true) => return Some((Want::Ok, RENAME_ENDS[1])),
+                    Some(false) => {}
+                }
+            }
         }
         let to_fresh = to.node.is_none() && to.parent_dir;
         let Some(f) = &from.node else {
@@ -2631,13 +3260,21 @@ impl Gen {
                     "no writable provider holds it",
                 ),
                 Some(n) if self.held(root, &t.folded) => {
-                    if n.dir && self.has_children(root, &t.folded) {
-                        (
+                    let children = n.dir && self.has_children(root, &t.folded);
+                    match (self.lower_only(root, &t.folded), children) {
+                        // wire.md 3.4.9: hidden by a whiteout, or refused by the
+                        // general rule (3.4.8).
+                        (Some(true), true) => (
+                            ok_or(true, Status::IoError),
+                            "a lower-only directory with something under it: hidden, or refused",
+                        ),
+                        (Some(true), false) => (Want::Ok, "a lower-only name: hidden"),
+                        (None, true) => return None,
+                        (_, true) => (
                             Want::Status(Status::IoError),
                             "a directory with something under it",
-                        )
-                    } else {
-                        (Want::Ok, "")
+                        ),
+                        (_, false) => (Want::Ok, ""),
                     }
                 }
                 None if self.held(root, &t.folded) && t.parent_dir => {
@@ -2646,7 +3283,9 @@ impl Gen {
                 _ => return None,
             }
         };
-        let effect = if want == Want::Ok {
+        // Hidden or refused: the trees differ, so the case ends there.
+        let either = matches!(want, Want::Alts(_));
+        let effect = if want == Want::Ok || either {
             Effect::Deleted {
                 root,
                 path: t.folded.clone(),
@@ -2654,6 +3293,7 @@ impl Gen {
         } else {
             Effect::None
         };
+        let then = if either { Then::End } else { Then::Nothing };
         Some(Plan {
             req: OwnedRequest::Delete {
                 root: RootId(root),
@@ -2663,7 +3303,7 @@ impl Gen {
             wire: "3.4.8",
             note: note.into(),
             effect,
-            then: Then::Nothing,
+            then,
         })
     }
 
@@ -2721,23 +3361,60 @@ impl Gen {
             _ if !self.has_writable(root) => self.missing(root, b >> 3, c, |_| true),
             _ => self.missing_held(root, b >> 3, c),
         }?;
-        let (want, note) = match &t.node {
+        let made = Effect::Made {
+            root,
+            path: t.folded.clone(),
+        };
+        let (want, note, effect) = match &t.node {
             Some(n) if n.dir && self.held(root, &t.folded) => {
-                (Want::OkOrExists, "an existing directory")
+                if self.lower_only(root, &t.folded) == Some(false) {
+                    (Want::OkOrExists, "an existing directory", Effect::None)
+                } else {
+                    // wire.md 3.4.9: a directory only a lower holds, `ST_OK`
+                    // or `ST_EXISTS`.
+                    (
+                        Want::Alts(vec![
+                            Expect::Reply(OwnedReply::Empty),
+                            Expect::Status(Status::Exists),
+                        ]),
+                        "a directory only a lower holds",
+                        Effect::Unsure {
+                            root,
+                            path: t.folded.clone(),
+                        },
+                    )
+                }
             }
-            Some(n) if !n.dir && self.held(root, &t.folded) => (
-                Want::Status(Status::IoError),
-                "an existing file a writable provider holds",
-            ),
+            Some(n) if !n.dir && self.held(root, &t.folded) => {
+                match self.lower_only(root, &t.folded) {
+                    // Or refused, by the general rule (3.4.9).
+                    Some(true) => (
+                        ok_or(true, Status::IoError),
+                        "over a lower-only file: the directory hides it, or refused",
+                        Effect::MadeOver {
+                            root,
+                            path: t.folded.clone(),
+                        },
+                    ),
+                    None => return None,
+                    Some(false) => (
+                        Want::Status(Status::IoError),
+                        "an existing file a writable provider holds",
+                        Effect::None,
+                    ),
+                }
+            }
             Some(n) if !n.dir && self.read_only(root, &t.folded) => (
                 Want::Status(Status::Exists),
                 "an existing file no writable provider holds",
+                Effect::None,
             ),
             None if t.parent_dir && !self.has_writable(root) => (
                 Want::Status(Status::ReadOnly),
                 "a root with no writable provider",
+                Effect::None,
             ),
-            None if t.parent_dir && self.held(root, &t.folded) => (Want::Ok, ""),
+            None if t.parent_dir && self.held(root, &t.folded) => (Want::Ok, "", made),
             _ => return None,
         };
         let wire = if want == Want::Status(Status::ReadOnly) {
@@ -2745,22 +3422,21 @@ impl Gen {
         } else {
             "3.4.9"
         };
-        let effect = if want == Want::Ok {
-            Effect::Changed
-        } else {
-            Effect::None
-        };
         Some(Plan {
             req: OwnedRequest::Mkdir {
                 root: RootId(root),
                 mode,
                 path: t.path,
             },
+            then: if note == "over a lower-only file: the directory hides it, or refused" {
+                Then::End
+            } else {
+                Then::Nothing
+            },
             want,
             wire,
             note: note.into(),
             effect,
-            then: Then::Nothing,
         })
     }
 
@@ -3039,7 +3715,9 @@ impl Gen {
     fn step(&mut self, plan: Plan, client: u32) -> Result<(), String> {
         // What the handles a DELETE or RENAME may leave behind held.
         let snaps = match plan.effect {
-            Effect::Moved { .. } | Effect::Deleted { .. } => self.snapshots(),
+            Effect::Moved { .. } | Effect::Deleted { .. } | Effect::MadeOver { .. } => {
+                self.snapshots()
+            }
             _ => BTreeMap::new(),
         };
         let listing = |root: u32, dir: &str| OwnedRequest::ReadDir {
@@ -3051,6 +3729,7 @@ impl Gen {
             _ => None,
         };
         let got = self.oracle.ask(&plan.req);
+        self.check_prediction(&plan.req, &got)?;
         let disagree = || {
             format!(
                 "generator: step {}: {:?}: wire.md {} says {:?}, but the reference \
@@ -3114,7 +3793,34 @@ impl Gen {
             }
             _ => return Err(disagree()),
         };
-        let cite = matches!(expect, Expect::OneOf(_)).then(|| plan.wire.to_string());
+        // A read open the oracle answered immutable on a file only a layer
+        // holds may be answered either way (wire.md 3.4.3, 3.4.9); the READs
+        // whose answer depends on which share its label.
+        let (expect, choice, wire) = match (&plan.req, &got) {
+            (OwnedRequest::Open { root, flags, path }, Ok(OwnedReply::Open(o)))
+                if o.immutable
+                    && !o.is_dir
+                    && !flags.contains(OpenFlags::WRITE)
+                    && self.held(root.0, &fold(path)) =>
+            {
+                let mut mutable = o.clone();
+                mutable.immutable = false;
+                let alts = vec![
+                    Expect::Reply(OwnedReply::Open(o.clone())),
+                    Expect::Reply(OwnedReply::Open(mutable)),
+                ];
+                (
+                    Expect::OneOf(alts),
+                    Some(Gen::pinned_label(o.fh)),
+                    "3.4.3, 3.4.9",
+                )
+            }
+            (OwnedRequest::Read { fh, .. }, _) if plan.note == PINNED_NOTE => {
+                (expect, Some(Gen::pinned_label(*fh)), plan.wire)
+            }
+            _ => (expect, None, plan.wire),
+        };
+        let cite = matches!(expect, Expect::OneOf(_)).then(|| wire.to_string());
         let note = if plan.note.is_empty() {
             format!("wire.md {}", plan.wire)
         } else {
@@ -3127,6 +3833,7 @@ impl Gen {
             note: Some(note),
             client,
             literal_fh: false,
+            choice,
         });
         if let Ok(r) = &got {
             self.record_version(r);
@@ -3135,6 +3842,14 @@ impl Gen {
         if let Effect::Spent(fh) = plan.effect {
             self.spend(fh);
         }
+        if let Effect::Unsure { root, path } = &plan.effect {
+            if let Some(l) = self.layered.get_mut(root) {
+                if !l.upper.contains(path) {
+                    l.unsure.insert(path.clone());
+                }
+            }
+        }
+        self.check_layers()?;
         self.touch(&plan.req, &got);
         if got.is_ok() {
             match &plan.req {
@@ -3158,6 +3873,10 @@ impl Gen {
         }
         match plan.then {
             Then::Nothing => Ok(()),
+            Then::End => {
+                self.done = true;
+                Ok(())
+            }
             Then::GetAttr { root, path } => self.step(
                 Plan {
                     req: OwnedRequest::GetAttr {
@@ -3194,6 +3913,7 @@ impl Gen {
                     )),
                     client,
                     literal_fh: false,
+                    choice: None,
                 });
                 let after = self.oracle.ask(&listing(root, &dir));
                 let (Some(Ok(b @ OwnedReply::ReadDir(_))), Ok(a @ OwnedReply::ReadDir(_))) =
@@ -3221,6 +3941,7 @@ impl Gen {
                     )),
                     client,
                     literal_fh: false,
+                    choice: None,
                 });
                 self.done = true;
                 Ok(())
@@ -3310,8 +4031,28 @@ impl Gen {
                 write,
                 append,
                 emptied,
+                created,
+                changed,
             } => {
                 let OwnedReply::Open(o) = r else { return };
+                let pinned = (o.immutable && !*dir && self.held(*root, path))
+                    .then(|| self.lower_shows(*root, path).map(|n| n.bytes.clone()))
+                    .flatten();
+                if *write && !*dir {
+                    // A create is the upper's, and may put the layers'
+                    // directories above it there; a write open of a
+                    // lower-only file may copy it up, and does once it
+                    // changes the bytes (the lower is read-only).
+                    let lo = self.lower_only(*root, path);
+                    self.unsure_parents(*root, path);
+                    if let Some(l) = self.layered.get_mut(root) {
+                        if *created || *changed {
+                            l.up(path);
+                        } else if lo != Some(false) {
+                            l.unsure.insert(path.clone());
+                        }
+                    }
+                }
                 let file = if *dir {
                     None
                 } else {
@@ -3332,11 +4073,18 @@ impl Gen {
                         file,
                         gone: None,
                         clean: true,
+                        pinned,
                     },
                 );
                 self.refresh();
             }
-            Effect::Wrote(fh) => {
+            Effect::Wrote(fh, changed) => {
+                if let Some(h) = self.handles.get(fh).filter(|h| h.gone.is_none()) {
+                    let (root, path) = (h.root, h.folded.clone());
+                    if let (true, Some(l)) = (*changed, self.layered.get_mut(&root)) {
+                        l.up(&path);
+                    }
+                }
                 if let Some(id) = self.handles.get(fh).and_then(|h| h.file) {
                     self.changed_file(id);
                 }
@@ -3357,6 +4105,7 @@ impl Gen {
                 self.taint_dirs(*from_root, from);
                 self.taint_dirs(*to_root, to);
                 if (from_root, from) != (to_root, to) {
+                    self.moved_layers(*from_root, from, *to_root, to);
                     // What was at `to` is replaced: deleted, to its handles.
                     self.end_files(*to_root, to, snaps);
                     let moved: Vec<(String, u64)> = self
@@ -3393,8 +4142,28 @@ impl Gen {
             Effect::Deleted { root, path } => {
                 self.taint_dirs(*root, path);
                 self.end_files(*root, path, snaps);
+                if let Some(l) = self.layered.get_mut(root) {
+                    l.gone(path);
+                }
                 self.refresh();
             }
+            Effect::Made { root, path } => {
+                self.unsure_parents(*root, path);
+                if let Some(l) = self.layered.get_mut(root) {
+                    l.up(path);
+                }
+                self.refresh();
+            }
+            Effect::MadeOver { root, path } => {
+                self.end_files(*root, path, snaps);
+                self.unsure_parents(*root, path);
+                if let Some(l) = self.layered.get_mut(root) {
+                    l.masked.insert(path.clone());
+                    l.up(path);
+                }
+                self.refresh();
+            }
+            Effect::Unsure { .. } => {}
             Effect::Changed => self.refresh(),
         }
     }
@@ -3473,7 +4242,18 @@ const FILE_KINDS: [Kind; 12] = [
 /// name or handle it takes ([`NEAR_EXISTING`] and the rest; bits 8 and up,
 /// which of them, the latest first). The template's other numbers are the
 /// op's own ([`Gen::template`]).
-const TEMPLATES: [&[(Kind, u32, u32, u32)]; 7] = [
+const TEMPLATES: [&[(Kind, u32, u32, u32)]; 8] = [
+    // A file read, then opened for writing and written, and read again
+    // through the first handle: in a layered root, a lower-only file copied
+    // up under a handle that may be immutable (wire.md 3.4.3, 3.4.9).
+    &[
+        (Kind::OpenRead, 2, 0, 0),
+        (Kind::OpenWrite, 0, 0, NEAR_EXISTING),
+        (Kind::Write, 0, 0, NEAR_HANDLE),
+        (Kind::Read, 0, 0, NEAR_HANDLE | 1 << 8),
+        (Kind::Close, 0, 0, NEAR_HANDLE),
+        (Kind::Read, 0, 0, NEAR_HANDLE),
+    ],
     // A save: a new file written, renamed over a file with its handle
     // open, written again through that handle, closed and read back.
     &[
@@ -3574,6 +4354,7 @@ mod tests {
                 }],
                 dirs: vec![],
                 writable: vec![],
+                lower: vec![],
             }],
             registry: None,
         };
@@ -3636,11 +4417,13 @@ mod tests {
                     writable: None,
                     two: false,
                     entries: vec![file(1, 0b1010), file(5, 0b0101)],
+                    lower: vec![],
                 },
                 RootSpec {
                     writable: None,
                     two: false,
                     entries: vec![file(1, 0b0110), file(11, 0b1001)],
+                    lower: vec![],
                 },
             ],
             registry: None,
@@ -3828,6 +4611,15 @@ mod tests {
             "`to` is read-only",
             "a `skip` of every component",
             "the case ends",
+            RENAME_ENDS[0],
+            RENAME_ENDS[1],
+            RENAME_ENDS[2],
+            RENAME_ENDS[3],
+            "a lower-only directory with something under it: hidden, or refused",
+            "a lower-only name: hidden",
+            "over a lower-only file: the directory hides it, or refused",
+            "a directory only a lower holds",
+            PINNED_NOTE,
         ];
         let mut seen = vec![0; notes.len()];
         let mut others = 0;
@@ -3858,6 +4650,37 @@ mod tests {
         assert!(others > 0);
     }
 
+    /// A good share of generated trees serve a root as an overlay, with
+    /// names in both layers, and every case of many seeds is one the
+    /// generator's reckoning of the layers agrees with the reference on
+    /// (`build` fails otherwise).
+    #[test]
+    fn layered_roots_are_generated_and_agree_with_the_reference() {
+        let (mut layered, mut both, mut total) = (0, 0, 0);
+        for seed in [1, 2, 3, 40] {
+            for s in crate::generate::cases(seed, 300, 32).unwrap() {
+                total += 1;
+                let Some(r) = s.tree.roots.iter().find(|r| !r.lower.is_empty()) else {
+                    continue;
+                };
+                layered += 1;
+                let upper: BTreeSet<String> = r.files.iter().map(|f| fold(&f.path)).collect();
+                if r.lower
+                    .iter()
+                    .flat_map(|l| &l.files)
+                    .any(|f| upper.contains(&fold(&f.path)))
+                {
+                    both += 1;
+                }
+            }
+        }
+        assert!(layered * 4 >= total, "{layered} of {total} cases layered");
+        assert!(
+            both * 10 >= layered,
+            "{both} of {layered} with a name in both layers"
+        );
+    }
+
     /// Inline READs and WRITEs fit the director's slot: `payload_cap - 8`
     /// bytes of read data, `payload_cap - 24` of write data (wire.md 3.4.4,
     /// 3.4.5).
@@ -3869,6 +4692,7 @@ mod tests {
                 inline_read: 100,
                 write: 50,
                 arena,
+                layers: true,
             };
             let mut runner = proptest::test_runner::TestRunner::deterministic();
             let (mut reads, mut writes) = (0, 0);

@@ -27,7 +27,7 @@
     {"request": {"op": "getattr", "root": 0, "path": "saves/dir2/x.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}},
     {"request": {"op": "rename-x", "from_root": 0, "to_root": 0, "from": "saves/b.txt", "to": "saves/B.TXT"}, "expect": {"status": "ok"}},
     {"request": {"op": "stored-names", "root": 0, "skip": 1, "path": "saves/b.txt"}, "expect": {"reply": {"names": "B.TXT"}}},
-    {"request": {"op": "rename-x", "from_root": 0, "to_root": 0, "from": ".", "to": "x"}, "expect": {"status": "bad-request"}},
+    {"request": {"op": "rename-x", "from_root": 0, "to_root": 0, "from": ".", "to": "x"}, "expect": {"one_of": [{"status": "bad-request"}, {"status": "io-error"}], "wire": "3.4.13, 3.4.7"}, "note": "equal roots act as RENAME, which allows either for the root at an end"},
     {"request": {"op": "rename-x", "from_root": 0, "to_root": 0, "from": "saves/nope", "to": "saves/x"}, "expect": {"status": "not-found"}}
   ]
 }

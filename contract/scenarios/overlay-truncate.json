@@ -1,0 +1,29 @@
+{
+  "name": "overlay-truncate",
+  "description": "A lower-only file truncated by a write open with OPEN_TRUNC, and another cut by SETATTR through a write handle. A read open of a lower-only file may be immutable (wire.md 3.4.3, 3.4.9): such a handle keeps the lower's bytes while it is open, whatever a copy-up and writes do; one opened without it reads the file as it is now, the copy-up keeping the file's identity (3.4.4, 3.4.9). The handle's OPEN and the READs whose answer depends on it share a choice label, the immutable answer first, so a handle reads as its OPEN said it would. Once a write open has reached the file no read open of it is immutable (3.4.9), which the run checks. A handle opened without it reads the truncation and the cut at once (wire.md 3.4.4: \"a truncating OPEN ... is seen by the next READ through every other handle\", 3.4.6), and a WRITE past the new end grows the file with zeros (3.4.5).",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}], "lower": [{"files": [{"path": "Data/Big.bsa", "contents": {"size": 3000, "seed": 5}}, {"path": "Data/Other.esp", "contents": "123456"}]}]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/big.bsa"}, "expect": {"one_of": [{"reply": {"fh": 1, "size": 3000, "is_dir": false, "immutable": true, "mount_gen": 0}}, {"reply": {"fh": 1, "size": 3000, "is_dir": false, "immutable": false, "mount_gen": 0}}], "wire": "3.4.3", "choice": "pinned"}, "note": "immutable, or not"},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 3000}, "expect": {"reply": {"data": {"size": 3000, "seed": 5}}}},
+    {"request": {"op": "open", "root": 0, "flags": ["write", "trunc"], "path": "data/big.bsa"}, "expect": {"reply": {"fh": 2, "size": 0, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": {"size": 64, "seed": 5}}}, {"reply": {"data": ""}}], "wire": "3.4.3", "choice": "pinned"}, "note": "the handle opened before the truncation"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/big.bsa"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 0, "mtime": 0}}},
+    {"request": {"op": "write", "fh": 2, "offset": 2, "data": "x"}, "expect": {"reply": {"written": 1}}},
+    {"request": {"op": "read", "fh": 1, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": {"size": 64, "seed": 5}}}, {"reply": {"data": {"concat": [{"zeros": 2}, "x"]}}}], "wire": "3.4.3", "choice": "pinned"}},
+    {"request": {"op": "read", "fh": 2, "offset": 0, "len": 64}, "expect": {"reply": {"data": {"concat": [{"zeros": 2}, "x"]}}}},
+    {"request": {"op": "open", "root": 0, "flags": ["read"], "path": "data/other.esp"}, "expect": {"one_of": [{"reply": {"fh": 3, "size": 6, "is_dir": false, "immutable": true, "mount_gen": 0}}, {"reply": {"fh": 3, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}], "wire": "3.4.3", "choice": "other"}, "note": "immutable, or not"},
+    {"request": {"op": "open", "root": 0, "flags": ["write"], "path": "data/other.esp"}, "expect": {"reply": {"fh": 4, "size": 6, "is_dir": false, "immutable": false, "mount_gen": 0}}},
+    {"request": {"op": "setattr", "fh": 4, "size": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "read", "fh": 3, "offset": 0, "len": 64}, "expect": {"one_of": [{"reply": {"data": "123456"}}, {"reply": {"data": "12"}}], "wire": "3.4.3", "choice": "other"}},
+    {"request": {"op": "read", "fh": 4, "offset": 0, "len": 64}, "expect": {"reply": {"data": "12"}}},
+    {"request": {"op": "readdir", "root": 0, "path": "data"}, "expect": {"reply": {"entries": [{"name": "Big.bsa", "is_dir": false, "size": 3, "mtime": 0}, {"name": "Keep.esp", "is_dir": false, "size": 4, "mtime": 0}, {"name": "Other.esp", "is_dir": false, "size": 2, "mtime": 0}]}}},
+    {"request": {"op": "close", "fh": 1}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 2}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 3}, "expect": {"status": "ok"}},
+    {"request": {"op": "close", "fh": 4}, "expect": {"status": "ok"}}
+  ]
+}

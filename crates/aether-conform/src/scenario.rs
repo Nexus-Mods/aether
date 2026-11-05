@@ -32,7 +32,7 @@
 //! unknown op, field, flag or status, a missing field, a non-canonical path)
 //! is a [`LoadError`] naming the file, the step and the field.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -70,6 +70,11 @@ pub struct Step {
     /// paired with a director's handle, so a scenario can send a number no
     /// director issues (`fh` 0, wire.md 3.4.3, 3.4.10).
     pub literal_fh: bool,
+    /// The label of a `one_of` whose alternative the steps of that label
+    /// choose together (`"choice"` beside `"wire"`; `compare::Session::
+    /// check_chosen`), for an outcome wire.md leaves to the director that
+    /// shows in several steps.
+    pub choice: Option<String>,
 }
 
 /// What a step expects: a reply (status OK), an error status, or any of
@@ -734,12 +739,36 @@ fn parse_scenario(v: &Value) -> R<Scenario> {
         .map(|(i, s)| parse_step(i, s))
         .collect::<R<Vec<Step>>>()?;
     check_handles(&steps)?;
+    check_choices(&steps)?;
     Ok(Scenario {
         name,
         description,
         tree,
         steps,
     })
+}
+
+/// Refuses steps of one `choice` whose `one_of` lists differ in length:
+/// the steps take the alternative of one position together.
+fn check_choices(steps: &[Step]) -> R<()> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, st) in steps.iter().enumerate() {
+        let (Some(label), Expect::OneOf(alts)) = (&st.choice, &st.expect) else {
+            continue;
+        };
+        let first = *seen.entry(label).or_insert(alts.len());
+        if first != alts.len() {
+            return Err(Bad {
+                step: Some(i),
+                field: "expect.one_of".into(),
+                message: format!(
+                    "choice {label:?} has {first} alternatives in its first step and {} here",
+                    alts.len()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Refuses an OPEN that expects a handle number still open in the scenario
@@ -796,7 +825,29 @@ fn parse_step(i: usize, v: &Value) -> R<Step> {
         None => None,
         Some(_) => Some(o.str("note")?),
     };
-    let (expect, cite) = parse_expect(i, request.opcode(), o.get("expect")?, "expect.", true)?;
+    let mut expect_value = o.get("expect")?.clone();
+    let choice = match expect_value
+        .as_object_mut()
+        .and_then(|m| m.remove("choice"))
+    {
+        None => None,
+        Some(Value::String(label)) if !label.is_empty() => Some(label),
+        Some(_) => {
+            return Err(Bad {
+                step: Some(i),
+                field: "expect.choice".into(),
+                message: "a label (a non-empty string) expected".into(),
+            })
+        }
+    };
+    let (expect, cite) = parse_expect(i, request.opcode(), &expect_value, "expect.", true)?;
+    if choice.is_some() && !matches!(expect, Expect::OneOf(_)) {
+        return Err(Bad {
+            step: Some(i),
+            field: "expect.choice".into(),
+            message: "a choice belongs to a one_of".into(),
+        });
+    }
     let client = match o.opt("client") {
         None => 0,
         Some(_) => o.u32("client")?,
@@ -809,6 +860,7 @@ fn parse_step(i: usize, v: &Value) -> R<Step> {
         note,
         client,
         literal_fh,
+        choice,
     })
 }
 
@@ -1220,14 +1272,25 @@ pub fn tree_json(t: &Tree) -> Value {
         .roots
         .iter()
         .map(|r| {
-            let files: Vec<Value> = r
-                .files
-                .iter()
-                .map(|f| {
-                    json!({"path": f.path, "contents": contents_json(&f.contents), "mtime": f.mtime})
-                })
-                .collect();
-            json!({"id": r.id, "files": files, "dirs": r.dirs, "writable": r.writable})
+            let files = |files: &[aether_refdirector::tree::File]| -> Vec<Value> {
+                files
+                    .iter()
+                    .map(|f| {
+                        json!({"path": f.path, "contents": contents_json(&f.contents), "mtime": f.mtime})
+                    })
+                    .collect()
+            };
+            let mut root =
+                json!({"id": r.id, "files": files(&r.files), "dirs": r.dirs, "writable": r.writable});
+            if !r.lower.is_empty() {
+                let lower: Vec<Value> = r
+                    .lower
+                    .iter()
+                    .map(|l| json!({"files": files(&l.files), "dirs": l.dirs}))
+                    .collect();
+                root["lower"] = json!(lower);
+            }
+            root
         })
         .collect();
     let mut tree = json!({ "roots": roots });
@@ -1289,6 +1352,9 @@ fn step_json(s: &Step) -> Value {
     }
     if s.client != 0 {
         v["client"] = Value::from(s.client);
+    }
+    if let Some(label) = &s.choice {
+        v["expect"]["choice"] = Value::String(label.clone());
     }
     if s.literal_fh {
         if let Some(fh) = v["request"].get("fh").cloned() {

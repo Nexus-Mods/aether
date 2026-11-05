@@ -772,7 +772,12 @@ Reply, 24 bytes:
   Never set it for a write open or a directory. Since every handle of a file
   reads the file as it is now (3.4.4), a handle on a file any request can
   change cannot be immutable: never set it for a file a writable provider
-  holds.
+  holds. The one exception is a director serving a writable root as an
+  overlay (3.4.9): a read open of a file only a read-only lower layer holds
+  may set it, and that handle then keeps reading the bytes it had while it
+  is open, whatever a copy-up of the file and writes through other handles
+  do. Once the file has been copied up, or any write open of it has
+  succeeded, no read open of it sets it.
 - `mount_gen`: a generation the director bumps whenever a root's content is
   replaced. The cache keys a file's blocks by (root, folded path, size,
   `mount_gen`), so two immutable opens of one path with equal size and
@@ -969,6 +974,12 @@ outside every writable provider `ST_READ_ONLY`.
 - **A missing parent.** A `to` whose parent is missing is `ST_NOT_FOUND`;
   one whose parent is a file is `ST_NOT_FOUND` or `ST_NOT_A_DIRECTORY`.
   Nothing moves. The reference answers `ST_NOT_FOUND` for both.
+- **A directory the upper and a lower both hold.** A director that serves a
+  writable root as an overlay may refuse to move it, with `ST_IO_ERROR` and
+  nothing moved (it cannot move the lower's part), or move it whole: every
+  name under it, from every layer, as the merged tree shows them, is then
+  under `to` and none under `from`. It never moves part of it. The reference
+  refuses.
 
 The reference checks in this order: the root at an end or a `to` inside
 `from`, then a missing `from`, then a read-only end, then `to`'s parent,
@@ -1035,10 +1046,11 @@ whose parent is missing is `ST_NOT_FOUND`; one whose parent is a file is
 answers `ST_NOT_FOUND` for both.
 
 **Names only in a read-only lower.** A director may serve a writable root as
-an overlay: a writable upper over a read-only lower. For a name that exists
-only in the lower, not in the upper, such a director may answer DELETE,
-RENAME and MKDIR as follows, where the rules above (written for names the
-writable provider holds) say otherwise:
+an overlay: a writable upper over one or more read-only lower layers. For a
+name that exists only in a lower, not in the upper, such a director may
+answer DELETE, RENAME and MKDIR as follows, where the rules above (written
+for names the writable provider holds) say otherwise; the answers the rules
+above give remain allowed for such a name too:
 
 - DELETE of a lower-only name, a directory with children included, hides it
   (a whiteout in the upper) and answers `ST_OK`.
@@ -1048,8 +1060,25 @@ writable provider holds) say otherwise:
   without respelling it: the name keeps the lower's spelling.
 - MKDIR over a lower-only file creates the directory in the upper and
   answers `ST_OK`; the directory then hides the file.
+- MKDIR of a directory only the lower holds answers `ST_OK` or `ST_EXISTS`,
+  as it does for any existing directory, and leaves the directory's listing
+  as it was. (The reference answers `ST_EXISTS`.)
 
-The reference director has no layers, so it never gives these answers.
+Whatever it answers to these, a copy-up keeps a file's identity. When the
+overlay copies a lower-only file up (at a write open or at its first change,
+as the director chooses), the upper's copy, with the lower's bytes, is the
+same file: every handle opened on it before then without `immutable` reads
+it, and what is written to it, from then on (3.4.4), as every handle opened
+after does. A read open of a lower-only file may answer `immutable`, and
+such a handle is the exception: it keeps reading the lower's bytes while it
+is open (3.4.3). Once the file has been copied up, or a write open of it has
+succeeded, no read open of it answers `immutable`. The shim's read cache
+stays sound under this: it serves cached blocks only through immutable
+handles, which keep those bytes, and caches nothing more of a path for the
+rest of the process once an open of it answers without `immutable`.
+
+The reference director gives the answers in the list above for a root it
+serves with read-only layers beneath its writable upper.
 
 #### 3.4.10 CLOSE (11)
 

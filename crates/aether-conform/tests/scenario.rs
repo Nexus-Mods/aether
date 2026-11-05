@@ -883,3 +883,159 @@ fn a_literal_handle_is_marked_and_written_back_as_one() {
     ]));
     assert!(e.contains("literal"), "{e}");
 }
+
+/// A root's `lower` layers load, write back as they were read, and a layer
+/// whose names are not below a writable entry is a load error naming them
+/// (`contract/scenarios/README.md`, "Tree").
+#[test]
+fn a_tree_with_lower_layers_loads_and_writes_back() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let mut v = scenario(json!([heartbeat_ok()]));
+    v["tree"]["roots"][0]["lower"] = json!([
+        {"files": [{"path": "saves/old.sav", "contents": "old"}], "dirs": ["saves/Empty"]},
+        {"files": [{"path": "saves/older.sav", "contents": {"size": 10, "seed": 2}}]}
+    ]);
+    let p = write(dir.path(), "layers.json", &v);
+    let s = load(&p).unwrap();
+    let lower = &s.tree.roots[0].lower;
+    assert_eq!(lower.len(), 2);
+    assert_eq!(lower[0].dirs, ["saves/Empty"]);
+    assert_eq!(lower[1].files[0].path, "saves/older.sav");
+    let text = aether_conform::scenario::to_json_string(&s);
+    std::fs::write(&p, &text).unwrap();
+    assert_eq!(load(&p).unwrap(), s);
+    // A root without layers writes none.
+    let plain = load(&write(
+        dir.path(),
+        "plain.json",
+        &scenario(json!([heartbeat_ok()])),
+    ))
+    .unwrap();
+    assert!(!aether_conform::scenario::to_json_string(&plain).contains("lower"));
+
+    v["tree"]["roots"][0]["lower"] = json!([{"files": [{"path": "data/b.esp", "contents": "b"}]}]);
+    let e = load(&write(dir.path(), "bad.json", &v))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("tree") && e.contains("data/b.esp") && e.contains("writable"),
+        "{e}"
+    );
+}
+
+/// The README's example of a layered root is a root a tree may hold.
+#[test]
+fn the_readmes_layered_root_is_valid() {
+    let readme = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contract/scenarios/README.md"
+    ))
+    .unwrap()
+    .replace("\r\n", "\n");
+    let at = readme.find("**Layers.**").expect("the layers paragraph");
+    let start = at + readme[at..].find("```json\n").unwrap() + "```json\n".len();
+    let end = start + readme[start..].find("```").unwrap();
+    let root: Value = serde_json::from_str(&readme[start..end]).unwrap();
+    let mut v = scenario(json!([heartbeat_ok()]));
+    v["tree"]["roots"] = json!([root]);
+    let dir = aether_testkit::tempdir().unwrap();
+    let s = load(&write(dir.path(), "layered.json", &v)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(s.tree.roots[0].lower.len(), 2);
+}
+
+/// A `choice` beside a `one_of`'s `wire` loads, writes back, and is refused
+/// where it means nothing: on an answer that is not a `one_of`, or on lists
+/// of different lengths in one label.
+#[test]
+fn a_choice_labels_a_one_of_and_is_checked() {
+    let dir = aether_testkit::tempdir().unwrap();
+    let either = |label: Value, n: usize| {
+        let alts: Vec<Value> = (0..n)
+            .map(|k| json!({"reply": {"found": k == 0, "is_dir": false, "size": 0, "mtime": 0}}))
+            .collect();
+        json!({"request": {"op": "getattr", "root": 0, "path": "data/a.esp"},
+               "expect": {"one_of": alts, "wire": "3.4.7", "choice": label}})
+    };
+    let steps = json!([either(json!("moved"), 2), either(json!("moved"), 2)]);
+    let p = write(dir.path(), "c.json", &scenario(steps));
+    let s = load(&p).unwrap();
+    assert_eq!(s.steps[1].choice.as_deref(), Some("moved"));
+    std::fs::write(&p, aether_conform::scenario::to_json_string(&s)).unwrap();
+    assert_eq!(load(&p).unwrap(), s);
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains("\"choice\": \"moved\""), "{text}");
+
+    let e = load_error(json!([
+        either(json!("moved"), 2),
+        either(json!("moved"), 3)
+    ]));
+    assert!(e.contains("moved") && e.contains("alternatives"), "{e}");
+    let e = load_error(json!([either(json!(""), 2)]));
+    assert!(e.contains("choice"), "{e}");
+    let e = load_error(json!([
+        {"request": {"op": "heartbeat"}, "expect": {"status": "ok", "choice": "x"}}
+    ]));
+    assert!(e.contains("choice"), "{e}");
+}
+
+/// wire.md 3.4.13, 3.4.7: RENAME_X between equal roots acts as RENAME, which
+/// answers `ST_BAD_REQUEST` or `ST_IO_ERROR` for the root at an end, so the
+/// committed scenario accepts both.
+#[test]
+fn rename_x_of_the_root_in_one_root_accepts_both_refusals() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let s = load(&dir.join("rename-x-same-root.json")).unwrap();
+    let step = s
+        .steps
+        .iter()
+        .find(|st| {
+            matches!(&st.request, OwnedRequest::RenameX { from, to, .. } if from == "." && to == "x")
+        })
+        .expect("the root as `from`");
+    assert_eq!(
+        step.expect,
+        Expect::OneOf(vec![
+            Expect::Status(Status::BadRequest),
+            Expect::Status(Status::IoError)
+        ])
+    );
+}
+
+/// `overlay-rename-both` accepts a director that refuses the move and one
+/// that moves the whole directory, and fails one whose steps show the move
+/// in one place and the refusal in another (wire.md 3.4.7).
+#[test]
+fn the_rename_of_a_directory_in_both_layers_is_whole_or_refused() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let s = load(&dir.join("overlay-rename-both.json")).unwrap();
+    let answer = |e: &Expect, n: usize| -> Result<OwnedReply, Status> {
+        match e {
+            Expect::OneOf(alts) => match &alts[n] {
+                Expect::Reply(r) => Ok(r.clone()),
+                Expect::Status(s) => Err(*s),
+                Expect::OneOf(_) => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    };
+    let play = |pick: &dyn Fn(usize) -> usize| {
+        let mut sess = Session::new();
+        let mut failed = Vec::new();
+        for (i, st) in s.steps.iter().enumerate() {
+            let got = answer(&st.expect, pick(i));
+            if sess
+                .check_chosen(i, &st.request, &st.expect, &got, st.choice.as_deref())
+                .is_err()
+            {
+                failed.push(i);
+            }
+        }
+        failed
+    };
+    assert_eq!(play(&|_| 0), Vec::<usize>::new(), "moved whole");
+    assert_eq!(play(&|_| 1), Vec::<usize>::new(), "refused");
+    // The upper's part moved: the parent lists both names and the lower's
+    // names stayed where they were.
+    let failed = play(&|i| usize::from(i != 0 && i != 1 && s.steps.len() > i && i % 2 == 1));
+    assert!(!failed.is_empty(), "a mixture must fail");
+}

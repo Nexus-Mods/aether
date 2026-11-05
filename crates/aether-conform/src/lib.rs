@@ -21,7 +21,9 @@
 //! in-process reference, and shrinks the first that fails into a scenario
 //! file. [`clients`] sends requests from a slot the caller picks and runs
 //! a scenario's other clients as processes of their own; [`concurrent`]
-//! plays rounds of generated cases from several clients at once.
+//! plays rounds of generated cases from several clients at once, and [`soak`]
+//! plays them for hours with a fresh seed per batch, keeping each distinct
+//! failure.
 //! [`workload`] reads the benchmark workloads (`contract/workloads/`), and
 //! [`bench`] times a director on them over the null adapter's ring floor,
 //! on the [`machine`] it names.
@@ -51,6 +53,7 @@ pub mod report;
 pub mod run;
 pub mod scenario;
 pub mod shape;
+pub mod soak;
 pub mod workload;
 
 pub use aether_refdirector::tree;

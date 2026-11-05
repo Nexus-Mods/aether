@@ -77,7 +77,7 @@ use std::time::{Duration, Instant};
 
 use aether_protocol::Status;
 use aether_protocol::{OpenFlags, RequestFlags, RootId};
-use aether_refdirector::tree::{fill, Contents, File, RegKey, Registry, Root, Tree};
+use aether_refdirector::tree::{fill, Contents, File, Layer, RegKey, Registry, Root, Tree};
 use proptest::strategy::{Strategy, ValueTree};
 
 use crate::adapter::{Adapter, Env};
@@ -367,6 +367,19 @@ fn combine(cases: &[Scenario], slots: u32) -> Result<Tree, String> {
         root.dirs.extend(r.dirs.iter().map(|d| moved(&p, d)));
         root.writable
             .extend(r.writable.iter().map(|w| moved(&p, w)));
+        // Layer `i` of every case is layer `i` of the combined root.
+        for (i, l) in r.lower.iter().enumerate() {
+            if root.lower.len() <= i {
+                root.lower.resize_with(i + 1, Layer::default);
+            }
+            let to = &mut root.lower[i];
+            to.files.extend(l.files.iter().map(|f| File {
+                path: moved(&p, &f.path),
+                contents: f.contents.clone(),
+                mtime: f.mtime,
+            }));
+            to.dirs.extend(l.dirs.iter().map(|d| moved(&p, d)));
+        }
     }
     root.dirs.push(MEET_DIR.into());
     root.writable.push(MEET_DIR.into());
@@ -432,6 +445,8 @@ fn round(
                 note: st.note.clone(),
                 client: k as u32,
                 literal_fh: false,
+                // Each client's labels its own.
+                choice: st.choice.as_ref().map(|c| format!("c{k}-{c}")),
             };
             mine.push((steps.len(), step.clone()));
             steps.push(step);
@@ -610,7 +625,10 @@ fn probe(adapter: &mut Adapter, file: &Path, timeout: Duration) -> Result<Probe,
     let slots = attached.map_err(|e| GenerateError::Generator(format!("attach failed: {e}")))?;
     let (cap, arena) = crate::attach::payload_cap_and_arena(&env);
     Ok(Probe {
-        limits: Limits::of(cap, arena),
+        limits: Limits {
+            layers: adapter.serves_layers(),
+            ..Limits::of(cap, arena)
+        },
         slots,
     })
 }
@@ -649,6 +667,7 @@ fn rounds(
         passed: false,
         steps,
         error,
+        skipped: None,
     };
     for r in 0..opts.cases {
         let round = round(&mut runner, opts, probe.limits, r, probe.slots)?;
@@ -709,6 +728,7 @@ fn rounds(
         passed: true,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     })
 }
 
@@ -1709,6 +1729,7 @@ mod tests {
             note: None,
             client: 0,
             literal_fh: false,
+            choice: None,
         }
     }
 

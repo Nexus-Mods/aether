@@ -61,12 +61,14 @@ pub fn registry_tree() -> Tree {
                 files: vec![file("data/a.txt", "abc"), file("saves/s.txt", "s")],
                 dirs: vec![],
                 writable: vec!["saves".into()],
+                lower: vec![],
             },
             Root {
                 id: 1,
                 files: vec![file("r.txt", "r")],
                 dirs: vec![],
                 writable: vec![],
+                lower: vec![],
             },
         ],
         registry: Some(Registry {
@@ -801,6 +803,7 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
         passed: false,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     };
     for mount in [Mount::Files, Mount::Registry] {
         if let Some(e) = one_mount(adapter, timeout, mount, &mut result.steps)? {

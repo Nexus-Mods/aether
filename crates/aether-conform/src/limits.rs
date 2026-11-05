@@ -117,6 +117,7 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
         passed: false,
         steps: Vec::new(),
         error: None,
+        skipped: None,
     };
     let file = std::env::temp_dir().join(format!(
         "aether-conform-limits-{}-{}.json",
@@ -249,6 +250,7 @@ fn scenario(g: Geometry) -> Scenario {
             files,
             dirs: vec!["w".into()],
             writable: vec!["w".into()],
+            lower: vec![],
         }],
         registry: Some(Registry {
             keys: vec![RegKey {
@@ -269,6 +271,7 @@ fn scenario(g: Geometry) -> Scenario {
             note: Some(note.to_string()),
             client: 0,
             literal_fh: false,
+            choice: None,
         });
     };
     add(

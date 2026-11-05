@@ -1,0 +1,27 @@
+{
+  "name": "overlay-rename-dir",
+  "description": "A lower-only directory does not move: RENAME of it to another name is ST_IO_ERROR and nothing moves, and RENAME to another case of itself is ST_OK and keeps the lower's spelling (wire.md 3.4.9, \"Names only in a read-only lower\"); by the general rules it moves whole, or is respelled (3.4.7): wire.md 3.4.9 lets an overlay give the answers its list of \"Names only in a read-only lower\" gives, or the ones the rules above it give; each such step, and every step whose answer depends on it, shares a choice label, the list's answer first. A case-only RENAME of a directory the upper and a lower both hold respells it, or is refused (3.4.7: an overlay may refuse to move such a directory). RENAME_X of a lower-only directory is ST_CROSS_ROOT (3.4.13: a directory is refused). Each request acts on a directory of its own, so the choices do not meet.",
+  "tree": {
+    "roots": [
+      {"id": 0, "writable": ["."], "files": [{"path": "Data/Keep.esp", "contents": "keep"}, {"path": "Data/Both/up.txt", "contents": "up"}], "lower": [{"files": [{"path": "Data/Meshes/a.nif", "contents": "a"}, {"path": "Data/Meshes/Sub/b.nif", "contents": "bb"}, {"path": "Data/Tex/Sub/t.dds", "contents": "t"}, {"path": "Data/Bee/x.nif", "contents": "x"}, {"path": "Data/Cross/c.nif", "contents": "c"}, {"path": "Data/Both/low.txt", "contents": "low"}]}]},
+      {"id": 1, "writable": ["."]}
+    ]
+  },
+  "steps": [
+    {"request": {"op": "rename", "root": 0, "from": "data/meshes", "to": "Data/Models"}, "expect": {"one_of": [{"status": "io-error"}, {"status": "ok"}], "wire": "3.4.9", "choice": "moved"}, "note": "a lower-only directory: refused, or moved whole"},
+    {"request": {"op": "getattr", "root": 0, "path": "data/meshes/sub/b.nif"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.9", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/models/sub/b.nif"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}], "wire": "3.4.9", "choice": "moved"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/models/a.nif"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}], "wire": "3.4.9", "choice": "moved"}},
+    {"request": {"op": "rename", "root": 0, "from": "data/tex/sub", "to": "data/Sub2"}, "expect": {"one_of": [{"status": "io-error"}, {"status": "ok"}], "wire": "3.4.9", "choice": "sub"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/sub2/t.dds"}, "expect": {"one_of": [{"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}, {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}], "wire": "3.4.9", "choice": "sub"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/tex/sub"}, "expect": {"one_of": [{"reply": {"found": true, "is_dir": true, "size": 0, "mtime": 0}}, {"reply": {"found": false, "is_dir": false, "size": 0, "mtime": 0}}], "wire": "3.4.9", "choice": "sub"}},
+    {"request": {"op": "rename", "root": 0, "from": "data/bee", "to": "Data/BEE"}, "expect": {"status": "ok"}, "note": "another case of itself"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/bee/x.nif"}, "expect": {"one_of": [{"reply": {"names": "Data/Bee/x.nif"}}, {"reply": {"names": "Data/BEE/x.nif"}}], "wire": "3.4.9", "choice": "spelled"}, "note": "the lower's spelling kept, or respelled"},
+    {"request": {"op": "rename", "root": 0, "from": "data/both", "to": "Data/BOTH"}, "expect": {"one_of": [{"status": "ok"}, {"status": "io-error"}], "wire": "3.4.7", "choice": "both"}, "note": "a directory both layers hold: respelled, or refused"},
+    {"request": {"op": "stored-names", "root": 0, "skip": 0, "path": "data/both/low.txt"}, "expect": {"one_of": [{"reply": {"names": "Data/BOTH/low.txt"}}, {"reply": {"names": "Data/Both/low.txt"}}], "wire": "3.4.7", "choice": "both"}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/both/up.txt"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 2, "mtime": 0}}},
+    {"request": {"op": "rename-x", "from_root": 0, "to_root": 1, "from": "data/cross", "to": "Cross"}, "expect": {"status": "cross-root"}},
+    {"request": {"op": "readdir", "root": 1, "path": "."}, "expect": {"reply": {"entries": []}}},
+    {"request": {"op": "getattr", "root": 0, "path": "data/cross/c.nif"}, "expect": {"reply": {"found": true, "is_dir": false, "size": 1, "mtime": 0}}}
+  ]
+}

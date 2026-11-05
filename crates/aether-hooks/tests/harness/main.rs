@@ -40,6 +40,7 @@ mod costs;
 mod fault_table;
 mod faults_file;
 mod faults_registry;
+mod faults_soak;
 mod fileops;
 mod geometry;
 mod handles_outside;

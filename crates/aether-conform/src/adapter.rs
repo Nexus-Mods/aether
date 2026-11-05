@@ -75,6 +75,9 @@ pub struct Adapter {
     lines: Receiver<Option<std::io::Result<String>>>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     timeout: Duration,
+    /// Whether the director serves roots with `lower` layers: true until a
+    /// mount answer says `"layers": false`.
+    layers: bool,
 }
 
 /// The handshake variables of a stale session that a run leaves in its
@@ -178,7 +181,15 @@ impl Adapter {
             lines,
             stderr,
             timeout,
+            layers: true,
         })
+    }
+
+    /// Whether the director serves a root with `lower` layers, as an
+    /// overlay: true unless a mount answer said `"layers": false`
+    /// (`docs/conformance.md`, "The adapter protocol").
+    pub fn serves_layers(&self) -> bool {
+        self.layers
     }
 
     /// Asks the adapter to mount the scenario at `scenario`. `Ok(Err(why))`
@@ -186,6 +197,15 @@ impl Adapter {
     pub fn mount(&mut self, scenario: &Path) -> Result<Result<Env, String>, AdapterError> {
         let scenario = std::path::absolute(scenario).unwrap_or_else(|_| scenario.to_path_buf());
         let answer = self.ask(&json!({"op": "mount", "scenario": scenario.to_string_lossy()}))?;
+        match answer.get("layers") {
+            None | Some(Value::Bool(true)) => {}
+            Some(Value::Bool(false)) => self.layers = false,
+            Some(other) => {
+                return Err(self.error(format!(
+                    "\"layers\" is {other}, not a boolean, in the mount answer: {answer}"
+                )))
+            }
+        }
         match answer.get("ok") {
             Some(Value::Bool(true)) => {
                 let Some(Value::Object(env)) = answer.get("env") else {

@@ -29,6 +29,21 @@
 //! (or `"."`, the whole root) under which a write open is honoured; it is a
 //! directory too. Without `registry` the session has no registry layer and
 //! every registry opcode is `Status::NotSupported` (wire.md 4).
+//!
+//! A root may name `lower` layers, read-only, beneath its writable upper
+//! (its own `files` and `dirs`), the nearest first, each `{"files": [...],
+//! "dirs": [...]}` with every name below a writable entry:
+//!
+//! ```json
+//! {"id": 0, "writable": ["."],
+//!  "files": [{"path": "Data/Saved.esp", "contents": "mine"}],
+//!  "lower": [{"files": [{"path": "Data/Mod.esp", "contents": "mod"}]},
+//!            {"files": [{"path": "Data/Base.esm", "contents": "base"}],
+//!             "dirs": ["Data/Empty"]}]}
+//! ```
+//!
+//! The reference serves such a root as an overlay (`docs/wire.md` 3.4.9,
+//! "Names only in a read-only lower").
 
 use aether_rpc::Director;
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,6 +75,27 @@ pub struct Root {
     /// Directories (or `"."`) under which a write open is honoured.
     #[cfg_attr(feature = "scenario", serde(default))]
     pub writable: Vec<String>,
+    /// Read-only layers beneath the writable upper (the root's own `files`
+    /// and `dirs`), the nearest first: the root is served as an overlay
+    /// (`docs/wire.md` 3.4.9, "Names only in a read-only lower"). Every
+    /// name a layer lists lies below a writable entry.
+    #[cfg_attr(feature = "scenario", serde(default))]
+    pub lower: Vec<Layer>,
+}
+
+/// One read-only layer of a root: files, and directories besides the ones
+/// a file's path implies. Where two layers hold a name the nearer one's
+/// entry is the one served; a file in a nearer layer, or the upper, hides
+/// whatever farther layers hold below its name, and a directory over a
+/// file hides the file.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "scenario", derive(serde::Deserialize))]
+#[cfg_attr(feature = "scenario", serde(deny_unknown_fields))]
+pub struct Layer {
+    #[cfg_attr(feature = "scenario", serde(default))]
+    pub files: Vec<File>,
+    #[cfg_attr(feature = "scenario", serde(default))]
+    pub dirs: Vec<String>,
 }
 
 /// One file: its path, its bytes and its modification time.
@@ -202,6 +238,9 @@ impl Tree {
                     }
                 }
             }
+            for (i, layer) in r.lower.iter().enumerate() {
+                layer.validate(r, i)?;
+            }
         }
         // The reference's one prefix covering a whole root 0 covers every
         // root (`Reference::writable_under("")`), so a tree that makes root 0
@@ -234,39 +273,111 @@ impl Tree {
     }
 }
 
+impl Layer {
+    /// What lower layer `i` of `root` must satisfy: canonical paths, sizes
+    /// the reference can hold, each name once and of one kind, and every
+    /// file and listed directory strictly below one of the root's writable
+    /// entries (the entries themselves are the upper's; a read-only provider
+    /// beside the upper has no layers).
+    fn validate(&self, root: &Root, i: usize) -> Result<(), String> {
+        let at = |p: &str| format!("root {} lower {i} {p:?}", root.id);
+        let below_writable = |p: &str| {
+            let p = aether_casefold::fold(p);
+            root.writable
+                .iter()
+                .any(|w| w == "." || p.starts_with(&format!("{}/", aether_casefold::fold(w))))
+        };
+        let mut files = BTreeSet::new();
+        for f in &self.files {
+            if f.path == "." || !is_canonical(&f.path) {
+                return Err(format!("{}: not a canonical path", at(&f.path)));
+            }
+            if let Contents::Fill { size, .. } = f.contents {
+                if size > MAX_MOUNTED_LEN as u64 {
+                    return Err(format!(
+                        "{}: larger than {MAX_MOUNTED_LEN} bytes",
+                        at(&f.path)
+                    ));
+                }
+            }
+            if !files.insert(aether_casefold::fold(&f.path)) {
+                return Err(format!("{}: twice", at(&f.path)));
+            }
+        }
+        for d in &self.dirs {
+            if d == "." || !is_canonical(d) {
+                return Err(format!("{}: not a canonical path", at(d)));
+            }
+        }
+        for p in self.files.iter().map(|f| &f.path).chain(&self.dirs) {
+            if !below_writable(p) {
+                return Err(format!(
+                    "{}: not below a writable entry (a lower layer lies beneath the \
+                     writable upper)",
+                    at(p)
+                ));
+            }
+        }
+        let dirs = folded(&self.dirs_spelled());
+        if let Some(f) = self
+            .files
+            .iter()
+            .find(|f| dirs.contains(&aether_casefold::fold(&f.path)))
+        {
+            return Err(format!("{}: both a file and a directory", at(&f.path)));
+        }
+        Ok(())
+    }
+
+    /// Every directory of this layer, each once (by fold) with the spelling
+    /// the layer gives it: the listed ones and the ones above them, then
+    /// every file's ancestors as the file's path spells them. The first
+    /// spelling of a name wins.
+    pub fn dirs_spelled(&self) -> Vec<String> {
+        let listed = self.dirs.iter().flat_map(|d| {
+            let comps: Vec<&str> = d.split('/').collect();
+            (1..=comps.len()).map(move |n| comps[..n].join("/"))
+        });
+        spelled(listed, &self.files)
+    }
+}
+
+/// `listed`, then every ancestor of `files`, each once by fold, the first
+/// spelling winning; never `"."`.
+fn spelled(listed: impl Iterator<Item = String>, files: &[File]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    let ancestors = files.iter().flat_map(|f| {
+        let comps: Vec<&str> = f.path.split('/').collect();
+        (1..comps.len()).map(move |n| comps[..n].join("/"))
+    });
+    for d in listed.chain(ancestors).filter(|d| d != ".") {
+        if seen.insert(aether_casefold::fold(&d)) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn folded(dirs: &[String]) -> BTreeSet<String> {
+    dirs.iter().map(|d| aether_casefold::fold(d)).collect()
+}
+
 impl Root {
     /// Every directory under this root, each once (by fold) with the
     /// spelling the tree gives it: the listed ones, then the writable ones,
     /// then every file's ancestors as the file's path spells them. The first
     /// spelling of a name wins.
     fn dirs_spelled(&self) -> Vec<String> {
-        let mut seen = BTreeSet::new();
-        let mut out = Vec::new();
-        let ancestors = self.files.iter().flat_map(|f| {
-            let comps: Vec<&str> = f.path.split('/').collect();
-            (1..comps.len()).map(move |n| comps[..n].join("/"))
-        });
-        for d in self
-            .dirs
-            .iter()
-            .chain(self.writable.iter())
-            .cloned()
-            .chain(ancestors)
-            .filter(|d| d != ".")
-        {
-            if seen.insert(aether_casefold::fold(&d)) {
-                out.push(d);
-            }
-        }
-        out
+        spelled(
+            self.dirs.iter().chain(self.writable.iter()).cloned(),
+            &self.files,
+        )
     }
 
     /// The same directories, folded.
     fn dirs_folded(&self) -> BTreeSet<String> {
-        self.dirs_spelled()
-            .iter()
-            .map(|d| aether_casefold::fold(d))
-            .collect()
+        folded(&self.dirs_spelled())
     }
 }
 
@@ -305,6 +416,14 @@ impl Reference {
             }
             for f in &r.files {
                 d = d.with(&under(r.id, &f.path), f.contents.bytes(), ReadStyle::Whole);
+            }
+            for (i, layer) in r.lower.iter().enumerate() {
+                for dir in layer.dirs_spelled() {
+                    d = d.with_layer_dir(i, &under(r.id, &dir));
+                }
+                for f in &layer.files {
+                    d = d.with_layer_file(i, &under(r.id, &f.path), f.contents.bytes());
+                }
             }
             for w in &r.writable {
                 let prefix = if w == "." {

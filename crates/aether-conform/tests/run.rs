@@ -1343,6 +1343,8 @@ fn a_director_refusing_reads_through_write_only_handles_fails() {
         [
             "handles-deleted-file",
             "handles-follow-rename",
+            "overlay-copy-up-handles",
+            "overlay-truncate",
             "truncate-then-read",
             "write-only-read",
             "write-then-read"
@@ -1695,4 +1697,226 @@ fn a_director_keeping_deleted_files_for_their_handles_passes() {
 #[test]
 fn a_director_keeping_a_copy_per_gone_handle_fails() {
     caught_by("gone-handles-private", "handles-deleted-file-shared");
+}
+
+/// wire.md 3.4.8, 3.4.9: a DELETE of a name a lower layer holds hides it.
+/// A director whose GETATTR finds the lower's entry again fails.
+#[test]
+fn a_director_forgetting_a_whiteout_fails() {
+    caught_by("no-whiteout", "overlay-delete-recreate");
+    caught_by("no-whiteout", "overlay-delete-dir");
+}
+
+/// wire.md 3.4.2, 3.4.9: a listing shows no name a DELETE or RENAME hid.
+/// A director that merges its layers without its whiteouts fails.
+#[test]
+fn a_director_listing_a_hidden_name_fails() {
+    caught_by("lists-hidden", "overlay-listing");
+    caught_by("lists-hidden", "overlay-delete-recreate");
+}
+
+/// wire.md 3.4.9: the lower is read-only, so a lower-only file a WRITE
+/// changed is the upper's. A director writing into the lower fails.
+#[test]
+fn a_director_writing_through_to_the_lower_fails() {
+    caught_by("write-through", "overlay-written-file");
+}
+
+/// wire.md 3.4.3, 3.4.4: a write open of a lower-only file opens the file
+/// as it is. A director whose copy-up loses its bytes fails.
+#[test]
+fn a_director_whose_copy_up_loses_bytes_fails() {
+    caught_by("copy-up-loses-bytes", "overlay-copy-up-handles");
+}
+
+/// wire.md 3.4.4: every handle of a file reads it as it is now, one opened
+/// on the lower's file before the copy-up included. A director whose old
+/// handle goes on reading the lower fails.
+#[test]
+fn a_director_whose_old_handle_reads_the_lower_fails() {
+    caught_by("copy-up-old-handle-lower", "overlay-copy-up-handles");
+    caught_by("copy-up-old-handle-lower", "overlay-truncate");
+}
+
+/// wire.md 3.4.8: a handle never reads a file created at its name after
+/// its own was hidden. A director whose handle on a hidden lower file
+/// reaches the new upper one fails.
+#[test]
+fn a_director_whose_hidden_handle_reads_the_new_file_fails() {
+    caught_by("hidden-handle-reads-new", "overlay-delete-recreate");
+}
+
+/// wire.md 3.4.9, 3.4.2: the upper over the lower, so a name both hold is
+/// listed as the upper has it. A director listing the lower's fails.
+#[test]
+fn a_director_whose_listing_prefers_the_lower_fails() {
+    caught_by("upper-loses-listing", "overlay-listing");
+    caught_by("upper-loses-listing", "overlay-spelling");
+}
+
+/// wire.md 3.4.7: a directory both the upper and a lower hold is refused or
+/// moved whole, never in part. A director that moves only the upper's part
+/// fails, and the reference, which refuses, and a director that moves the
+/// whole of it both pass.
+#[test]
+fn a_director_moving_only_the_upper_part_of_a_directory_fails() {
+    caught_by("rename-moves-upper-part", "overlay-rename-both");
+}
+
+/// wire.md 3.4.9: an overlay "may" answer a lower-only name as its list
+/// says, so one that answers DELETE, RENAME and MKDIR of such names by the
+/// general rules (3.4.7 to 3.4.9) passes the committed suite and the
+/// generated cases, and so does one that refuses every RENAME of a
+/// directory both layers hold, a case-only one included (3.4.7).
+#[test]
+fn overlays_giving_the_general_rules_or_refusing_layered_renames_pass() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    for how in ["lower-general-rules", "refuse-layered-dir-renames"] {
+        let failures = aether_testkit::tempdir().unwrap();
+        let (code, entries, _, all) = run_json(
+            &format!("test-adapter --misbehave {how}"),
+            &dir,
+            "20",
+            &[
+                "--generate",
+                "--cases",
+                "512",
+                "--seed",
+                "3",
+                "--failures",
+                failures.path().to_str().unwrap(),
+            ],
+        );
+        assert_eq!(failed(&entries), Vec::<&str>::new(), "{how}: {all}");
+        assert_eq!(code, Some(0), "{how}: {all}");
+    }
+}
+
+/// An adapter whose director serves no root as an overlay says so in its
+/// mount answers (`"layers": false`) and refuses a tree with lower layers.
+/// The run skips the layered scenarios (reported skipped, neither passed
+/// nor failed), generates no layered root (a refused mount would fail the
+/// generated entry) and passes (docs/conformance.md, "The adapter
+/// protocol").
+#[test]
+fn a_director_serving_no_layers_skips_the_layered_scenarios_and_generates_none() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let out = aether_testkit::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    let director = format!("{} test-adapter --misbehave no-layers", quoted_exe());
+    let failures = out.path().join("failures");
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+        "--generate",
+        "--cases",
+        "256",
+        "--seed",
+        "3",
+        "--concurrent",
+        "4",
+        "--concurrent-cases",
+        "32",
+        "--failures",
+        failures.to_str().unwrap(),
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    let all = all_output(&o);
+    assert_eq!(o.status.code(), Some(0), "{all}");
+    let v: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let mut skipped = Vec::new();
+    for s in v["scenarios"].as_array().unwrap() {
+        let name = s["name"].as_str().unwrap();
+        if s["skipped"].is_string() {
+            assert_eq!(s["passed"], false, "{name}");
+            skipped.push(name.to_string());
+        } else {
+            assert_eq!(s["passed"], true, "{name}: {s:#}");
+        }
+    }
+    let layered: Vec<String> = aether_conform::scenario::load_dir(&dir)
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.tree.roots.iter().any(|r| !r.lower.is_empty()))
+        .map(|s| s.name)
+        .collect();
+    assert!(!layered.is_empty());
+    assert_eq!(skipped, layered, "{all}");
+    // The TAP report says SKIP.
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+    ]);
+    let out = stdout(&o);
+    assert!(
+        out.contains("ok 49 - overlay-copy-up-handles # SKIP"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("# skipped {}", layered.len())),
+        "{out}"
+    );
+}
+
+/// wire.md 3.4.9, 3.4.2: a name made below a lower directory leaves the
+/// lower's names there listed. A director whose copy-up makes the directory
+/// opaque, losing them, fails.
+#[test]
+fn a_director_whose_copy_up_makes_the_parent_opaque_fails() {
+    caught_by("copy-up-opaque-parent", "overlay-spelling");
+}
+
+/// wire.md 3.4.3, 3.4.9: a read open of a lower-only file may be immutable
+/// or not. One that never is (its handles read the file as it is now across
+/// a copy-up) passes the committed suite and the generated cases.
+#[test]
+fn a_director_whose_lower_only_reads_are_mutable_passes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let failures = aether_testkit::tempdir().unwrap();
+    let (code, entries, _, all) = run_json(
+        "test-adapter --misbehave mutable-lower-reads",
+        &dir,
+        "20",
+        &[
+            "--generate",
+            "--cases",
+            "512",
+            "--seed",
+            "3",
+            "--failures",
+            failures.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed(&entries), Vec::<&str>::new(), "{all}");
+    assert_eq!(code, Some(0), "{all}");
+}
+
+/// wire.md 3.4.9: once a write open has reached a lower-only file, no read
+/// open of it is immutable. A director that goes on answering immutable
+/// fails, citing the rule.
+#[test]
+fn a_director_answering_immutable_after_a_copy_up_fails() {
+    let notes = caught_by("immutable-after-copy-up", "overlay-copy-up-handles");
+    assert!(
+        notes.iter().any(|n| n.contains("immutable set on a file")),
+        "{notes:?}"
+    );
+}
+
+/// wire.md 3.4.3: an immutable handle's bytes cannot change while it is
+/// open. A director whose immutable handle on a lower-only file reads the
+/// copy-up's new bytes fails.
+#[test]
+fn a_director_whose_immutable_handle_sees_new_bytes_fails() {
+    caught_by("immutable-sees-new-bytes", "overlay-copy-up-handles");
+    caught_by("immutable-sees-new-bytes", "overlay-truncate");
 }

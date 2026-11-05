@@ -942,3 +942,26 @@ fn the_readmes_layered_root_is_valid() {
     let s = load(&write(dir.path(), "layered.json", &v)).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(s.tree.roots[0].lower.len(), 2);
 }
+
+/// wire.md 3.4.13, 3.4.7: RENAME_X between equal roots acts as RENAME, which
+/// answers `ST_BAD_REQUEST` or `ST_IO_ERROR` for the root at an end, so the
+/// committed scenario accepts both.
+#[test]
+fn rename_x_of_the_root_in_one_root_accepts_both_refusals() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let s = load(&dir.join("rename-x-same-root.json")).unwrap();
+    let step = s
+        .steps
+        .iter()
+        .find(|st| {
+            matches!(&st.request, OwnedRequest::RenameX { from, to, .. } if from == "." && to == "x")
+        })
+        .expect("the root as `from`");
+    assert_eq!(
+        step.expect,
+        Expect::OneOf(vec![
+            Expect::Status(Status::BadRequest),
+            Expect::Status(Status::IoError)
+        ])
+    );
+}

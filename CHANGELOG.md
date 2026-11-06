@@ -3,7 +3,7 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
-## Unreleased
+## 1.1.0
 
 The wire is unchanged: the wire version (4), the golden vectors and
 `contract/artifacts.json` are as in 1.0.0, and `contract/env.json` gains one

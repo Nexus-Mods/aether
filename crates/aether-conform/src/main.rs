@@ -23,11 +23,12 @@ usage:
                      [--steps M] [--failures DIR]]
                      [--concurrent N [--concurrent-cases C]]
                      [--report tap|json] [--out FILE] [--timeout SECS]
+                     [--adapter-timeout SECS]
   aether-conform soak --director \"<command line>\" (--for TIME | --cases N)
                       [--scenarios DIR] [--seed S] [--steps M] [--batch-cases N]
                       [--concurrent N [--concurrent-cases C] | --no-concurrent]
                       [--generated-only] [--failures DIR] [--summary FILE]
-                      [--timeout SECS]
+                      [--timeout SECS] [--adapter-timeout SECS]
   aether-conform reference-adapter [--ring file|section] [--no-arena]
   aether-conform bench --director \"<command line>\" [--workloads DIR]
                        [--only NAME[,NAME...]] [--floor \"<command line>\"]
@@ -38,10 +39,11 @@ usage:
 
 run       starts the director's adapter (the command line) and plays every
           scenario in DIR (default contract/scenarios) against it. The report
-          is TAP (default) or JSON, on stdout or in FILE. Every adapter answer
-          and ring request has SECS seconds (default 30). Exit code 0 when
-          every scenario passes, 1 when one fails, 2 on a usage or adapter
-          error.
+          is TAP (default) or JSON, on stdout or in FILE. Every ring request
+          has SECS seconds (default 30); the adapter's answers (mount,
+          unmount) have --adapter-timeout seconds (default 60), whatever
+          --timeout is. Exit code 0 when every scenario passes, 1 when one
+          fails, 2 on a usage or adapter error.
           --malformed also sends requests that are not valid requests (short,
           trailing bytes, bad UTF-8, unknown opcodes, odd slot flags, an
           over-long header) and checks the answers wire.md gives them.
@@ -101,6 +103,19 @@ null-adapter
 fn usage(msg: &str) -> ExitCode {
     eprintln!("aether-conform: {msg}\n\n{USAGE}");
     ExitCode::from(2)
+}
+
+/// `--adapter-timeout`: how long the adapter's answers may take, in seconds.
+fn adapter_timeout(value: Option<String>) -> Result<Duration, String> {
+    match value {
+        None => Ok(aether_conform::adapter::ADAPTER_TIMEOUT),
+        Some(t) => match t.parse::<f64>() {
+            Ok(s) if s > 0.0 && s.is_finite() => Ok(Duration::from_secs_f64(s)),
+            _ => Err(format!(
+                "--adapter-timeout {t:?} is not a positive number of seconds"
+            )),
+        },
+    }
 }
 
 fn main() -> ExitCode {
@@ -237,6 +252,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
             "--report",
             "--out",
             "--timeout",
+            "--adapter-timeout",
             "--cases",
             "--seed",
             "--steps",
@@ -269,6 +285,10 @@ fn cmd_run(args: &[String]) -> ExitCode {
                 ))
             }
         },
+    };
+    let adapter_timeout = match adapter_timeout(get("--adapter-timeout")) {
+        Ok(t) => t,
+        Err(e) => return usage(&e),
     };
     if timeout > Duration::from_secs(60) {
         // wire.md 2.5: the shim gives up on a request after
@@ -367,6 +387,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
                 .unwrap_or_else(|| PathBuf::from("contract/scenarios")),
         ),
         timeout,
+        adapter_timeout,
         malformed: has("--malformed"),
         limits: has("--limits"),
         generate,
@@ -441,6 +462,7 @@ fn cmd_soak(args: &[String]) -> ExitCode {
             "--failures",
             "--summary",
             "--timeout",
+            "--adapter-timeout",
         ],
         &["--generated-only", "--no-concurrent"],
     ) {
@@ -482,6 +504,10 @@ fn cmd_soak(args: &[String]) -> ExitCode {
         Some(Ok(s)) if s > 0.0 && s.is_finite() => Duration::from_secs_f64(s),
         Some(_) => return usage("--timeout needs a positive number of seconds"),
     };
+    let adapter_timeout = match adapter_timeout(get("--adapter-timeout")) {
+        Ok(t) => t,
+        Err(e) => return usage(&e),
+    };
     let parsed = (
         number("--seed", clock_seed()),
         number("--steps", generate::DEFAULT_STEPS as u64),
@@ -516,6 +542,7 @@ fn cmd_soak(args: &[String]) -> ExitCode {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("contract/scenarios")),
         timeout,
+        adapter_timeout,
         budget,
         seed,
         steps: steps.max(1) as usize,

@@ -110,8 +110,10 @@ when one does.
   `immutable` flag and `reg_gen`) and what the mount's environment says of
   its tree. `aether-conform reference-adapter` serves the reference director
   behind the adapter protocol, over a ring file or a section, with or without
-  an arena. `docs/conformance.md` describes the adapter protocol and every
-  rule that relaxes equality.
+  an arena. `--timeout` bounds each ring request; the adapter's own answers
+  (mount, unmount) have `--adapter-timeout`, default 60 seconds, so a short
+  `--timeout` does not fail a slow mount. `docs/conformance.md` describes the
+  adapter protocol and every rule that relaxes equality.
 - `contract/scenarios/`: what every director must do, as data, shipped in
   `contract.zip`.
 - `contract/protocol.json`: the protocol table (opcodes, fields, statuses,

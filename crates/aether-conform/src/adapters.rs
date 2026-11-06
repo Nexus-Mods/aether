@@ -461,7 +461,14 @@ pub enum Break {
     /// another handle change what it reads (wire.md 3.4.3: an immutable
     /// handle's bytes cannot change while it is open).
     ImmutableSeesNewBytes,
+    /// Not a broken rule: every mount answer comes [`SLOW_MOUNT`] late, as
+    /// a director's does on a loaded machine. Longer than a short
+    /// `--timeout`, shorter than the adapter's: a run must pass it.
+    SlowMount,
 }
+
+/// How long [`Break::SlowMount`] waits before it answers a mount.
+pub const SLOW_MOUNT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Break {
     /// The rule a `--break` value names.
@@ -561,6 +568,7 @@ impl Break {
             "mutable-lower-reads" => Some(Break::MutableLowerReads),
             "immutable-after-copy-up" => Some(Break::ImmutableAfterCopyUp),
             "immutable-sees-new-bytes" => Some(Break::ImmutableSeesNewBytes),
+            "slow-mount" => Some(Break::SlowMount),
             _ => None,
         }
     }
@@ -580,6 +588,9 @@ pub fn reference_adapter(kind: RingKind, arena: bool, broken: Option<Break>) -> 
         AdapterRequest::Mount { scenario } => {
             if mounted.is_some() {
                 return json!({"ok": false, "error": "a tree is already mounted"});
+            }
+            if broken == Some(Break::SlowMount) {
+                std::thread::sleep(SLOW_MOUNT);
             }
             let mut answer = match mount(Path::new(&scenario), kind, arena, broken) {
                 Ok(m) => {

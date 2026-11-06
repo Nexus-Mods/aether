@@ -802,7 +802,7 @@ its stdout, never two requests at once.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed
-  if it has not exited within the timeout.
+  if it has not exited within the adapter timeout.
 - Whenever the run kills the adapter (a timeout, an error, the end of the
   run), it kills every process the adapter started too, so an adapter may be
   a launcher (a `.cmd` file, a shell script, `java`) that starts the real
@@ -817,8 +817,11 @@ its stdout, never two requests at once.
 - Anything the adapter writes on stderr is kept; its last lines are shown
   when something goes wrong.
 
-Every answer must come within the timeout (`--timeout`, 30 seconds by
-default). An adapter that crashes, closes its stdout, writes a line that is
+Every answer must come within the adapter timeout (`--adapter-timeout`, 60
+seconds by default), which is also how long the adapter has to exit after
+EOF. It is not `--timeout`, which bounds the ring's requests: a mount builds
+a tree, and a short `--timeout` (to see a hang quickly) must not fail a
+mount on a loaded machine. An adapter that crashes, closes its stdout, writes a line that is
 not a JSON object of the right shape, refuses an unmount, or does not answer
 in time fails the scenario being run and ends the run, with exit code 2.
 
@@ -883,7 +886,8 @@ aether-conform run --director "java -jar my-director-adapter.jar" --scenarios co
 | `--scenarios DIR` | The `*.json` scenarios to play, in file-name order. Default `contract/scenarios`. A folder with none is an error, not a pass. |
 | `--report tap\|json` | The report's format. Default `tap`. |
 | `--out FILE` | Where the report goes. Default stdout. |
-| `--timeout SECS` | How long every adapter answer and every ring request may take. Default 30. |
+| `--timeout SECS` | How long every ring request may take. Default 30. |
+| `--adapter-timeout SECS` | How long each adapter answer (mount, unmount) may take, and the adapter's exit after EOF. Default 60, whatever `--timeout` is. `soak` takes it too. |
 | `--malformed` | Also send the malformed requests ("Malformed requests"). |
 | `--limits` | Also play the requests sized from the ring ("Requests sized from the ring"). |
 | `--generate` | Also play generated cases ("Generated cases"). |

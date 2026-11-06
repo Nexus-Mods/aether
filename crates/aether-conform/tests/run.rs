@@ -256,8 +256,9 @@ fn a_wrong_expectation_fails_with_both_values_in_the_report() {
     );
 }
 
-/// Runs `test-adapter --misbehave <how>` with a 2 s timeout and returns its
-/// output and how long it took.
+/// Runs `test-adapter --misbehave <how>` with a 2 s timeout, for the ring's
+/// requests and the adapter's answers, and returns its output and how long
+/// it took.
 fn misbehaving(how: &str) -> (Output, Duration) {
     let dir = two_scenarios();
     let director = format!("{} test-adapter --misbehave {how}", quoted_exe());
@@ -269,6 +270,8 @@ fn misbehaving(how: &str) -> (Output, Duration) {
         "--scenarios",
         dir.path().to_str().unwrap(),
         "--timeout",
+        "2",
+        "--adapter-timeout",
         "2",
     ]);
     (o, t.elapsed())
@@ -310,6 +313,28 @@ fn an_adapter_that_never_answers_ends_the_run_at_the_timeout() {
     assert!(all.contains("test adapter: not answering"), "{all}");
     assert!(took >= Duration::from_secs(2), "{took:?}");
     assert!(took < Duration::from_secs(15), "{took:?}");
+}
+
+/// The adapter's answers have a bound of their own: a mount slower than the
+/// ring's `--timeout` (here 1 s; the mount takes 3 s) still plays, on a
+/// machine too loaded to mount in a short time.
+#[test]
+fn a_mount_slower_than_the_timeout_still_plays() {
+    let dir = two_scenarios();
+    let o = run_reference(dir.path(), " --break slow-mount", &["--timeout", "1"]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}\n{}", stderr(&o));
+    assert!(out.contains("ok 1 - files"), "{out}");
+    assert!(out.contains("ok 2 - handles"), "{out}");
+    // The adapter's own bound can be made as short as the mount is slow.
+    let o = run_reference(
+        dir.path(),
+        " --break slow-mount",
+        &["--timeout", "1", "--adapter-timeout", "1"],
+    );
+    let all = all_output(&o);
+    assert_eq!(o.status.code(), Some(2), "{all}");
+    assert!(all.contains("no answer within 1 s"), "{all}");
 }
 
 #[test]

@@ -3,7 +3,7 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
-## Unreleased
+## 1.1.0
 
 The wire is unchanged: the wire version (4), the golden vectors and
 `contract/artifacts.json` are as in 1.0.0, and `contract/env.json` gains one
@@ -110,8 +110,10 @@ when one does.
   `immutable` flag and `reg_gen`) and what the mount's environment says of
   its tree. `aether-conform reference-adapter` serves the reference director
   behind the adapter protocol, over a ring file or a section, with or without
-  an arena. `docs/conformance.md` describes the adapter protocol and every
-  rule that relaxes equality.
+  an arena. `--timeout` bounds each ring request; the adapter's own answers
+  (mount, unmount) have `--adapter-timeout`, default 60 seconds, so a short
+  `--timeout` does not fail a slow mount. `docs/conformance.md` describes the
+  adapter protocol and every rule that relaxes equality.
 - `contract/scenarios/`: what every director must do, as data, shipped in
   `contract.zip`.
 - `contract/protocol.json`: the protocol table (opcodes, fields, statuses,

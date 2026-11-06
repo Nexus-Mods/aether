@@ -46,8 +46,12 @@ pub struct RunOptions {
     /// The folder of `*.json` scenarios, or none to play none (a soak's
     /// later batches).
     pub scenarios: Option<PathBuf>,
-    /// How long each adapter answer, and each ring request, may take.
+    /// How long each ring request may take.
     pub timeout: Duration,
+    /// How long each adapter answer (mount, unmount) may take, and the
+    /// adapter's exit after EOF: [`crate::adapter::ADAPTER_TIMEOUT`] by
+    /// default, whatever `timeout` is.
+    pub adapter_timeout: Duration,
     /// Also send the malformed requests ([`crate::malformed`]).
     pub malformed: bool,
     /// Also play the requests sized from the ring ([`crate::limits`]).
@@ -207,7 +211,8 @@ pub fn run(opts: &RunOptions) -> Result<RunReport, RunError> {
             dir.display()
         )));
     }
-    let mut adapter = Adapter::start(&opts.director, opts.timeout).map_err(RunError::Adapter)?;
+    let mut adapter =
+        Adapter::start(&opts.director, opts.adapter_timeout).map_err(RunError::Adapter)?;
     let mut report = RunReport {
         scenarios: Vec::new(),
         adapter_error: None,

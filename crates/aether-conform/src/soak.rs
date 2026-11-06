@@ -61,6 +61,8 @@ pub struct SoakOptions {
     pub director: String,
     pub scenarios: PathBuf,
     pub timeout: Duration,
+    /// How long each adapter answer may take ([`RunOptions::adapter_timeout`]).
+    pub adapter_timeout: Duration,
     pub budget: Budget,
     /// The first batch's seed; the others come from it ([`batch_seed`]).
     pub seed: u64,
@@ -303,6 +305,7 @@ impl Soak {
             director: o.director.clone(),
             scenarios: (first && o.fixed).then(|| o.scenarios.clone()),
             timeout: o.timeout,
+            adapter_timeout: o.adapter_timeout,
             malformed: first && o.fixed,
             limits: first && o.fixed,
             generate: Some(GenerateOptions {

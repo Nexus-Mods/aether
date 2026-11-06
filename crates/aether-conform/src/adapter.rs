@@ -67,6 +67,12 @@ impl std::fmt::Display for AdapterError {
 
 impl std::error::Error for AdapterError {}
 
+/// How long an adapter's answers (mount, unmount) may take unless
+/// `--adapter-timeout` says otherwise: generous, since a mount builds a tree
+/// and a loaded machine is slow at it. It is not the ring's `--timeout`,
+/// which a run may make short to see a hang quickly.
+pub const ADAPTER_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// A running adapter.
 pub struct Adapter {
     /// The child and every process it starts, killed together.

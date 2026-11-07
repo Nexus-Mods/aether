@@ -25,7 +25,10 @@
 //! ([`RegGen`]): in a session that serves a registry it is non-zero before
 //! the first registry request; a successful registry write moves it forward
 //! before its reply is published, so it is greater right after the reply
-//! than right before the request; and it never goes backward.
+//! than right before the request; and it never goes backward. A director
+//! that answers `"registry": false` to a mount serves no session a registry:
+//! the scenarios that need one are skipped, so none of the first two rules
+//! is checked.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -94,8 +97,9 @@ pub struct ScenarioResult {
     /// error.
     pub error: Option<String>,
     /// Why the scenario was not played: its tree has `lower` layers and
-    /// the director serves no root as an overlay. A skipped scenario is not
-    /// passed, and fails nothing.
+    /// the director serves no root as an overlay, or it has a registry layer
+    /// or registry steps and the director serves no registry. A skipped
+    /// scenario is not passed, and fails nothing.
     pub skipped: Option<String>,
 }
 
@@ -324,15 +328,25 @@ fn one(
     out: &mut ScenarioResult,
 ) -> Result<(), AdapterError> {
     let layered = s.tree.roots.iter().any(|r| !r.lower.is_empty());
-    let unserved = "the director serves no root as an overlay, and the tree has lower layers";
-    if layered && !adapter.serves_layers() {
-        out.skipped = Some(unserved.into());
+    let registry = s.uses_registry();
+    // Why the scenario cannot be played by this director, if it cannot.
+    let unserved = |adapter: &Adapter| {
+        if layered && !adapter.serves_layers() {
+            Some("the director serves no root as an overlay, and the tree has lower layers")
+        } else if registry && !adapter.serves_registry() {
+            Some("the director serves no registry, and the scenario has a registry layer or registry steps")
+        } else {
+            None
+        }
+    };
+    if let Some(why) = unserved(adapter) {
+        out.skipped = Some(why.into());
         return Ok(());
     }
     let env = match adapter.mount(file)? {
         Ok(env) => env,
-        Err(_) if layered && !adapter.serves_layers() => {
-            out.skipped = Some(unserved.into());
+        Err(_) if unserved(adapter).is_some() => {
+            out.skipped = unserved(adapter).map(str::to_string);
             return Ok(());
         }
         Err(why) => {
@@ -639,7 +653,7 @@ impl RegGen {
         if backward.is_some() {
             return backward;
         }
-        if self.serves && !self.asked && is_registry(req) {
+        if self.serves && !self.asked && req.is_registry() {
             self.asked = true;
             if now == 0 {
                 return Some(
@@ -687,15 +701,6 @@ impl RegGen {
             )
         })
     }
-}
-
-/// The registry opcodes (wire.md 4.3).
-fn is_registry(req: &OwnedRequest) -> bool {
-    use OwnedRequest as O;
-    matches!(
-        req,
-        O::RegLookup { .. } | O::RegKey { .. } | O::RegChanged { .. }
-    ) || is_registry_write(req)
 }
 
 /// The registry writes (wire.md 3.3, 4.3: REG_SET_VALUE to REG_RENAME_KEY),

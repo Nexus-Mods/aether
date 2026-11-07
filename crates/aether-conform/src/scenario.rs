@@ -184,7 +184,31 @@ pub enum OwnedRequest {
     },
 }
 
+impl Scenario {
+    /// Whether playing it needs a director that serves a registry: its tree
+    /// has a registry layer, or a step sends a registry request (wire.md 4).
+    pub fn uses_registry(&self) -> bool {
+        self.tree.registry.is_some() || self.steps.iter().any(|s| s.request.is_registry())
+    }
+}
+
 impl OwnedRequest {
+    /// Whether it is one of the registry requests (wire.md 4.3).
+    pub fn is_registry(&self) -> bool {
+        use OwnedRequest as O;
+        matches!(
+            self,
+            O::RegLookup { .. }
+                | O::RegKey { .. }
+                | O::RegSetValue { .. }
+                | O::RegDeleteValue { .. }
+                | O::RegCreateKey { .. }
+                | O::RegDeleteKey { .. }
+                | O::RegRenameKey { .. }
+                | O::RegChanged { .. }
+        )
+    }
+
     /// The borrowed request, to send.
     pub fn as_request(&self) -> Request<'_> {
         use OwnedRequest as O;

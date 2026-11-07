@@ -166,6 +166,7 @@ fn probe(adapter: &mut Adapter, file: &Path) -> Result<Limits, GenerateError> {
             let (cap, arena) = crate::attach::payload_cap_and_arena(&env);
             Ok(Limits {
                 layers: adapter.serves_layers(),
+                registry: adapter.serves_registry(),
                 ..Limits::of(cap, arena)
             })
         }

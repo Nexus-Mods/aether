@@ -40,7 +40,9 @@
 //!   published must see that write ("it moves on every successful registry
 //!   write, before the write's reply is published"; a director that moves
 //!   it before the write is visible lets the shim cache the old answer
-//!   under the new generation). A director with no registry layer skips it.
+//!   under the new generation). A director with no registry layer skips it,
+//!   and one whose mount answer says `"registry": false` is mounted a tree
+//!   without a registry layer and sent no registry request.
 //! - **Warnings**, which never fail: `worker_hint` 0 or above `slot_count`
 //!   (2.8), and the median HEARTBEAT round trip (2.11).
 //!
@@ -132,7 +134,7 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
             Ok(g) => g,
             Err(e) => return Ok(Some(e)),
         };
-        let s = scenario(geom);
+        let s = scenario(geom, adapter.serves_registry());
         let tree_only = Scenario {
             steps: Vec::new(),
             ..s.clone()
@@ -224,8 +226,9 @@ fn listing_names(prefix: &str, total: u64) -> Vec<String> {
         .collect()
 }
 
-/// The tree and steps for `g`.
-fn scenario(g: Geometry) -> Scenario {
+/// The tree and steps for `g`; the tree has a registry layer only when
+/// `registry` says the director serves one.
+fn scenario(g: Geometry, registry: bool) -> Scenario {
     let cap = u64::from(g.cap);
     let fit = listing_names("f", cap);
     let over = listing_names("o", cap + 1);
@@ -252,7 +255,7 @@ fn scenario(g: Geometry) -> Scenario {
             writable: vec!["w".into()],
             lower: vec![],
         }],
-        registry: Some(Registry {
+        registry: registry.then(|| Registry {
             keys: vec![RegKey {
                 path: KEY.into(),
                 volatile: false,
@@ -535,7 +538,23 @@ fn play(
     }
     let (what, expected, got, why) = abandoned(ring, g)?;
     push(what, expected, got, why);
-    let (what, expected, got, why) = registry_race(ring, env, timeout)?;
+    let (what, expected, got, why) = if s.tree.registry.is_some() {
+        registry_race(ring, env, timeout)?
+    } else {
+        (
+            format!(
+                "{REG_WRITES} REG_SET_VALUEs of {KEY} from one client while another reads it \
+                 with REG_KEY"
+            ),
+            "a read at a generation a write's reply published sees that write".into(),
+            "no registry request sent".into(),
+            Some(
+                "not exercised: the director serves no registry (its mount answer says \
+                 \"registry\": false)"
+                    .into(),
+            ),
+        )
+    };
     push(what, expected, got, why);
     // Warnings.
     let hint = ring::worker_hint(ring.seg());

@@ -25,14 +25,15 @@
 use crate::fakedirector::{self, Fake, Fault, Match, Options, ReadStyle};
 use aether_protocol::{Opcode, Request, RootId, Status};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PROCESS_ABORTED,
     HANDLE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcess, QueryFullProcessImageNameW, TerminateProcess,
-    WaitForSingleObject, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+    CreateProcessW, GetCurrentProcess, GetExitCodeProcess, QueryFullProcessImageNameW,
+    TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW,
 };
 
@@ -51,10 +52,22 @@ const GONE_MS: u32 = 10_000;
 struct Created {
     image: String,
     handle: usize,
+    /// Its exit code, when the observer let it run ([`RUN_CHILDREN`]).
+    exit: Option<u32>,
 }
 
 /// Every child created since the hooks went in.
 static CREATED: Mutex<Vec<Created>> = Mutex::new(Vec::new());
+
+/// The observer resumes each child and waits for it to end before the hook
+/// injects it, so that what the child does is seen; the hook's injection of
+/// a process that has ended then fails, as it would for any child that died.
+static RUN_CHILDREN: AtomicBool = AtomicBool::new(false);
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtResumeProcess(process: HANDLE) -> i32;
+}
 
 /// The observer: what the kernel started, read while the child exists.
 fn observe(process: HANDLE, _pid: u32) {
@@ -70,6 +83,17 @@ fn observe(process: HANDLE, _pid: u32) {
     } else {
         String::new()
     };
+    let exit = RUN_CHILDREN.load(Ordering::SeqCst).then(|| {
+        let mut code = 0u32;
+        // SAFETY: the hook's handle of a suspended child it just created,
+        // with every access right.
+        unsafe {
+            assert_eq!(NtResumeProcess(process), 0, "the child resumed");
+            assert_eq!(WaitForSingleObject(process, GONE_MS), WAIT_OBJECT_0);
+            GetExitCodeProcess(process, &mut code);
+        }
+        code
+    });
     let mut dup: HANDLE = core::ptr::null_mut();
     // SAFETY: a duplicate of a valid handle into this process, for waiting.
     unsafe {
@@ -90,11 +114,17 @@ fn observe(process: HANDLE, _pid: u32) {
         .push(Created {
             image,
             handle: dup as usize,
+            exit,
         });
 }
 
 /// Take what the observer saw, waiting for each child to be gone.
 pub(crate) fn created() -> Vec<String> {
+    created_with_exits().into_iter().map(|(i, _)| i).collect()
+}
+
+/// [`created`], with each child's exit code when it was let run.
+fn created_with_exits() -> Vec<(String, Option<u32>)> {
     let all = std::mem::take(&mut *CREATED.lock().unwrap_or_else(|e| e.into_inner()));
     all.into_iter()
         .map(|c| {
@@ -110,7 +140,7 @@ pub(crate) fn created() -> Vec<String> {
                 CloseHandle(h);
                 assert_eq!(w, WAIT_OBJECT_0, "the child {:?} was left running", c.image);
             }
-            c.image
+            (c.image, c.exit)
         })
         .collect()
 }
@@ -444,6 +474,43 @@ fn an_image_named_by_the_command_line_in_a_root_runs_the_staged_copy() {
         images[0],
         s.staged
     );
+}
+
+/// A program the VFS does not hold, named by the command line alone and
+/// started in a root: the host finds it where it would without the VFS (here
+/// `cmd.exe` in the system folder), and it runs with the command line as
+/// written. Nothing is staged.
+#[test]
+fn a_program_outside_the_roots_named_by_the_command_line_in_a_root_starts() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let (s, _) = setup(
+        &probe,
+        Given {
+            stages: true,
+            backed: true,
+            missing_backing: false,
+            fault: None,
+        },
+    );
+    RUN_CHILDREN.store(true, Ordering::SeqCst);
+    let mark = s.served.recorder.mark();
+    let r = start(None, "cmd /c exit 7", Some(&s.root));
+    assert!(
+        matches!(r, Ok(_) | Err(ERROR_PROCESS_ABORTED)),
+        "started, then refused only for its injection: {r:?}"
+    );
+    assert!(stage_execs(&s, mark).is_empty(), "no STAGE_EXEC");
+    let children = created_with_exits();
+    assert_eq!(children.len(), 1, "one child: {children:?}");
+    let (image, exit) = &children[0];
+    assert!(
+        Path::new(image)
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe")),
+        "the child runs {image:?}"
+    );
+    assert_eq!(*exit, Some(7), "cmd ran `exit 7`");
 }
 
 /// A refused start: `CreateProcessW` fails with `ERROR_FILE_NOT_FOUND` (the

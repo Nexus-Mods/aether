@@ -15,6 +15,18 @@ Aether's crates. Newest first.
   and the `reg_gen` rules are not checked for it (`docs/conformance.md`,
   "The adapter protocol"; `contract/scenarios/README.md`, "Registry").
 
+### Fixed
+
+- With `VFS_ROOT_BACKINGS` set, a child named by a relative name that the
+  director does not have, such as `cmd /c exit 7` started with no
+  application name in a working directory under a root, was refused with
+  `ERROR_FILE_NOT_FOUND`. The shim now searches for it in the order the
+  system does, seeing what the VFS sees, and starts it from the file it
+  finds outside the roots, as it would start without the VFS. A relative
+  name the director has is staged as before, and an absolute name under a
+  root that the director does not have, or cannot stage, is still refused
+  (`docs/wire.md` 3.4.14).
+
 ## 1.1.0
 
 The wire is unchanged: the wire version (4), the golden vectors and

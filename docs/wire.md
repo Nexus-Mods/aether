@@ -1164,14 +1164,21 @@ stage is `ST_NOT_FOUND`. A staged image holds the file's bytes as they are
 when STAGE_EXEC is served, writes in the session included.
 
 How the shim uses it: only when `VFS_ROOT_BACKINGS` names at least one
-backing (otherwise the child starts as it would without the VFS). Then, for
-each candidate image path that routes under a root it first sends GETATTR,
-and sends STAGE_EXEC only for the first candidate that is a file (`found`,
-not `is_dir`). On success the child is started from the returned path. If no
-candidate was staged, every candidate path is absolute, and at least one was
-under a root, the child is refused, not started from whatever is really on
-disk at that path. Otherwise (a relative name the loader may resolve
-elsewhere) the image path is left as it was.
+backing (otherwise the child starts as it would without the VFS). An
+absolute image name is looked up as given; a relative one is searched for in
+the order the system searches (an application name in the working directory
+alone; a command line's program beside the parent's image, in the working
+directory, the system folders, then `PATH`), where a path under a root holds
+the image only if the director has a file there and a path outside every
+root only if the real disk does. For a path under a root the shim first
+sends GETATTR, and sends STAGE_EXEC only when it is a file (`found`, not
+`is_dir`). On success the child is started from the returned path; when
+STAGE_EXEC fails, the child is refused, not started from whatever is really
+on disk at that path. An absolute name under a root that the director does
+not have is refused too. A relative name found outside the roots is started
+from the path found, so it starts as it would without the VFS; one found
+nowhere is left to the system's own search, which fails it as it would
+without the VFS.
 
 ### 3.5 Status values
 

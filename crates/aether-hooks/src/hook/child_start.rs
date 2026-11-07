@@ -10,6 +10,9 @@
 //! - starts a child whose image only the VFS holds from a copy the director
 //!   stages into the root's backing directory (`Opcode::StageExec`), leaving the
 //!   command line, with its virtual `argv[0]`, as the caller wrote it;
+//! - starts a child named by a relative name the VFS does not hold from the
+//!   file the system's search finds outside the roots, as it would without
+//!   the VFS;
 //! - starts a child whose working directory is under a root in that root's
 //!   backing directory, and tells it the virtual one before it runs;
 //! - gives a child the caller hands its own environment block the session's
@@ -155,9 +158,108 @@ fn current_dir() -> Option<String> {
     unsafe { super::path::cwd_from_peb() }.map(|(_, dos)| dos)
 }
 
+/// Where a child's image was found.
+enum Found {
+    /// A file the VFS holds, staged here.
+    Staged(String),
+    /// A file the VFS holds that the director did not stage.
+    Unstaged,
+    /// A file on the real disk outside every root, at this path.
+    Outside(String),
+}
+
+/// `path` as the VFS has it: `None` when it is not under a root or the VFS
+/// holds no file there; otherwise staged, or not.
+fn held(client: &FuseClient, path: &str) -> Option<Found> {
+    let (root, vp) = routed(client, path)?;
+    if !matches!(client.getattr(root, &vp), Ok(a) if a.found && !a.is_dir) {
+        return None;
+    }
+    Some(match client.stage_exec(root, &vp) {
+        Ok(real) => Found::Staged(real),
+        Err(_) => Found::Unstaged,
+    })
+}
+
+/// A relative image name searched for the way `CreateProcess` searches,
+/// seeing what the VFS sees: a path under a root holds the image only if the
+/// VFS does, and a path outside every root if the real disk does. An
+/// application name is looked for in the current directory alone; a command
+/// line's program beside the parent's image, then in the current directory
+/// (both as the parent was told them), the system folders and `PATH`. Each
+/// folder is tried with every name in `names` before the next.
+fn search(
+    client: &FuseClient,
+    names: &[String],
+    by_app: bool,
+    cur_dir: Option<String>,
+) -> Option<Found> {
+    let cwd = cur_dir.or_else(current_dir);
+    let dirs: Vec<String> = if by_app {
+        cwd.into_iter().collect()
+    } else {
+        let parent = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_string_lossy().into_owned()));
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let on_path = std::env::split_paths(&path).map(|d| d.to_string_lossy().into_owned());
+        parent
+            .into_iter()
+            .chain(cwd)
+            .chain(system_dirs())
+            .chain(on_path)
+            .collect()
+    };
+    for dir in dirs.iter().filter(|d| is_absolute(d)) {
+        for n in names {
+            let p = join(dir, n);
+            if routed(client, &p).is_some() {
+                if let Some(f) = held(client, &p) {
+                    return Some(f);
+                }
+                continue;
+            }
+            // The system adds `.exe` to a name without an extension, and
+            // never tries the bare name on disk.
+            if std::path::Path::new(n).extension().is_none() {
+                continue;
+            }
+            let on_disk = {
+                let _io = super::ShimIoGuard::enter();
+                std::fs::metadata(&p).is_ok_and(|m| m.is_file())
+            };
+            if on_disk {
+                return Some(Found::Outside(p));
+            }
+        }
+    }
+    None
+}
+
+/// The system folders `CreateProcess` searches, in its order: the system
+/// folder, the 16-bit system folder, the Windows folder.
+fn system_dirs() -> Vec<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetSystemDirectoryW, GetWindowsDirectoryW,
+    };
+    fn read(f: unsafe extern "system" fn(*mut u16, u32) -> u32) -> Option<String> {
+        let mut buf = [0u16; 512];
+        // SAFETY: `buf` holds `buf.len()` units.
+        let n = unsafe { f(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        (n > 0 && n < buf.len()).then(|| String::from_utf16_lossy(&buf[..n]))
+    }
+    let windows = read(GetWindowsDirectoryW);
+    read(GetSystemDirectoryW)
+        .into_iter()
+        .chain(windows.as_deref().map(|w| join(w, "System")))
+        .chain(windows)
+        .collect()
+}
+
 /// Plan a child's creation. `None` when nothing about it changes (no root
-/// has a backing directory, no director, or nothing the child names is
-/// under a root).
+/// has a backing directory, no director, or the child is named by an
+/// absolute path outside the roots and started, with the environment it was
+/// given, outside them).
 ///
 /// # Safety
 /// `app`, `cmd` and `cur_dir` are null or NUL-terminated UTF-16 strings;
@@ -177,9 +279,7 @@ pub(super) unsafe fn plan(
     let mut out = ChildStart::default();
 
     // The image. Named by the application name, or by the command line's
-    // first argument, searched the way `CreateProcess` searches: beside the
-    // parent's image, then in the current directory (both as the parent was
-    // told them), with `.exe` added when the name has no extension.
+    // first argument, with `.exe` added when the name has no extension.
     // SAFETY: per this function's contract.
     let (named, by_app) = match unsafe { wide_opt(app) } {
         Some(a) => (a, true),
@@ -191,42 +291,30 @@ pub(super) unsafe fn plan(
         if std::path::Path::new(&named).extension().is_none() {
             names.push(format!("{named}.exe"));
         }
-        let mut candidates = Vec::new();
-        for n in &names {
-            if is_absolute(n) {
-                candidates.push(n.clone());
-                continue;
+        let found = if is_absolute(&named) {
+            names.iter().find_map(|n| held(client, n))
+        } else {
+            search(client, &names, by_app, cur_dir.clone())
+        };
+        match found {
+            Some(Found::Staged(real)) | Some(Found::Outside(real)) => out.app = Some(nul(&real)),
+            // Refused rather than started from whatever is really on disk there.
+            Some(Found::Unstaged) => {
+                out.refuse = true;
+                return Some(out);
             }
-            if !by_app {
-                if let Some(dir) = std::env::current_exe()
-                    .ok()
-                    .and_then(|e| e.parent().map(|d| d.to_string_lossy().into_owned()))
-                {
-                    candidates.push(join(&dir, n));
-                }
+            // An absolute name under a root that the VFS does not have would be
+            // opened by the kernel from whatever is really there.
+            None if names
+                .iter()
+                .any(|n| is_absolute(n) && routed(client, n).is_some()) =>
+            {
+                out.refuse = true;
+                return Some(out);
             }
-            if let Some(dir) = cur_dir.clone().or_else(current_dir) {
-                candidates.push(join(&dir, n));
-            }
-        }
-        let mut under_root = false;
-        for c in &candidates {
-            let Some((root, vp)) = routed(client, c) else {
-                continue;
-            };
-            under_root = true;
-            if matches!(client.getattr(root, &vp), Ok(a) if a.found && !a.is_dir) {
-                if let Ok(real) = client.stage_exec(root, &vp) {
-                    out.app = Some(nul(&real));
-                }
-                break;
-            }
-        }
-        // An absolute image under a root that the VFS does not have would be
-        // opened by the kernel from whatever is really there.
-        if out.app.is_none() && under_root && candidates.iter().all(|c| is_absolute(c)) {
-            out.refuse = true;
-            return Some(out);
+            // A relative name found nowhere: left to the host's own search,
+            // which sees what the VFS sees and fails as it would without it.
+            None => {}
         }
     }
 
@@ -253,16 +341,6 @@ pub(super) unsafe fn plan(
             }
         }
     }
-    // A child started in a backing directory is handed its image as an
-    // absolute path (the staged copy) or not started, so the host never
-    // searches for it. The search above covers a relative name whenever the
-    // working directory is under a root: the name in that directory is a
-    // candidate, so it was staged, or refused, before here.
-    if out.cwd.is_some() && out.app.is_none() && !named.is_empty() && !is_absolute(&named) {
-        out.refuse = true;
-        return Some(out);
-    }
-
     // The environment, when the caller handed one in: theirs, with each of
     // this process's handshake variables (the ring, the roots, the shim's
     // config) that it lacks. Only those, and only where missing: everything

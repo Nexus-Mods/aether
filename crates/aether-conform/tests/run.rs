@@ -1892,6 +1892,95 @@ fn a_director_serving_no_layers_skips_the_layered_scenarios_and_generates_none()
     );
 }
 
+/// An adapter whose director serves no registry says so in its mount answers
+/// (`"registry": false`), refuses a tree with a registry layer and answers
+/// any registry request with an error. The run skips the scenarios with a
+/// registry layer or registry steps (reported skipped, neither passed nor
+/// failed), and the generated cases, concurrent rounds, malformed requests
+/// and limits send no registry request, so it passes (docs/conformance.md,
+/// "The adapter protocol").
+#[test]
+fn a_director_serving_no_registry_skips_the_registry_scenarios_and_sends_none() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/scenarios");
+    let out = aether_testkit::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    let director = format!("{} test-adapter --misbehave no-registry", quoted_exe());
+    let failures = out.path().join("failures");
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+        "--malformed",
+        "--limits",
+        "--generate",
+        "--cases",
+        "256",
+        "--seed",
+        "3",
+        "--concurrent",
+        "4",
+        "--concurrent-cases",
+        "32",
+        "--failures",
+        failures.to_str().unwrap(),
+        "--report",
+        "json",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    let all = all_output(&o);
+    assert_eq!(o.status.code(), Some(0), "{all}");
+    let v: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let mut skipped = Vec::new();
+    for s in v["scenarios"].as_array().unwrap() {
+        let name = s["name"].as_str().unwrap();
+        if s["skipped"].is_string() {
+            assert_eq!(s["passed"], false, "{name}");
+            skipped.push(name.to_string());
+        } else {
+            assert_eq!(s["passed"], true, "{name}: {s:#}");
+        }
+    }
+    let registry: Vec<String> = aether_conform::scenario::load_dir(&dir)
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.uses_registry())
+        .map(|s| s.name)
+        .collect();
+    assert!(!registry.is_empty());
+    assert_eq!(skipped, registry, "{all}");
+    // The built-in parts ran, and said what they left out.
+    for part in ["malformed", "limits"] {
+        let s = v["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == part)
+            .unwrap_or_else(|| panic!("no {part} entry: {all}"));
+        assert!(
+            s.to_string()
+                .contains("not exercised: the director serves no registry"),
+            "{part}: {s:#}"
+        );
+    }
+    // The TAP report says SKIP.
+    let o = conform(&[
+        "run",
+        "--director",
+        &director,
+        "--scenarios",
+        dir.to_str().unwrap(),
+    ]);
+    let out = stdout(&o);
+    assert!(out.contains("# SKIP"), "{out}");
+    assert!(
+        out.contains(&format!("# skipped {}", registry.len())),
+        "{out}"
+    );
+}
+
 /// wire.md 3.4.9, 3.4.2: a name made below a lower directory leaves the
 /// lower's names there listed. A director whose copy-up makes the directory
 /// opaque, losing them, fails.

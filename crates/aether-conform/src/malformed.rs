@@ -795,7 +795,9 @@ enum Mount {
 
 /// Mounts [`file_tree`] and sends the file cases, then [`registry_tree`] and
 /// the registry cases. The result is one scenario named `malformed`, a step
-/// per case, numbered across both. `Err` only for an adapter error.
+/// per case, numbered across both. For a director that serves no registry
+/// (its mount answers say `"registry": false`) the registry cases are not
+/// sent, and one step says so. `Err` only for an adapter error.
 pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, AdapterError> {
     let mut result = ScenarioResult {
         name: "malformed".into(),
@@ -806,6 +808,24 @@ pub fn run(adapter: &mut Adapter, timeout: Duration) -> Result<ScenarioResult, A
         skipped: None,
     };
     for mount in [Mount::Files, Mount::Registry] {
+        // The file cases' mount has told the adapter by now whether the
+        // director serves a registry.
+        if mount == Mount::Registry && !adapter.serves_registry() {
+            result.steps.push(StepResult {
+                index: result.steps.len(),
+                request: "the registry cases".into(),
+                expected: "sent to a tree with a registry layer".into(),
+                got: "not sent".into(),
+                passed: true,
+                note: Some(
+                    "not exercised: the director serves no registry (its mount answer says \
+                     \"registry\": false)"
+                        .into(),
+                ),
+                answer: None,
+            });
+            continue;
+        }
         if let Some(e) = one_mount(adapter, timeout, mount, &mut result.steps)? {
             let what = match mount {
                 Mount::Files => "the file cases",

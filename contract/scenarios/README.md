@@ -100,6 +100,12 @@ lower-only name by its list or by the general rules, and the scenarios
 accept both. `docs/conformance.md` ("Layered roots") lists the rules they
 check and the questions wire.md leaves open.
 
+**Registry.** An adapter whose director serves no registry refuses the mount
+of a tree with a `registry` and says `"registry": false` in its mount
+answers. The run then skips the scenarios that have a `registry` or send a
+registry request, and sends no registry request of its own
+(`docs/conformance.md`, "The adapter protocol").
+
 **Who holds what.** Everything under a `writable` entry that the root's own
 `files` and `dirs` list, and any name made there later, is held by the
 writable provider itself, not by a read-only layer beneath it, so wire.md

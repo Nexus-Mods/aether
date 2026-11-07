@@ -1145,6 +1145,10 @@ pub struct Limits {
     /// Whether the director serves roots with `lower` layers: without, no
     /// generated root has any.
     pub layers: bool,
+    /// Whether the director serves a registry: without, no generated tree
+    /// has a registry layer and no case sends a registry request, the one
+    /// probe of an absent layer ([`Gen::finish`]) included.
+    pub registry: bool,
 }
 
 impl Limits {
@@ -1155,6 +1159,7 @@ impl Limits {
             write: payload_cap.saturating_sub(24) as usize,
             arena: arena_len > 0,
             layers: true,
+            registry: true,
         }
     }
 }
@@ -1244,6 +1249,9 @@ pub fn build_with(
         for r in &mut spec.roots {
             r.lower.clear();
         }
+    }
+    if !limits.registry {
+        spec.registry = None;
     }
     let (tree, roots) = build_tree(&spec);
     tree.validate()
@@ -3663,8 +3671,13 @@ impl Gen {
 
     /// The case's last step: a REG_DELETE_KEY of a key no layer holds,
     /// which tombstones it (wire.md 4.3); or, without a registry layer, one
-    /// registry request, `ST_NOT_SUPPORTED` (4).
+    /// registry request, `ST_NOT_SUPPORTED` (4); or, for a director that
+    /// serves no registry, nothing.
     fn finish(&mut self) -> Result<(), String> {
+        if !self.limits.registry {
+            // The director serves no registry: not even the probe.
+            return Ok(());
+        }
         self.focus = 0;
         let path = format!("{REG_BASE}\\Absent");
         let (req, want, wire, note) = if self.registry {
@@ -4693,6 +4706,7 @@ mod tests {
                 write: 50,
                 arena,
                 layers: true,
+                registry: true,
             };
             let mut runner = proptest::test_runner::TestRunner::deterministic();
             let (mut reads, mut writes) = (0, 0);

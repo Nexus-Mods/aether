@@ -439,6 +439,13 @@ pub enum Break {
     /// run must pass it, the layered scenarios skipped and no generated
     /// root layered.
     NoLayers,
+    /// Not a broken rule: a director that serves no registry. Every mount
+    /// answer says `"registry": false`, a tree with a registry layer is
+    /// refused, and any registry request is answered `ST_IO_ERROR`, so a
+    /// run that sends one fails (docs/conformance.md, "The adapter
+    /// protocol"). A run must pass it, the scenarios with a registry layer or
+    /// registry steps skipped and no registry request sent.
+    NoRegistry,
     /// A name made in, or a lower-only file copied up from, a directory a
     /// lower holds makes the directory opaque: READDIR of it no longer
     /// lists the names only a lower holds there, as a director that copies
@@ -564,6 +571,7 @@ impl Break {
             "lower-general-rules" => Some(Break::LowerGeneralRules),
             "refuse-layered-dir-renames" => Some(Break::RefuseLayeredDirRenames),
             "no-layers" => Some(Break::NoLayers),
+            "no-registry" => Some(Break::NoRegistry),
             "copy-up-opaque-parent" => Some(Break::CopyUpOpaqueParent),
             "mutable-lower-reads" => Some(Break::MutableLowerReads),
             "immutable-after-copy-up" => Some(Break::ImmutableAfterCopyUp),
@@ -602,6 +610,9 @@ pub fn reference_adapter(kind: RingKind, arena: bool, broken: Option<Break>) -> 
             };
             if broken == Some(Break::NoLayers) {
                 answer["layers"] = json!(false);
+            }
+            if broken == Some(Break::NoRegistry) {
+                answer["registry"] = json!(false);
             }
             answer
         }
@@ -986,6 +997,9 @@ fn mount(
     let s = crate::scenario::load(scenario).map_err(|e| e.to_string())?;
     if broken == Some(Break::NoLayers) && s.tree.roots.iter().any(|r| !r.lower.is_empty()) {
         return Err("this director serves no root as an overlay (lower layers)".into());
+    }
+    if broken == Some(Break::NoRegistry) && s.tree.registry.is_some() {
+        return Err("this director serves no registry".into());
     }
     let staged = Arc::new(Mutex::new(Vec::new()));
     let d = Served {
@@ -2058,6 +2072,15 @@ impl Served {
         self.arrivals.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// [`Break::NoRegistry`]: the director serves no registry, so a
+    /// registry request is an error no case expects.
+    fn registry_served(&self) -> Result<(), Status> {
+        match self.broken {
+            Some(Break::NoRegistry) => Err(Status::IoError),
+            _ => Ok(()),
+        }
+    }
+
     /// The middle of a request a 2.8.1 break splits: held until another
     /// request has arrived (at most [`RACE_WAIT`]) and then [`RACE_HOLD`]
     /// more, so that a request in flight with this one is served while the
@@ -3005,11 +3028,13 @@ impl Director for Served {
     }
     fn reg_lookup(&mut self, path: &str) -> Result<LookupReply, Status> {
         self.arrive();
+        self.registry_served()?;
         self.hive(path)?;
         self.reference.reg_lookup(path)
     }
     fn reg_key(&mut self, path: &str) -> Result<KeyReply<'_>, Status> {
         self.arrive();
+        self.registry_served()?;
         self.hive(path)?;
         // Counted once the answer is made, so a write let go by the count
         // cannot reach it.
@@ -3029,6 +3054,7 @@ impl Director for Served {
         data: &[u8],
     ) -> Result<u64, Status> {
         self.arrive();
+        self.registry_served()?;
         if let (Some(Break::BumpBeforeWrite), Some(ring)) = (self.broken, &self.ring) {
             let (n, cv) = &*self.reg_reads;
             let reads = n.lock().unwrap_or_else(|e| e.into_inner());
@@ -3071,6 +3097,7 @@ impl Director for Served {
     }
     fn reg_delete_value(&mut self, path: &str, name: &str) -> Result<u64, Status> {
         self.arrive();
+        self.registry_served()?;
         if self.broken == Some(Break::ValueNameBytes) && name.len() > 16_383 {
             return Err(Status::BadRequest);
         }
@@ -3079,6 +3106,7 @@ impl Director for Served {
     }
     fn reg_create_key(&mut self, path: &str, volatile: bool) -> Result<u64, Status> {
         self.arrive();
+        self.registry_served()?;
         if self.broken == Some(Break::RacyRegCreate)
             && self
                 .reference
@@ -3106,6 +3134,7 @@ impl Director for Served {
     }
     fn reg_delete_key(&mut self, path: &str) -> Result<u64, Status> {
         self.arrive();
+        self.registry_served()?;
         if self.broken == Some(Break::DeleteUnrecordedNotFound)
             && path.split('\\').count() <= 64
             && path.split('\\').all(|c| c.chars().count() <= 255)
@@ -3142,6 +3171,7 @@ impl Director for Served {
     }
     fn reg_rename_key(&mut self, path: &str, new_leaf: &str) -> Result<u64, Status> {
         self.arrive();
+        self.registry_served()?;
         let r = self.reference.reg_rename_key(path, new_leaf);
         if r.is_ok() && self.broken == Some(Break::RenameUnchanged) {
             self.held().renamed_away.insert(aether_casefold::fold(path));
@@ -3155,6 +3185,7 @@ impl Director for Served {
         since: u64,
     ) -> Result<ChangedReply, Status> {
         self.arrive();
+        self.registry_served()?;
         let mut c = self.reference.reg_changed(path, subtree, since)?;
         if self.broken == Some(Break::RenameUnchanged)
             && self

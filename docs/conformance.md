@@ -767,6 +767,7 @@ its stdout, never two requests at once.
     -> {"ok":true,"env":{"VFS_RING_PATH":"/tmp/x.ring","VFS_RING_BYTES":"16777216",...}}
     or {"ok":false,"error":"why not"}
     either may carry "layers":false (the director serves no layered roots)
+    and "registry":false (the director serves no registry)
 {"op":"unmount"}
     -> {"ok":true}
 ```
@@ -799,6 +800,22 @@ its stdout, never two requests at once.
   cases and concurrent rounds, which learn it from their first mount of an
   empty tree, make no layered root. A skipped scenario is not a passed one:
   such a director has not shown it serves overlays.
+- A director that serves no registry (wire.md 4) says so in its mount
+  answers with `"registry": false` beside `ok`, and refuses (`"ok":false`)
+  the mount of a tree that has a registry layer. Without the field, a
+  director serves one (`"registry": true`). It works as `"layers"` does:
+  once a mount answer has said `false`, the run reports each scenario that
+  has a registry layer or sends a registry request as skipped (TAP `# SKIP`,
+  JSON `"skipped"` with the reason, `"passed": false`, failing nothing)
+  without mounting it. Generated cases and concurrent rounds, which learn it
+  from their first mount of an empty tree, have no registry layer and send
+  no registry request, the probe of an absent layer included, and the
+  concurrent meetings leave out the REG_CREATE_KEYs. `--malformed` leaves
+  out its registry cases and `--limits` its registry writer against a
+  reader, each with a step that says it was not exercised. No session serves
+  a registry, so the `reg_gen` rules (wire.md 4.5) are not checked. A
+  skipped scenario is not a passed one: such a director has not shown it
+  serves a registry.
 - `unmount` lets the mounted tree go. The run has detached from the ring
   before it sends this, so the adapter may remove a ring file.
 - EOF on stdin means the run is over: the adapter should exit. It is killed

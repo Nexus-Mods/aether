@@ -3,6 +3,18 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
+## Unreleased
+
+### Added
+
+- A director that serves no registry says `"registry": false` in its mount
+  answers, as one that serves no overlays says `"layers": false`, and
+  refuses the mount of a tree with a registry layer. The run skips the
+  scenarios with a registry layer or registry steps, generated cases,
+  concurrent rounds, `--malformed` and `--limits` send no registry request,
+  and the `reg_gen` rules are not checked for it (`docs/conformance.md`,
+  "The adapter protocol"; `contract/scenarios/README.md`, "Registry").
+
 ## 1.1.0
 
 The wire is unchanged: the wire version (4), the golden vectors and

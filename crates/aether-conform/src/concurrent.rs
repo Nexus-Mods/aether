@@ -22,7 +22,9 @@
 //! answers otherwise there is a generator error. Root 0 also holds one file
 //! per slot under `sweep/`, of distinct sizes and bytes, and the writable
 //! directory `meet/`; the combined tree has a registry layer with one key,
-//! for the meetings (the cases' own probe of an absent layer is left out).
+//! for the meetings (the cases' own probe of an absent layer is left out). For
+//! a director whose mount says `"registry": false` the combined tree has no
+//! registry layer and the meetings make no registry request.
 //!
 //! **Meetings.** After the clients, requests on one name, file or key, in
 //! flight together each from a slot of its own ([`meet`]), whose outcome
@@ -306,21 +308,6 @@ fn without_stand_ins(steps: &[Step]) -> Vec<&Step> {
     kept
 }
 
-fn is_registry(req: &OwnedRequest) -> bool {
-    use OwnedRequest as O;
-    matches!(
-        req,
-        O::RegLookup { .. }
-            | O::RegKey { .. }
-            | O::RegSetValue { .. }
-            | O::RegDeleteValue { .. }
-            | O::RegCreateKey { .. }
-            | O::RegDeleteKey { .. }
-            | O::RegRenameKey { .. }
-            | O::RegChanged { .. }
-    )
-}
-
 /// One round: the combined scenario (its steps marked with their clients)
 /// and each client's steps with their places in it.
 struct Round {
@@ -340,7 +327,7 @@ fn sweep_bytes(n: u32) -> Vec<u8> {
 
 /// The tree with every case under its client's directory, and the sweep
 /// files.
-fn combine(cases: &[Scenario], slots: u32) -> Result<Tree, String> {
+fn combine(cases: &[Scenario], slots: u32, registry: bool) -> Result<Tree, String> {
     let mut root = Root {
         id: 0,
         ..Root::default()
@@ -393,7 +380,7 @@ fn combine(cases: &[Scenario], slots: u32) -> Result<Tree, String> {
     }));
     let tree = Tree {
         roots: vec![root],
-        registry: Some(Registry {
+        registry: registry.then(|| Registry {
             keys: vec![RegKey {
                 path: MEET_KEY.into(),
                 volatile: false,
@@ -426,7 +413,7 @@ fn round(
         let name = format!("concurrent-{}-{r}-c{k}", opts.seed);
         cases.push(model::build_with(&input, &name, "", limits).map_err(GenerateError::Generator)?);
     }
-    let tree = combine(&cases, slots).map_err(generator)?;
+    let tree = combine(&cases, slots, limits.registry).map_err(generator)?;
     let mut steps = Vec::new();
     let mut clients = Vec::new();
     for (k, s) in cases.iter().enumerate() {
@@ -436,7 +423,7 @@ fn round(
         // combined tree has one, for the meetings.
         for st in without_stand_ins(&s.steps)
             .into_iter()
-            .filter(|st| !is_registry(&st.request))
+            .filter(|st| !st.request.is_registry())
         {
             let step = Step {
                 request: relocate(&st.request, &p, off),
@@ -627,6 +614,7 @@ fn probe(adapter: &mut Adapter, file: &Path, timeout: Duration) -> Result<Probe,
     Ok(Probe {
         limits: Limits {
             layers: adapter.serves_layers(),
+            registry: adapter.serves_registry(),
             ..Limits::of(cap, arena)
         },
         slots,
@@ -814,7 +802,15 @@ fn play(env: &Env, timeout: Duration, round: &Round, slots: u32) -> Played {
     // stopped answering them is not swept.
     if played.error.is_none() {
         let n = round.clients.len();
-        if let Err(e) = meet(&ring, round.number, n, limit, &mut played.coverage) {
+        let registry = round.scenario.tree.registry.is_some();
+        if let Err(e) = meet(
+            &ring,
+            round.number,
+            n,
+            limit,
+            registry,
+            &mut played.coverage,
+        ) {
             played.error = Some(format!("meeting: {e}"));
         }
     }
@@ -1204,8 +1200,16 @@ fn record(k: usize, j: usize) -> Vec<u8> {
 
 /// The meetings of round `r`, `n` clients at each, at most `limit` data
 /// requests in flight (wire.md 2.8), each checked as wire.md 2.8.1 says
-/// requests in flight together take effect: atomically.
-fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Result<(), String> {
+/// requests in flight together take effect: atomically. The REG_CREATE_KEYs
+/// are met only when `registry` says the tree has a registry layer.
+fn meet(
+    ring: &Attached,
+    r: u32,
+    n: usize,
+    limit: u32,
+    registry: bool,
+    cov: &mut Coverage,
+) -> Result<(), String> {
     let data = n.min(limit.max(1) as usize).max(1);
     // Each round in a directory of its own, so a listing of it holds this
     // round's names only, however many rounds came before.
@@ -1278,26 +1282,29 @@ fn meet(ring: &Attached, r: u32, n: usize, limit: u32, cov: &mut Coverage) -> Re
         );
     }
 
-    // REG_CREATE_KEYs of one key: exactly one succeeds.
-    let key = format!("{MEET_KEY}\\Meet{r}");
-    let create = OwnedRequest::RegCreateKey {
-        path: key.clone(),
-        volatile: false,
-    };
-    let got = together(ring, &vec![create; n.max(2)], cov)?;
-    let ok = got
-        .iter()
-        .filter(|g| matches!(g, Ok(OwnedReply::RegVersion(_))))
-        .count();
-    let exists = got.iter().filter(|g| **g == Err(Status::Exists)).count();
-    if ok != 1 || exists != got.len() - 1 {
-        return fails(
-            &format!("{} REG_CREATE_KEYs of {key} at once", got.len()),
-            format!(
-                "{ok} succeeded and {exists} were ST_EXISTS: {}",
-                got.iter().map(render_got).collect::<Vec<_>>().join(", ")
-            ),
-        );
+    // REG_CREATE_KEYs of one key: exactly one succeeds. Not for a director
+    // that serves no registry.
+    if registry {
+        let key = format!("{MEET_KEY}\\Meet{r}");
+        let create = OwnedRequest::RegCreateKey {
+            path: key.clone(),
+            volatile: false,
+        };
+        let got = together(ring, &vec![create; n.max(2)], cov)?;
+        let ok = got
+            .iter()
+            .filter(|g| matches!(g, Ok(OwnedReply::RegVersion(_))))
+            .count();
+        let exists = got.iter().filter(|g| **g == Err(Status::Exists)).count();
+        if ok != 1 || exists != got.len() - 1 {
+            return fails(
+                &format!("{} REG_CREATE_KEYs of {key} at once", got.len()),
+                format!(
+                    "{ok} succeeded and {exists} were ST_EXISTS: {}",
+                    got.iter().map(render_got).collect::<Vec<_>>().join(", ")
+                ),
+            );
+        }
     }
 
     // WRITEs to disjoint, unaligned ranges of one file, each through a

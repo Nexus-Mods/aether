@@ -84,6 +84,9 @@ pub struct Adapter {
     /// Whether the director serves roots with `lower` layers: true until a
     /// mount answer says `"layers": false`.
     layers: bool,
+    /// Whether the director serves a registry: true until a mount answer
+    /// says `"registry": false`.
+    registry: bool,
 }
 
 /// The handshake variables of a stale session that a run leaves in its
@@ -188,6 +191,7 @@ impl Adapter {
             stderr,
             timeout,
             layers: true,
+            registry: true,
         })
     }
 
@@ -198,18 +202,28 @@ impl Adapter {
         self.layers
     }
 
+    /// Whether the director serves a registry (wire.md 4): true unless a
+    /// mount answer said `"registry": false` (`docs/conformance.md`, "The
+    /// adapter protocol").
+    pub fn serves_registry(&self) -> bool {
+        self.registry
+    }
+
     /// Asks the adapter to mount the scenario at `scenario`. `Ok(Err(why))`
     /// is a refusal (`{"ok":false}`), which fails only that scenario.
     pub fn mount(&mut self, scenario: &Path) -> Result<Result<Env, String>, AdapterError> {
         let scenario = std::path::absolute(scenario).unwrap_or_else(|_| scenario.to_path_buf());
         let answer = self.ask(&json!({"op": "mount", "scenario": scenario.to_string_lossy()}))?;
-        match answer.get("layers") {
-            None | Some(Value::Bool(true)) => {}
-            Some(Value::Bool(false)) => self.layers = false,
-            Some(other) => {
-                return Err(self.error(format!(
-                    "\"layers\" is {other}, not a boolean, in the mount answer: {answer}"
-                )))
+        for name in ["layers", "registry"] {
+            match answer.get(name) {
+                None | Some(Value::Bool(true)) => {}
+                Some(Value::Bool(false)) if name == "layers" => self.layers = false,
+                Some(Value::Bool(false)) => self.registry = false,
+                Some(other) => {
+                    return Err(self.error(format!(
+                        "\"{name}\" is {other}, not a boolean, in the mount answer: {answer}"
+                    )))
+                }
             }
         }
         match answer.get("ok") {

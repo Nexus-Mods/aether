@@ -1164,21 +1164,36 @@ stage is `ST_NOT_FOUND`. A staged image holds the file's bytes as they are
 when STAGE_EXEC is served, writes in the session included.
 
 How the shim uses it: only when `VFS_ROOT_BACKINGS` names at least one
-backing (otherwise the child starts as it would without the VFS). An
-absolute image name is looked up as given; a relative one is searched for in
-the order the system searches (an application name in the working directory
-alone; a command line's program beside the parent's image, in the working
-directory, the system folders, then `PATH`), where a path under a root holds
-the image only if the director has a file there and a path outside every
-root only if the real disk does. For a path under a root the shim first
-sends GETATTR, and sends STAGE_EXEC only when it is a file (`found`, not
-`is_dir`). On success the child is started from the returned path; when
-STAGE_EXEC fails, the child is refused, not started from whatever is really
-on disk at that path. An absolute name under a root that the director does
-not have is refused too. A relative name found outside the roots is started
-from the path found, so it starts as it would without the VFS; one found
-nowhere is left to the system's own search, which fails it as it would
-without the VFS.
+backing (otherwise the child starts as it would without the VFS). Then the
+shim finds the child's image itself, as `CreateProcess` does, and starts the
+child from the full path it found; the system never searches for it.
+
+- An application name is used as given, against the parent's current
+  directory: no extension is added and nothing is searched.
+- Otherwise the command line names the program: a quoted first argument
+  alone; unquoted, the line up to each space or tab in turn, then the whole
+  line, the first that is a file winning. `.exe` is added to a name whose
+  last component has no dot. A name with a drive, a leading separator, `.\`
+  or `..\` is resolved against the parent's current directory (and for
+  `C:name`, drive C's); any other is looked for beside the parent's image,
+  in the parent's current directory (skipped when
+  `NoDefaultCurrentDirectoryInExePath` is set and the name has no
+  backslash), in the system folder, the 16-bit system folder, the Windows
+  folder, then in each `PATH` entry, a relative entry resolved against the
+  parent's current directory. The first path that exists, file or
+  directory, ends the search for that name.
+
+Each path is decided by the director's view when it is under a root and by
+the real disk otherwise. Under a root the shim sends GETATTR: not `found`,
+the search goes on; a directory, as on disk; a file, then STAGE_EXEC, and
+the child is started from the returned path. A GETATTR or STAGE_EXEC that
+fails refuses the start (`ERROR_FILE_NOT_FOUND`): the search does not go on
+to a later path. When no name is a file the start fails as the system's
+would: `ERROR_ACCESS_DENIED` when the first name found a directory,
+`ERROR_INVALID_PARAMETER` when the command line starts with a space or is
+empty, otherwise `ERROR_FILE_NOT_FOUND`; for an application name,
+`ERROR_ACCESS_DENIED` for a directory, `ERROR_PATH_NOT_FOUND` when its folder
+is missing or the name is empty, otherwise `ERROR_FILE_NOT_FOUND`.
 
 ### 3.5 Status values
 

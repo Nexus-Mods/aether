@@ -86,7 +86,9 @@
 //! - `section_lazy_page_fill`: the fill runs on the shim's fill thread, so
 //!   its allocations are not counted; the faulting thread's are (it hands
 //!   the job over and waits).
-//! - `create_process`: GETATTR and STAGE_EXEC for the image. The child
+//! - `create_process`: GETATTR and STAGE_EXEC for the image, named by an
+//!   absolute application name, so the shim's search for it probes that one
+//!   path and gathers no search folders. The child
 //!   starts in the root's backing directory, which the shim makes and the
 //!   host checks on disk, never through the director. The STAGE_EXEC reply
 //!   is the staged copy's real path (in [`base`]); its length is left out of

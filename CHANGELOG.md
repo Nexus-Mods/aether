@@ -20,12 +20,17 @@ Aether's crates. Newest first.
 - With `VFS_ROOT_BACKINGS` set, a child named by a relative name that the
   director does not have, such as `cmd /c exit 7` started with no
   application name in a working directory under a root, was refused with
-  `ERROR_FILE_NOT_FOUND`. The shim now searches for it in the order the
-  system does, seeing what the VFS sees, and starts it from the file it
-  finds outside the roots, as it would start without the VFS. A relative
-  name the director has is staged as before, and an absolute name under a
-  root that the director does not have, or cannot stage, is still refused
-  (`docs/wire.md` 3.4.14).
+  `ERROR_FILE_NOT_FOUND`. The shim now finds every child's image as
+  `CreateProcess` does, seeing what the VFS sees, and hands the host the
+  full path: an application name as given; a command line's program with
+  `.exe` added as the system adds it, unquoted names with spaces tried
+  from the shortest, and the search in the system's order from the
+  parent's current directory (not the child's), relative `PATH` entries
+  included. A file outside the roots starts as it would without the VFS;
+  one the director has is staged; a director that cannot stage it, or does
+  not answer, refuses the start; and a start that finds nothing fails with
+  the system's error rather than being left to the system's own search,
+  which sees files only the VFS holds (`docs/wire.md` 3.4.14).
 
 ## 1.1.0
 

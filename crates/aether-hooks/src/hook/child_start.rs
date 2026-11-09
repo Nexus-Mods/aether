@@ -10,9 +10,9 @@
 //! - starts a child whose image only the VFS holds from a copy the director
 //!   stages into the root's backing directory (`Opcode::StageExec`), leaving the
 //!   command line, with its virtual `argv[0]`, as the caller wrote it;
-//! - starts a child named by a relative name the VFS does not hold from the
-//!   file the system's search finds outside the roots, as it would without
-//!   the VFS;
+//! - finds every child's image itself, as `CreateProcess` would, seeing
+//!   what the VFS sees, and hands the host its full path, so the host never
+//!   searches; a start that finds nothing fails as the system's would;
 //! - starts a child whose working directory is under a root in that root's
 //!   backing directory, and tells it the virtual one before it runs;
 //! - gives a child the caller hands its own environment block the session's
@@ -31,8 +31,8 @@ const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
 /// What the process hook changes about a child's creation.
 #[derive(Default)]
 pub(super) struct ChildStart {
-    /// The image to create the child from, NUL-terminated, when it is a
-    /// staged copy rather than what the caller named.
+    /// The image to create the child from, NUL-terminated: a staged copy,
+    /// or the full path of a file outside the roots.
     pub app: Option<Vec<u16>>,
     /// The real working directory to create it in, NUL-terminated.
     pub cwd: Option<Vec<u16>>,
@@ -44,9 +44,10 @@ pub(super) struct ChildStart {
     /// The environment block to create it with (Unicode), when the caller
     /// handed one in.
     pub env: Option<Vec<u16>>,
-    /// The caller named an image under a root that the VFS does not have:
-    /// refused rather than started from whatever is really on disk there.
-    pub refuse: bool,
+    /// The start fails with this error, as the system's would: no image
+    /// found, or one under a root that cannot be staged (refused rather
+    /// than started from whatever is really on disk there).
+    pub refuse: Option<u32>,
 }
 
 thread_local! {
@@ -129,27 +130,24 @@ fn nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// The program a command line starts: its first argument.
-fn argv0(cmd: &str) -> String {
-    let cmd = cmd.trim_start();
-    match cmd.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or("").to_string(),
-        None => cmd.split([' ', '\t']).next().unwrap_or("").to_string(),
-    }
-}
-
-fn is_absolute(p: &str) -> bool {
-    let b = p.as_bytes();
-    (b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) || p.starts_with(r"\\")
-}
-
 fn join(dir: &str, name: &str) -> String {
     format!("{}\\{name}", dir.trim_end_matches(['\\', '/']))
 }
 
+/// `path` (a full DOS path) in NT spelling.
+fn nt_of(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        format!(r"\??\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\") {
+        format!(r"\??\UNC\{rest}")
+    } else {
+        format!(r"\??\{path}")
+    }
+}
+
 /// `path`'s root and vpath when it is under one.
 fn routed(client: &FuseClient, path: &str) -> Option<(RootId, crate::director::VPath)> {
-    client.route(&format!(r"\??\{path}"))
+    client.route(&nt_of(path))
 }
 
 /// The process's current directory as it was told it (the PEB's).
@@ -158,82 +156,258 @@ fn current_dir() -> Option<String> {
     unsafe { super::path::cwd_from_peb() }.map(|(_, dos)| dos)
 }
 
-/// Where a child's image was found.
-enum Found {
-    /// A file the VFS holds, staged here.
-    Staged(String),
-    /// A file the VFS holds that the director did not stage.
-    Unstaged,
-    /// A file on the real disk outside every root, at this path.
-    Outside(String),
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED as ACCESS_DENIED, ERROR_FILE_NOT_FOUND as FILE_NOT_FOUND,
+    ERROR_INVALID_PARAMETER as INVALID_PARAMETER, ERROR_PATH_NOT_FOUND as PATH_NOT_FOUND,
+};
+
+/// What a path holds, as the start sees it.
+#[derive(Debug, PartialEq)]
+enum Hit {
+    Missing,
+    Dir,
+    /// A file, to create the child from this path: a staged copy for a file
+    /// the VFS holds, the path itself for one on the real disk.
+    File(String),
 }
 
-/// `path` as the VFS has it: `None` when it is not under a root or the VFS
-/// holds no file there; otherwise staged, or not.
-fn held(client: &FuseClient, path: &str) -> Option<Found> {
-    let (root, vp) = routed(client, path)?;
-    if !matches!(client.getattr(root, &vp), Ok(a) if a.found && !a.is_dir) {
-        return None;
+/// The folders a command line's program is searched in, in the order
+/// `CreateProcess` searches them.
+#[derive(Clone)]
+struct Folders {
+    /// The folder of the parent's image.
+    app_dir: Option<String>,
+    /// The parent's current directory (never the child's).
+    cwd: Option<String>,
+    /// `NoDefaultCurrentDirectoryInExePath` is set: the current directory
+    /// is searched only for a name with a backslash in it.
+    no_default_cwd: bool,
+    /// The system folder, the 16-bit system folder, the Windows folder.
+    system: Vec<String>,
+    /// The parent's `PATH`, as it is.
+    path: String,
+}
+
+impl Folders {
+    fn of_this_process() -> Folders {
+        Folders {
+            app_dir: std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|d| d.to_string_lossy().into_owned())),
+            cwd: current_dir(),
+            no_default_cwd: std::env::var_os("NoDefaultCurrentDirectoryInExePath").is_some(),
+            system: system_dirs(),
+            path: std::env::var("PATH").unwrap_or_default(),
+        }
     }
-    Some(match client.stage_exec(root, &vp) {
-        Ok(real) => Found::Staged(real),
-        Err(_) => Found::Unstaged,
+}
+
+/// Whether the last component of `name` has an extension: a dot anywhere
+/// in it (`.hidden` and `name.` have one), as the system's search decides
+/// whether to add `.exe`.
+fn has_extension(name: &str) -> bool {
+    name.rsplit(['\\', '/'])
+        .next()
+        .is_some_and(|last| last.contains('.'))
+}
+
+/// A name the system resolves against the current directory alone: one that
+/// starts with a drive, a separator, `.\` or `..\` (either separator).
+fn is_resolved_directly(name: &str) -> bool {
+    let mut c = name.chars();
+    let (a, b, d) = (c.next(), c.next(), c.next());
+    let sep = |x: Option<char>| matches!(x, Some('\\' | '/'));
+    sep(a)
+        || b == Some(':')
+        || (a == Some('.') && sep(b))
+        || (a == Some('.') && b == Some('.') && sep(d))
+}
+
+/// The names `CreateProcess` tries for a command line's program, in order:
+/// a quoted first argument alone; otherwise the line up to each space or
+/// tab in turn, then the whole line.
+fn image_tokens(cmd: &str) -> Vec<&str> {
+    if let Some(rest) = cmd.strip_prefix('"') {
+        return vec![rest.split('"').next().unwrap_or("")];
+    }
+    cmd.char_indices()
+        .filter(|&(_, c)| c == ' ' || c == '\t')
+        .map(|(i, _)| &cmd[..i])
+        .chain(Some(cmd))
+        .collect()
+}
+
+/// Resolve the child's image as `CreateProcess` does, deciding each
+/// candidate with `probe` (given a full path) and making full paths with
+/// `full` (against the parent's current directory, and each drive's).
+/// `Ok` is the path to create the child from; `Err` the error the start
+/// fails with.
+///
+/// An application name is used as given, with no extension added and no
+/// search. A command line's program is searched for: `.exe` added when its
+/// last component has no extension; a name with a drive, a leading
+/// separator, `.\` or `..\` resolved directly, any other searched for in
+/// [`Folders`]' order, the first path that exists (file or directory)
+/// ending the search. A directory or nothing found tries the next of
+/// [`image_tokens`]; when none is a file, the start fails as the system's
+/// does on the first.
+fn resolve(
+    app: Option<&str>,
+    cmd: &str,
+    folders: &dyn Fn() -> Folders,
+    full: &dyn Fn(&str) -> Option<String>,
+    probe: &mut dyn FnMut(&str, bool) -> Result<Hit, u32>,
+) -> Result<String, u32> {
+    let mut look = |p: &str, stage: bool| match full(p) {
+        Some(f) => probe(&f, stage),
+        None => Ok(Hit::Missing),
+    };
+    if let Some(app) = app {
+        if app.is_empty() {
+            return Err(PATH_NOT_FOUND);
+        }
+        return match look(app, true)? {
+            Hit::File(image) => Ok(image),
+            Hit::Dir => Err(ACCESS_DENIED),
+            // Missing: the kernel's open fails on the folder, or the file.
+            Hit::Missing => {
+                let parent = app.rsplit_once(['\\', '/']).map(|(d, _)| d);
+                match parent {
+                    Some(d)
+                        if !d.is_empty() && !d.ends_with(':') && look(d, false)? != Hit::Dir =>
+                    {
+                        Err(PATH_NOT_FOUND)
+                    }
+                    _ => Err(FILE_NOT_FOUND),
+                }
+            }
+        };
+    }
+    let mut at = |p: &str| look(p, true);
+    // Gathered only for a name that is searched for.
+    let mut searched: Option<Folders> = None;
+    let mut first = None;
+    for token in image_tokens(cmd) {
+        let hit = if token.is_empty() {
+            Hit::Missing
+        } else {
+            let name = if has_extension(token) {
+                token.to_string()
+            } else {
+                format!("{token}.exe")
+            };
+            if is_resolved_directly(&name) {
+                at(&name)?
+            } else {
+                search(&name, searched.get_or_insert_with(folders), &mut at)?
+            }
+        };
+        first.get_or_insert(match (&hit, token.is_empty()) {
+            (_, true) => INVALID_PARAMETER,
+            (Hit::Dir, _) => ACCESS_DENIED,
+            _ => FILE_NOT_FOUND,
+        });
+        if let Hit::File(image) = hit {
+            return Ok(image);
+        }
+    }
+    Err(first.unwrap_or(INVALID_PARAMETER))
+}
+
+/// One name (its extension settled, not resolved directly) as the system's
+/// search finds it.
+fn search(
+    name: &str,
+    folders: &Folders,
+    at: &mut dyn FnMut(&str) -> Result<Hit, u32>,
+) -> Result<Hit, u32> {
+    let cwd = (name.contains('\\') || !folders.no_default_cwd)
+        .then_some(folders.cwd.as_deref())
+        .flatten();
+    let dirs = folders
+        .app_dir
+        .as_deref()
+        .into_iter()
+        .chain(cwd)
+        .chain(folders.system.iter().map(String::as_str))
+        // A relative entry is resolved against the current directory, as
+        // the name in it is.
+        .chain(folders.path.split(';').filter(|d| !d.is_empty()));
+    for dir in dirs {
+        let hit = at(&join(dir, name))?;
+        if hit != Hit::Missing {
+            return Ok(hit);
+        }
+    }
+    Ok(Hit::Missing)
+}
+
+/// What `path` (full) holds. Under a root the director's view decides: a
+/// file is staged (when `stage`), and the start refused when it cannot be,
+/// or when the director does not answer; outside every root the real disk
+/// does.
+fn probe(client: &FuseClient, path: &str, stage: bool) -> Result<Hit, u32> {
+    if let Some((root, vp)) = routed(client, path) {
+        return match client.getattr(root, &vp) {
+            Ok(a) if !a.found => Ok(Hit::Missing),
+            Ok(a) if a.is_dir => Ok(Hit::Dir),
+            Ok(_) if !stage => Ok(Hit::File(String::new())),
+            Ok(_) => client
+                .stage_exec(root, &vp)
+                .map(Hit::File)
+                .map_err(|_| FILE_NOT_FOUND),
+            Err(_) => Err(FILE_NOT_FOUND),
+        };
+    }
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, INVALID_FILE_ATTRIBUTES,
+    };
+    let wide = nul(path);
+    // The system's own check: an attribute query, not an open. In a 32-bit
+    // process this and the start that follows go through the same file
+    // system redirection (the system folder is SysWOW64 to both).
+    let attrs = {
+        let _io = super::ShimIoGuard::enter();
+        // SAFETY: a NUL-terminated path.
+        unsafe { GetFileAttributesW(wide.as_ptr()) }
+    };
+    Ok(if attrs == INVALID_FILE_ATTRIBUTES {
+        Hit::Missing
+    } else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Hit::Dir
+    } else {
+        Hit::File(path.to_string())
     })
 }
 
-/// A relative image name searched for the way `CreateProcess` searches,
-/// seeing what the VFS sees: a path under a root holds the image only if the
-/// VFS does, and a path outside every root if the real disk does. An
-/// application name is looked for in the current directory alone; a command
-/// line's program beside the parent's image, then in the current directory
-/// (both as the parent was told them), the system folders and `PATH`. Each
-/// folder is tried with every name in `names` before the next.
-fn search(
-    client: &FuseClient,
-    names: &[String],
-    by_app: bool,
-    cur_dir: Option<String>,
-) -> Option<Found> {
-    let cwd = cur_dir.or_else(current_dir);
-    let dirs: Vec<String> = if by_app {
-        cwd.into_iter().collect()
-    } else {
-        let parent = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|d| d.to_string_lossy().into_owned()));
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let on_path = std::env::split_paths(&path).map(|d| d.to_string_lossy().into_owned());
-        parent
-            .into_iter()
-            .chain(cwd)
-            .chain(system_dirs())
-            .chain(on_path)
-            .collect()
+/// `name` as a full path, against the parent's current directory (and, for
+/// `C:name`, drive C's): the system's own resolution (`GetFullPathNameW`).
+fn full_path(name: &str) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
+    let wide = nul(name);
+    let call = |buf: &mut [u16]| {
+        // SAFETY: a NUL-terminated name; `buf` holds `buf.len()` units.
+        let n = unsafe {
+            GetFullPathNameW(
+                wide.as_ptr(),
+                buf.len() as u32,
+                buf.as_mut_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        n as usize
     };
-    for dir in dirs.iter().filter(|d| is_absolute(d)) {
-        for n in names {
-            let p = join(dir, n);
-            if routed(client, &p).is_some() {
-                if let Some(f) = held(client, &p) {
-                    return Some(f);
-                }
-                continue;
-            }
-            // The system adds `.exe` to a name without an extension, and
-            // never tries the bare name on disk.
-            if std::path::Path::new(n).extension().is_none() {
-                continue;
-            }
-            let on_disk = {
-                let _io = super::ShimIoGuard::enter();
-                std::fs::metadata(&p).is_ok_and(|m| m.is_file())
-            };
-            if on_disk {
-                return Some(Found::Outside(p));
-            }
-        }
+    let mut buf = [0u16; 520];
+    let n = call(&mut buf);
+    if n == 0 {
+        return None;
     }
-    None
+    if n < buf.len() {
+        return Some(String::from_utf16_lossy(&buf[..n]));
+    }
+    let mut long = vec![0u16; n];
+    let n = call(&mut long);
+    (n > 0 && n < long.len()).then(|| String::from_utf16_lossy(&long[..n]))
 }
 
 /// The system folders `CreateProcess` searches, in its order: the system
@@ -256,10 +430,8 @@ fn system_dirs() -> Vec<String> {
         .collect()
 }
 
-/// Plan a child's creation. `None` when nothing about it changes (no root
-/// has a backing directory, no director, or the child is named by an
-/// absolute path outside the roots and started, with the environment it was
-/// given, outside them).
+/// Plan a child's creation. `None` when no root has a backing directory or
+/// there is no director.
 ///
 /// # Safety
 /// `app`, `cmd` and `cur_dir` are null or NUL-terminated UTF-16 strings;
@@ -278,43 +450,24 @@ pub(super) unsafe fn plan(
     let client = global()?;
     let mut out = ChildStart::default();
 
-    // The image. Named by the application name, or by the command line's
-    // first argument, with `.exe` added when the name has no extension.
+    // The image: found here, as the system would find it, and handed to the
+    // host as a full path, so the host never searches for it (its search
+    // would find a file only the VFS holds, which the kernel would then open
+    // from whatever is really on disk there).
     // SAFETY: per this function's contract.
-    let (named, by_app) = match unsafe { wide_opt(app) } {
-        Some(a) => (a, true),
-        // SAFETY: per this function's contract.
-        None => (argv0(&unsafe { wide_opt(cmd) }.unwrap_or_default()), false),
-    };
-    if !named.is_empty() {
-        let mut names = vec![named.clone()];
-        if std::path::Path::new(&named).extension().is_none() {
-            names.push(format!("{named}.exe"));
-        }
-        let found = if is_absolute(&named) {
-            names.iter().find_map(|n| held(client, n))
-        } else {
-            search(client, &names, by_app, cur_dir.clone())
-        };
-        match found {
-            Some(Found::Staged(real)) | Some(Found::Outside(real)) => out.app = Some(nul(&real)),
-            // Refused rather than started from whatever is really on disk there.
-            Some(Found::Unstaged) => {
-                out.refuse = true;
-                return Some(out);
-            }
-            // An absolute name under a root that the VFS does not have would be
-            // opened by the kernel from whatever is really there.
-            None if names
-                .iter()
-                .any(|n| is_absolute(n) && routed(client, n).is_some()) =>
-            {
-                out.refuse = true;
-                return Some(out);
-            }
-            // A relative name found nowhere: left to the host's own search,
-            // which sees what the VFS sees and fails as it would without it.
-            None => {}
+    let (app, cmd) = unsafe { (wide_opt(app), wide_opt(cmd).unwrap_or_default()) };
+    let image = resolve(
+        app.as_deref(),
+        &cmd,
+        &Folders::of_this_process,
+        &full_path,
+        &mut |p, stage| probe(client, p, stage),
+    );
+    match image {
+        Ok(image) => out.app = Some(nul(&image)),
+        Err(code) => {
+            out.refuse = Some(code);
+            return Some(out);
         }
     }
 
@@ -370,8 +523,7 @@ pub(super) unsafe fn plan(
         }
     }
 
-    let changed = out.app.is_some() || out.cwd.is_some() || out.env.is_some();
-    changed.then_some(out)
+    Some(out)
 }
 
 /// The caller's environment block as UTF-16, through its final empty entry.
@@ -447,11 +599,192 @@ mod tests {
         assert!(!is_real_dir(r"C:\Games\Backing"));
     }
 
+    /// A disk: each path (lower case) a file or a directory, `Err` for a
+    /// director that does not answer. The current directory is `C:\cwd`.
+    struct Disk {
+        entries: Vec<(&'static str, Result<bool, ()>)>,
+        probed: Vec<String>,
+    }
+
+    fn disk(files: &[&'static str], dirs: &[&'static str]) -> Disk {
+        let entries = files
+            .iter()
+            .map(|f| (*f, Ok(true)))
+            .chain(dirs.iter().map(|d| (*d, Ok(false))))
+            .collect();
+        Disk {
+            entries,
+            probed: Vec::new(),
+        }
+    }
+
+    fn full(p: &str) -> Option<String> {
+        let p = p.replace('/', "\\");
+        let b: Vec<char> = p.chars().collect();
+        let abs = if p.starts_with(r"\\") || (b.len() > 2 && b[1] == ':' && b[2] == '\\') {
+            p
+        } else if let Some(rest) = p.strip_prefix(r".\") {
+            format!(r"C:\cwd\{rest}")
+        } else if p.starts_with('\\') {
+            format!("C:{p}")
+        } else if b.len() > 1 && b[1] == ':' {
+            format!(r"{}\cwd\{}", &p[..2], &p[2..])
+        } else {
+            format!(r"C:\cwd\{p}")
+        };
+        Some(abs.to_ascii_lowercase())
+    }
+
+    fn folders() -> Folders {
+        Folders {
+            app_dir: Some(r"C:\app".into()),
+            cwd: Some(r"C:\cwd".into()),
+            no_default_cwd: false,
+            system: vec![r"C:\sys".into(), r"C:\win".into()],
+            path: r"C:\p1;;rel".into(),
+        }
+    }
+
+    fn run(d: &mut Disk, f: &Folders, app: Option<&str>, cmd: &str) -> Result<String, u32> {
+        resolve(app, cmd, &|| f.clone(), &full, &mut |p, _| {
+            d.probed.push(p.to_string());
+            match d.entries.iter().find(|(e, _)| *e == p) {
+                None => Ok(Hit::Missing),
+                Some((_, Ok(false))) => Ok(Hit::Dir),
+                Some((_, Ok(true))) => Ok(Hit::File(p.to_string())),
+                Some((_, Err(()))) => Err(FILE_NOT_FOUND),
+            }
+        })
+    }
+
     #[test]
-    fn the_first_argument_is_the_program() {
-        assert_eq!(argv0(r#""C:\a b\x.exe" -arg"#), r"C:\a b\x.exe");
-        assert_eq!(argv0(r"SkyrimSE.exe -x"), "SkyrimSE.exe");
-        assert_eq!(argv0("  plain"), "plain");
-        assert!(is_absolute(r"C:\x") && is_absolute(r"\\srv\s") && !is_absolute("x.exe"));
+    fn a_command_line_program_is_searched_for_in_the_systems_order() {
+        let f = folders();
+        let order = [
+            r"c:\app\x.exe",
+            r"c:\cwd\x.exe",
+            r"c:\sys\x.exe",
+            r"c:\win\x.exe",
+            r"c:\p1\x.exe",
+            r"c:\cwd\rel\x.exe",
+        ];
+        let mut d = disk(&[], &[]);
+        assert_eq!(run(&mut d, &f, None, "x"), Err(FILE_NOT_FOUND));
+        assert_eq!(d.probed, order, "every folder once, `.exe` added");
+        for (i, hit) in order.iter().enumerate() {
+            let mut d = disk(&order[i..], &[]);
+            assert_eq!(run(&mut d, &f, None, "x -a"), Ok(hit.to_string()));
+        }
+        // NoDefaultCurrentDirectoryInExePath: the current directory only
+        // for a name with a backslash.
+        let f = Folders {
+            no_default_cwd: true,
+            ..folders()
+        };
+        let mut d = disk(&[r"c:\cwd\x.exe"], &[]);
+        assert_eq!(run(&mut d, &f, None, "x"), Err(FILE_NOT_FOUND));
+        let mut d = disk(&[r"c:\cwd\s\x.exe"], &[]);
+        assert_eq!(run(&mut d, &f, None, r"s\x"), Ok(r"c:\cwd\s\x.exe".into()));
+        let mut d = disk(&[r"c:\cwd\s\x.exe"], &[]);
+        assert_eq!(run(&mut d, &f, None, "s/x"), Err(FILE_NOT_FOUND));
+    }
+
+    #[test]
+    fn exe_is_added_only_to_a_command_line_name_without_an_extension() {
+        let f = folders();
+        for (cmd, probed) in [
+            ("x.y", r"c:\app\x.y"),
+            (".hid", r"c:\app\.hid"),
+            ("sub.d/x", r"c:\app\sub.d\x.exe"),
+        ] {
+            let mut d = disk(&[], &[]);
+            let _ = run(&mut d, &f, None, cmd);
+            assert_eq!(d.probed[0], probed, "{cmd}");
+        }
+        // An application name: as given, against the current directory.
+        let mut d = disk(&[r"c:\cwd\x.exe", r"c:\app\x"], &[]);
+        assert_eq!(run(&mut d, &f, Some("x"), "x"), Err(FILE_NOT_FOUND));
+        assert_eq!(d.probed, [r"c:\cwd\x"]);
+        let mut d = disk(&[r"c:\cwd\noext"], &[]);
+        assert_eq!(
+            run(&mut d, &f, Some("noext"), "y"),
+            Ok(r"c:\cwd\noext".into())
+        );
+    }
+
+    #[test]
+    fn unquoted_spaces_are_tried_from_the_shortest_name() {
+        let f = folders();
+        let cmd = r"C:\My Tool\x.exe -a";
+        let mut d = disk(&[r"c:\my.exe", r"c:\my tool\x.exe"], &[]);
+        assert_eq!(run(&mut d, &f, None, cmd), Ok(r"c:\my.exe".into()));
+        let mut d = disk(&[r"c:\my tool\x.exe"], &[r"c:\my.exe"]);
+        assert_eq!(run(&mut d, &f, None, cmd), Ok(r"c:\my tool\x.exe".into()));
+        // Quoted: that name alone.
+        let mut d = disk(&[r"c:\my.exe"], &[]);
+        assert_eq!(
+            run(&mut d, &f, None, r#""C:\My Tool\x.exe" -a"#),
+            Err(FILE_NOT_FOUND)
+        );
+        assert_eq!(d.probed, [r"c:\my tool\x.exe"]);
+        assert_eq!(image_tokens("a b\tc"), ["a", "a b", "a b\tc"]);
+    }
+
+    #[test]
+    fn names_with_a_drive_a_separator_or_dots_are_not_searched() {
+        let f = folders();
+        for (cmd, probed) in [
+            (r".\x", r"c:\cwd\x.exe"),
+            ("./x", r"c:\cwd\x.exe"),
+            (r"\x", r"c:\x.exe"),
+            ("C:x", r"c:\cwd\x.exe"),
+            (r"C:\d\x", r"c:\d\x.exe"),
+        ] {
+            let mut d = disk(&[], &[]);
+            assert_eq!(run(&mut d, &f, None, cmd), Err(FILE_NOT_FOUND), "{cmd}");
+            assert_eq!(d.probed, [probed], "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_start_fails_as_the_systems_would() {
+        let f = folders();
+        // A directory as the first name, nothing later.
+        let mut d = disk(&[], &[r"c:\cwd\d.exe"]);
+        assert_eq!(run(&mut d, &f, None, "d -a"), Err(ACCESS_DENIED));
+        // A directory later, never the first.
+        let mut d = disk(&[], &[r"c:\app\n q.exe"]);
+        assert_eq!(run(&mut d, &f, None, "n q"), Err(FILE_NOT_FOUND));
+        for cmd in ["", "  x"] {
+            let mut d = disk(&[], &[]);
+            assert_eq!(
+                run(&mut d, &f, None, cmd),
+                Err(INVALID_PARAMETER),
+                "{cmd:?}"
+            );
+        }
+        // An application name: a directory, a missing file, a missing folder.
+        let mut d = disk(&[], &[r"c:\cwd\d.exe", r"c:\cwd\s"]);
+        assert_eq!(run(&mut d, &f, Some("d.exe"), "x"), Err(ACCESS_DENIED));
+        assert_eq!(run(&mut d, &f, Some(r"s\x.exe"), "x"), Err(FILE_NOT_FOUND));
+        assert_eq!(run(&mut d, &f, Some(r"n\x.exe"), "x"), Err(PATH_NOT_FOUND));
+        assert_eq!(run(&mut d, &f, Some(""), "x"), Err(PATH_NOT_FOUND));
+    }
+
+    #[test]
+    fn a_director_error_ends_the_search() {
+        let f = folders();
+        let mut d = disk(&[r"c:\p1\x.exe"], &[]);
+        d.entries.push((r"c:\cwd\x.exe", Err(())));
+        assert_eq!(run(&mut d, &f, None, "x"), Err(FILE_NOT_FOUND));
+        assert_eq!(d.probed.last().map(String::as_str), Some(r"c:\cwd\x.exe"));
+    }
+
+    #[test]
+    fn full_paths_take_their_nt_spelling() {
+        assert_eq!(nt_of(r"C:\x"), r"\??\C:\x");
+        assert_eq!(nt_of(r"\\?\C:\x"), r"\??\C:\x");
+        assert_eq!(nt_of(r"\\srv\s\x"), r"\??\UNC\srv\s\x");
+        assert!(has_extension(".hid") && has_extension("a.") && !has_extension(r"a.b\c"));
     }
 }

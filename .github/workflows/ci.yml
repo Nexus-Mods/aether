@@ -122,6 +122,11 @@ jobs:
       # tests run 32-bit targets only when built for i686.
       - name: aether-inject unit tests, 32-bit (i686)
         run: cargo test -p aether-inject --lib --target i686-pc-windows-msvc
+      # A 32-bit parent's child start: its system folder is SysWOW64 to the
+      # shim's search and to the start alike. The harness's child-start
+      # tests, built for i686, with the 32-bit probe they start.
+      - name: Child start tests, 32-bit (i686)
+        run: cargo build -p aether-inject --target i686-pc-windows-msvc && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc child_start::
       # The release natives (+crt-static, x64 and i686) and the fixtures, as a
       # release builds them, with the VC++ runtime import check required
       - name: Release natives and fixtures (bin/build-natives.ps1)

@@ -126,7 +126,7 @@ jobs:
       # shim's search and to the start alike. The harness's child-start
       # tests, built for i686, with the 32-bit probe they start.
       - name: Child start tests, 32-bit (i686)
-        run: cargo build -p aether-inject --target i686-pc-windows-msvc && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc child_start::
+        run: 'cargo build -p aether-inject --target i686-pc-windows-msvc && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc child_start::'
       # The release natives (+crt-static, x64 and i686) and the fixtures, as a
       # release builds them, with the VC++ runtime import check required
       - name: Release natives and fixtures (bin/build-natives.ps1)

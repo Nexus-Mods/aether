@@ -1172,16 +1172,17 @@ child from the full path it found; the system never searches for it.
   directory: no extension is added and nothing is searched.
 - Otherwise the command line names the program: a quoted first argument
   alone; unquoted, the line up to each space or tab in turn, then the whole
-  line, the first that is a file winning. `.exe` is added to a name whose
-  last component has no dot. A name with a drive, a leading separator, `.\`
-  or `..\` is resolved against the parent's current directory (and for
-  `C:name`, drive C's); any other is looked for beside the parent's image,
-  in the parent's current directory (skipped when
-  `NoDefaultCurrentDirectoryInExePath` is set and the name has no
-  backslash), in the system folder, the 16-bit system folder, the Windows
-  folder, then in each `PATH` entry, a relative entry resolved against the
-  parent's current directory. The first path that exists, file or
-  directory, ends the search for that name.
+  line, the first that is a file winning. A name with a drive, a leading
+  separator, `.\` or `..\` is resolved against the parent's current
+  directory (and for `C:name`, drive C's), as written and then, when that
+  does not exist and its last component has no dot, with `.exe` added. Any
+  other name has `.exe` added when its last component has no dot, and is
+  looked for beside the parent's image, in the parent's current directory
+  (skipped when `NoDefaultCurrentDirectoryInExePath` is set and the name
+  has no backslash), in the system folder, the 16-bit system folder, the
+  Windows folder, then in each `PATH` entry, a relative entry resolved
+  against the parent's current directory. The first path that exists, file
+  or directory, ends the search for that name.
 
 Each path is decided by the director's view when it is under a root and by
 the real disk otherwise. Under a root the shim sends GETATTR: not `found`,

@@ -191,13 +191,18 @@ struct Folders {
 impl Folders {
     fn of_this_process() -> Folders {
         Folders {
+            // The loader's name for the image, as the system's search reads
+            // it: the virtual one once the shim has renamed it (`whereami`),
+            // which routes to the director like any other path.
             app_dir: std::env::current_exe()
                 .ok()
                 .and_then(|e| e.parent().map(|d| d.to_string_lossy().into_owned())),
             cwd: current_dir(),
             no_default_cwd: std::env::var_os("NoDefaultCurrentDirectoryInExePath").is_some(),
             system: system_dirs(),
-            path: std::env::var("PATH").unwrap_or_default(),
+            path: std::env::var_os("PATH")
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
 }
@@ -244,10 +249,11 @@ fn image_tokens(cmd: &str) -> Vec<&str> {
 /// fails with.
 ///
 /// An application name is used as given, with no extension added and no
-/// search. A command line's program is searched for: `.exe` added when its
-/// last component has no extension; a name with a drive, a leading
-/// separator, `.\` or `..\` resolved directly, any other searched for in
-/// [`Folders`]' order, the first path that exists (file or directory)
+/// search. A command line's program: a name with a drive, a leading
+/// separator, `.\` or `..\` is resolved directly, as written and then, when
+/// that is missing and its last component has no extension, with `.exe`;
+/// any other has `.exe` added when it has no extension and is searched for
+/// in [`Folders`]' order, the first path that exists (file or directory)
 /// ending the search. A directory or nothing found tries the next of
 /// [`image_tokens`]; when none is a file, the start fails as the system's
 /// does on the first.
@@ -288,24 +294,26 @@ fn resolve(
     let mut searched: Option<Folders> = None;
     let mut first = None;
     for token in image_tokens(cmd) {
-        let hit = if token.is_empty() {
-            Hit::Missing
-        } else {
-            let name = if has_extension(token) {
-                token.to_string()
-            } else {
-                format!("{token}.exe")
-            };
-            if is_resolved_directly(&name) {
-                at(&name)?
-            } else {
-                search(&name, searched.get_or_insert_with(folders), &mut at)?
+        // An empty first name (an empty line, or one that starts with a
+        // space) is the system's invalid parameter, whatever follows.
+        if token.is_empty() {
+            return Err(INVALID_PARAMETER);
+        }
+        let exe = (!has_extension(token)).then(|| format!("{token}.exe"));
+        let hit = if is_resolved_directly(token) {
+            // A path: as written first, then with `.exe`.
+            match (at(token)?, exe) {
+                (Hit::Missing, Some(exe)) => at(&exe)?,
+                (hit, _) => hit,
             }
+        } else {
+            let name = exe.as_deref().unwrap_or(token);
+            search(name, searched.get_or_insert_with(folders), &mut at)?
         };
-        first.get_or_insert(match (&hit, token.is_empty()) {
-            (_, true) => INVALID_PARAMETER,
-            (Hit::Dir, _) => ACCESS_DENIED,
-            _ => FILE_NOT_FOUND,
+        first.get_or_insert(if hit == Hit::Dir {
+            ACCESS_DENIED
+        } else {
+            FILE_NOT_FOUND
         });
         if let Hit::File(image) = hit {
             return Ok(image);
@@ -733,17 +741,45 @@ mod tests {
     #[test]
     fn names_with_a_drive_a_separator_or_dots_are_not_searched() {
         let f = folders();
+        // The name as written, then with `.exe` when it has no extension.
         for (cmd, probed) in [
-            (r".\x", r"c:\cwd\x.exe"),
-            ("./x", r"c:\cwd\x.exe"),
-            (r"\x", r"c:\x.exe"),
-            ("C:x", r"c:\cwd\x.exe"),
-            (r"C:\d\x", r"c:\d\x.exe"),
+            (r".\x", r"c:\cwd\x"),
+            ("./x", r"c:\cwd\x"),
+            (r"..\x", r"c:\cwd\..\x"),
+            (r"\x", r"c:\x"),
+            ("C:x", r"c:\cwd\x"),
+            (r"C:\d\x", r"c:\d\x"),
         ] {
             let mut d = disk(&[], &[]);
             assert_eq!(run(&mut d, &f, None, cmd), Err(FILE_NOT_FOUND), "{cmd}");
-            assert_eq!(d.probed, [probed], "{cmd}");
+            assert_eq!(
+                d.probed,
+                [probed.to_string(), format!("{probed}.exe")],
+                "{cmd}"
+            );
         }
+        let mut d = disk(&[], &[]);
+        let _ = run(&mut d, &f, None, r"C:\d\x.y");
+        assert_eq!(d.probed, [r"c:\d\x.y"], "an extension: as written only");
+        // As written wins over its `.exe` twin; the twin when it is alone.
+        let mut d = disk(&[r"c:\cwd\tool", r"c:\cwd\tool.exe"], &[]);
+        assert_eq!(run(&mut d, &f, None, r".\tool"), Ok(r"c:\cwd\tool".into()));
+        let mut d = disk(&[r"c:\cwd\tool.exe"], &[]);
+        assert_eq!(
+            run(&mut d, &f, None, r".\tool"),
+            Ok(r"c:\cwd\tool.exe".into())
+        );
+        // A directory as written ends that name: its `.exe` twin is not
+        // tried, the next name is, and the first name's error is the start's.
+        let mut d = disk(&[r"c:\cwd\sub.exe"], &[r"c:\cwd\sub"]);
+        assert_eq!(run(&mut d, &f, None, r".\sub"), Err(ACCESS_DENIED));
+        let mut d = disk(&[r"c:\d\sub x.exe"], &[r"c:\d\sub"]);
+        assert_eq!(
+            run(&mut d, &f, None, r"C:\d\sub x"),
+            Ok(r"c:\d\sub x.exe".into())
+        );
+        let mut d = disk(&[], &[r"c:\d\sub"]);
+        assert_eq!(run(&mut d, &f, None, r"C:\d\sub x"), Err(ACCESS_DENIED));
     }
 
     #[test]
@@ -762,6 +798,7 @@ mod tests {
                 Err(INVALID_PARAMETER),
                 "{cmd:?}"
             );
+            assert!(d.probed.is_empty(), "{cmd:?}: {:?}", d.probed);
         }
         // An application name: a directory, a missing file, a missing folder.
         let mut d = disk(&[], &[r"c:\cwd\d.exe", r"c:\cwd\s"]);

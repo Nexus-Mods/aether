@@ -22,9 +22,10 @@ Aether's crates. Newest first.
   application name in a working directory under a root, was refused with
   `ERROR_FILE_NOT_FOUND`. The shim now finds every child's image as
   `CreateProcess` does, seeing what the VFS sees, and hands the host the
-  full path: an application name as given; a command line's program with
-  `.exe` added as the system adds it, unquoted names with spaces tried
-  from the shortest, and the search in the system's order from the
+  full path: an application name as given; a command line's program named
+  by a path as written, then with `.exe`; a searched name with `.exe`
+  added as the system adds it; unquoted names with spaces tried from the
+  shortest; and the search in the system's order from the
   parent's current directory (not the child's), relative `PATH` entries
   included. A file outside the roots starts as it would without the VFS;
   one the director has is staged; a director that cannot stage it, or does

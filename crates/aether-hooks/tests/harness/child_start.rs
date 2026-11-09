@@ -50,6 +50,15 @@ const SPACED: &str = "My Tool/aether-probe.exe";
 /// A directory the director serves, named like an image.
 const DIR_EXE: &str = "adir.exe";
 
+/// An image with no extension, served under root 0 and real in the outside
+/// folder.
+const BARE: &str = "tool";
+
+/// An image with no extension beside its `.exe` twin, both served under
+/// root 0 and both real in the outside folder.
+const TWIN: &str = "twin";
+const TWIN_EXE: &str = "twin.exe";
+
 /// How long a child the hook killed may take to be gone.
 const GONE_MS: u32 = 10_000;
 
@@ -235,7 +244,9 @@ pub(crate) fn setup_in(
     std::fs::copy(probe, root.join(HIDDEN)).unwrap();
     let staged = stage.join(IMAGE);
     std::fs::copy(probe, &staged).unwrap();
-    std::fs::copy(probe, outside.join(IMAGE)).unwrap();
+    for name in [IMAGE, BARE, TWIN, TWIN_EXE] {
+        std::fs::copy(probe, outside.join(name)).unwrap();
+    }
 
     if given.backed {
         std::env::set_var(
@@ -254,10 +265,13 @@ pub(crate) fn setup_in(
         .with(IMAGE, b"MZ served".to_vec(), ReadStyle::Whole)
         .with(SPACED, b"MZ served".to_vec(), ReadStyle::Whole)
         .with_dir(DIR_EXE);
+    for name in [BARE, TWIN, TWIN_EXE] {
+        fake = fake.with(name, b"MZ served".to_vec(), ReadStyle::Whole);
+    }
     if given.stages {
-        fake = fake
-            .staging(IMAGE, &staged.to_string_lossy())
-            .staging(SPACED, &staged.to_string_lossy());
+        for name in [IMAGE, SPACED, BARE, TWIN, TWIN_EXE] {
+            fake = fake.staging(name, &staged.to_string_lossy());
+        }
     }
     let served = fakedirector::install_with(&root, fake, Options::default());
     let id = given.fault.map(|f| {
@@ -644,6 +658,62 @@ fn a_directory_named_as_the_program_is_access_denied() {
     let Some(probe) = probe() else { return };
     let s = served(&probe);
     let cmd = format!(r"{}\adir", s.root.display());
+    assert_fails(start(None, &cmd, None), ERROR_ACCESS_DENIED);
+}
+
+/// A program named by a path with no extension: the file as written starts,
+/// outside the roots (unquoted, in a folder with a space) and in one (its
+/// staged copy, staged by that name). `.\` is the current directory's.
+#[test]
+fn a_path_to_an_image_with_no_extension_starts_it() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let cmd = format!(r"{}\{BARE} -x", s.outside.display());
+    assert_runs(start(None, &cmd, None), &s.outside.join(BARE));
+    in_dir(&s.root);
+    let mark = s.served.recorder.mark();
+    assert_runs(start(None, &format!(r".\{BARE} -x"), None), &s.staged);
+    let calls = stage_execs(&s, mark);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].1, BARE, "staged as written");
+}
+
+/// A path to a name with no extension beside its `.exe` twin: the name as
+/// written wins, as the system's lookup tries it first; a searched name
+/// (no path) is only ever the `.exe`.
+#[test]
+fn a_path_names_the_file_as_written_before_its_exe_twin() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let cmd = format!(r#""{}\{TWIN}" -x"#, s.outside.display());
+    assert_runs(start(None, &cmd, None), &s.outside.join(TWIN));
+    in_dir(&s.outside);
+    assert_runs(
+        start(None, &format!(r".\{TWIN}"), None),
+        &s.outside.join(TWIN),
+    );
+    assert_runs(start(None, TWIN, None), &s.outside.join(TWIN_EXE));
+    in_dir(&s.root);
+    for (cmd, staged_as) in [(format!(r".\{TWIN}"), TWIN), (TWIN.to_string(), TWIN_EXE)] {
+        let mark = s.served.recorder.mark();
+        assert_runs(start(None, &cmd, None), &s.staged);
+        let calls = stage_execs(&s, mark);
+        assert_eq!(calls.len(), 1, "{cmd}: {calls:?}");
+        assert_eq!(calls[0].1, staged_as, "{cmd}");
+    }
+}
+
+/// A directory named by a path, as written: the system's answer for a
+/// directory, never its `.exe` twin.
+#[test]
+fn a_path_to_a_directory_is_access_denied() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    std::fs::copy(&probe, s.outside.with_extension("exe")).unwrap();
+    let cmd = format!(r#""{}" -x"#, s.outside.display());
     assert_fails(start(None, &cmd, None), ERROR_ACCESS_DENIED);
 }
 

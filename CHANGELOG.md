@@ -3,7 +3,7 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
-## Unreleased
+## 1.1.1
 
 ### Added
 

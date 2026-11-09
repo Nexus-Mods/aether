@@ -25,14 +25,15 @@
 use crate::fakedirector::{self, Fake, Fault, Match, Options, ReadStyle};
 use aether_protocol::{Opcode, Request, RootId, Status};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PROCESS_ABORTED,
-    HANDLE, WAIT_OBJECT_0,
+    CloseHandle, DuplicateHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
+    ERROR_PROCESS_ABORTED, HANDLE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcess, QueryFullProcessImageNameW, TerminateProcess,
-    WaitForSingleObject, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+    CreateProcessW, GetCurrentProcess, GetExitCodeProcess, QueryFullProcessImageNameW,
+    TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW,
 };
 
@@ -41,6 +42,22 @@ pub(crate) const IMAGE: &str = "aether-probe.exe";
 
 /// An image on disk under root 0 that the director does not serve.
 const HIDDEN: &str = "hidden-probe.exe";
+
+/// A served image in a folder with a space in its name, staged as
+/// [`IMAGE`] is.
+const SPACED: &str = "My Tool/aether-probe.exe";
+
+/// A directory the director serves, named like an image.
+const DIR_EXE: &str = "adir.exe";
+
+/// An image with no extension, served under root 0 and real in the outside
+/// folder.
+const BARE: &str = "tool";
+
+/// An image with no extension beside its `.exe` twin, both served under
+/// root 0 and both real in the outside folder.
+const TWIN: &str = "twin";
+const TWIN_EXE: &str = "twin.exe";
 
 /// How long a child the hook killed may take to be gone.
 const GONE_MS: u32 = 10_000;
@@ -51,10 +68,22 @@ const GONE_MS: u32 = 10_000;
 struct Created {
     image: String,
     handle: usize,
+    /// Its exit code, when the observer let it run ([`RUN_CHILDREN`]).
+    exit: Option<u32>,
 }
 
 /// Every child created since the hooks went in.
 static CREATED: Mutex<Vec<Created>> = Mutex::new(Vec::new());
+
+/// The observer resumes each child and waits for it to end before the hook
+/// injects it, so that what the child does is seen; the hook's injection of
+/// a process that has ended then fails, as it would for any child that died.
+static RUN_CHILDREN: AtomicBool = AtomicBool::new(false);
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtResumeProcess(process: HANDLE) -> i32;
+}
 
 /// The observer: what the kernel started, read while the child exists.
 fn observe(process: HANDLE, _pid: u32) {
@@ -70,6 +99,17 @@ fn observe(process: HANDLE, _pid: u32) {
     } else {
         String::new()
     };
+    let exit = RUN_CHILDREN.load(Ordering::SeqCst).then(|| {
+        let mut code = 0u32;
+        // SAFETY: the hook's handle of a suspended child it just created,
+        // with every access right.
+        unsafe {
+            assert_eq!(NtResumeProcess(process), 0, "the child resumed");
+            assert_eq!(WaitForSingleObject(process, GONE_MS), WAIT_OBJECT_0);
+            GetExitCodeProcess(process, &mut code);
+        }
+        code
+    });
     let mut dup: HANDLE = core::ptr::null_mut();
     // SAFETY: a duplicate of a valid handle into this process, for waiting.
     unsafe {
@@ -90,11 +130,17 @@ fn observe(process: HANDLE, _pid: u32) {
         .push(Created {
             image,
             handle: dup as usize,
+            exit,
         });
 }
 
 /// Take what the observer saw, waiting for each child to be gone.
 pub(crate) fn created() -> Vec<String> {
+    created_with_exits().into_iter().map(|(i, _)| i).collect()
+}
+
+/// [`created`], with each child's exit code when it was let run.
+fn created_with_exits() -> Vec<(String, Option<u32>)> {
     let all = std::mem::take(&mut *CREATED.lock().unwrap_or_else(|e| e.into_inner()));
     all.into_iter()
         .map(|c| {
@@ -110,7 +156,7 @@ pub(crate) fn created() -> Vec<String> {
                 CloseHandle(h);
                 assert_eq!(w, WAIT_OBJECT_0, "the child {:?} was left running", c.image);
             }
-            c.image
+            (c.image, c.exit)
         })
         .collect()
 }
@@ -147,6 +193,9 @@ pub(crate) struct Setup {
     pub(crate) staged: PathBuf,
     /// Root 0's backing directory, on disk.
     pub(crate) backing: PathBuf,
+    /// A folder outside every root, with a space in its name, holding a
+    /// real `aether-probe.exe`.
+    pub(crate) outside: PathBuf,
     pub(crate) served: &'static fakedirector::Served,
     pub(crate) _hooks: aether_hooks::HookGuard,
 }
@@ -183,7 +232,8 @@ pub(crate) fn setup_in(
     let root = base.join("root");
     let backing = base.join("backing");
     let stage = base.join("stage");
-    for d in [&root, &backing, &stage] {
+    let outside = base.join("out side");
+    for d in [&root, &backing, &stage, &outside] {
         std::fs::create_dir_all(d).unwrap();
     }
     if given.missing_backing {
@@ -194,6 +244,9 @@ pub(crate) fn setup_in(
     std::fs::copy(probe, root.join(HIDDEN)).unwrap();
     let staged = stage.join(IMAGE);
     std::fs::copy(probe, &staged).unwrap();
+    for name in [IMAGE, BARE, TWIN, TWIN_EXE] {
+        std::fs::copy(probe, outside.join(name)).unwrap();
+    }
 
     if given.backed {
         std::env::set_var(
@@ -208,9 +261,17 @@ pub(crate) fn setup_in(
 
     // What the director serves need not be an image: the kernel never reads
     // it, only the staged copy.
-    let mut fake = Fake::new().with(IMAGE, b"MZ served".to_vec(), ReadStyle::Whole);
+    let mut fake = Fake::new()
+        .with(IMAGE, b"MZ served".to_vec(), ReadStyle::Whole)
+        .with(SPACED, b"MZ served".to_vec(), ReadStyle::Whole)
+        .with_dir(DIR_EXE);
+    for name in [BARE, TWIN, TWIN_EXE] {
+        fake = fake.with(name, b"MZ served".to_vec(), ReadStyle::Whole);
+    }
     if given.stages {
-        fake = fake.staging(IMAGE, &staged.to_string_lossy());
+        for name in [IMAGE, SPACED, BARE, TWIN, TWIN_EXE] {
+            fake = fake.staging(name, &staged.to_string_lossy());
+        }
     }
     let served = fakedirector::install_with(&root, fake, Options::default());
     let id = given.fault.map(|f| {
@@ -229,6 +290,7 @@ pub(crate) fn setup_in(
             root,
             staged,
             backing,
+            outside,
             served,
             _hooks: hooks,
         },
@@ -243,13 +305,14 @@ fn wide(s: &str) -> Vec<u16> {
 /// `CreateProcessW(app, "\"app\"")`: the process id, or the call's error.
 /// A child that did start is killed and waited for.
 pub(crate) fn create(app: &Path) -> Result<u32, u32> {
-    start(Some(app), &format!("\"{}\"", app.display()), None)
+    let app = app.to_string_lossy();
+    start(Some(&app), &format!("\"{app}\""), None)
 }
 
 /// `CreateProcessW(app, cmd)` in `cwd` (the caller's own when `None`), as
 /// [`create`].
-fn start(app: Option<&Path>, cmd: &str, cwd: Option<&Path>) -> Result<u32, u32> {
-    let app_w = app.map(|a| wide(&a.to_string_lossy()));
+fn start(app: Option<&str>, cmd: &str, cwd: Option<&Path>) -> Result<u32, u32> {
+    let app_w = app.map(wide);
     let cwd_w = cwd.map(|d| wide(&d.to_string_lossy()));
     let mut cmd = wide(cmd);
     // SAFETY: zeroed is a valid STARTUPINFOW once `cb` is set.
@@ -431,7 +494,20 @@ fn an_image_named_by_the_command_line_in_a_root_runs_the_staged_copy() {
             fault: None,
         },
     );
+    in_dir(&s.root);
     let r = start(None, IMAGE, Some(&s.root));
+    assert_runs(r, &s.staged);
+}
+
+/// The parent's current directory is `dir`, and the system searches it for
+/// a name with no backslash too.
+fn in_dir(dir: &Path) {
+    std::env::remove_var("NoDefaultCurrentDirectoryInExePath");
+    std::env::set_current_dir(dir).expect("current directory");
+}
+
+/// The start created one child, from `image`.
+fn assert_runs(r: Result<u32, u32>, image: &Path) {
     assert!(
         matches!(r, Ok(_) | Err(ERROR_PROCESS_ABORTED)),
         "started, then refused only for its injection: {r:?}"
@@ -439,11 +515,282 @@ fn an_image_named_by_the_command_line_in_a_root_runs_the_staged_copy() {
     let images = created();
     assert_eq!(images.len(), 1, "one child: {images:?}");
     assert!(
-        same_path(&images[0], &s.staged),
-        "the child runs {:?}, not the staged copy {:?}",
+        same_path(&images[0], image),
+        "the child runs {:?}, not {:?}",
         images[0],
-        s.staged
+        image
     );
+}
+
+/// The start failed with `code` and created nothing.
+fn assert_fails(r: Result<u32, u32>, code: u32) {
+    assert_eq!(r, Err(code));
+    let images = created();
+    assert!(images.is_empty(), "nothing may start: {images:?}");
+}
+
+fn served(probe: &Path) -> Setup {
+    setup(
+        probe,
+        Given {
+            stages: true,
+            backed: true,
+            missing_backing: false,
+            fault: None,
+        },
+    )
+    .0
+}
+
+/// `PATH` is `dirs`, then what it was.
+fn path_first(dirs: &[&Path]) {
+    let mut path = std::ffi::OsString::new();
+    for d in dirs {
+        path.push(d.as_os_str());
+        path.push(";");
+    }
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    std::env::set_var("PATH", path);
+}
+
+/// The search is the parent's: its current directory, not the one the child
+/// is given. The root holds the image too, and is the child's working
+/// directory; the real copy in the parent's runs.
+#[test]
+fn the_parents_current_directory_is_searched_not_the_childs() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(&s.outside);
+    let mark = s.served.recorder.mark();
+    let r = start(None, IMAGE, Some(&s.root));
+    assert_runs(r, &s.outside.join(IMAGE));
+    assert!(stage_execs(&s, mark).is_empty(), "no STAGE_EXEC");
+}
+
+/// A folder under a root earlier in the search (the current directory)
+/// holds the name, with `.exe` added: its staged copy runs, not the real
+/// copy in a `PATH` folder.
+#[test]
+fn a_root_earlier_in_the_search_than_path_wins() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(&s.root);
+    path_first(&[&s.outside]);
+    assert_runs(start(None, "aether-probe -x", None), &s.staged);
+}
+
+/// A relative `PATH` entry is the parent's current directory's: `root`,
+/// from the folder above it, finds the image the VFS holds there.
+#[test]
+fn a_relative_path_entry_is_searched_from_the_current_directory() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(s.root.parent().unwrap());
+    path_first(&[Path::new("root")]);
+    assert_runs(start(None, "aether-probe", None), &s.staged);
+}
+
+/// `.\name` is the current directory's alone.
+#[test]
+fn a_dot_relative_name_is_the_current_directorys() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(&s.root);
+    assert_runs(start(None, r".\aether-probe", None), &s.staged);
+}
+
+/// An unquoted name with a space: the shorter name first (`<root>\My`,
+/// which the VFS does not hold), then the longer, held and staged.
+#[test]
+fn an_unquoted_name_with_a_space_is_tried_as_the_system_tries_it() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let cmd = format!(r"{}\My Tool\aether-probe.exe -x", s.root.display());
+    let mark = s.served.recorder.mark();
+    assert_runs(start(None, &cmd, None), &s.staged);
+    let calls = stage_execs(&s, mark);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].1.ends_with("aether-probe.exe"), "{calls:?}");
+    // Outside the roots, the real disk decides the same way.
+    let cmd = format!(r"{}\{IMAGE} -x", s.outside.display());
+    assert_runs(start(None, &cmd, None), &s.outside.join(IMAGE));
+}
+
+/// An application name is used as given, against the parent's current
+/// directory: no search, and no `.exe` added.
+#[test]
+fn a_relative_application_name_is_the_current_directorys_as_given() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(&s.root);
+    assert_runs(start(Some(IMAGE), IMAGE, None), &s.staged);
+    assert_fails(
+        start(Some("aether-probe"), IMAGE, None),
+        ERROR_FILE_NOT_FOUND,
+    );
+}
+
+/// A name found nowhere fails as the system's search does, and the host is
+/// never left to search for it.
+#[test]
+fn a_name_found_nowhere_fails_file_not_found() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(&s.root);
+    assert_fails(
+        start(None, "no-such-program -x", None),
+        ERROR_FILE_NOT_FOUND,
+    );
+}
+
+/// A directory the VFS holds, named as the program: the system's answer for
+/// a directory, `ERROR_ACCESS_DENIED`.
+#[test]
+fn a_directory_named_as_the_program_is_access_denied() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let cmd = format!(r"{}\adir", s.root.display());
+    assert_fails(start(None, &cmd, None), ERROR_ACCESS_DENIED);
+}
+
+/// A program named by a path with no extension: the file as written starts,
+/// outside the roots (unquoted, in a folder with a space) and in one (its
+/// staged copy, staged by that name). `.\` is the current directory's.
+#[test]
+fn a_path_to_an_image_with_no_extension_starts_it() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let cmd = format!(r"{}\{BARE} -x", s.outside.display());
+    assert_runs(start(None, &cmd, None), &s.outside.join(BARE));
+    in_dir(&s.root);
+    let mark = s.served.recorder.mark();
+    assert_runs(start(None, &format!(r".\{BARE} -x"), None), &s.staged);
+    let calls = stage_execs(&s, mark);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].1, BARE, "staged as written");
+}
+
+/// A path to a name with no extension beside its `.exe` twin: the name as
+/// written wins, as the system's lookup tries it first; a searched name
+/// (no path) is only ever the `.exe`.
+#[test]
+fn a_path_names_the_file_as_written_before_its_exe_twin() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let cmd = format!(r#""{}\{TWIN}" -x"#, s.outside.display());
+    assert_runs(start(None, &cmd, None), &s.outside.join(TWIN));
+    in_dir(&s.outside);
+    assert_runs(
+        start(None, &format!(r".\{TWIN}"), None),
+        &s.outside.join(TWIN),
+    );
+    assert_runs(start(None, TWIN, None), &s.outside.join(TWIN_EXE));
+    in_dir(&s.root);
+    for (cmd, staged_as) in [(format!(r".\{TWIN}"), TWIN), (TWIN.to_string(), TWIN_EXE)] {
+        let mark = s.served.recorder.mark();
+        assert_runs(start(None, &cmd, None), &s.staged);
+        let calls = stage_execs(&s, mark);
+        assert_eq!(calls.len(), 1, "{cmd}: {calls:?}");
+        assert_eq!(calls[0].1, staged_as, "{cmd}");
+    }
+}
+
+/// A directory named by a path, as written: the system's answer for a
+/// directory, never its `.exe` twin.
+#[test]
+fn a_path_to_a_directory_is_access_denied() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    std::fs::copy(&probe, s.outside.with_extension("exe")).unwrap();
+    let cmd = format!(r#""{}" -x"#, s.outside.display());
+    assert_fails(start(None, &cmd, None), ERROR_ACCESS_DENIED);
+}
+
+/// A held name the director cannot stage ends the search refused: the real
+/// copy later on `PATH` is never started instead.
+#[test]
+fn a_held_name_that_cannot_be_staged_refuses_the_search() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let (s, _) = setup(
+        &probe,
+        Given {
+            stages: true,
+            backed: true,
+            missing_backing: false,
+            fault: Some(Fault::Status(Status::NotFound)),
+        },
+    );
+    in_dir(&s.root);
+    path_first(&[&s.outside]);
+    assert_fails(start(None, "aether-probe", None), ERROR_FILE_NOT_FOUND);
+}
+
+/// A director that does not answer a candidate's GETATTR refuses the start:
+/// the search never moves on to a real copy on `PATH`.
+#[test]
+fn a_director_error_refuses_the_search() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    let id = s.served.faults.arm(
+        Match {
+            op: Some(Opcode::GetAttr),
+            ..Match::default()
+        },
+        Fault::Status(Status::IoError),
+    );
+    in_dir(&s.root);
+    path_first(&[&s.outside]);
+    assert_fails(start(None, "aether-probe", None), ERROR_FILE_NOT_FOUND);
+    assert!(s.served.faults.applied(id) >= 1, "the fault fired");
+}
+
+/// A program the VFS does not hold, named by the command line alone, by a
+/// parent whose current directory is in a root, and started in that root:
+/// it is found where it would be without the VFS (`cmd.exe` in the system
+/// folder: `SysWOW64` for a 32-bit parent), and it runs with the command
+/// line as written. Nothing is staged.
+#[test]
+fn a_program_outside_the_roots_named_by_the_command_line_in_a_root_starts() {
+    isolate!();
+    let Some(probe) = probe() else { return };
+    let s = served(&probe);
+    in_dir(&s.root);
+    RUN_CHILDREN.store(true, Ordering::SeqCst);
+    let mark = s.served.recorder.mark();
+    let r = start(None, "cmd /c exit 7", Some(&s.root));
+    assert!(
+        matches!(r, Ok(_) | Err(ERROR_PROCESS_ABORTED)),
+        "started, then refused only for its injection: {r:?}"
+    );
+    assert!(stage_execs(&s, mark).is_empty(), "no STAGE_EXEC");
+    let children = created_with_exits();
+    assert_eq!(children.len(), 1, "one child: {children:?}");
+    let (image, exit) = &children[0];
+    let system = if cfg!(target_pointer_width = "32") {
+        "SysWOW64"
+    } else {
+        "System32"
+    };
+    let windows = std::env::var_os("SystemRoot").expect("SystemRoot");
+    let cmd = Path::new(&windows).join(system).join("cmd.exe");
+    assert!(
+        same_path(image, &cmd),
+        "the child runs {image:?}, not {cmd:?}"
+    );
+    assert_eq!(*exit, Some(7), "cmd ran `exit 7`");
 }
 
 /// A refused start: `CreateProcessW` fails with `ERROR_FILE_NOT_FOUND` (the

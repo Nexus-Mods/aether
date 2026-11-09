@@ -3,7 +3,7 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
-## Unreleased
+## 1.1.1
 
 ### Added
 
@@ -14,6 +14,24 @@ Aether's crates. Newest first.
   concurrent rounds, `--malformed` and `--limits` send no registry request,
   and the `reg_gen` rules are not checked for it (`docs/conformance.md`,
   "The adapter protocol"; `contract/scenarios/README.md`, "Registry").
+
+### Fixed
+
+- With `VFS_ROOT_BACKINGS` set, a child named by a relative name that the
+  director does not have, such as `cmd /c exit 7` started with no
+  application name in a working directory under a root, was refused with
+  `ERROR_FILE_NOT_FOUND`. The shim now finds every child's image as
+  `CreateProcess` does, seeing what the VFS sees, and hands the host the
+  full path: an application name as given; a command line's program named
+  by a path as written, then with `.exe`; a searched name with `.exe`
+  added as the system adds it; unquoted names with spaces tried from the
+  shortest; and the search in the system's order from the
+  parent's current directory (not the child's), relative `PATH` entries
+  included. A file outside the roots starts as it would without the VFS;
+  one the director has is staged; a director that cannot stage it, or does
+  not answer, refuses the start; and a start that finds nothing fails with
+  the system's error rather than being left to the system's own search,
+  which sees files only the VFS holds (`docs/wire.md` 3.4.14).
 
 ## 1.1.0
 

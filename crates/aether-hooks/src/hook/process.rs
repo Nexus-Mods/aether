@@ -96,9 +96,9 @@ pub(super) unsafe fn cpiw_hook_body(
         let wanted_cwd = super::child_start::wide_opt(cur_dir_eff);
         super::child_start::plan(app, cmd, env, flags, wanted_cwd)
     };
-    if plan.as_ref().is_some_and(|p| p.refuse) {
+    if let Some(code) = plan.as_ref().and_then(|p| p.refuse) {
         // SAFETY: FFI call with a valid error code.
-        unsafe { SetLastError(windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND) };
+        unsafe { SetLastError(code) };
         return 0;
     }
     let app_eff: *const u16 = plan

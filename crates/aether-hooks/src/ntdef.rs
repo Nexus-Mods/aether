@@ -256,6 +256,8 @@ pub(crate) const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
 
 /// `STATUS_NO_MORE_FILES` — enumeration cursor exhausted.
 pub(crate) const STATUS_NO_MORE_FILES: NTSTATUS = 0x8000_0006u32 as i32;
+/// `STATUS_NO_SUCH_FILE` — the first query of an enumeration found nothing.
+pub(crate) const STATUS_NO_SUCH_FILE: NTSTATUS = 0xC000_000Fu32 as i32;
 /// `STATUS_INFO_LENGTH_MISMATCH` — the caller buffer cannot hold even the fixed
 /// header of the requested structure. Distinct from `STATUS_BUFFER_OVERFLOW`,
 /// and `NtQueryObject` returns each in its own range — see `qobj_hook_body`.

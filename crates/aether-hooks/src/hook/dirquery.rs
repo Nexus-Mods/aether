@@ -4,7 +4,7 @@
 use super::{path_of_handle, strip_whiteout_markers, HANDLES, TRAMP_QDIR, TRAMP_QDIREX};
 use crate::ntdef::{
     UnicodeString, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW,
-    STATUS_NO_MORE_FILES, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    STATUS_NO_MORE_FILES, STATUS_NO_SUCH_FILE, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use aether_ntlayout::{write_dir_info, DirInfoClass, DirItem, DirStatus};
 use core::ffi::c_void;
@@ -19,6 +19,10 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 pub(super) struct EnumState {
     pub(super) entries: Vec<DirItem>,
     cursor: usize,
+    /// Whether a query has been answered from this listing: the first one
+    /// that finds nothing is `STATUS_NO_SUCH_FILE`, a later one
+    /// `STATUS_NO_MORE_FILES` (see `serve_dir_query`).
+    answered: bool,
 }
 
 /// A tracked directory handle: the NT path it was opened as, and its lazily
@@ -286,7 +290,11 @@ unsafe fn serve_dir_query(
                 entries.len(),
                 source,
             );
-            tracked.state = Some(EnumState { entries, cursor: 0 });
+            tracked.state = Some(EnumState {
+                entries,
+                cursor: 0,
+                answered: false,
+            });
         }
         let st = match tracked.state.as_mut() {
             Some(s) => s,
@@ -294,8 +302,11 @@ unsafe fn serve_dir_query(
         };
         let result = write_dir_info(class, &st.entries[st.cursor..], &mut scratch, single);
         st.cursor += result.count;
-        result
+        let first = !st.answered;
+        st.answered = true;
+        (result, first)
     };
+    let (result, first) = result;
 
     // Unlocked from here: a fault on `info` can now re-enter the shim freely.
     if result.bytes > 0 {
@@ -304,8 +315,17 @@ unsafe fn serve_dir_query(
         buf[..result.bytes].copy_from_slice(&scratch[..result.bytes]);
     }
 
+    // NTFS answers the first query of a listing (since the open or a restart)
+    // that finds nothing with STATUS_NO_SUCH_FILE, and only a later one with
+    // STATUS_NO_MORE_FILES. An empty directory never shows it there, for its
+    // `.` and `..`, but this listing has neither (docs/wire.md 3.4.2). Win32
+    // passes the status on: FindFirstFileExW fails with ERROR_FILE_NOT_FOUND,
+    // which Rust's `read_dir` takes for an empty directory, where
+    // ERROR_NO_MORE_FILES is an error (redscript's compiler panicked on its
+    // empty `r6\logs` under Wine).
     let status = match result.status {
         DirStatus::Success => STATUS_SUCCESS,
+        DirStatus::NoMoreFiles if first => STATUS_NO_SUCH_FILE,
         DirStatus::NoMoreFiles => STATUS_NO_MORE_FILES,
         DirStatus::BufferOverflow => STATUS_BUFFER_OVERFLOW,
     };

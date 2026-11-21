@@ -276,6 +276,7 @@ pub(crate) enum Expect {
 
 pub(crate) const STATUS_SUCCESS: i32 = 0;
 pub(crate) const STATUS_NO_MORE_FILES: i32 = 0x8000_0006u32 as i32;
+pub(crate) const STATUS_NO_SUCH_FILE: i32 = 0xC000_000Fu32 as i32;
 pub(crate) const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
 pub(crate) const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
 pub(crate) const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
@@ -292,6 +293,7 @@ pub(crate) const ERROR_FILE_NOT_FOUND: u32 = 2;
 /// The NTSTATUS names a cell may hold, written without `STATUS_`.
 const NT_NAMES: &[(i32, &str)] = &[
     (STATUS_NO_MORE_FILES, "NO_MORE_FILES"),
+    (STATUS_NO_SUCH_FILE, "NO_SUCH_FILE"),
     (STATUS_UNSUCCESSFUL, "UNSUCCESSFUL"),
     (STATUS_INVALID_PARAMETER, "INVALID_PARAMETER"),
     (STATUS_ACCESS_DENIED, "ACCESS_DENIED"),
@@ -356,8 +358,9 @@ pub(crate) fn expected(op: HookedOp, fault: FaultClass) -> Expect {
         },
         O::SetSize | O::DeleteOnHandle => fail,
         O::ReadDir => match fault {
-            // The directory is gone: an empty listing.
-            F::Status(Status::NotFound) => nt(STATUS_NO_MORE_FILES),
+            // The directory is gone: an empty listing, whose first query
+            // finds nothing, as NTFS answers it.
+            F::Status(Status::NotFound) => nt(STATUS_NO_SUCH_FILE),
             F::Trailing => ok,
             _ => fail,
         },

@@ -19,8 +19,8 @@ use aether_protocol::{Opcode, OpenFlags, Reply, Request, Status};
 use core::ffi::c_void;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_GEN_FAILURE,
-    ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_FILE_NOT_FOUND,
+    ERROR_GEN_FAILURE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileSizeEx,
@@ -84,6 +84,7 @@ const FILE_OPENED: usize = 1;
 const FILE_DIRECTORY_INFORMATION: u32 = 1;
 const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
 const STATUS_NO_MORE_FILES: i32 = 0x8000_0006u32 as i32;
+const STATUS_NO_SUCH_FILE: i32 = 0xC000_000Fu32 as i32;
 
 /// The ring's overflow status (wire.md 2.5, step 3).
 const OVERFLOW: i32 = i32::MIN;
@@ -499,10 +500,50 @@ fn a_readdir_of_a_vanished_directory_is_empty() {
     let empty = find_all(&root.join("empty"));
 
     assert_eq!(found, empty, "as for an empty directory");
-    // Today's answer for both: the first query is STATUS_NO_MORE_FILES
-    // (ERROR_NO_MORE_FILES), where NTFS answers STATUS_NO_SUCH_FILE
-    // (ERROR_FILE_NOT_FOUND) for a search that finds nothing.
-    assert_eq!(found, Err(ERROR_NO_MORE_FILES));
+    // NTFS's answer for both: the first query that finds nothing is
+    // STATUS_NO_SUCH_FILE (ERROR_FILE_NOT_FOUND, which Rust's `read_dir`
+    // takes for an empty directory), not STATUS_NO_MORE_FILES
+    // (ERROR_NO_MORE_FILES, an error to it).
+    assert_eq!(found, Err(ERROR_FILE_NOT_FOUND));
+}
+
+#[test]
+fn an_empty_listing_finds_nothing_first_then_no_more() {
+    isolate!();
+    let root = root();
+    let _served = fakedirector::install_with(&root, three_files(), Options::default());
+    let _hooks = aether_hooks::install().expect("install");
+
+    // NTFS's sequence for a query that finds nothing: the first one since
+    // the open (or a restart) is STATUS_NO_SUCH_FILE, a later one
+    // STATUS_NO_MORE_FILES. Wine's FindFirstFileExW passes the first on as
+    // the Win32 error; ERROR_NO_MORE_FILES there broke redscript's
+    // `read_dir` of an empty folder.
+    let (st, h) = nt_open_dir_abs(&root.join("empty").to_string_lossy(), FILE_LIST_DIRECTORY);
+    assert_eq!(st, 0, "open {st:#x}");
+    let h: HANDLE = h;
+    let (first, names) = query_dir(h, 4096, false);
+    let (second, _) = query_dir(h, 4096, false);
+    let (restarted, _) = query_dir(h, 4096, true);
+    let (after, _) = query_dir(h, 4096, false);
+    close(h);
+    assert_eq!((first, names), (STATUS_NO_SUCH_FILE, vec![]));
+    assert_eq!(second, STATUS_NO_MORE_FILES);
+    assert_eq!(restarted, STATUS_NO_SUCH_FILE, "a restart is a first query");
+    assert_eq!(after, STATUS_NO_MORE_FILES);
+
+    // A listing that has entries ends with STATUS_NO_MORE_FILES.
+    let (st, h) = nt_open_dir_abs(&root.join("save").to_string_lossy(), FILE_LIST_DIRECTORY);
+    assert_eq!(st, 0, "open {st:#x}");
+    let h: HANDLE = h;
+    let (listed, names) = query_dir(h, 4096, false);
+    let (end, _) = query_dir(h, 4096, false);
+    close(h);
+    assert_eq!(
+        (listed, names),
+        (0, vec!["a.txt".into(), "b.txt".into(), "c.txt".into()])
+    );
+    assert_eq!(end, STATUS_NO_MORE_FILES);
 }
 
 #[test]

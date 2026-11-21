@@ -3,6 +3,27 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
+## 1.1.2
+
+### Fixed
+
+- Under Wine, a DLL loaded by its path under a root's backing directory
+  (a plugin loader that builds paths from its own module name before the
+  shim renamed it, such as RED4ext's plugins) failed to load with
+  `STATUS_DLL_NOT_FOUND`, or loaded whatever followed the name in memory.
+  The shim passes such a name on by the root's location, and that string
+  had no NUL after it; Windows reads a DLL name to its `Length`, but Wine's
+  `LdrLoadDll` reads it to its NUL. The respelled name is now NUL-terminated,
+  with `MaximumLength` counting the NUL, as NT builds its own.
+- A directory listing that finds nothing (an empty directory, or a search
+  pattern that matches no entry) answered its first query with
+  `STATUS_NO_MORE_FILES`, so `FindFirstFileExW` failed with
+  `ERROR_NO_MORE_FILES`. NTFS answers that query `STATUS_NO_SUCH_FILE`
+  (`ERROR_FILE_NOT_FOUND`), which Rust's `read_dir` and other callers take
+  for an empty directory; the shim now does too, and a later query still
+  ends with `STATUS_NO_MORE_FILES`. (Under Wine, redscript's compiler
+  panicked listing an empty `r6\logs`.)
+
 ## 1.1.1
 
 ### Added

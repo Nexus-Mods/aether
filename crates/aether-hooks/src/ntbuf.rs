@@ -130,6 +130,47 @@ pub(crate) unsafe fn oa_name_string(
     us_string((*oa).object_name)
 }
 
+/// A `UNICODE_STRING` the shim builds and passes on in place of the caller's, NUL-terminated as
+/// NT builds its own: `Length` excludes the NUL, `MaximumLength` includes it.
+///
+/// The terminator is not decoration. Wine's `LdrLoadDll` reads a DLL name to its NUL rather
+/// than to `Length` (GE-Proton 11-11: a counted name followed by other units fails with
+/// `STATUS_DLL_NOT_FOUND`, the same name followed by a NUL loads), so a name without one
+/// loads whatever the units after it spell.
+pub(crate) struct OwnedUs {
+    buf: Vec<u16>,
+    us: UnicodeString,
+}
+
+impl OwnedUs {
+    /// `s` as a `UNICODE_STRING`. A string too long for one (over 0xFFFE bytes) is refused with
+    /// `STATUS_OBJECT_NAME_INVALID`, never cut.
+    pub(crate) fn new(s: &str) -> Result<OwnedUs, NTSTATUS> {
+        let mut buf: Vec<u16> = s.encode_utf16().collect();
+        if !fits(buf.len()) {
+            return Err(STATUS_OBJECT_NAME_INVALID);
+        }
+        let (length, maximum_length) = lengths_for(buf.len());
+        buf.push(0);
+        let mut owned = OwnedUs {
+            buf,
+            us: UnicodeString {
+                length,
+                maximum_length,
+                buffer: core::ptr::null_mut(),
+            },
+        };
+        // The buffer is the Vec's heap allocation, which stays put when `owned` moves.
+        owned.us.buffer = owned.buf.as_mut_ptr();
+        Ok(owned)
+    }
+
+    /// The string, valid while `self` is alive and not moved.
+    pub(crate) fn as_ptr(&self) -> *const UnicodeString {
+        &self.us
+    }
+}
+
 /// An absolute `OBJECT_ATTRIBUTES` the shim builds for its own opens. Boxed: the attributes
 /// point at the string, which points at the buffer.
 ///
@@ -266,6 +307,40 @@ mod tests {
             maximum_length: length,
             buffer: units.as_mut_ptr(),
         }
+    }
+
+    #[test]
+    fn an_owned_string_is_nul_terminated_past_its_length() {
+        let owned = OwnedUs::new(r"C:\vfs\root\red4ext\plugins\A\A.dll").unwrap();
+        let us = unsafe { &*owned.as_ptr() };
+        let units = usize::from(us.length) / 2;
+        assert_eq!(us.maximum_length, us.length + 2);
+        // Wine's LdrLoadDll reads to this NUL, not to Length
+        assert_eq!(unsafe { *us.buffer.add(units) }, 0);
+        assert_eq!(
+            unsafe { us_string(owned.as_ptr()) },
+            Ok(Some(r"C:\vfs\root\red4ext\plugins\A\A.dll".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_owned_string_survives_a_move() {
+        let owned = OwnedUs::new("moved").unwrap();
+        let moved = [owned];
+        assert_eq!(
+            unsafe { us_string(moved[0].as_ptr()) },
+            Ok(Some("moved".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_owned_string_too_long_for_a_unicode_string_is_refused() {
+        let long = "a".repeat(MAX_UNICODE_STRING_BYTES / 2 + 1);
+        assert_eq!(OwnedUs::new(&long).err(), Some(STATUS_OBJECT_NAME_INVALID));
+        let longest = "a".repeat(MAX_UNICODE_STRING_BYTES / 2);
+        let owned = OwnedUs::new(&longest).unwrap();
+        let us = unsafe { &*owned.as_ptr() };
+        assert_eq!(usize::from(us.length), MAX_UNICODE_STRING_BYTES);
     }
 
     #[test]

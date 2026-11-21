@@ -3,6 +3,19 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
+## Unreleased
+
+### Fixed
+
+- Under Wine, a DLL loaded by its path under a root's backing directory
+  (a plugin loader that builds paths from its own module name before the
+  shim renamed it, such as RED4ext's plugins) failed to load with
+  `STATUS_DLL_NOT_FOUND`, or loaded whatever followed the name in memory.
+  The shim passes such a name on by the root's location, and that string
+  had no NUL after it; Windows reads a DLL name to its `Length`, but Wine's
+  `LdrLoadDll` reads it to its NUL. The respelled name is now NUL-terminated,
+  with `MaximumLength` counting the NUL, as NT builds its own.
+
 ## 1.1.1
 
 ### Added

@@ -21,7 +21,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{TRAMP_LDR_LOAD_DLL, TRAMP_NT_CREATE_USER_PROCESS, TRAMP_RAISE_HARD_ERROR};
-use crate::ntbuf::us_string;
+use crate::ntbuf::{us_string, OwnedUs};
 use crate::ntdef::{ObjectAttributes, UnicodeString, STATUS_UNSUCCESSFUL};
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
@@ -111,20 +111,13 @@ pub(super) unsafe fn ldr_load_dll_hook_body(
     // SKSE later loads by the location).
     // SAFETY: the caller's `UNICODE_STRING`, per the NT contract.
     let asked = unsafe { us_string(dll_name) }.ok().flatten();
-    let respelled: Option<Vec<u16>> = asked
+    // NUL-terminated (`OwnedUs`): Wine's loader reads the name to its NUL, not to `Length`.
+    let respelled: Option<OwnedUs> = asked
         .as_deref()
         .and_then(crate::whereami::virtual_spelling)
-        .map(|v| v.encode_utf16().collect());
-    let respelled_us = respelled.as_ref().and_then(|w| {
-        let bytes = u16::try_from(w.len() * 2).ok()?;
-        Some(UnicodeString {
-            length: bytes,
-            maximum_length: bytes,
-            buffer: w.as_ptr() as *mut u16,
-        })
-    });
-    let name_arg: *const UnicodeString = match &respelled_us {
-        Some(us) => us,
+        .and_then(|v| OwnedUs::new(&v).ok());
+    let name_arg: *const UnicodeString = match &respelled {
+        Some(us) => us.as_ptr(),
         None => dll_name,
     };
     let status = match TRAMP_LDR_LOAD_DLL.get() {
@@ -133,7 +126,7 @@ pub(super) unsafe fn ldr_load_dll_hook_body(
         Some(tramp) => unsafe { tramp(search_path, characteristics, name_arg, base) },
         None => return STATUS_UNSUCCESSFUL,
     };
-    if let (Some(a), Some(_)) = (&asked, &respelled_us) {
+    if let (Some(a), Some(_)) = (&asked, &respelled) {
         crate::loadlog::note(&format!(
             "LdrLoadDll respelled \"{a}\" by its location, status={:#010x}",
             status as u32

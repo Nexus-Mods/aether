@@ -289,6 +289,26 @@ pub unsafe fn inject_dll_exit_code(
     dll_path: &str,
     timeout_ms: u32,
 ) -> Result<u32, InjectError> {
+    // SAFETY: as this function's contract.
+    unsafe { inject_dll_with(process, dll_path, timeout_ms, None) }
+}
+
+/// The remote thread's start other than `LoadLibraryW`, and how to wait for
+/// it: the early layer's (`crate::early`).
+type Start<'a> = Option<(usize, &'a mut dyn FnMut(HANDLE, u32) -> bool)>;
+
+/// [`inject_dll_exit_code`], the thread started at `start`'s address (a
+/// routine that takes the shim's path as `LoadLibraryW` does) and waited for
+/// by its waiter, when given.
+///
+/// # Safety
+/// As [`inject_dll`].
+unsafe fn inject_dll_with(
+    process: HANDLE,
+    dll_path: &str,
+    timeout_ms: u32,
+    start: Start<'_>,
+) -> Result<u32, InjectError> {
     // SAFETY: standard remote LoadLibrary injection; `process` is a live process
     // handle with the needed rights (per the contract above).
     unsafe {
@@ -323,10 +343,14 @@ pub unsafe fn inject_dll_exit_code(
             Some(p) => p,
             None => return Err(InjectError::RemoteThread),
         };
+        let (routine, mut waiter) = match start {
+            Some((at, wait)) => (at, Some(wait)),
+            None => (load_library as usize, None),
+        };
         let start: LPTHREAD_START_ROUTINE = Some(core::mem::transmute::<
-            unsafe extern "system" fn() -> isize,
+            usize,
             unsafe extern "system" fn(*mut c_void) -> u32,
-        >(load_library));
+        >(routine));
         let hthread = CreateRemoteThread(
             process,
             core::ptr::null(),
@@ -341,7 +365,10 @@ pub unsafe fn inject_dll_exit_code(
             eprintln!("vfs-inject: CreateRemoteThread(LoadLibrary) failed last_error={err}");
             return Err(InjectError::RemoteThread);
         }
-        let done = WaitForSingleObject(hthread, timeout_ms) == 0;
+        let done = match waiter.as_mut() {
+            Some(wait) => wait(hthread, timeout_ms),
+            None => WaitForSingleObject(hthread, timeout_ms) == 0,
+        };
         // The thread's exit code is only the low 32 bits of the HMODULE, so it
         // cannot tell a load from a failure for certain; the shim's own signal
         // does. It is still the best clue when that signal never comes.
@@ -565,7 +592,25 @@ fn start_target(
             );
         }
 
-        if let Err(e) = inject_dll(pi.hProcess, &cfg.dll_path, timeout_ms) {
+        // Before the remote thread runs the process's initialisation: what
+        // the static imports read then comes from the director (`early`).
+        let mut early = match crate::early::Early::install(pi.hProcess, env, &cfg.dll_path) {
+            Ok(e) => e,
+            Err(why) => {
+                eprintln!("vfs-inject: early layer off: {why}");
+                None
+            }
+        };
+        let early_start = early.as_ref().map(|e| e.start());
+        let mut waiter = |thread: HANDLE, ms: u32| match early.as_mut() {
+            Some(e) => e.wait(pi.hProcess, thread, ms),
+            None => WaitForSingleObject(thread, ms) == 0,
+        };
+        let start: Start<'_> = match early_start {
+            Some(at) => Some((at, &mut waiter)),
+            None => None,
+        };
+        if let Err(e) = inject_dll_with(pi.hProcess, &cfg.dll_path, timeout_ms, start).map(|_| ()) {
             if let Some(code) = exited(pi.hProcess) {
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);

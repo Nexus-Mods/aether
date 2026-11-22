@@ -110,10 +110,15 @@ dependencies = [
 name = "aether-inject"
 version = "0.1.0"
 dependencies = [
+ "aether-casefold",
  "aether-env",
  "aether-hooks",
+ "aether-ipc",
  "aether-pe",
  "aether-protocol",
+ "aether-redirect",
+ "aether-rpc",
+ "aether-win",
  "windows-sys 0.61.2",
 ]
 

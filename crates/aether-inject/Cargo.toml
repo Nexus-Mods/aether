@@ -11,6 +11,12 @@ aether-env.workspace = true
 # The shim config codec (`shimcfg`), for the static-import rows.
 aether-protocol.workspace = true
 aether-pe.workspace = true
+# The early layer (`early.rs`): a ring client, as the shim's, and its routing.
+aether-casefold.workspace = true
+aether-ipc.workspace = true
+aether-redirect.workspace = true
+aether-rpc.workspace = true
+aether-win.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",

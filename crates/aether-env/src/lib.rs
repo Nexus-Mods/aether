@@ -133,6 +133,20 @@ pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
 /// cold start therefore gets the same allowance the launch did. Unset or
 /// unparsable: [`DEFAULT_READY_TIMEOUT_SECS`].
 pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
+/// Set to `0` to launch without the injector's early layer (`aether-inject`'s
+/// `early.rs`), which serves what the target's static imports read during
+/// process initialisation and loads the shim then. Unset: the layer is on
+/// whenever the launch stages a folder.
+pub const EARLY_LAYER: &str = "VFS_EARLY_LAYER";
+/// Set to `0` to keep the early layer but load the shim only from the
+/// injector's remote thread, after process initialisation, not from the
+/// first hooked call once kernel32 is up: a static import's `DllMain` then
+/// runs without the hooks, and what it writes reaches the staged folder.
+/// Unset: the early load.
+pub const EARLY_SHIM: &str = "VFS_EARLY_SHIM";
+/// Set to `1` to have the injector print what the early layer did: each name
+/// it served, and whether the shim loaded during initialisation.
+pub const EARLY_TRACE: &str = "VFS_EARLY_TRACE";
 /// The ready wait when [`READY_TIMEOUT_SECS`] is unset. A cold first launch in
 /// a fresh Wine prefix can take well over 20 s. The one place the number is
 /// written; the injector and the shim both use it.
@@ -407,6 +421,13 @@ pub const FIXTURE_OPS_OUT: &str = "VFS_FIXTURE_OPS_OUT";
 /// `aether-fixture-vproxy`: a file that must be beside the program when the DLL
 /// is initialised, or its load fails.
 pub const FIXTURE_VPROXY_NEEDS: &str = "VFS_FIXTURE_VPROXY_NEEDS";
+/// `aether-fixture-vproxy`: a wildcard path beside the program (`plugins\*.asi`)
+/// that must match at least one file, each read whole, when the DLL is
+/// initialised, or its load fails.
+pub const FIXTURE_VPROXY_LIST: &str = "VFS_FIXTURE_VPROXY_LIST";
+/// `aether-fixture-vproxy`: a file to write beside the program while the DLL
+/// is initialised (`written in DllMain`), the way a proxy opens its log.
+pub const FIXTURE_VPROXY_WRITES: &str = "VFS_FIXTURE_VPROXY_WRITES";
 /// `aether-fixture-read`: a file read on slow threads while others read
 /// `FIXTURE_PATH` (the concurrent-read e2e).
 pub const FIXTURE_SLOW_PATH: &str = "VFS_FIXTURE_SLOW_PATH";
@@ -622,6 +643,21 @@ pub const ALL: &[Var] = &[
         name: READY_TIMEOUT_SECS,
         kind: Kind::Behaviour,
         default: "180 (DEFAULT_READY_TIMEOUT_SECS)",
+    },
+    Var {
+        name: EARLY_LAYER,
+        kind: Kind::Behaviour,
+        default: "on when the launch stages a folder",
+    },
+    Var {
+        name: EARLY_SHIM,
+        kind: Kind::Behaviour,
+        default: "the shim loads once kernel32 is up",
+    },
+    Var {
+        name: EARLY_TRACE,
+        kind: Kind::Diagnostic,
+        default: "silent",
     },
     Var {
         name: INJECT_CWD,
@@ -897,6 +933,16 @@ pub const ALL: &[Var] = &[
         name: FIXTURE_VPROXY_NEEDS,
         kind: Kind::Fixture,
         default: "unset: no requirement",
+    },
+    Var {
+        name: FIXTURE_VPROXY_LIST,
+        kind: Kind::Fixture,
+        default: "unset: no listing",
+    },
+    Var {
+        name: FIXTURE_VPROXY_WRITES,
+        kind: Kind::Fixture,
+        default: "unset: no write",
     },
     Var {
         name: FIXTURE_SLOW_PATH,

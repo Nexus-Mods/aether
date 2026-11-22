@@ -455,6 +455,41 @@ Two mechanisms:
    of the EXE, on disk or in memory, is edited, so a Steam DRM wrapper
    (SteamStub) that verifies its own headers starts as it would without the
    VFS.
+3. **The early layer covers what process initialisation reads.** That
+   initialisation runs every static import's `DllMain` before the shim, and a
+   proxy DLL a mod ships as one (an ASI loader's `version.dll`, ReShade's
+   `dxgi.dll`, RED4ext's `winmm.dll`) reads its settings and lists its
+   plugins then, beside the program, where only the staged closure is. So
+   before the target runs, the injector maps a small import-free DLL into it
+   (`crates/aether-inject/early/src/lib.rs`, a `no_std` Rust DLL with no
+   imports that the crate's `build.rs` compiles with `rustc` alone)
+   and points ntdll's `NtCreateFile`, `NtOpenFile`,
+   `NtQuery(Full)AttributesFile` and `NtQueryDirectoryFile(Ex)` at it. A name
+   under a staged folder (the launch image's, each root's backing directory)
+   waits while the injector asks the director for it over the ring (GETATTR,
+   OPEN, READ, READDIR) and puts what it has there on disk: a file's bytes, a
+   directory, a listing's matching entries. That covers only the loader's
+   own probes, though: the first of these calls that comes once kernel32 has
+   run its `DllMain` (the loader starts it before any other DLL, and marks
+   it so in the PEB's module list) puts ntdll's bytes back and loads the
+   shim right there, on the thread initialising the process and under the
+   loader lock, so every static import after kernel32 runs its `DllMain`
+   with the hooks live: what it reads comes from the director, and what it
+   writes (a proxy's log) goes to it, as any of the program's I/O does. The
+   call that triggered the load goes on through the shim's hook. The remote
+   thread starts in that DLL, after the initialisation; its `LoadLibrary`
+   of the shim then only returns the module already loaded (or, with
+   `VFS_EARLY_SHIM=0`, puts ntdll's bytes back and loads the shim there, as
+   before the early load: a static import's writes then reach the staged
+   folder). What was put on disk stays in the staged folder, which the shim
+   routes to the director from then on. Each injector carries the stub for
+   its own architecture: x64, and x86 for a 32-bit target under WOW64,
+   whose syscall thunks (`mov eax, n; mov edx, transition; call edx`) are as
+   position-independent as x64's. The layer is the launch's: a child the
+   shim starts is injected as before. It is off when the launch stages
+   nothing, and `VFS_EARLY_LAYER=0` turns it off; `VFS_EARLY_TRACE=1` has
+   the injector say whether the shim loaded during initialisation
+   (`crates/aether-inject/src/early.rs`).
 
 ### 4.2 `CreateProcess` needs a real file on disk
 

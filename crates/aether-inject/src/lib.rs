@@ -10,6 +10,8 @@ use std::time::Duration;
 
 mod artifacts;
 mod cli;
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+mod early;
 mod env_block;
 mod inject;
 mod map;

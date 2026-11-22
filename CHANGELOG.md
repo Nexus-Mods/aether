@@ -3,6 +3,28 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
+## Unreleased
+
+### Added
+
+- The injector's early layer: what a program's static imports do in their
+  `DllMain`, during process initialisation and so before the injector's
+  remote thread would load the shim, goes through the VFS. A proxy DLL a
+  mod ships beside the program (an ASI loader's `version.dll`, ReShade's
+  `dxgi.dll`, RED4ext's `winmm.dll`) read its settings and listed its
+  plugins on real disk, in the staged folder, and wrote its log there.
+  Before the target runs, the injector maps a small import-free stub into
+  it and points six ntdll exports at it; the first of those calls once
+  kernel32 has initialised loads the shim right there, before any other
+  DLL's `DllMain`, and the loader's own earlier probes are served by the
+  injector from the director. x64 and 32-bit (WOW64) targets, on Windows
+  and Wine. `VFS_EARLY_LAYER=0` turns it off, `VFS_EARLY_SHIM=0` keeps
+  only the serving, `VFS_EARLY_TRACE=1` reports what it did
+  (`docs/architecture.md` 4.1).
+- vproxy.dll's `VFS_FIXTURE_VPROXY_LIST` (its `DllMain` lists a pattern
+  and reads each match) and `VFS_FIXTURE_VPROXY_WRITES` (it writes a file
+  beside the program), for a director's tests of the above.
+
 ## 1.1.2
 
 ### Fixed

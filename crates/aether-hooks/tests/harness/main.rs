@@ -37,6 +37,7 @@ mod caches_read;
 mod caches_registry;
 mod child_start;
 mod costs;
+mod early_layer;
 mod fault_table;
 mod faults_file;
 mod faults_registry;

@@ -127,6 +127,12 @@ jobs:
       # tests, built for i686, with the 32-bit probe they start.
       - name: Child start tests, 32-bit (i686)
         run: 'cargo build -p aether-inject --target i686-pc-windows-msvc && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc child_start::'
+      # The early layer for a 32-bit target: the x86 stub, the PEB's 32-bit
+      # layout and the WOW64 syscall thunks. The harness's early-layer tests,
+      # built for i686, with the 32-bit shim, vproxy.dll and staticimp they
+      # launch (vproxy first: staticimp links its import library).
+      - name: Early layer tests, 32-bit (i686)
+        run: 'cargo build --target i686-pc-windows-msvc -p aether-inject -p aether-shim -p aether-fixture-vproxy && cargo build --target i686-pc-windows-msvc -p aether-fixture-staticimp && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc early_layer::'
       # The release natives (+crt-static, x64 and i686) and the fixtures, as a
       # release builds them, with the VC++ runtime import check required
       - name: Release natives and fixtures (bin/build-natives.ps1)

@@ -39,7 +39,7 @@
 #![allow(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
 use std::mem::offset_of;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -54,6 +54,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::Diagnostics::Debug::{
     FlushInstructionCache, ReadProcessMemory, WriteProcessMemory,
 };
+use windows_sys::Win32::System::Environment::GetEnvironmentVariableW;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualProtectEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
@@ -79,18 +80,20 @@ use aether_env::{EARLY_LAYER, EARLY_SHIM, EARLY_TRACE};
 
 /// The exports hooked, in the stub's `Config.sites` order, with the stub's
 /// hook for each. `NtQueryDirectoryFileEx` is missing from older systems.
-const HOOKS: [(&str, &str, bool); SITES] = [
-    ("NtCreateFile", "hook_NtCreateFile", true),
-    ("NtOpenFile", "hook_NtOpenFile", true),
-    ("NtQueryAttributesFile", "hook_NtQueryAttributesFile", true),
+/// (C strings: the shim installs the layer into every child it starts, and
+/// nothing on that path allocates but the stub's image and block.)
+const HOOKS: [(&CStr, &str, bool); SITES] = [
+    (c"NtCreateFile", "hook_NtCreateFile", true),
+    (c"NtOpenFile", "hook_NtOpenFile", true),
+    (c"NtQueryAttributesFile", "hook_NtQueryAttributesFile", true),
     (
-        "NtQueryFullAttributesFile",
+        c"NtQueryFullAttributesFile",
         "hook_NtQueryFullAttributesFile",
         true,
     ),
-    ("NtQueryDirectoryFile", "hook_NtQueryDirectoryFile", true),
+    (c"NtQueryDirectoryFile", "hook_NtQueryDirectoryFile", true),
     (
-        "NtQueryDirectoryFileEx",
+        c"NtQueryDirectoryFileEx",
         "hook_NtQueryDirectoryFileEx",
         false,
     ),
@@ -116,21 +119,23 @@ fn is_thunk(t: &[u8; 32]) -> bool {
 
 /// The bytes that send an export to `hook`: `mov rax, hook; jmp rax`.
 #[cfg(target_arch = "x86_64")]
-fn jump(hook: usize) -> Vec<u8> {
-    let mut j = vec![0x48, 0xb8];
-    j.extend_from_slice(&(hook as u64).to_le_bytes());
-    j.extend_from_slice(&[0xff, 0xe0]);
+fn jump(hook: usize) -> [u8; JUMP] {
+    let mut j = [0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0];
+    j[2..10].copy_from_slice(&(hook as u64).to_le_bytes());
     j
 }
+#[cfg(target_arch = "x86_64")]
+const JUMP: usize = 12;
 
 /// `mov eax, hook; jmp eax`: 7 bytes, inside the 15 of the thunk.
 #[cfg(target_arch = "x86")]
-fn jump(hook: usize) -> Vec<u8> {
-    let mut j = vec![0xb8];
-    j.extend_from_slice(&(hook as u32).to_le_bytes());
-    j.extend_from_slice(&[0xff, 0xe0]);
+fn jump(hook: usize) -> [u8; JUMP] {
+    let mut j = [0xb8, 0, 0, 0, 0, 0xff, 0xe0];
+    j[1..5].copy_from_slice(&(hook as u32).to_le_bytes());
     j
 }
+#[cfg(target_arch = "x86")]
+const JUMP: usize = 7;
 
 /// The early layer in one target: where the stub is, and what answers it.
 pub(crate) struct Early {
@@ -176,7 +181,8 @@ struct Image {
     bytes: Vec<u8>,
     base: u64,
     reloc: (usize, usize),
-    exports: HashMap<String, usize>,
+    /// The export directory's RVA.
+    edir: usize,
 }
 
 fn image(file: &[u8]) -> Result<Image, String> {
@@ -212,34 +218,31 @@ fn image(file: &[u8]) -> Result<Image, String> {
         let n = raw.min(size - va);
         bytes[va..va + n].copy_from_slice(&file[ptr..ptr + n]);
     }
-    let (edir, _) = dir(0);
-    let mut exports = HashMap::new();
-    let count = rd32(&bytes, edir + 24) as usize;
-    let (funcs, names, ords) = (
-        rd32(&bytes, edir + 28) as usize,
-        rd32(&bytes, edir + 32) as usize,
-        rd32(&bytes, edir + 36) as usize,
-    );
-    for i in 0..count {
-        let at = rd32(&bytes, names + i * 4) as usize;
-        let end = at + bytes[at..].iter().position(|&b| b == 0).unwrap_or(0);
-        let name = String::from_utf8_lossy(&bytes[at..end]).into_owned();
-        let ord = rd16(&bytes, ords + i * 2) as usize;
-        exports.insert(name, rd32(&bytes, funcs + ord * 4) as usize);
-    }
     Ok(Image {
         bytes,
         base,
         reloc: dir(5),
-        exports,
+        edir: dir(0).0,
     })
 }
 
 impl Image {
+    /// The RVA of the export `name`, from the export directory's names.
     fn export(&self, name: &str) -> Result<usize, String> {
-        self.exports
-            .get(name)
-            .copied()
+        let (b, e) = (&self.bytes, self.edir);
+        let count = rd32(b, e + 24) as usize;
+        let (funcs, names, ords) = (
+            rd32(b, e + 28) as usize,
+            rd32(b, e + 32) as usize,
+            rd32(b, e + 36) as usize,
+        );
+        (0..count)
+            .find(|&i| {
+                let at = rd32(b, names + i * 4) as usize;
+                b.get(at..at + name.len() + 1)
+                    .is_some_and(|n| &n[..name.len()] == name.as_bytes() && n[name.len()] == 0)
+            })
+            .map(|i| rd32(b, funcs + rd16(b, ords + i * 2) as usize * 4) as usize)
             .ok_or_else(|| format!("the early stub exports no {name}"))
     }
 
@@ -349,13 +352,34 @@ fn routing(env: &HashMap<String, String>) -> Result<RootMap, String> {
     RootMap::with_roots(&refs, volumes).map_err(|e| format!("the roots are not usable: {e:?}"))
 }
 
-unsafe fn proc_address(module: &str, name: &str) -> Option<u64> {
-    let m = GetModuleHandleW(wide(module).as_ptr());
+/// `name` in `module` (a NUL-terminated wide name), in this process: at the
+/// same address in the target, as every system DLL of a session is.
+unsafe fn proc_address(module: *const u16, name: &CStr) -> Option<u64> {
+    let m = GetModuleHandleW(module);
     if m.is_null() {
         return None;
     }
-    let c = std::ffi::CString::new(name).ok()?;
-    GetProcAddress(m, c.as_ptr().cast()).map(|f| f as usize as u64)
+    GetProcAddress(m, name.as_ptr().cast()).map(|f| f as usize as u64)
+}
+
+const NTDLL: *const u16 = windows_sys::core::w!("ntdll.dll");
+const KERNEL32: *const u16 = windows_sys::core::w!("kernel32.dll");
+
+/// Whether this process's environment sets `name` to `0`, read without
+/// allocating.
+fn env_is_zero(name: &str) -> bool {
+    let mut w = [0u16; 64];
+    let units = name.encode_utf16();
+    if name.len() >= w.len() {
+        return false;
+    }
+    for (d, u) in w.iter_mut().zip(units) {
+        *d = u;
+    }
+    let mut v = [0u16; 4];
+    // SAFETY: a NUL-terminated name and a buffer of the length given.
+    let n = unsafe { GetEnvironmentVariableW(w.as_ptr(), v.as_mut_ptr(), v.len() as u32) };
+    n == 1 && v[0] == u16::from(b'0')
 }
 
 unsafe fn read(process: HANDLE, at: usize, buf: &mut [u8]) -> bool {
@@ -460,37 +484,39 @@ unsafe fn place(
         (&mut *cfg as *mut Config).cast::<u8>(),
         size_of::<Config>(),
     );
-    let nt = |name: &str| proc_address("ntdll.dll", name);
-    cfg.nt_set_event = nt("NtSetEvent").ok_or("no NtSetEvent")?;
-    cfg.nt_wait = nt("NtWaitForSingleObject").ok_or("no NtWaitForSingleObject")?;
-    cfg.nt_protect = nt("NtProtectVirtualMemory").ok_or("no NtProtectVirtualMemory")?;
-    cfg.load_library_w = proc_address("kernel32.dll", "LoadLibraryW").ok_or("no LoadLibraryW")?;
-    let mut patches = Vec::new();
+    let nt = |name: &CStr| proc_address(NTDLL, name);
+    cfg.nt_set_event = nt(c"NtSetEvent").ok_or("no NtSetEvent")?;
+    cfg.nt_wait = nt(c"NtWaitForSingleObject").ok_or("no NtWaitForSingleObject")?;
+    cfg.nt_protect = nt(c"NtProtectVirtualMemory").ok_or("no NtProtectVirtualMemory")?;
+    cfg.load_library_w = proc_address(KERNEL32, c"LoadLibraryW").ok_or("no LoadLibraryW")?;
+    let mut patches = [(0usize, [0u8; JUMP]); SITES];
+    let mut npatch = 0;
     for (i, (export, hook, required)) in HOOKS.iter().enumerate() {
         let Some(target) = nt(export) else {
             if *required {
-                return Err(format!("no {export}"));
+                return Err(format!("no {export:?}"));
             }
             continue;
         };
         let mut thunk = [0u8; 32];
         if !read(process, target as usize, &mut thunk) || !is_thunk(&thunk) {
             return Err(format!(
-                "{export} does not start as a syscall thunk ({:02x?})",
+                "{export:?} does not start as a syscall thunk ({:02x?})",
                 &thunk[..4]
             ));
         }
         cfg.sites[i].target = target;
         cfg.sites[i].orig.copy_from_slice(&thunk[..16]);
         cfg.code.0[i] = thunk;
-        patches.push((target as usize, jump(remote + img.export(hook)?)));
+        patches[npatch] = (target as usize, jump(remote + img.export(hook)?));
+        npatch += 1;
     }
-    if early_shim {
-        let units: Vec<u16> = shim.encode_utf16().collect();
-        if units.len() < cfg.shim_path.len() {
-            cfg.shim_path[..units.len()].copy_from_slice(&units);
-            cfg.early_shim = 1;
+    // (one unit short of the room at most: the rest is the NUL)
+    if early_shim && shim.encode_utf16().count() < cfg.shim_path.len() {
+        for (d, u) in cfg.shim_path.iter_mut().zip(shim.encode_utf16()) {
+            *d = u;
         }
+        cfg.early_shim = 1;
     }
     if let Some((req_ev, done_ev)) = events {
         for (i, f) in folders.iter().enumerate() {
@@ -527,13 +553,14 @@ unsafe fn place(
     if !write(process, remote, &img.bytes) {
         return Err("writing the early stub failed".into());
     }
+    let patches = &patches[..npatch];
     for (n, (target, jump)) in patches.iter().enumerate() {
         if !patch(process, *target, jump) {
             // Put back what was patched: a half-hooked ntdll is worse than none.
             for (target, _) in &patches[..n] {
                 let i = HOOKS
                     .iter()
-                    .position(|h| proc_address("ntdll.dll", h.0) == Some(*target as u64));
+                    .position(|h| proc_address(NTDLL, h.0) == Some(*target as u64));
                 if let Some(i) = i {
                     patch(process, *target, &cfg.sites[i].orig);
                 }
@@ -562,7 +589,7 @@ unsafe fn place(
 /// with all access, whose threads have not run.
 pub(crate) unsafe fn install_for_child(process: HANDLE, shim: &str) -> Result<usize, String> {
     for name in [EARLY_LAYER, EARLY_SHIM] {
-        if std::env::var(name).is_ok_and(|v| v == "0") {
+        if env_is_zero(name) {
             return Err(format!("{name} is 0"));
         }
     }

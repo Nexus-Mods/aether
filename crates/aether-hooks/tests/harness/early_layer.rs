@@ -213,8 +213,13 @@ fn without_the_early_layer_the_dllmain_finds_nothing() {
             (aether_env::EARLY_LAYER, "0"),
         ],
     );
+    // Wine ends the process there; Windows leaves it, its initialisation
+    // failed, and the shim never reports ready. Either way it never runs.
     assert!(
-        matches!(r, Err(InjectError::TargetExited(DLL_INIT_FAILED))),
+        matches!(
+            r,
+            Err(InjectError::TargetExited(DLL_INIT_FAILED) | InjectError::Bootstrap(_))
+        ),
         "without the early layer vproxy.dll's DllMain reads the stage folder on disk and fails: {r:?}"
     );
 }

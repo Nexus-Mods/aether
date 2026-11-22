@@ -1698,7 +1698,7 @@ The handshake names fall into three tables, shipped as `contract/env.json`
 |---|---|---|
 | transport | `VFS_RING_PATH`, `VFS_RING_SECTION`, `VFS_RING_BYTES`, `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_OFFSET`, `VFS_ARENA_LEN`, `VFS_SERVER_EV`, `VFS_CLIENT_EV`, `VFS_FUSE_CFG`, `VFS_VIRTUAL_DIR`, `VFS_VIRTUAL_ROOTS`, `VFS_ROOT_BACKINGS`, `VFS_REGISTRY` | A launch sets **or removes** every one of these, so nothing inherited from an earlier session reaches the child. |
 | inject | `VFS_INJECT_CWD`, `VFS_INJECT_STEAM_HELPER`, `VFS_INJECT_NEW_CONSOLE` | Read only by the injector. A Wine launch sets or removes them like the transport names. |
-| config | `VFS_STATE_DIR`, `VFS_HOME`, `VFS_LAUNCH_IMAGE`, `VFS_DISCOVERY_PATH`, `VFS_SHIM_CONFIG`, `VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG`, `VFS_FORCE_INJECTION` | Other handshake configuration; not cleared by a launch. |
+| config | `VFS_STATE_DIR`, `VFS_HOME`, `VFS_LAUNCH_IMAGE`, `VFS_DISCOVERY_PATH`, `VFS_SHIM_CONFIG`, `VFS_SHIM_READY`, `VFS_CHILD_REFUSED_LOG` | Other handshake configuration; not cleared by a launch. |
 
 Names compare without ASCII case on the Windows side (Wine included), so a
 removal must remove every spelling.
@@ -1734,7 +1734,6 @@ case-insensitive); an **opt-out** switch is off only for `0`, `false`, `no`,
 | `VFS_SHIM_CONFIG` | injector | shim | Path of `shim.cfg`. Unset: the shim fails its load. |
 | `VFS_SHIM_READY` | injector | shim | Path of the ready file (section 6.2). The shim removes it from its own environment after writing, so children do not inherit it. |
 | `VFS_CHILD_REFUSED_LOG` | injector | shim | `<ready>.child-refused`: the shim appends `<image> <reason>\n` for each child it had to kill. |
-| `VFS_FORCE_INJECTION` | director | — | Accepted and ignored: remote-thread `LoadLibrary` is the only activation. |
 
 Also read, outside the tables: `VFS_READY_TIMEOUT_SECS` (decimal seconds,
 default 180, minimum 1) bounds the injector's wait for the shim and the shim's

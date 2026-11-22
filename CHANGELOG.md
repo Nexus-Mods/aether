@@ -3,6 +3,16 @@
 What each Aether release changes for a director or a program built on
 Aether's crates. Newest first.
 
+## Unreleased
+
+### Removed
+
+- `VFS_FORCE_INJECTION` (`aether_env::FORCE_INJECTION`), a name the shim
+  accepted and ignored since remote-thread injection became its only
+  activation, is no longer a handshake name: it is gone from
+  `contract/env.json`'s `config` table and from the docs. A director may
+  stop setting it; one that still does is unaffected.
+
 ## 1.2.0
 
 ### Added

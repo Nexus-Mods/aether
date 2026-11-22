@@ -614,7 +614,6 @@ reporting a bootstrap failure, and no ready signal once `LoadLibrary` has return
 the shim by remote `LoadLibrary`, and only then run (or, for a child its caller created suspended,
 are left suspended for the caller to resume). A caller that asked for a suspended child gets it
 suspended, with the shim already in. No image is edited, on disk or in memory.
-`VFS_FORCE_INJECTION` is accepted and has no effect.
 
 **Nothing is skipped on purpose.** The hook does not exempt system processes, helpers or anything
 else; `VFS_INJECT_*` switches (`INJECT_CWD`, `INJECT_STEAM_HELPER`, `INJECT_NEW_CONSOLE`) belong to the top-level

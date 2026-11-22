@@ -485,9 +485,12 @@ Two mechanisms:
    routes to the director from then on. Each injector carries the stub for
    its own architecture: x64, and x86 for a 32-bit target under WOW64,
    whose syscall thunks (`mov eax, n; mov edx, transition; call edx`) are as
-   position-independent as x64's. The layer is the launch's: a child the
-   shim starts is injected as before. It is off when the launch stages
-   nothing, and `VFS_EARLY_LAYER=0` turns it off; `VFS_EARLY_TRACE=1` has
+   position-independent as x64's. A child the shim starts gets the stub too,
+   loading only (`aether_inject::inject_dll_early_exit_code`): its image and
+   import closure were staged before it was created, so its static imports
+   run with its own shim live, as the launch's do. The layer is off when the
+   launch stages nothing, and `VFS_EARLY_LAYER=0` turns it off (for a
+   child too, which inherits it); `VFS_EARLY_TRACE=1` has
    the injector say whether the shim loaded during initialisation
    (`crates/aether-inject/src/early.rs`).
 

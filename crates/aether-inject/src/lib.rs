@@ -112,8 +112,8 @@ pub enum InjectError {
 pub use artifacts::find_near;
 pub use cli::{parse_injector_args, InjectorArgs};
 pub use inject::{
-    expand_primary_stack, inject_dll, inject_dll_exit_code, run_target_with_shim,
-    spawn_target_with_shim, PRIMARY_STACK_BYTES,
+    expand_primary_stack, inject_dll, inject_dll_early_exit_code, inject_dll_exit_code,
+    run_target_with_shim, spawn_target_with_shim, PRIMARY_STACK_BYTES,
 };
 pub use steam_helper::{
     active_process_pid, check_helper_command, clear_active_process_pid, running_under_wine,

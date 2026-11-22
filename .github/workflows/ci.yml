@@ -132,7 +132,7 @@ jobs:
       # built for i686, with the 32-bit shim, vproxy.dll and staticimp they
       # launch (vproxy first: staticimp links its import library).
       - name: Early layer tests, 32-bit (i686)
-        run: 'cargo build --target i686-pc-windows-msvc -p aether-shim -p aether-fixture-vproxy && cargo build --target i686-pc-windows-msvc -p aether-fixture-staticimp && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc early_layer::'
+        run: 'cargo build --target i686-pc-windows-msvc -p aether-inject -p aether-shim -p aether-fixture-vproxy && cargo build --target i686-pc-windows-msvc -p aether-fixture-staticimp && cargo test -p aether-hooks --test harness --target i686-pc-windows-msvc early_layer::'
       # The release natives (+crt-static, x64 and i686) and the fixtures, as a
       # release builds them, with the VC++ runtime import check required
       - name: Release natives and fixtures (bin/build-natives.ps1)

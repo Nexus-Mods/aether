@@ -17,8 +17,10 @@ Aether's crates. Newest first.
   it and points six ntdll exports at it; the first of those calls once
   kernel32 has initialised loads the shim right there, before any other
   DLL's `DllMain`, and the loader's own earlier probes are served by the
-  injector from the director. x64 and 32-bit (WOW64) targets, on Windows
-  and Wine. `VFS_EARLY_LAYER=0` turns it off, `VFS_EARLY_SHIM=0` keeps
+  injector from the director. A child the shim starts gets the stub too,
+  so its static imports run with its shim live
+  (`aether_inject::inject_dll_early_exit_code`). x64 and 32-bit (WOW64)
+  targets, on Windows and Wine. `VFS_EARLY_LAYER=0` turns it off, `VFS_EARLY_SHIM=0` keeps
   only the serving, `VFS_EARLY_TRACE=1` reports what it did
   (`docs/architecture.md` 4.1).
 - vproxy.dll's `VFS_FIXTURE_VPROXY_LIST` (its `DllMain` lists a pattern

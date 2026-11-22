@@ -293,6 +293,40 @@ pub unsafe fn inject_dll_exit_code(
     unsafe { inject_dll_with(process, dll_path, timeout_ms, None) }
 }
 
+/// [`inject_dll_exit_code`] for a child the shim started, with the early
+/// layer's stub in it first (`crate::early::install_for_child`): the shim
+/// loads from the child's first hooked file call once kernel32 is up, so the
+/// child's static imports run their `DllMain`s with it live, as the
+/// launch's do. When the layer cannot go in, `note` hears why and the shim
+/// is injected as by [`inject_dll_exit_code`].
+///
+/// # Safety
+/// As [`inject_dll`], and `process` has not run: it was created suspended.
+pub unsafe fn inject_dll_early_exit_code(
+    process: HANDLE,
+    dll_path: &str,
+    timeout_ms: u32,
+    note: &mut dyn FnMut(&str),
+) -> Result<u32, InjectError> {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    {
+        // SAFETY: as this function's contract.
+        match unsafe { crate::early::install_for_child(process, dll_path) } {
+            Ok(at) => {
+                let mut wait = |thread: HANDLE, ms: u32| WaitForSingleObject(thread, ms) == 0;
+                // SAFETY: as this function's contract; `at` is the stub's
+                // start, which takes the shim's path as `LoadLibraryW` does.
+                return unsafe {
+                    inject_dll_with(process, dll_path, timeout_ms, Some((at, &mut wait)))
+                };
+            }
+            Err(why) => note(&format!("early layer off: {why}")),
+        }
+    }
+    // SAFETY: as this function's contract.
+    unsafe { inject_dll_with(process, dll_path, timeout_ms, None) }
+}
+
 /// The remote thread's start other than `LoadLibraryW`, and how to wait for
 /// it: the early layer's (`crate::early`).
 type Start<'a> = Option<(usize, &'a mut dyn FnMut(HANDLE, u32) -> bool)>;

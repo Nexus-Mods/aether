@@ -32,6 +32,10 @@
 //!
 //! Each injector serves targets of its own architecture, so each carries the
 //! stub built for it: x64's, or x86's for a 32-bit (WOW64) target.
+//! The shim, which links this crate, injects the children it starts with
+//! the stub too ([`install_for_child`]), loading only: nothing in the
+//! parent answers a child's requests, and the child's image and import
+//! closure are staged on disk before it is created.
 #![allow(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -398,101 +402,97 @@ unsafe fn patch(process: HANDLE, target: usize, bytes: &[u8]) -> bool {
     ok
 }
 
-impl Early {
-    /// Installs the early layer into `process`, created suspended and not yet
-    /// run, whose environment is `env` (its `CreateProcessW` block). `None`
-    /// when the launch stages nothing (no `VFS_LAUNCH_IMAGE` or
-    /// `VFS_ROOT_BACKINGS`), when [`EARLY_LAYER`] is `0`, or when this ntdll
-    /// is not one the layer knows; the launch then goes on without it.
-    ///
-    /// # Safety
-    /// `process` must be a suspended process of this injector's
-    /// architecture with all access, whose
-    /// threads have not run.
-    pub(crate) unsafe fn install(
-        process: HANDLE,
-        env: &[u16],
-        shim: &str,
-    ) -> Result<Option<Early>, String> {
-        let env = env_map(env);
-        if env.get(EARLY_LAYER).is_some_and(|v| v == "0") {
-            return Ok(None);
-        }
-        let folders = staged_folders(&env);
-        if folders.is_empty() {
-            return Ok(None);
-        }
-        let roots = routing(&env)?;
-        let mut img = image(STUB)?;
-        let at = img.export("aether_early")?;
-        let layout = rd32(&img.bytes, img.export("aether_early_layout")?) as usize;
-        if layout != size_of::<Config>() || rd64(&img.bytes, at) != MAGIC {
+/// The stub, mapped into a target and patched in: where its block and its
+/// start are.
+struct Placed {
+    /// `aether_early` in the target.
+    config: usize,
+    /// `aether_early_start` in the target.
+    start: usize,
+}
+
+/// Maps the stub into `process` and points the hooked exports at it, with
+/// `shim` to load early (unless `early_shim` is false), `folders` to ask
+/// about, and the events it asks and waits on (none with no `folders`: it
+/// then never asks). `Err` says why the layer is off.
+///
+/// # Safety
+/// As [`Early::install`].
+unsafe fn place(
+    process: HANDLE,
+    shim: &str,
+    early_shim: bool,
+    folders: &[String],
+    events: Option<(HANDLE, HANDLE)>,
+) -> Result<Placed, String> {
+    let mut img = image(STUB)?;
+    let at = img.export("aether_early")?;
+    let layout = rd32(&img.bytes, img.export("aether_early_layout")?) as usize;
+    if layout != size_of::<Config>() || rd64(&img.bytes, at) != MAGIC {
+        return Err(format!(
+            "the early stub's Config is {layout} bytes, early.rs's {}",
+            size_of::<Config>()
+        ));
+    }
+
+    let remote = VirtualAllocEx(
+        process,
+        core::ptr::null(),
+        img.bytes.len(),
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE,
+    ) as usize;
+    if remote == 0 {
+        return Err("VirtualAllocEx for the early stub failed".into());
+    }
+    img.relocate(remote as u64);
+
+    // SAFETY: `at` is the stub's `aether_early`, a `Config` (checked by
+    // size and magic above); the image buffer holds it whole.
+    let layout = std::alloc::Layout::new::<Config>();
+    let raw = std::alloc::alloc_zeroed(layout).cast::<Config>();
+    if raw.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    let mut cfg: Box<Config> = Box::from_raw(raw);
+    core::ptr::copy_nonoverlapping(
+        img.bytes[at..].as_ptr(),
+        (&mut *cfg as *mut Config).cast::<u8>(),
+        size_of::<Config>(),
+    );
+    let nt = |name: &str| proc_address("ntdll.dll", name);
+    cfg.nt_set_event = nt("NtSetEvent").ok_or("no NtSetEvent")?;
+    cfg.nt_wait = nt("NtWaitForSingleObject").ok_or("no NtWaitForSingleObject")?;
+    cfg.nt_protect = nt("NtProtectVirtualMemory").ok_or("no NtProtectVirtualMemory")?;
+    cfg.load_library_w = proc_address("kernel32.dll", "LoadLibraryW").ok_or("no LoadLibraryW")?;
+    let mut patches = Vec::new();
+    for (i, (export, hook, required)) in HOOKS.iter().enumerate() {
+        let Some(target) = nt(export) else {
+            if *required {
+                return Err(format!("no {export}"));
+            }
+            continue;
+        };
+        let mut thunk = [0u8; 32];
+        if !read(process, target as usize, &mut thunk) || !is_thunk(&thunk) {
             return Err(format!(
-                "the early stub's Config is {layout} bytes, early.rs's {}",
-                size_of::<Config>()
+                "{export} does not start as a syscall thunk ({:02x?})",
+                &thunk[..4]
             ));
         }
-
-        let remote = VirtualAllocEx(
-            process,
-            core::ptr::null(),
-            img.bytes.len(),
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_READWRITE,
-        ) as usize;
-        if remote == 0 {
-            return Err("VirtualAllocEx for the early stub failed".into());
+        cfg.sites[i].target = target;
+        cfg.sites[i].orig.copy_from_slice(&thunk[..16]);
+        cfg.code.0[i] = thunk;
+        patches.push((target as usize, jump(remote + img.export(hook)?)));
+    }
+    if early_shim {
+        let units: Vec<u16> = shim.encode_utf16().collect();
+        if units.len() < cfg.shim_path.len() {
+            cfg.shim_path[..units.len()].copy_from_slice(&units);
+            cfg.early_shim = 1;
         }
-        img.relocate(remote as u64);
-
-        // SAFETY: `at` is the stub's `aether_early`, a `Config` (checked by
-        // size and magic above); the image buffer holds it whole.
-        let layout = std::alloc::Layout::new::<Config>();
-        let raw = std::alloc::alloc_zeroed(layout).cast::<Config>();
-        if raw.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-        let mut cfg: Box<Config> = Box::from_raw(raw);
-        core::ptr::copy_nonoverlapping(
-            img.bytes[at..].as_ptr(),
-            (&mut *cfg as *mut Config).cast::<u8>(),
-            size_of::<Config>(),
-        );
-        let nt = |name: &str| proc_address("ntdll.dll", name);
-        cfg.nt_set_event = nt("NtSetEvent").ok_or("no NtSetEvent")?;
-        cfg.nt_wait = nt("NtWaitForSingleObject").ok_or("no NtWaitForSingleObject")?;
-        cfg.nt_protect = nt("NtProtectVirtualMemory").ok_or("no NtProtectVirtualMemory")?;
-        cfg.load_library_w =
-            proc_address("kernel32.dll", "LoadLibraryW").ok_or("no LoadLibraryW")?;
-        let mut patches = Vec::new();
-        for (i, (export, hook, required)) in HOOKS.iter().enumerate() {
-            let Some(target) = nt(export) else {
-                if *required {
-                    return Ok(None)
-                        .inspect(|_| eprintln!("vfs-inject: early layer off: no {export}"));
-                }
-                continue;
-            };
-            let mut thunk = [0u8; 32];
-            if !read(process, target as usize, &mut thunk) || !is_thunk(&thunk) {
-                eprintln!(
-                    "vfs-inject: early layer off: {export} does not start as a syscall thunk ({:02x?})",
-                    &thunk[..4]
-                );
-                return Ok(None);
-            }
-            cfg.sites[i].target = target;
-            cfg.sites[i].orig.copy_from_slice(&thunk[..16]);
-            cfg.code.0[i] = thunk;
-            patches.push((target as usize, jump(remote + img.export(hook)?)));
-        }
-        if env.get(EARLY_SHIM).is_none_or(|v| v != "0") {
-            let units: Vec<u16> = shim.encode_utf16().collect();
-            if units.len() < cfg.shim_path.len() {
-                cfg.shim_path[..units.len()].copy_from_slice(&units);
-                cfg.early_shim = 1;
-            }
-        }
+    }
+    if let Some((req_ev, done_ev)) = events {
         for (i, f) in folders.iter().enumerate() {
             let units: Vec<u16> = f.encode_utf16().collect();
             if units.len() > PATH_UNITS {
@@ -501,23 +501,6 @@ impl Early {
             cfg.prefixes[i].len = units.len() as u32;
             cfg.prefixes[i].units[..units.len()].copy_from_slice(&units);
             cfg.nprefix = i as u32 + 1;
-        }
-
-        let req_ev = CreateEventW(core::ptr::null(), 0, 0, core::ptr::null());
-        let done_ev = CreateEventW(core::ptr::null(), 0, 0, core::ptr::null());
-        let mut early = Early {
-            config: remote + at,
-            start: remote + img.export("aether_early_start")?,
-            req_ev,
-            done_ev,
-            env,
-            roots,
-            ring: None,
-            seen: HashSet::new(),
-            trace: false,
-        };
-        if req_ev.is_null() || done_ev.is_null() {
-            return Err("CreateEventW for the early layer failed".into());
         }
         for (mine, theirs) in [(req_ev, &mut cfg.req_event), (done_ev, &mut cfg.done_event)] {
             let mut h: HANDLE = core::ptr::null_mut();
@@ -535,29 +518,102 @@ impl Early {
             }
             *theirs = h as u64;
         }
-        core::ptr::copy_nonoverlapping(
-            (&*cfg as *const Config).cast::<u8>(),
-            img.bytes[at..].as_mut_ptr(),
-            size_of::<Config>(),
-        );
-        if !write(process, remote, &img.bytes) {
-            return Err("writing the early stub failed".into());
-        }
-        for (n, (target, jump)) in patches.iter().enumerate() {
-            if !patch(process, *target, jump) {
-                // Put back what was patched: a half-hooked ntdll is worse than none.
-                for (target, _) in &patches[..n] {
-                    let i = HOOKS
-                        .iter()
-                        .position(|h| proc_address("ntdll.dll", h.0) == Some(*target as u64));
-                    if let Some(i) = i {
-                        patch(process, *target, &cfg.sites[i].orig);
-                    }
+    }
+    core::ptr::copy_nonoverlapping(
+        (&*cfg as *const Config).cast::<u8>(),
+        img.bytes[at..].as_mut_ptr(),
+        size_of::<Config>(),
+    );
+    if !write(process, remote, &img.bytes) {
+        return Err("writing the early stub failed".into());
+    }
+    for (n, (target, jump)) in patches.iter().enumerate() {
+        if !patch(process, *target, jump) {
+            // Put back what was patched: a half-hooked ntdll is worse than none.
+            for (target, _) in &patches[..n] {
+                let i = HOOKS
+                    .iter()
+                    .position(|h| proc_address("ntdll.dll", h.0) == Some(*target as u64));
+                if let Some(i) = i {
+                    patch(process, *target, &cfg.sites[i].orig);
                 }
-                eprintln!("vfs-inject: early layer off: patching ntdll failed");
-                return Ok(None);
             }
+            return Err("patching ntdll failed".into());
         }
+    }
+    Ok(Placed {
+        config: remote + at,
+        start: remote + img.export("aether_early_start")?,
+    })
+}
+
+/// The early layer for a child the shim starts, which the shim injects
+/// itself: the stub alone, loading the shim from its first hook once
+/// kernel32 is up, so that the child's static imports run their `DllMain`s
+/// with the hooks live. Nothing is served before that: the child's image
+/// and its import closure were staged on disk before it was created, and
+/// what else the loader probes then is the system's. The remote thread's
+/// start (`aether_early_start`), or `Err` saying why the layer is off: when
+/// [`EARLY_LAYER`] or [`EARLY_SHIM`] is `0` in this process's environment
+/// (which the child inherits), or as [`Early::install`].
+///
+/// # Safety
+/// `process` must be a suspended process of this injector's architecture
+/// with all access, whose threads have not run.
+pub(crate) unsafe fn install_for_child(process: HANDLE, shim: &str) -> Result<usize, String> {
+    for name in [EARLY_LAYER, EARLY_SHIM] {
+        if std::env::var(name).is_ok_and(|v| v == "0") {
+            return Err(format!("{name} is 0"));
+        }
+    }
+    place(process, shim, true, &[], None).map(|p| p.start)
+}
+
+impl Early {
+    /// Installs the early layer into `process`, created suspended and not yet
+    /// run, whose environment is `env` (its `CreateProcessW` block). `None`
+    /// when the launch stages nothing (no `VFS_LAUNCH_IMAGE` or
+    /// `VFS_ROOT_BACKINGS`), or when [`EARLY_LAYER`] is `0`; `Err` when it
+    /// cannot be installed (an ntdll the layer does not know, say). Either
+    /// way the launch goes on without it.
+    ///
+    /// # Safety
+    /// `process` must be a suspended process of this injector's
+    /// architecture with all access, whose threads have not run.
+    pub(crate) unsafe fn install(
+        process: HANDLE,
+        env: &[u16],
+        shim: &str,
+    ) -> Result<Option<Early>, String> {
+        let env = env_map(env);
+        if env.get(EARLY_LAYER).is_some_and(|v| v == "0") {
+            return Ok(None);
+        }
+        let folders = staged_folders(&env);
+        if folders.is_empty() {
+            return Ok(None);
+        }
+        let roots = routing(&env)?;
+        let req_ev = CreateEventW(core::ptr::null(), 0, 0, core::ptr::null());
+        let done_ev = CreateEventW(core::ptr::null(), 0, 0, core::ptr::null());
+        let mut early = Early {
+            config: 0,
+            start: 0,
+            req_ev,
+            done_ev,
+            env,
+            roots,
+            ring: None,
+            seen: HashSet::new(),
+            trace: false,
+        };
+        if req_ev.is_null() || done_ev.is_null() {
+            return Err("CreateEventW for the early layer failed".into());
+        }
+        let early_shim = early.env.get(EARLY_SHIM).is_none_or(|v| v != "0");
+        let placed = place(process, shim, early_shim, &folders, Some((req_ev, done_ev)))?;
+        early.config = placed.config;
+        early.start = placed.start;
         early.trace = early.env.get(EARLY_TRACE).is_some_and(|v| v == "1");
         Ok(Some(early))
     }

@@ -75,9 +75,11 @@ pub(crate) fn child_ready_timeout_ms() -> u32 {
 }
 
 /// Inject into a force-suspended child, the way the launcher does: give its
-/// primary thread the shim's stack, then `LoadLibrary` the shim on a remote
-/// thread. That thread runs the child's process initialisation and then the
-/// shim's `DllMain`, which bootstraps before it returns. The child's primary
+/// primary thread the shim's stack, put the early layer's stub in, then
+/// `LoadLibrary` the shim on a remote thread. That thread runs the child's
+/// process initialisation, during which the stub loads the shim once
+/// kernel32 is up (before any static import's `DllMain`); the shim's
+/// `DllMain` bootstraps before it returns. The child's primary
 /// thread is never resumed here, so a caller that asked for a suspended child
 /// gets it still suspended, now virtualised.
 ///
@@ -108,7 +110,15 @@ pub(crate) fn inject_child(
             aether_inject::PRIMARY_STACK_BYTES,
         );
         crate::loadlog::note(&format!("child {pid}: activation remote injection"));
-        match aether_inject::inject_dll_exit_code(process, full_shim_dll, timeout_ms) {
+        // With the early layer's stub, so the child's static imports run
+        // their `DllMain`s with its shim live (`inject_dll_early_exit_code`).
+        let mut note = |why: &str| crate::loadlog::note(&format!("child {pid}: {why}"));
+        match aether_inject::inject_dll_early_exit_code(
+            process,
+            full_shim_dll,
+            timeout_ms,
+            &mut note,
+        ) {
             Ok(code) => crate::loadlog::note(&format!(
                 "child {pid}: remote LoadLibrary({full_shim_dll}) returned, thread exit {code:#x}"
             )),
